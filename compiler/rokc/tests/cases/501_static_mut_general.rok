@@ -7,3 +7,4 @@ static mut COUNTER: i32 = 0;     // ERROR: static mut outside extern "C"
 fn main() -> i32 {
     return 0;
 }
+// spec: §5.3.5

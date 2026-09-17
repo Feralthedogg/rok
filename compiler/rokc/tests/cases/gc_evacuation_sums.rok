@@ -135,3 +135,4 @@ fn main() {
     if bad[1] == 0 { println("sums ok"); }
     if bad[2] == 0 { println("fields ok"); }
 }
+// spec: 008.02-scan-table §8.2.6

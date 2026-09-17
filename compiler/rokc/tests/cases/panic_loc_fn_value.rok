@@ -1,6 +1,7 @@
 // expect-exit: 101
-// expect-stderr: panic_loc_fn_value.rok:11:13:
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_fn_value.rok:12:13:
 // expect-stderr: assertion failed: positive
+// expect-stdout:
 
 // A `fn` value of a `#[track_caller]` function reports where the value
 // was taken.

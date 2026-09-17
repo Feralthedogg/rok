@@ -242,3 +242,112 @@ pub enum ResolvedFn {
     /// any-slot or sum-type narrowing path; resolved at runtime.
     Dynamic(String),
 }
+
+macro_rules! codec_id {
+    ($($t:ident),*) => {$(
+        impl rokc_core::codec::Codec for $t {
+            fn enc(&self, e: &mut rokc_core::codec::Enc) {
+                e.u(u64::from(self.0));
+            }
+            fn dec(d: &mut rokc_core::codec::Dec<'_>) -> Option<Self> {
+                Some(Self(u32::try_from(d.u()?).ok()?))
+            }
+        }
+    )*};
+}
+codec_id!(BlockId, LocalId);
+
+impl rokc_core::codec::Codec for FunctionId {
+    fn enc(&self, e: &mut rokc_core::codec::Enc) {
+        e.id(rokc_core::codec::IdKind::Function, self.0);
+    }
+    fn dec(d: &mut rokc_core::codec::Dec<'_>) -> Option<Self> {
+        d.id(rokc_core::codec::IdKind::Function).map(Self)
+    }
+}
+
+rokc_core::codec_enum!(PrimTy {
+    I8,
+    I16,
+    I32,
+    I64,
+    Isize,
+    U8,
+    U16,
+    U32,
+    U64,
+    Usize,
+    F32,
+    F64,
+    Bool,
+    CChar,
+    Char,
+    Str,
+});
+rokc_core::codec_enum!(PrimOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+    Neg,
+    Not,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    LogicalAnd,
+    LogicalOr,
+    LogicalNot,
+    Sqrt,
+    WrappingAdd,
+    WrappingSub,
+    WrappingMul,
+    CountOnes,
+    LeadingZeros,
+    TrailingZeros,
+    SwapBytes,
+    Mod,
+});
+rokc_core::codec_enum!(ConstVal {
+    Unit,
+    Bool(x0),
+    Int { value, ty },
+    UInt { value, ty },
+    Float { bits, ty },
+    Char(x0),
+    Str(x0),
+    None,
+});
+rokc_core::codec_enum!(Abi {
+    Rok,
+    C { variadic }
+});
+rokc_core::codec_enum!(Linkage {
+    Defined,
+    Extern,
+    Prebuilt
+});
+rokc_core::codec_enum!(FnRole {
+    Plain,
+    Main,
+    AnyDispatcher
+});
+rokc_core::codec_struct!(FnFacts {
+    abi,
+    linkage,
+    export_name,
+    wasm_import,
+    link_name,
+    role,
+    mono_args,
+    track_caller,
+    no_safepoint,
+});

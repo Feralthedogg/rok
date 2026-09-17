@@ -41,3 +41,4 @@ fn main() -> i32 {
     println(f"{p.x} {m5::seven()} {m1::seven()}");
     return p.x + m5::seven();
 }
+// spec: §5.8.11

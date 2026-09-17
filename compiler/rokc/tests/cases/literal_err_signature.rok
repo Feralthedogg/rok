@@ -8,3 +8,4 @@ fn imaginary(re: f64, im: f64) -> f64 {
 fn main() -> i32 {
     return 0;
 }
+// spec: §6.5.4

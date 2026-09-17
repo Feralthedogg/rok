@@ -1,0 +1,42 @@
+// spec: 008.05-extern-symbols §8.5.1 rok_alloc_raw rok_realloc_raw §8.5.4 rok_time_now_ns
+// expect-exit: 0
+// expect-stdout:
+// null for size 0: true, align 3: true
+// zeroed: 0 0 0
+// aligned 64: true
+// realloc kept: 11 22 33
+// clock monotonic: true
+
+// spec 8.5.1: `rok_alloc_raw` returns null (0) for size 0 or an align
+// that is not a power of two, zero-fills when asked, honours the
+// alignment; `rok_realloc_raw` keeps the old bytes. Spec 8.5.4:
+// `rok_time_now_ns` is a monotonic clock.
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::ManyPtr;
+
+extern "C" {
+    fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
+    fn rok_realloc_raw(ptr: usize, old_size: usize, align: usize, new_size: usize) -> usize;
+    fn rok_time_now_ns() -> i64;
+}
+
+fn words(a: usize) -> ManyPtr<u32> { unsafe { transmute_unchecked(a) } }
+
+fn main() {
+    unsafe {
+        println(f"null for size 0: {rok_alloc_raw(0, 8, 0) == 0}, align 3: {rok_alloc_raw(16, 3, 0) == 0}");
+        let z = rok_alloc_raw(12, 4, 1);
+        let w = words(z);
+        println(f"zeroed: {w.read(0)} {w.read(1)} {w.read(2)}");
+        let a = rok_alloc_raw(8, 64, 0);
+        println(f"aligned 64: {a != 0 && a % 64 == 0}");
+        w.write(0, 11u32);
+        w.write(1, 22u32);
+        w.write(2, 33u32);
+        let r = words(rok_realloc_raw(z, 12, 4, 4096));
+        println(f"realloc kept: {r.read(0)} {r.read(1)} {r.read(2)}");
+        let t0 = rok_time_now_ns();
+        let t1 = rok_time_now_ns();
+        println(f"clock monotonic: {t1 >= t0}");
+    }
+}

@@ -226,3 +226,46 @@ fn debug_info_describes_the_function() {
     assert!(plain.contains("line = 2, scopeLine = 2"), "{plain}");
     assert!(text(true).contains("isOptimized = true"));
 }
+
+/// Each operation follows its operand type: unsigned and float forms,
+/// and the checks (with their messages) only where they can fail.
+#[test]
+fn ops_follow_operand_types() {
+    let u32_ = MirTy::Prim(PrimTy::U32);
+    let f64_ = MirTy::Prim(PrimTy::F64);
+    let i64_ = MirTy::Prim(PrimTy::I64);
+    let one = |op, ty: &MirTy| mlir(vec![binary(op, ty)], true);
+
+    let text = one(PrimOp::Rem, &u32_);
+    let f = body(&text, "f");
+    assert!(f.contains("arith.remui"), "{f}");
+    assert_eq!(f.matches("@rok_panic_at").count(), 1, "{f}");
+    assert!(text.contains("\"attempt to calculate the remainder with a divisor of zero\\00\""));
+
+    let text = one(PrimOp::Add, &f64_);
+    let f = body(&text, "f");
+    assert!(
+        f.contains("arith.addf") && !f.contains("rok_panic_at"),
+        "{f}"
+    );
+
+    let text = one(PrimOp::Mul, &i64_);
+    assert!(body(&text, "f").contains("arith.muli"));
+    assert!(text.contains("\"attempt to multiply with overflow\\00\""));
+    let text = one(PrimOp::Sub, &u32_);
+    assert!(text.contains("\"attempt to subtract with overflow\\00\""));
+
+    // `wrapping_*` never checks.
+    let text = one(PrimOp::WrappingAdd, &I32);
+    let f = body(&text, "f");
+    assert!(
+        f.contains("arith.addi") && !f.contains("rok_panic_at"),
+        "{f}"
+    );
+
+    let text = one(PrimOp::Shl, &I32);
+    assert!(body(&text, "f").contains("arith.shli"));
+    assert!(text.contains("\"attempt to shift left with overflow\\00\""));
+    assert!(body(&one(PrimOp::Shr, &I32), "f").contains("arith.shrsi"));
+    assert!(body(&one(PrimOp::Shr, &u32_), "f").contains("arith.shrui"));
+}

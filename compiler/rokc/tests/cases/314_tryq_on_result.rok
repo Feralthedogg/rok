@@ -17,3 +17,4 @@ fn quarter(x: i32) -> Result<i32, E> {
 fn main() -> i32 {
     return quarter(8).unwrap_or(0);
 }
+// spec: §3.14.10

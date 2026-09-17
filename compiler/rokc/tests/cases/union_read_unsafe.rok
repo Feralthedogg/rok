@@ -17,3 +17,5 @@ fn main() -> i32 {
 }
 
 // spec: 002.05-union
+
+// spec: §2.5.2

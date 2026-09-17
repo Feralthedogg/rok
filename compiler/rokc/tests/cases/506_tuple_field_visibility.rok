@@ -30,3 +30,4 @@ fn main() {
         a::S(_, z) => { println(f"{a::first(s)} {s.1} {u} {v} {w} {z}"); }
     }
 }
+// spec: §5.6.8

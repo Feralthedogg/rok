@@ -12,3 +12,4 @@ fn main() -> i32 {
     println(f"{C}");
     return 0;
 }
+// spec: §5.2.1 §5.2.4

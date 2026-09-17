@@ -1,0 +1,75 @@
+// spec: §2.8.1 §2.8.5 §2.8.6 §2.8.7 §2.9.6 §2.13.4
+// expect-exit: 0
+// expect-stdout:
+// point(1, 2) 2 shape
+// 4 6
+// 3 3
+// 1 2
+// 10
+
+trait Describe {
+    const KIND: str = "shape";
+    fn describe(self) -> str;
+    fn arity(self) -> i32 { 2 }
+}
+
+trait Convert<Target> {
+    fn convert(self) -> Target;
+}
+
+trait Sortable<T> where T: Ord {
+    fn smallest(self) -> T;
+}
+
+trait Container {
+    type Item: Clone;
+    fn first(self) -> Item;
+}
+
+struct Point { x: i32; y: i32; }
+
+impl Describe for Point {
+    fn describe(self) -> str { f"point({self.x}, {self.y})" }
+}
+
+impl Add for Point {
+    type Output = Point;
+    fn add(self, rhs: Point) -> Point { Point { x: self.x + rhs.x, y: self.y + rhs.y } }
+}
+
+impl Convert<i32> for Point {
+    fn convert(self) -> i32 { self.x + self.y }
+}
+
+struct Bag { xs: List<i32>; }
+
+impl Sortable<i32> for Bag {
+    fn smallest(self) -> i32 { self.xs.iter().min() ?? 0 }
+}
+
+impl Container for Bag {
+    type Item = i32;
+    fn first(self) -> i32 { self.xs[0] }
+}
+
+impl Bag {
+    pub fn total(self) -> i32 { self.helper() }
+    fn helper(self) -> i32 { self.xs.iter().sum() }
+}
+
+fn main() {
+    // A default method and a default associated constant.
+    let p = Point { x: 1, y: 2 };
+    println(f"{p.describe()} {p.arity()} {Point::KIND}");
+    // `Add<Rhs = Self>`: the default parameter.
+    let q = p + Point { x: 3, y: 4 };
+    println(f"{q.x} {q.y}");
+    // A generic trait's method, plain and through the qualified path.
+    let i: i32 = p.convert();
+    let j = <Point as Convert<i32>>::convert(p);
+    println(f"{i} {j}");
+    let b = Bag { xs: [3, 1, 2, 4] };
+    println(f"{b.smallest()} {b.xs[2]}");
+    // An inherent `impl`'s private method is callable in its module.
+    println(f"{b.total()}");
+}

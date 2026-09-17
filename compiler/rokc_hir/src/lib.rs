@@ -1,16 +1,20 @@
 //! High-level IR: the AST with names resolved, types checked and
 //! generics instantiated.
 
+mod codec;
 #[path = "../../../runtime/rokr/src/fmt_spec.rs"]
 mod fmt_spec;
 mod lower;
 mod print;
+#[cfg(test)]
+mod tests;
 mod ty;
 mod uses;
 pub mod walk;
 
 pub use lower::FN_BLOCK_LABEL;
 pub use lower::type_visible;
+pub use lower::{Bodies, BodyCache, BodyReuse, Unit};
 pub use lower::{lower, lower_full, lower_with_uses};
 pub use print::{instance, print_hir};
 
@@ -58,6 +62,11 @@ pub struct HirInput {
     /// program, by index; missing ones are at the root. HIR qualifies
     /// the item names with it.
     pub item_modules: Vec<String>,
+    /// What lowering depends on besides the program (the target and
+    /// cfg, the compiler): part of every key of `bodies`.
+    pub fingerprint: u64,
+    /// Where lowered bodies are kept for the next build (spec 9.2.16).
+    pub bodies: Option<Bodies>,
 }
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
@@ -105,6 +114,8 @@ pub struct HirModule {
     /// Every concrete type stored into an `any` slot, with its type tag
     /// (`-g` describes an `any` by them).
     pub any_tags: Vec<(HirTy, u32)>,
+    /// Bodies replayed from `HirInput::bodies`, of those lowered.
+    pub reuse: BodyReuse,
 }
 
 #[derive(Clone, Debug)]
@@ -688,6 +699,11 @@ pub(crate) fn name_type(enum_: bool, id: u32, base: &str, args: &[HirTy]) {
         let args: Vec<String> = args.iter().map(HirTy::stable_key).collect();
         format!("{base}<{}>", args.join(", "))
     };
+    set_type_name(enum_, id, name);
+}
+
+/// Set the `name_type` of struct (or `enum_`) `id`.
+pub(crate) fn set_type_name(enum_: bool, id: u32, name: String) {
     TYPE_NAMES.with(|n| {
         let v = &mut n.borrow_mut()[usize::from(enum_)];
         let id = id as usize;

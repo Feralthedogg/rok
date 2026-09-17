@@ -7,3 +7,4 @@ let v = match n {
     0 => 1,
     _ => false,
 };
+// spec: §3.12.4

@@ -1,4 +1,5 @@
-// expect-exit: 50
+// expect-exit: 0
+// expect-stdout: 50
 
 // `not(...)` excludes when its inner predicate is true. Without a `--cfg foo`
 // flag, `cfg(foo)` is false → `cfg(not(foo))` is true → `excluded` is included.
@@ -8,8 +9,8 @@ fn excluded() -> i32 { 50i32 }
 #[cfg(foo)]
 fn excluded() -> i32 { 0i32 }   // would shadow if `foo` were set
 
-fn main() -> i32 {
-    return excluded();
+fn main() {
+    println(f"{excluded()}");
 }
 
 // spec: 006.03-cfg

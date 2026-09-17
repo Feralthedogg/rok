@@ -101,8 +101,8 @@ pub fn build_use_table(
 ///
 /// A leaf must name an item, an enum variant, a module, or a re-export. A
 /// path rooted at a bare name (not `pkg` / `sup` / `rok`) may also start
-/// with a name the module sees through a glob (`use Result::*`), so it
-/// passes when any known path ends with it.
+/// with a name the module sees through one of its globs or the implicit
+/// `use rok::core::**` (`use Result::*`).
 #[must_use]
 pub fn check_use_targets(
     raw: &[(String, Visibility, UseTree)],
@@ -213,13 +213,26 @@ pub fn check_use_targets(
             if path.is_empty() || known.contains(path) {
                 continue;
             }
+            // Spec 5.7.1: a bare root may also be a name this module sees
+            // through a glob of its own or the implicit `use rok::core::**`.
             if bare {
                 let written = path
                     .strip_prefix(module_path.as_str())
                     .and_then(|r| r.strip_prefix("::"))
                     .unwrap_or(path);
                 let tail = format!("::{written}");
-                if known.contains(written) || known.iter().any(|k| k.ends_with(&tail)) {
+                let under = |prefix: &str| {
+                    let prefix = format!("{prefix}::");
+                    known
+                        .iter()
+                        .any(|k| k.starts_with(&prefix) && k.ends_with(&tail))
+                };
+                let globbed = earlier.iter().any(|e| match e {
+                    UseEntry::Glob { prefix } => known.contains(&format!("{prefix}{tail}")),
+                    UseEntry::GlobDeep { prefix } => under(prefix),
+                    UseEntry::Single { .. } => false,
+                });
+                if globbed || under(crate::lower::CORE_PREFIX) {
                     continue;
                 }
             }

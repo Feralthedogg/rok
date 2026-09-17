@@ -1,0 +1,9 @@
+// spec: §4.8.3
+// expect-error: argument `t` of `process` expects `fn(str) -> str`, found `str`
+
+// Spec 4.8.3: a trailing closure fills only the last argument; a
+// closure in the middle needs the parentheses.
+fn process(input: str, t: fn(str) -> str, output: str) -> str { t(input) }
+
+println(process("in", |s| { s }, "out"));
+println(process("in", "out") |s| { s });

@@ -1,0 +1,59 @@
+// spec: std 208-stream §2.8.4 §2.8.8 §2.8.8a / std 220-future §2.20.7 §2.20.8 §2.20.8a
+// expect-exit: 0
+// expect-stdout:
+// 1 2 3
+// zip (1, "a") (2, "b")
+// select 1
+// typed 6 4
+// try 7 caught 3
+
+// Stdlib 2.8 / 2.20: an `async yield fn` call is an `AsyncStream<T>`
+// consumed with `for await` (2.8.4, 2.20.7-8), and its copies share one
+// frame (2.8.8a); `zip` pairs two streams and `select` takes from
+// whichever is ready (2.8.8); `async fn` / `async { }` values are
+// `AsyncFuture<T>`, a throwing one a `TryAsyncFuture` awaited with
+// `try await` (2.20.8a).
+async yield fn nums(n: i32) -> i32 {
+    for i in 1..=n {
+        yield i;
+    }
+}
+
+async yield fn letters() -> str {
+    yield "a";
+    yield "b";
+    yield "c";
+}
+
+async fn six() -> i32 { 6 }
+
+async fn fails(x: i32) throws (str) -> i32 {
+    if x > 2 { throw f"{x}"; }
+    x + 6
+}
+
+async fn main() {
+    let s: AsyncStream<i32> = nums(3);
+    let t = s;
+    let a = 0;
+    let b = 0;
+    let c = 0;
+    for await v in s {
+        if a == 0 { a = v; } else { c = v; }
+        for await w in t { b = w; break; }
+    }
+    println(f"{a} {b} {c}");
+    print("zip");
+    for await p in zip(nums(5), letters().take(2)) { print(f" {p:?}"); }
+    println("");
+    let n = 0;
+    for await _ in stream::select(nums(2), nums(1)).take(1) { n += 1; }
+    println(f"select {n}");
+    let f: AsyncFuture<i32> = six();
+    let g: AsyncFuture<i32> = async { 4 };
+    println(f"typed {await f} {await g}");
+    let ok: TryAsyncFuture<i32, str> = fails(1);
+    let v = try await ok catch _ { -1 };
+    let w = try await fails(3) catch e { print(f"try {v} "); println(f"caught {e}"); 0 };
+    if w != 0 { println("not caught"); }
+}

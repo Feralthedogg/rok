@@ -2,13 +2,16 @@
 //! the `.rok` cases (`integration.rs`), read from `//` comment lines:
 //!   - `// expect-exit: N`      — runtime exit code
 //!   - `// expect-stdout: text` — single-line stdout, or an empty value
-//!     followed by `// line` comments for a multi-line block
+//!     followed by `// line` comments for a multi-line block (none:
+//!     empty stdout); required of every case that runs
 //!   - `// expect-error: text`  — build must fail and stderr must contain `text`
 //!   - `// forbid-error: text`  — (repeatable) that failed build's stderr must
 //!     not contain `text`
 //!   - `// expect-warning: text` — (repeatable) build stderr must contain `text`
 //!   - `// forbid-warning: text` — (repeatable) build stderr must not contain `text`
-//!   - `// expect-stderr: text` — (repeatable) the run's stderr must contain `text`
+//!   - `// expect-stderr: text` — (repeatable) the run's stderr, one
+//!     directive per line, leading and trailing blanks aside (`\` read
+//!     as `/`, library paths relative to the workspace); none: empty stderr
 //!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
 //!     overflow panics, which only `-O0` checks)
 //!   - `// gc-stress: N`        — run twice more, with

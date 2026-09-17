@@ -1,6 +1,9 @@
 // expect-exit: 101
-// expect-stderr: panic_loc_track_caller_nested.rok:22:5:
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_track_caller_nested.rok:25:5:
 // expect-stderr: assertion `left == right` failed
+// expect-stderr: left: 2
+// expect-stderr: right: 1
+// expect-stdout:
 
 // A `#[track_caller]` chain (user `outer` → user `inner` → library
 // `assert_eq` → `panic`) reports the first caller outside it; a check

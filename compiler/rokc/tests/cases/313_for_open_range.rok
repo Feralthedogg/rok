@@ -19,3 +19,4 @@ fn main() {
         println(f"odd {i}");
     }
 }
+// spec: §3.7.8 §3.13.3

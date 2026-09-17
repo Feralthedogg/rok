@@ -1,4 +1,5 @@
-// expect-exit: 3
+// expect-exit: 0
+// expect-stdout: a 3
 // expect-warning: this `try` covers no throwing call
 // expect-warning: no error reaches this `catch`
 
@@ -12,9 +13,8 @@ fn keep<T>(x: T) -> T {
     x
 }
 
-fn main() -> i32 {
-    let s = keep("a");
-    keep(3)
+fn main() {
+    println(f"{keep("a")} {keep(3)}");
 }
 
 // spec: 003.14-error-control-flow

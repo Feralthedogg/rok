@@ -163,6 +163,9 @@ environment:
   ROKC_TARGET_DIR   target/ location (default: inside the package)
   ROKC_VERBOSE      same as --verbose
   ROKC_NUM_JOBS     default for --threads
+  ROKC_INCREMENTAL  where the front end keeps parses and lowered bodies
+                    (default: target/<profile>/incremental/; 0: nowhere)
+  ROKC_INCR_VERIFY  1: lower every body again and fail on a difference
 ";
 
 // One flag per CLI switch; an enum per group would only add plumbing.
@@ -849,7 +852,18 @@ fn session(a: &Args, pkg: &Package) -> Session {
     session.set_anonymous(pkg.anonymous);
     session.set_target(a.spec());
     session.set_std_prebuilt(a.std_prebuilt.clone());
+    session.set_incremental(incremental_dir(a, pkg));
     session
+}
+
+/// `-v`: what the front end took from the incremental directory.
+fn reused(a: &Args, result: &CompileResult) {
+    if let Some(r) = result.reuse.filter(|_| a.verbose > 0 && !a.quiet) {
+        eprintln!(
+            "      Reused: {} of {} files parsed, {} of {} bodies lowered",
+            r.files.0, r.files.1, r.bodies.0, r.bodies.1
+        );
+    }
 }
 
 fn progress(a: &Args, verb: &str, pkg: &Package) {
@@ -892,10 +906,29 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
         process::exit(1);
     }
     stage(a, "front end", started);
+    reused(a, &result);
     if a.verbose > 1 && !a.quiet {
         eprint!("{}", result.trace());
     }
     (result, warnings, started)
+}
+
+/// The package's incremental directory (spec 9.2.16):
+/// `<out dir>/incremental/<name>-<hash of its root>`, under
+/// `$ROKC_INCREMENTAL` instead of `<out dir>/incremental` when set. A
+/// lone file (outside any package) gets one only under
+/// `$ROKC_INCREMENTAL`; `ROKC_INCREMENTAL=0` turns it off.
+fn incremental_dir(a: &Args, pkg: &Package) -> Option<PathBuf> {
+    let env = std::env::var_os("ROKC_INCREMENTAL").filter(|v| !v.is_empty());
+    let root = match env {
+        Some(v) if v == "0" => return None,
+        Some(v) => PathBuf::from(v),
+        None if pkg.anonymous => return None,
+        None => out_dir(a, Some(pkg)).join("incremental"),
+    };
+    let id = std::path::absolute(&pkg.root).unwrap_or_else(|_| pkg.root.clone());
+    let h = rokc_core::hash::fnv(id.to_string_lossy().as_bytes());
+    Some(root.join(format!("{}-{h:016x}", pkg.name)))
 }
 
 /// A library's package name: `--name`, else its directory's (made an
@@ -1158,6 +1191,7 @@ fn cmd_check(mut a: Args, codegen: bool) {
         &a.lint_levels,
         codegen.then_some(&a.opts),
     );
+    reused(&a, &result);
     diags.iter().for_each(|d| result.report(d));
     let errors = diags.iter().filter(|d| d.is_error()).count();
     let warnings = diags.len() - errors;

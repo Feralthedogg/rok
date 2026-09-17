@@ -35,3 +35,4 @@ fn main() -> i32 {
     println(f"4 x 200: {if all { "ok" } else { "broken" }}");
     0
 }
+// spec: 008.04-safepoint §8.4.10 / 008.05-extern-symbols §8.5.1 / 007.04 §7.4.4 / 007.02 §7.2.1

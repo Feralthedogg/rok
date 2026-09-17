@@ -142,3 +142,4 @@ println(f"resolve localhost: {found.port() == 80u16}");
 let refused = false;
 try TcpStream::connect(a3) catch e: IoError { refused = true; };
 println(f"refused: {refused}");
+// spec: std 302-net §3.2.1

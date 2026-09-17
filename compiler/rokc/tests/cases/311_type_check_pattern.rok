@@ -18,3 +18,4 @@ fn main() -> i32 {
     if classify(3.14) == 2 { println("got_float"); }
     return 0;
 }
+// spec: §3.11.1

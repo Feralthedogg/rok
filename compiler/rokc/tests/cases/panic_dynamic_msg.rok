@@ -1,4 +1,8 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/panic_dynamic_msg.rok:7:28:
+// expect-stderr: bad input
+// expect-stdout:
+
 // `panic` takes any `str`, not only a literal.
 fn fail(why: str) -> i32 { panic(why); }
 fn main() -> i32 { return fail("bad " + "input"); }

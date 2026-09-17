@@ -1,0 +1,39 @@
+// spec: std 102-cast §1.2.1 §1.2.2 §1.2.3 §1.2.4 §1.2.8
+// expect-exit: 0
+// expect-stdout:
+// ptr_cast: 7 4
+// u8 view: 1
+// align_cast: 258 none
+
+// stdlib 1.2: every pointer cast is a named function — `ptr_cast`
+// retypes (same address), `align_cast` checks the alignment first
+// (`none` when misaligned).
+use rok::bare::ptr::{Ptr, addr_of};
+use rok::bare::{align_cast, ptr_cast};
+
+struct A { x: u32; }
+struct B { x: u32; }
+
+fn main() {
+    let a = A { x: 7 };
+    let pa: Ptr<A> = addr_of(a);
+    let pb: Ptr<B> = ptr_cast::<B>(pa);
+    println(f"ptr_cast: {unsafe { pb.read() }.x} {pb.addr() - pa.addr() + 4}");
+
+    let words: [u32; 2] = [1, 258];
+    let pw: Ptr<u32> = addr_of(words[0]);
+    let bytes: Ptr<u8> = ptr_cast::<u8>(pw);
+    // Little-endian on every Tier 1 target.
+    println(f"u8 view: {unsafe { bytes.read() }}");
+
+    let at4: Ptr<u8> = bytes.add(4);
+    let good = match align_cast::<u32>(at4) {
+        p: Ptr<u32> => f"{unsafe { p.read() }}",
+        none => "none",
+    };
+    let bad = match align_cast::<u32>(bytes.add(1)) {
+        p: Ptr<u32> => f"{unsafe { p.read() }}",
+        none => "none",
+    };
+    println(f"align_cast: {good} {bad}");
+}

@@ -1,0 +1,19 @@
+// A single-file module holding every kind of item.
+pub struct Point { pub x: f64; pub y: f64; }
+
+pub trait Shape { fn name(self) -> str; }
+
+impl Shape for Point { fn name(self) -> str { "shape" } }
+
+pub const ORIGIN_X: f64 = 0.0;
+pub static CALLS: Atomic<i32> = Atomic::new(0);
+
+pub fn distance(p: Point) -> f64 {
+    CALLS.fetch_add(1);
+    ((p.x - ORIGIN_X) * (p.x - ORIGIN_X) + p.y * p.y).sqrt()
+}
+
+pub mod inner {
+    pub fn half(v: f64) -> f64 { v / 2.0 }
+    pub fn one() -> i32 { 1 }
+}

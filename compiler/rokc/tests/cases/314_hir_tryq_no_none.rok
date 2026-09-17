@@ -5,3 +5,4 @@
 fn g(x: i32) -> i32 | none { if x > 0 { return x; } return none; }
 fn h(x: i32) -> i32 | f64 { let v = g(x)?; return v + 1; }
 fn main() -> i32 { let r = h(0); return match r { a: i32 => a, b: f64 => 50 }; }
+// spec: §3.14.10

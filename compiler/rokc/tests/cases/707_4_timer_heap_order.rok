@@ -1,0 +1,40 @@
+// spec: 007.07-io-and-timer §7.7.4 §7.7.7
+// expect-exit: 0
+// expect-stdout:
+// woke in deadline order: 10 20 30 40
+// cancelled sleeper: true, others on time: true
+// after idle: 3 tasks ran
+
+// spec 7.7.4: sleeps wait in a heap ordered by deadline, so tasks wake
+// in deadline order whatever order they started in; a cancelled task's
+// timer is just discarded. 7.7.7: idle workers park and a later spawn
+// unparks them.
+async fn nap(ms: i64) -> i64 {
+    await task::sleep(Duration::ms(ms));
+    ms
+}
+
+async fn main() {
+    let order: List<i64> = [];
+    let ts: List<Task<i64>> = [];
+    for ms in [30i64, 10, 40, 20] {
+        ts.push(task::spawn_local(async {
+            let v = await nap(ms);
+            order.push(v);
+            v
+        }));
+    }
+    await task::join(ts);
+    println(f"woke in deadline order: {order[0]} {order[1]} {order[2]} {order[3]}");
+
+    let long = task::spawn(nap(10_000));
+    let short = task::spawn(nap(5));
+    long.cancel();
+    let r = try await long.join() catch _ { -1 };
+    println(f"cancelled sleeper: {r == -1}, others on time: {(await short) == 5}");
+
+    await task::sleep(Duration::ms(30));
+    let more: List<Task<i32>> = [];
+    for i in 0..3 { more.push(task::spawn(async { i })); }
+    println(f"after idle: {(await task::join(more)).len()} tasks ran");
+}

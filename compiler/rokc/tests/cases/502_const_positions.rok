@@ -1,0 +1,48 @@
+// spec: §5.2.1 §5.2.2 §5.2.3 §5.2.5 §5.2.7 §5.2.8
+// expect-exit: 0
+// expect-stdout:
+// 3.14159 3 rok
+// 42 43
+// 12.56636 3.14159
+// 2 12 42 42
+// 7 8
+
+// Spec 5.2: a `const` has an explicit type and a compile-time value,
+// may sit at module level or in an impl, is inlined
+// at each use, and is what `struct` field defaults are.
+const PI: f64 = 3.14159f64;
+const MAX_RETRY: i32 = 3i32;
+const NAME: str = "rok";
+const X: i32 = 42i32;
+const STEP: i32 = MAX_RETRY * 2 + 1;
+
+struct Circle { r: f64; }
+
+impl Circle {
+    const UNIT_AREA: f64 = 3.14159f64;
+    fn unit() -> Circle { Circle { r: 1.0f64 } }
+}
+
+fn area(r: f64) -> f64 {
+    PI * r * r
+}
+
+const fn double(x: i32) -> i32 { x * 2i32 }
+const fn gcd(a: i64, b: i64) -> i64 { if b == 0i64 { a } else { gcd(b, a % b) } }
+const fn id<T>(x: T) -> T { x }
+
+const TWO: i32 = double(1i32);
+const TWELVE: i64 = gcd(24i64, 36i64);
+const A: i32 = id(42i32);
+
+struct Retry { tries: i32 = STEP; next: i32 = STEP + 1; }
+
+println(f"{PI} {MAX_RETRY} {NAME}");
+let a = X;
+let b = X + 1i32;
+println(f"{a} {b}");
+println(f"{area(2.0)} {Circle::UNIT_AREA * Circle::unit().r}");
+let user_input = 21;
+println(f"{TWO} {TWELVE} {double(user_input)} {A}");
+let r = Retry {};
+println(f"{r.tries} {r.next}");

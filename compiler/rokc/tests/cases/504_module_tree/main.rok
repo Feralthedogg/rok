@@ -1,0 +1,39 @@
+// spec: §5.4.1 §5.4.2 §5.4.3 §5.4.4 §5.4.7 §5.4.8 §5.4.9 §5.4.11
+// spec: §5.8.1 §5.8.2 §5.8.3 §5.8.4 §5.8.5 §5.8.7 §5.8.8 §5.8.9 §5.8.11
+// expect-exit: 0
+// expect-stdout:
+// 5 3.5 1 shape
+// tok:7 base ext
+// 7 7 c
+// 5 2 1
+// 3 4
+
+// Spec 5.4 / 5.8: `mod name;` maps `name.rok` (single file) or
+// `name.rok` + `name/` (folder, recursively); the package directory is
+// the root's folder. A body may only re-export its submodules (5.4.11);
+// `pub use` exposes an item again under another path, with aliases,
+// groups and whole modules, at no cost.
+mod geom;
+pub mod parsing;
+pub(pkg) mod tools;
+
+pub mod prelude {
+    pub use pkg::geom::{Point, distance as dist};
+    pub use pkg::parsing::lexer::Token;
+}
+
+pub use parsing::lexer;
+pub use parsing::lexer::chars::classify as kind;
+
+use prelude::*;
+
+let p = Point { x: 3.0, y: 4.0 };
+println(f"{dist(p)} {geom::inner::half(7.0)} {geom::CALLS.load()} {p.name()}");
+let t = Token { v: 7 };
+println(f"{t.show()} {parsing::base_name()} {parsing::ext_name()}");
+// One item through its original and its re-exported paths.
+let a = parsing::lexer::Token { v: 7 };
+let b = lexer::Token { v: 7 };
+println(f"{a.v} {b.v} {kind('x')}");
+println(f"{tools::five()} {tools::nested::two()} {pkg::geom::inner::one()}");
+println(f"{parsing::lexer::chars::depth()} {parsing::visible_count()}");

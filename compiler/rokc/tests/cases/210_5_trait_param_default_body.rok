@@ -1,7 +1,8 @@
 // spec: 002.10.5
 // A trait default body sees the trait parameters bound by the impl, or
 // their defaults (`Self` = the impl target) when the impl omits them.
-// expect-exit: 12
+// expect-exit: 0
+// expect-stdout: 5 5 1 true
 
 trait Tr<T = i64> {
     fn make(self) -> T { let x: T = 5; x }
@@ -13,10 +14,10 @@ impl Tr for S {}
 impl Same for S {}
 struct U {}
 impl Tr<i32> for U {}
-fn main() -> i32 {
+fn main() {
     let s = S {};
     let a: i64 = s.make();
     let b: i32 = U {}.make();
     let ok = s.same(S {});
-    return (a as i32) + b + s.size() + (if ok { 1 } else { 0 });
+    println(f"{a} {b} {s.size()} {ok}");
 }

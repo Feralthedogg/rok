@@ -12,3 +12,6 @@ fn main() {
     let d: i32 = 7 / 0;
     let ok: u8 = 250 + 5;
 }
+
+// spec: §1.6.4
+// spec: §5.2.4

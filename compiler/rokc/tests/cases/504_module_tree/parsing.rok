@@ -1,0 +1,8 @@
+// A folder module body that only declares and re-exports its parts.
+mod base;
+mod ext;
+pub mod lexer;
+
+pub use base::base_name;
+pub(pkg) use base::visible_count;
+pub use ext::{ext_name};

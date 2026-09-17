@@ -39,3 +39,4 @@ fn main() -> i32 {
     println(f"{(90° + a).d}");
     return 0;
 }
+// spec: §6.7.1

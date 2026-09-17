@@ -33,3 +33,4 @@ fn main() {
     println(f"renamed {d.exists("sub/b.txt")} copied {n}");
     try! Dir::root().remove_dir_all(base);
 }
+// spec: std 308-path §3.8.7

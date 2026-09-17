@@ -31,3 +31,4 @@ fn main() {
     println(f"next {show(g.next())}");
     println(f"next {show(g.next())}");
 }
+// spec: 008.10 §8.10.1 §8.10.2

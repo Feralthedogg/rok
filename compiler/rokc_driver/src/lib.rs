@@ -6,6 +6,8 @@ mod cfg;
 mod coro;
 mod entry;
 mod harness;
+mod incr;
+pub use incr::Reuse;
 pub mod native;
 pub mod rokhir;
 mod toolchain;
@@ -107,6 +109,9 @@ pub struct CompilerConfig {
     /// it): their concrete code is linked, not compiled. Ignored when
     /// stale or not of these tiers.
     pub std_prebuilt: Option<PathBuf>,
+    /// The package's incremental directory (spec 9.2.16): parses and
+    /// lowered bodies of the last build are kept there for the next.
+    pub incremental: Option<PathBuf>,
 }
 
 /// The build's cfg (spec 6.3): the target's keys, `--cfg` and `test`.
@@ -392,6 +397,8 @@ pub struct CompiledProject {
     /// The source files read from disk (`#[path]` ones outside the
     /// package too).
     pub files: Vec<PathBuf>,
+    /// What was taken from the incremental directory.
+    pub reuse: Option<Reuse>,
 }
 
 /// Compile the package rooted at `path`; `files` gets every source file
@@ -573,6 +580,39 @@ fn compile_unit(
     lib: Option<&str>,
     files: &mut SourceMap,
 ) -> Result<CompiledProject, Vec<RokDiagnostic>> {
+    // One store per kind of build of the package (a check, a build, a
+    // test build ..), so that alternating them keeps each one's.
+    let flavor = format!(
+        "{}|{}|{}|{}|{:?}|{:?}|{}",
+        incr::target_key(&cfg_env(config), &config.target),
+        config.check_library,
+        config.inline_prebuilt,
+        config.keep_ast,
+        lib,
+        prebuilt.iter().map(|p| &p.rokhir.name).collect::<Vec<_>>(),
+        config.std_lib,
+    );
+    let dir = config
+        .incremental
+        .as_ref()
+        .map(|d| d.join(format!("{:016x}", incr::key(&[flavor.as_bytes()]))));
+    let (r, reuse) = incr::with(dir.as_deref(), || {
+        compile_unit_in(source, path, config, prebuilt, lib, files)
+    });
+    r.map(|mut p| {
+        p.reuse = reuse;
+        p
+    })
+}
+
+fn compile_unit_in(
+    source: &str,
+    path: &Path,
+    config: &CompilerConfig,
+    prebuilt: &[Prebuilt],
+    lib: Option<&str>,
+    files: &mut SourceMap,
+) -> Result<CompiledProject, Vec<RokDiagnostic>> {
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
     // Bootstrap PrecTable from operator-declaration sources, if any.
@@ -644,10 +684,15 @@ fn compile_unit(
             table: std::sync::Arc::clone(&meta_table),
             keywords: keywords.get(i).cloned().unwrap_or_default(),
             literals: std::sync::Arc::clone(if i == 0 { &user_lits } else { &lib_lits }),
+            key: std::sync::OnceLock::new(),
+            target: config.target.clone(),
         })
         .collect();
+    let incr = incr::current();
+    let ids = incr::Ids::of(files);
     rokc_diagnostic::time("parse", || {
         real_parse(
+            incr.as_deref().map(|i| (i, &ids)),
             &root_dir_kw,
             &roots,
             &metas,
@@ -792,6 +837,8 @@ fn compile_unit(
         inline_prebuilt: config.inline_prebuilt,
         pointer_width: config.target.pointer_width,
         item_modules,
+        fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
+        bodies: incr::current().map(|i| incr::bodies(i, files)),
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -819,11 +866,31 @@ fn compile_unit(
     let mut libs = Vec::new();
     native_libs(&program.items, &mut libs);
     let mut hir = rokc_diagnostic::time("hir", || {
-        rokc_hir::lower_full(
-            program, &prec, &all_uses, &use_table, &reexports, &input, files,
-        )
+        let lower = |program, input: &rokc_hir::HirInput| {
+            rokc_hir::lower_full(
+                program, &prec, &all_uses, &use_table, &reexports, input, files,
+            )
+        };
+        match input.bodies.is_some().then(incr::verify).flatten() {
+            Some(check) => {
+                let clean = lower(
+                    program.clone(),
+                    &rokc_hir::HirInput {
+                        bodies: None,
+                        ..input.clone()
+                    },
+                );
+                let mut hir = lower(program, &input);
+                check(&clean, &mut hir);
+                hir
+            }
+            None => lower(program, &input),
+        }
     });
     diags.append(&mut hir.diagnostics);
+    if let Some(i) = incr::current() {
+        i.bodies_reused(hir.reuse.replayed, hir.reuse.lowered);
+    }
     // Warnings go out with the errors (a failed build still shows them).
     if diags.iter().any(RokDiagnostic::is_error) {
         return Err(diags);
@@ -874,6 +941,7 @@ fn compile_unit(
         tests,
         sources,
         files: READ.with(std::cell::RefCell::take),
+        reuse: None,
     })
 }
 
@@ -992,10 +1060,13 @@ fn prepass_parse(
                 Some((path, sub_dir, source, id))
             })
             .collect();
+        let incr = incr::current();
+        let ids = incr.is_some().then(|| incr::Ids::of(sources));
         let parsed: Vec<Prepassed> = std::thread::scope(|s| {
             let mut parses = Vec::new();
             for (path, _, source, id) in &jobs {
-                parses.push(s.spawn(move || prepass_file(path, source, *id)));
+                let incr = incr.as_deref().zip(ids.as_ref());
+                parses.push(s.spawn(move || prepass_file(path, source, *id, incr)));
             }
             parses
                 .into_iter()
@@ -1004,27 +1075,59 @@ fn prepass_parse(
         });
         level = Vec::new();
         for ((path, sub_dir, _, id), file) in jobs.into_iter().zip(parsed) {
-            mod_files(&file.program.items, sub_dir.as_deref(), &mut level);
+            mod_files(&file.sum.skeleton, sub_dir.as_deref(), &mut level);
             files.insert(path, (id, file));
         }
     }
     files
 }
 
-/// One pre-pass file `id`: lexed without extension operators and parsed.
-fn prepass_file(path: &Path, source: &str, id: u32) -> Prepassed {
+/// One pre-pass file `id`: lexed without extension operators and parsed
+/// (or its summary from the incremental store).
+fn prepass_file(
+    path: &Path,
+    source: &str,
+    id: u32,
+    incr: Option<(&incr::Incr, &incr::Ids)>,
+) -> Prepassed {
     let file = path.display().to_string();
-    let (mut tokens, lex) = Lexer::new(source, file.clone()).lex_all();
+    let k = incr::key(&[b"pre", file.as_bytes(), source.as_bytes()]);
+    if let Some(sum) = incr.and_then(|(i, ids)| i.parse.get::<Summary>(k, ids)) {
+        return Prepassed {
+            source: source.to_owned(),
+            sum,
+            program: None,
+        };
+    }
+    let (program, sum) = plain_parse(&file, source, id, |tokens, program, quiet| {
+        Summary::of(tokens, program, quiet, &file, source)
+    });
+    if let Some((i, ids)) = incr {
+        i.parse.put(k, &sum, ids);
+    }
+    Prepassed {
+        source: source.to_owned(),
+        sum,
+        program: Some(program),
+    }
+}
+
+/// File `id` lexed without extension operators and parsed: the program,
+/// and `then` of its tokens, the program and whether no diagnostic came
+/// up.
+fn plain_parse<T>(
+    file: &str,
+    source: &str,
+    id: u32,
+    then: impl FnOnce(&[rokc_lexer::Token], &rokc_ast::Program, bool) -> T,
+) -> (rokc_ast::Program, T) {
+    let (mut tokens, lex) = Lexer::new(source, file.to_owned()).lex_all();
     for t in &mut tokens {
         t.span.file = id;
     }
-    let (program, parse) = parse_program(&tokens, file);
-    Prepassed {
-        source: source.to_owned(),
-        tokens,
-        program,
-        quiet: lex.is_empty() && parse.is_empty(),
-    }
+    let (program, parse) = parse_program(&tokens, file.to_owned());
+    let t = then(&tokens, &program, lex.is_empty() && parse.is_empty());
+    (program, t)
 }
 
 /// The files of the `mod name;` among `items` (inline modules' too),
@@ -1064,9 +1167,16 @@ fn prepass_tree(
     let Some((id, f)) = files.remove(path) else {
         return;
     };
-    prepass_gather(&f.tokens, &f.source, &path.display().to_string(), id, metas);
-    prepass_mods(&f.program.items, sub_dir, module, files, metas, out);
-    out.push(collect_prec_table(&f.program, module));
+    prepass_gather(&f.sum, &f.source, &path.display().to_string(), id, metas);
+    prepass_mods(&f.sum.skeleton, sub_dir, module, files, metas, out);
+    let skeleton = rokc_ast::Program {
+        attrs: Vec::new(),
+        items: f.sum.skeleton.clone(),
+        stmts: Vec::new(),
+        expanded: Vec::new(),
+        tops: Vec::new(),
+    };
+    out.push(collect_prec_table(&skeleton, module));
     PREPASSED.with(|p| p.borrow_mut().insert(path.to_path_buf(), (id, f)));
 }
 
@@ -1074,29 +1184,32 @@ fn prepass_tree(
 /// keywords, meta blocks, literals and cfg) would give the pre-pass's
 /// tokens and AST: the file uses none of them.
 fn reusable(p: &Prepassed, ext: &ExtOps, metas: &MetaCtx) -> bool {
-    use rokc_lexer::TokenKind as T;
-    let prefixes: Vec<&T> = metas
+    let sum = &p.sum;
+    let prefixes: Vec<Vec<u8>> = metas
         .literals
         .rules
         .iter()
         .filter(|r| r.kind == PatKind::Prefix)
         .filter_map(|r| match r.pattern.elems.first() {
-            Some(rokc_parser::PatElem::Tok(k, _)) => Some(k),
+            Some(rokc_parser::PatElem::Tok(k, _)) => Some(kind_bytes(k)),
             _ => None,
         })
         .collect();
-    p.quiet
+    sum.quiet
+        && !sum.ext_op
+        && !sum.cfg_bang
         && !ext.symbols().iter().any(|s| p.source.contains(s.as_str()))
-        && p.tokens.windows(2).all(|w| match &w[0].kind {
-            T::ExtOp(_) => false,
-            T::Ident(n) => {
-                !(n == "cfg_attr"
-                    || n == "cfg" && w[1].kind == T::Bang
-                    || metas.table.defines(n)
-                    || metas.keywords.iter().any(|(k, ..)| k == n))
-            }
-            k => !prefixes.contains(&k),
+        && !sum.idents.iter().any(|(n, _)| {
+            n == "cfg_attr" || metas.table.defines(n) || metas.keywords.iter().any(|(k, ..)| k == n)
         })
+        && !sum.kinds.iter().any(|k| prefixes.contains(k))
+}
+
+/// A token kind's encoding (kinds compare by it).
+fn kind_bytes(k: &rokc_lexer::TokenKind) -> Vec<u8> {
+    let mut e = rokc_core::codec::Enc::new(false);
+    rokc_core::codec::Codec::enc(k, &mut e);
+    e.buf
 }
 
 fn prepass_mods(
@@ -1193,37 +1306,21 @@ pub(crate) fn defines_metas(tokens: &[rokc_lexer::Token], source: &str) -> bool 
         || source.contains("#[literal(")
 }
 
-/// Gather the meta blocks of a pre-pass file `id` (their template tokens
-/// keep spans into file `id`).
-fn prepass_gather(
-    tokens: &[rokc_lexer::Token],
-    source: &str,
-    file: &str,
-    id: u32,
-    metas: &mut PrePass,
-) {
+/// Gather the meta blocks, keywords and literals of a pre-pass file
+/// `id` (their template tokens keep spans into file `id`).
+fn prepass_gather(sum: &Summary, source: &str, file: &str, id: u32, metas: &mut PrePass) {
     if let Some(idents) = &mut metas.idents {
         // The user package's names, first use per file.
-        let mut seen = std::collections::HashSet::new();
-        for t in tokens {
-            if let rokc_lexer::TokenKind::Ident(n) = &t.kind {
-                if seen.insert(n.as_str()) {
-                    idents.push((n.clone(), t.span));
-                }
-            }
-        }
+        idents.extend(sum.idents.iter().cloned());
     }
-    if defines_metas(tokens, source) {
-        let found = collect_meta_blocks(tokens, file);
-        if !found.is_empty() {
-            metas
-                .meta_files
-                .push((file.to_owned(), source.to_owned(), id));
-        }
-        metas.metas.extend(found);
-        metas.keywords.extend(collect_keywords(tokens, file));
-        metas.literals.extend(collect_literals(tokens, file));
+    if !sum.metas.is_empty() {
+        metas
+            .meta_files
+            .push((file.to_owned(), source.to_owned(), id));
     }
+    metas.metas.extend(sum.metas.iter().cloned());
+    metas.keywords.extend(sum.keywords.iter().cloned());
+    metas.literals.extend(sum.literals.iter().cloned());
 }
 
 /// Spec 1.4.2: distinct names of one package with the same confusable
@@ -1301,10 +1398,137 @@ struct PrePass {
 /// is `reusable`.
 struct Prepassed {
     source: String,
-    tokens: Vec<rokc_lexer::Token>,
-    program: rokc_ast::Program,
+    sum: Summary,
+    /// The parse, unless the summary came from the incremental store.
+    program: Option<rokc_ast::Program>,
+}
+
+/// What the pre-pass needs of a file's plain parse.
+struct Summary {
+    /// Its `mod` and `trait` items (`trait` method bodies dropped): the
+    /// module tree and the operator declarations.
+    skeleton: Vec<rokc_ast::Item>,
     /// Lexed and parsed without a diagnostic.
     quiet: bool,
+    /// Each identifier at its first use.
+    idents: Vec<(String, rokc_diagnostic::Span)>,
+    /// Its other token kinds (`kind_bytes`), each once.
+    kinds: Vec<Vec<u8>>,
+    /// An extension-operator token; `cfg!`.
+    ext_op: bool,
+    cfg_bang: bool,
+    metas: Vec<MetaDef>,
+    keywords: Vec<KeywordDef>,
+    literals: Vec<LiteralDef>,
+}
+
+rokc_core::codec_struct!(Summary {
+    skeleton,
+    quiet,
+    idents,
+    kinds,
+    ext_op,
+    cfg_bang,
+    metas,
+    keywords,
+    literals,
+});
+
+impl Summary {
+    fn of(
+        tokens: &[rokc_lexer::Token],
+        program: &rokc_ast::Program,
+        quiet: bool,
+        file: &str,
+        source: &str,
+    ) -> Self {
+        use rokc_lexer::TokenKind as T;
+        let mut seen = std::collections::HashSet::new();
+        let mut kinds = std::collections::HashSet::new();
+        let mut sum = Self {
+            skeleton: skeleton(&program.items),
+            quiet,
+            idents: Vec::new(),
+            kinds: Vec::new(),
+            ext_op: false,
+            cfg_bang: false,
+            metas: Vec::new(),
+            keywords: Vec::new(),
+            literals: Vec::new(),
+        };
+        for (i, t) in tokens.iter().enumerate() {
+            match &t.kind {
+                T::Ident(n) => {
+                    if seen.insert(n.as_str()) {
+                        sum.idents.push((n.clone(), t.span));
+                    }
+                    if n == "cfg" && tokens.get(i + 1).is_some_and(|b| b.kind == T::Bang) {
+                        sum.cfg_bang = true;
+                    }
+                }
+                T::ExtOp(_) => sum.ext_op = true,
+                k => {
+                    let b = kind_bytes(k);
+                    if kinds.insert(b.clone()) {
+                        sum.kinds.push(b);
+                    }
+                }
+            }
+        }
+        if defines_metas(tokens, source) {
+            sum.metas = collect_meta_blocks(tokens, file);
+            sum.keywords = collect_keywords(tokens, file);
+            sum.literals = collect_literals(tokens, file);
+        }
+        sum
+    }
+}
+
+/// What `collect_prec_table` reads of `items`: the `mod` and `trait`
+/// items (inline modules' too), and the functions and `impl` methods
+/// with an operator attribute (misplaced ones), bodies dropped.
+fn skeleton(items: &[rokc_ast::Item]) -> Vec<rokc_ast::Item> {
+    use rokc_ast::{ImplItem, Item, TraitItem};
+    let op = |f: &rokc_ast::FnDef| {
+        f.attrs
+            .iter()
+            .any(|a| matches!(a.name(), "infix" | "prefix" | "postfix"))
+    };
+    let op_method = |m: &ImplItem| matches!(m, ImplItem::Method(f) if op(f));
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Mod(m) => {
+                let mut m = m.clone();
+                m.items = m.items.as_deref().map(skeleton);
+                Some(Item::Mod(m))
+            }
+            Item::Trait(t) => {
+                let mut t = t.clone();
+                for ti in &mut t.items {
+                    if let TraitItem::Method(f) = ti {
+                        f.body = None;
+                    }
+                }
+                Some(Item::Trait(t))
+            }
+            Item::Fn(f) if op(f) => Some(Item::Fn(rokc_ast::FnDef {
+                body: None,
+                ..f.clone()
+            })),
+            Item::Impl(i) if i.items.iter().any(op_method) => {
+                let mut i = i.clone();
+                i.items.retain(op_method);
+                for m in &mut i.items {
+                    if let ImplItem::Method(f) = m {
+                        f.body = None;
+                    }
+                }
+                Some(Item::Impl(i))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 thread_local! {
@@ -1339,6 +1563,7 @@ const AST_STACK: usize = 1 << 30;
 /// threads finish in. Token buffers are dropped, and the `keep` copies
 /// made, on the worker threads.
 fn real_parse(
+    incr: Option<(&incr::Incr, &incr::Ids)>,
     user_dir: &Path,
     roots: &[LibRoot],
     metas: &[MetaCtx],
@@ -1364,12 +1589,7 @@ fn real_parse(
                     .filter(|(_, d)| path.starts_with(d))
                     .max_by_key(|(_, d)| d.components().count())?;
                 let metas = metas.get(pkg)?;
-                let (program, diags) = if reusable(&pre, ext, metas) {
-                    (pre.program, Vec::new())
-                } else {
-                    let file = path.display().to_string();
-                    parse_file(&pre.source, file, file_id, ext, metas, cfg_env)
-                };
+                let (program, diags) = cached_parse(&path, file_id, pre, incr, ext, metas, cfg_env);
                 let parsed = settle(&path, file_id, program, diags, metas, cfg_env, keep);
                 Some((path, parsed))
             });
@@ -1380,6 +1600,55 @@ fn real_parse(
             .collect()
     });
     PARSED.with(|p| p.borrow_mut().extend(parsed));
+}
+
+/// The real parse of pre-passed file `file_id` at `path`: the
+/// pre-pass's when `reusable`, else with the package's tables; from the
+/// incremental store when it has it.
+fn cached_parse(
+    path: &Path,
+    file_id: u32,
+    pre: Prepassed,
+    incr: Option<(&incr::Incr, &incr::Ids)>,
+    ext: &ExtOps,
+    metas: &MetaCtx,
+    cfg_env: &CfgEnv,
+) -> (rokc_ast::Program, Vec<RokDiagnostic>) {
+    let file = path.display().to_string();
+    let source = pre.source.as_bytes();
+    if reusable(&pre, ext, metas) {
+        let k = incr::key(&[b"plain", file.as_bytes(), source]);
+        let cached = match pre.program {
+            Some(_) => None,
+            None => incr.and_then(|(i, ids)| i.parse.get(k, ids)),
+        };
+        if let Some((i, _)) = incr {
+            i.count_parse(cached.is_some());
+        }
+        let program = cached.unwrap_or_else(|| {
+            let program = pre
+                .program
+                .unwrap_or_else(|| plain_parse(&file, &pre.source, file_id, |_, _, _| ()).0);
+            if let Some((i, ids)) = incr {
+                i.parse.put(k, &program, ids);
+            }
+            program
+        });
+        return (program, Vec::new());
+    }
+    let tables = metas.tables_key(ext, cfg_env).to_le_bytes();
+    let k = incr::key(&[b"parse", file.as_bytes(), source, &tables]);
+    let cached = incr.and_then(|(i, ids)| i.parse.get(k, ids));
+    if let Some((i, _)) = incr {
+        i.count_parse(cached.is_some());
+    }
+    cached.unwrap_or_else(|| {
+        let parsed = parse_file(&pre.source, file, file_id, ext, metas, cfg_env);
+        if let Some((i, ids)) = incr {
+            i.parse.put(k, &parsed, ids);
+        }
+        parsed
+    })
 }
 
 /// Check the `#[cfg]` predicates of `program` (before filtering drops
@@ -1506,6 +1775,28 @@ struct MetaCtx {
     keywords: KeywordTable,
     /// `#[literal]` patterns: the libraries', plus the package's own.
     literals: std::sync::Arc<LiteralTable>,
+    /// `tables_key`, once asked for.
+    key: std::sync::OnceLock<u64>,
+    target: rokc_mir::Target,
+}
+
+impl MetaCtx {
+    /// A key of what, besides its text, a file's parse in this package
+    /// depends on: the extension operators, meta blocks, keywords,
+    /// literals and cfg.
+    fn tables_key(&self, ext: &ExtOps, cfg: &CfgEnv) -> u64 {
+        *self.key.get_or_init(|| {
+            let mut levels: Vec<String> = ext.levels.iter().map(|l| format!("{l:?}")).collect();
+            levels.sort();
+            incr::key(&[
+                levels.join(";").as_bytes(),
+                format!("{:?}", self.table).as_bytes(),
+                format!("{:?}", self.keywords).as_bytes(),
+                format!("{:?}", self.literals).as_bytes(),
+                incr::target_key(cfg, &self.target).as_bytes(),
+            ])
+        })
+    }
 }
 
 /// Spec 6.6: per package (user first, then each library root), its

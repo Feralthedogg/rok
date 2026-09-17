@@ -29,3 +29,4 @@ fn main() -> i32 {
     println(f"thrice {thrice(5)}");
     return 0;
 }
+// spec: §6.6.2 §6.6.3 §6.6.5 §6.6.7 §6.6.8 §6.6.10 §6.6.12

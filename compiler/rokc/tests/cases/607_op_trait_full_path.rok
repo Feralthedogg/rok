@@ -32,3 +32,4 @@ fn main() {
     let r = N { v: 2 } ⊕ N { v: 4 };
     print(f"{r.v}");
 }
+// spec: §6.7.3

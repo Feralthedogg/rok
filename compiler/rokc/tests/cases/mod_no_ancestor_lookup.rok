@@ -10,3 +10,4 @@ mod a {
 fn main() -> i32 {
     return a::f();
 }
+// spec: §5.7.1

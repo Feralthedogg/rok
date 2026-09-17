@@ -8,3 +8,4 @@ fn main() -> i32 {
     let x: i32 = 5;    // ERROR: redeclaration in same scope
     return x;
 }
+// spec: §5.1.4

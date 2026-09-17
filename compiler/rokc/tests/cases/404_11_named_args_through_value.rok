@@ -1,0 +1,10 @@
+// spec: §4.4.11
+// expect-error: named / spread arguments need a statically known callee
+
+// Spec 4.4.11: a function type has no parameter names, so a call through
+// a value takes positional arguments only.
+fn make_user(name: str, age: i32) -> i32 { age }
+
+let f: fn(str, i32) -> i32 = make_user;
+println(f"{make_user(name: "A", age: 30i32)} {f("A", 30i32)}");
+println(f"{f(name: "A", age: 30i32)}");

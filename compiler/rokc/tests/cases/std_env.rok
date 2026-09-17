@@ -55,3 +55,4 @@ fn main() throws (IoError) {
 }
 
 // spec: std 306-env
+// spec: std 306-env §3.6.2

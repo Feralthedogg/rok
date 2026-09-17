@@ -109,3 +109,5 @@ fn main() {
         println(f"{tn is none} {s}");
     }
 }
+
+// spec: §2.7.1 §2.7.2 §2.7.3

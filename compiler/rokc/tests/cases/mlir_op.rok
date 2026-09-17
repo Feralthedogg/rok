@@ -26,3 +26,4 @@ fn main() -> i32 {
     println(f"{s} {eq(s, 7)} {eq(s, 8)} {twice} {h}");
     0
 }
+// spec: std 109-mlir §1.9.2

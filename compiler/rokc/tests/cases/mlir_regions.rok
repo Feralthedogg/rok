@@ -52,3 +52,4 @@ fn main() -> i32 {
     println(f"{pick(true, 1, 2)} {pick(false, 1, 2)} {sum_to(5, 3)} {r}");
     0
 }
+// spec: std 109-mlir §1.9.2

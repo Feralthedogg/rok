@@ -776,4 +776,62 @@ mod tests {
         fmt::tests::formatter_ops();
         fuzz_tests::allocating();
     }
+
+    /// `[[fill]align][sign]['#']['0'][width]['.' precision][type]`
+    /// (stdlib 2.10.7), and `pack` / `unpack` round trips.
+    #[test]
+    fn fmt_spec_grammar() {
+        use fmt_spec::{FmtSpec, pack, parse, unpack};
+        let s = |t: &str| parse(t).unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let plain = s("");
+        assert_eq!((plain.fill, plain.align, plain.ty), (' ', 0, 0));
+        assert_eq!((plain.width, plain.precision), (None, None));
+        let all = s("*^+#010.3e");
+        assert_eq!(
+            all,
+            FmtSpec {
+                fill: '*',
+                align: b'^',
+                sign: b'+',
+                alt: true,
+                zero: true,
+                width: Some(10),
+                precision: Some(3),
+                ty: b'e',
+            }
+        );
+        // An align char alone; a fill takes any char, `<` included.
+        assert_eq!((s(">").fill, s(">").align), (' ', b'>'));
+        assert_eq!(
+            (s("<<5").fill, s("<<5").align, s("<<5").width),
+            ('<', b'<', Some(5))
+        );
+        assert_eq!((s("é=8").fill, s("é=8").align), ('é', b'='));
+        assert_eq!((s("08").zero, s("08").width), (true, Some(8)));
+        assert_eq!((s(".0f").precision, s(".0f").ty), (Some(0), b'f'));
+        assert_eq!(s(" ").sign, b' ');
+        for ty in ["d", "b", "o", "x", "X", "f", "e", "E", "g", "s", "?"] {
+            assert_eq!(s(ty).ty, ty.as_bytes()[0]);
+        }
+        for bad in [
+            "z",
+            ".",
+            "5.",
+            "10.x2",
+            "1.2.3",
+            "+-",
+            "#x5",
+            "99999999999999999999999",
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+        // A wide precision is kept; `s d g` pack as none; the rest round-trips.
+        let (f, c) = pack(&s(".9999"));
+        assert_eq!(unpack(f, c).precision, Some(9999));
+        assert_eq!(unpack(pack(&s("d")).0, pack(&s("d")).1).ty, 0);
+        for t in ["*^+#010.3e", "", ">7x", "é<3?", "-.2E"] {
+            let (f, c) = pack(&s(t));
+            assert_eq!(unpack(f, c), s(t), "{t:?}");
+        }
+    }
 }

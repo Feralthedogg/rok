@@ -1,4 +1,5 @@
-// expect-exit: 42
+// expect-exit: 0
+// expect-stdout: 10 22 10
 // A private core helper (`rok::core::num::bigint::radix_chunk` /
 // `digit_of`) is not imported by the implicit `use rok::core::**` (spec
 // 5.6), and a generic fn reached by the module's own `use` beats any core
@@ -14,8 +15,8 @@ use util::*;
 
 fn pow10<T>(x: T) -> T { x }
 
-fn main() -> i32 {
-    return radix_chunk(10i32) + digit_of(11i32) + pow10(10i32);
+fn main() {
+    println(f"{radix_chunk(10i32)} {digit_of(11i32)} {pow10(10i32)}");
 }
 
 // spec: 005.05-use

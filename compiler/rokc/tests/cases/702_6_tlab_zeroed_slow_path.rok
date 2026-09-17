@@ -1,0 +1,49 @@
+// spec: 007.02-allocation §7.2.1 §7.2.2 §7.2.3 §7.2.6 §7.2.12 / 008.05 §8.5.1 rok_gc_alloc_slow
+// expect-exit: 101
+// expect-stderr: rok runtime: allocation too large
+// expect-stdout:
+// fresh buffers zeroed: true
+// slow path: id 1 large true size 8216
+// unused overflow next
+
+// spec 7.2.6: a TLAB is zeroed before the fast path (7.2.1 / 7.2.2)
+// hands it out, so a fresh object reads all zero even where garbage
+// lived before the collection. Spec 7.2.3: the slow path called
+// directly fills in the header (a 8 KiB+ object goes to the LOS).
+// Spec 7.2.12: an allocation whose size overflows reaches "allocation
+// too large" even when nothing ever uses it (no elision).
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::ConstPtr;
+
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;
+}
+
+fn addr<T>(b: GcBuf<T>) -> usize { unsafe { transmute_unchecked(b) } }
+fn u32_at(a: usize) -> u32 { unsafe { let p: ConstPtr<u32> = transmute_unchecked(a); p.read() } }
+fn u64_at(a: usize) -> u64 { unsafe { let p: ConstPtr<u64> = transmute_unchecked(a); p.read() } }
+
+fn dirty() {
+    for i in 0..2000 {
+        let b: GcBuf<i64> = unsafe { buf_new(6) };
+        for k in 0usize..6 { unsafe { b[k] = -1 - i as i64; } }
+    }
+}
+
+fn main() {
+    dirty();
+    unsafe { rok_gc_collect(); }
+    let zero = true;
+    for _ in 0..2000 {
+        let b: GcBuf<i64> = unsafe { buf_new(6) };
+        for k in 0usize..6 { zero = zero && unsafe { b[k] } == 0; }
+    }
+    println(f"fresh buffers zeroed: {zero}");
+    let big = unsafe { rok_gc_alloc_slow(16 + 8200, 8, 1u32) };
+    let a = addr(big);
+    println(f"slow path: id {u32_at(a)} large {u32_at(a + 4) & 16u32 != 0u32} size {u64_at(a + 8)}");
+    println("unused overflow next");
+    let _unused: GcBuf<i64> = unsafe { buf_new(usize::MAX / 8 + 1) };
+    println("not reached");
+}

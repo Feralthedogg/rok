@@ -9,3 +9,4 @@ mod a {
 }
 
 fn main() -> i32 { let s = a::mk(); return s.secret(); }
+// spec: §5.6.10

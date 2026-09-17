@@ -1,5 +1,6 @@
 //! Definitions shared by the compiler and the `rok` tool.
 
+pub mod codec;
 pub mod def;
 pub mod hash;
 pub mod lint;

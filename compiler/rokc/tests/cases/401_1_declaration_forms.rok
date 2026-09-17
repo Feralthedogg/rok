@@ -1,0 +1,72 @@
+// spec: §4.1.1 §4.1.2 §4.1.4 §4.1.5 §4.1.6 §4.1.7 §4.1.8 §4.1.9 §4.1.11 §4.1.12
+// expect-exit: 0
+// expect-stdout:
+// hello
+// 7
+// 42 hi
+// true
+// 42
+// -1 10
+// 4 9 x
+// unsafe 3 3
+// a b c 6
+
+// Spec 4.1: declaration forms, inferred / unit bodies, generic and
+// `any` parameters, modifiers in their fixed order, arguments left to
+// right before the body.
+fn greet() {
+    print("hello\n");
+}
+
+fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+fn id(x) {
+    x
+}
+
+fn dyn_id(x: any) {
+    x
+}
+
+fn nothing() { }
+
+fn f() -> i32 {
+    42i32
+}
+
+fn early(x: i32) -> i32 {
+    if x < 0 { return -1; }
+    x * 2
+}
+
+pub fn area(r: i32) -> i32 { r * r }
+pub(pkg) fn helper(x: i32) -> i32 { x * 3 }
+fn _internal(s: str) -> str { s }
+
+unsafe fn raw(x: i32) -> i32 { x }
+unsafe yield fn gen() -> i32 { yield 1; yield 2; }
+unsafe async fn later() -> i32 { 3 }
+
+fn tag(s: str, v: i32) -> i32 {
+    print(f"{s} ");
+    v
+}
+
+fn three(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+
+greet();
+println(f"{add(3, 4)}");
+println(f"{id(42i32)} {id("hi")}");
+println(f"{dyn_id(true) is bool}");
+let u: () = nothing();
+println(f"{f()}");
+println(f"{early(-5)} {early(5)}");
+println(f"{area(2)} {helper(3)} {_internal("x")}");
+let g = 0;
+for v in unsafe { gen() } { g += v; }
+let fut: AsyncFuture<i32> = unsafe { later() };
+println(f"unsafe {unsafe { raw(g) }} 3");
+let s = three(tag("a", 1), tag("b", 2), tag("c", 3));
+println(f"{s}");

@@ -1,0 +1,38 @@
+// spec: 007.06-scheduler §7.6.10 / 007.02-allocation §7.2.7
+// gc-stress: 200
+// expect-exit: 0
+// expect-stdout:
+// 16 tasks: t0-0..t0-299 t15-0..t15-299
+// collections ran: true
+
+// spec 7.6.10: the thread whose allocation (or `rok_gc_collect`) starts
+// a stop-the-world collection runs it while the other workers wait at
+// safepoints, then they go back to their tasks. 7.2.7: a task resumed
+// by another worker allocates from that worker's TLAB. Tasks allocate
+// across `yield_now`s (so they move between workers) while collections
+// start on whichever thread runs out; every list reads back intact.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_stats_collections() -> u64;
+}
+
+async fn fill(t: i32) -> str {
+    let xs: List<str> = [];
+    for i in 0..300 {
+        xs.push(f"t{t}-{i}");
+        if i % 50 == 0 {
+            await task::yield_now();
+            unsafe { rok_gc_collect(); }
+        }
+    }
+    f"{xs[0]}..{xs[299]}"
+}
+
+async fn main() {
+    let before = unsafe { rok_gc_stats_collections() };
+    let ts: List<Task<str>> = [];
+    for t in 0..16 { ts.push(task::spawn(fill(t))); }
+    let rs = await task::join(ts);
+    println(f"{rs.len()} tasks: {rs[0]} {rs[15]}");
+    println(f"collections ran: {unsafe { rok_gc_stats_collections() } > before}");
+}

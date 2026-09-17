@@ -1,0 +1,61 @@
+// spec: std 214-error §2.14.1 §2.14.4 §2.14.5 §2.14.7
+// expect-exit: 0
+// expect-stdout:
+// conversion: str value: bad input overflow: mul u8 add: value out of range for `i32`
+// parse: cannot parse "x1": not a digit odd zero: true
+// typed 7 / i32
+// 7 none 42 none
+// 4 ok
+
+// Stdlib 2.14: the built-in error types carry their fields and a
+// `Display` message (2.14.4) and are thrown and caught by type (2.14.1);
+// `unreachable` and the `assert` family stay silent when they hold
+// (2.14.5); `Result::catching`, `get`, `ok` / `err` and `try?` convert
+// between held results and the throwing flow (2.14.7).
+fn pick(n: i32) throws (ConversionError | ValueError | OverflowError) -> i32 {
+    if n == 0 { throw ConversionError { msg: "str" }; }
+    if n == 1 { throw ValueError { msg: "bad input" }; }
+    if n == 2 { throw OverflowError { op: "mul", ty: "u8" }; }
+    n
+}
+
+fn describe(n: i32) -> str {
+    try { f"ok {pick(n)}" }
+    catch e: ConversionError { f"conversion: {e.msg}" }
+    catch e: ValueError { f"value: {e.msg}" }
+    catch e: OverflowError { f"overflow: {e.op} {e.ty}" }
+}
+
+fn parse_digit(s: str) throws (ParseError) -> i32 {
+    if s.len() != 1 { throw ParseError { input: s, pos: 0, reason: "not a digit" }; }
+    7
+}
+
+fn require_positive(x: i32) -> u32 {
+    if x < 0 { rok::core::panic::unreachable() }
+    x as u32
+}
+
+fn first_ok(rs: List<Result<i32, ParseError>>) throws (ParseError) -> i32 {
+    try rs[0].get()
+}
+
+fn main() {
+    let o = OverflowError { op: "add", ty: "i32" };
+    println(f"{describe(0)} {describe(1)} {describe(2)} {o}");
+    let p = try parse_digit("x1") catch e { print(f"parse: {e} "); 0 };
+    let c = ConversionError { msg: "odd" };
+    let z = try NonZero::<i32>::try_from(0) catch e: ZeroError { print(f"{c.msg} "); NonZero::new(1) ?? panic("zero") };
+    println(f"zero: {z.get() == 1 && p == 0}");
+    let t = try parse_digit("7") catch e { 0 };
+    println(f"typed {t} / {o.ty}");
+    let r: Result<i32, ParseError> = Result::catching(|| try parse_digit("5"));
+    let bad: Result<i32, ParseError> = Result::catching(|| try parse_digit("55"));
+    let a: i32 | none = try? parse_digit("x9");
+    let f = try first_ok([Result::Ok(42)]) catch _ { -1 };
+    println(f"{r.ok() ?? -1} {bad.ok():?} {f} {a:?}");
+    assert(true);
+    assert_eq(require_positive(4), 4u32, "positive");
+    assert_ne(1, 2);
+    println(f"{require_positive(4)} ok");
+}

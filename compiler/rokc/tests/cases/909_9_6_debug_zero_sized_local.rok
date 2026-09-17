@@ -4,6 +4,7 @@
 // rokc-arg: -g -O2
 // expect-exit: 0
 // expect-stdout: 42 ok
+// expect-stderr: stderr works
 
 struct Quiet {}
 

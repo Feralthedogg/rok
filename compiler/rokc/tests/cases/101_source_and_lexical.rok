@@ -1,0 +1,43 @@
+﻿// The file starts with a BOM, which is ignored.
+// spec: §1.1.2 §1.1.3 §1.2.2 §1.2.3 §1.3.1 §1.3.3 §1.3.4 §1.3.5
+// expect-exit: 0
+// expect-stdout:
+// 3
+// 7
+// 12
+// 2
+// u2028: |nbsp: |
+
+/* outer
+   /* inner */
+   still a comment */
+
+/// An outer doc comment on the item.
+fn add(a: i32, b: i32) -> i32 {
+    //! An inner doc comment (ignored here).
+    //// An ordinary comment.
+    a + b
+}
+
+fn main() {
+    // Several statements on one line, `;` attached on both sides.
+    let a = 1;let b = 2;println(f"{add(a, b)}");
+    ;;;
+    // One statement over several lines.
+    let c = add(
+        3,
+        4
+    );
+    println(f"{c}");
+    let d = c
+        + 2        +3;
+    if d > 0 { println(f"{d}"); }
+    let e = if a > 0 { 1 } else { 0 };
+    for i in 0..1 { let _ = i; }
+    {
+        println(f"{e + 1}");
+    }
+    -a;
+    let s = "u2028: |nbsp: |";
+    println(s);
+}

@@ -1,0 +1,37 @@
+// spec: §6.7.1 §6.7.2 §6.7.3 §6.7.4 §6.7.6 §6.7.7 §6.7.8 §6.7.9 §6.7.10 §6.7.11 §6.1.8
+// expect-exit: 0
+// expect-stdout:
+// 12 123 true -1
+// 6 [11, 22]
+
+// Spec 6.7: `#[infix]` / `#[prefix]` bind a token to a trait method;
+// several tokens may alias one method; a new token takes the level of
+// its `like` token; `swap` puts the receiver on the right. `-` binds
+// separately as prefix and infix, and dot tokens broadcast.
+struct V { x: i32; }
+
+trait Combine {
+    #[infix("⊕", like = "+")]
+    #[infix("⊞", like = "+")]
+    fn combine(self, rhs: Self) -> V;
+}
+impl Combine for V { fn combine(self, rhs: V) -> V { V { x: self.x * 10 + rhs.x } } }
+
+trait Holds {
+    #[infix("∋", like = "==", swap)]
+    fn holds(self, x: i32) -> bool;
+}
+impl Holds for V { fn holds(self, x: i32) -> bool { self.x == x } }
+
+trait Flip {
+    #[prefix("¬", like = "!")]
+    fn flip(self) -> V;
+}
+impl Flip for V { fn flip(self) -> V { V { x: -self.x } } }
+
+let a = V { x: 1 };
+let b = V { x: 2 };
+// `⊞` and `⊕` share `+`'s level and left associativity.
+println(f"{(a ⊕ b).x} {(a ⊞ b ⊕ V { x: 3 }).x} {3 ∋ V { x: 3 }} {(¬a).x}");
+let n = 4;
+println(f"{-n + 10} {[1, 2] .+ [10, 20]:?}");

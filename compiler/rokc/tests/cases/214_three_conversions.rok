@@ -1,0 +1,34 @@
+// spec: §2.14.1 §2.14.2 §2.14.3 §2.14.4 §2.14.6
+// expect-exit: 0
+// expect-stdout:
+// 0 256 A 65 1
+// 100 i64 100
+// overflow 7
+// true 42
+
+enum Dir { North, East }
+
+fn main() {
+    // `as`: truncation, widening, `u8 as char`, `char as` integer, enum tag.
+    let x: i32 = 256i32;
+    let y: u8 = x as u8;
+    let z: f64 = x as f64;
+    let c = 65u8 as char;
+    println(f"{y} {z} {c} {c as u32} {Dir::East as i32}");
+    // `.into()`: a lossless widening, target from context or turbofish.
+    let n: i32 = 100;
+    let w: i64 = n.into();
+    let v = n.into::<i64>();
+    println(f"{w} {v.type_name_of()} {v}");
+    // `.try_into()` throws on failure.
+    let big: i64 = 10_000_000_000i64;
+    let r = try big.try_into::<i32>() catch e {
+        -1
+    };
+    let ok = try! 7i64.try_into::<i32>();
+    let word = if r == -1 { "overflow" } else { "fit" };
+    println(f"{word} {ok}");
+    let m: i32 | none = try? big.try_into::<i32>();
+    let k: i32 | none = try? 42i64.try_into::<i32>();
+    println(f"{m is none} {k ?? 0}");
+}

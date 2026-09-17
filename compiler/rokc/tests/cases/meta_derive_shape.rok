@@ -95,3 +95,4 @@ fn main() {
 }
 
 // spec: 006.08-meta-blocks
+// spec: §6.9.2

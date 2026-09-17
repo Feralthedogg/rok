@@ -1,0 +1,50 @@
+// spec: §1.7.2 §1.7.4 §1.8.1 §1.9.1 §1.9.2
+// expect-exit: 0
+// expect-stdout:
+// raw\n 5
+// C:\path\to\file
+// a string may contain "double quotes"
+// even r#"this form"# works
+// abcdef
+// A 세 10 128512 A
+// 65 10 127 255 c_char
+// true false true
+// absent
+
+fn find(xs: List<i32>, x: i32) -> i32 | none {
+    for v in xs {
+        if v == x { return v; }
+    }
+    return none;
+}
+
+fn main() {
+    // 1.7.2: no escapes in a raw string; `#`s change the delimiter.
+    let r = r"raw\n";
+    println(f"{r} {r.len()}");
+    println(r"C:\path\to\file");
+    println(r#"a string may contain "double quotes""#);
+    println(r##"even r#"this form"# works"##);
+    // 1.7.4: no implicit concatenation; an operator joins.
+    println("abc" + "def");
+    // 1.8.1: `'X'` is one code point, `c'X'` one byte.
+    let a = 'A';
+    let k = '세';
+    let nl = '\n';
+    let smile = '\u{1F600}';
+    let hx = '\x41';
+    println(f"{a} {k} {nl as u32} {smile as u32} {hx}");
+    let ca = c'A';
+    let cn = c'\n';
+    let cd = c'\x7F';
+    let cf = c'\u{FF}';
+    println(f"{ca as i32} {cn as i32} {cd as i32} {cf as u8} {ca.type_name_of()}");
+    // 1.9: `true` / `false` are `bool`; `none` fills a sum's empty slot.
+    let t = true;
+    println(f"{t} {!t} {t.type_name_of() == "bool"}");
+    let miss = find([1, 2], 3);
+    match miss {
+        none => println("absent"),
+        v: i32 => println(f"{v}"),
+    }
+}

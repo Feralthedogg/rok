@@ -10,3 +10,5 @@ fn main() -> i32 {
     let a: Number = 32;
     return 0;
 }
+
+// spec: §2.12.1 §2.12.6

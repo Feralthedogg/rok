@@ -1,0 +1,88 @@
+// spec: §2.6.1 §2.6.2 §2.6.4 §2.6.6 §2.6.7 §2.6.8 §2.6.9
+// expect-exit: 0
+// expect-stdout:
+// i32 f32 str
+// true true
+// check failed: bad
+// original value was an error: earlier
+// true i32
+// num 2 | str s | none
+// i64 str
+// Ok 1 | 2
+
+struct ParseErr { msg: str; }
+
+fn check<T>(x: T, bad: bool) -> T | ParseErr {
+    if bad { return ParseErr { msg: "bad" }; }
+    x
+}
+
+fn unwrap_or<T>(x: T | none, d: T) -> T {
+    match x {
+        none => d,
+        v: T => v,
+    }
+}
+
+type Number = i32 | i64 | f32 | f64;
+type N = i32 | f64;
+
+enum Res { Ok(i32), Err(str) }
+type Either = i32 | str;
+
+fn classify(v: i32 | str | f64 | none) -> str {
+    match v {
+        n: i32 | f64 => f"num {n is i32 as i32 + 1}",
+        s: str => f"str {s}",
+        none => "none",
+    }
+}
+
+fn main() {
+    // 2.6.1 / 2.6.2: the tag follows the stored term.
+    let x: i32 | f32 = 42i32;
+    let y: i32 | f32 = 3.14f32;
+    let z: i32 | str | bool = "s";
+    println(f"{x.type_name_of()} {y.type_name_of()} {z.type_name_of()}");
+    // 2.6.4: nesting, duplicates and order normalize away.
+    let a: (i32 | f64) | str = 1;
+    let b: str | f64 | i32 | i32 = a;
+    let c: N | i32 = 2.5;
+    println(f"{b is i32} {c is f64}");
+    // A generic layer stays when the substituted type overlaps.
+    let r1 = check(1i32, true);
+    match r1 {
+        e: ParseErr => println(f"check failed: {e.msg}"),
+        _ => println("ok"),
+    }
+    let v: i32 | ParseErr = ParseErr { msg: "earlier" };
+    let r = check(v, false);
+    match r {
+        e: ParseErr => println(f"check failed: {e.msg}"),
+        inner: i32 | ParseErr => match inner {
+            e: ParseErr => println(f"original value was an error: {e.msg}"),
+            n: i32 => println(f"{n}"),
+        },
+    }
+    // A subset value fits a larger sum; `T | none` against
+    // `i32 | str | none` infers `T = i32 | str`.
+    let small: i32 | none = 7;
+    let big: i32 | str | none = small;
+    let got = unwrap_or(big, 0i32);
+    println(f"{got is i32} {got.type_name_of()}");
+    println(f"{classify(2)} | {classify("s")} | {classify(none)}");
+    let w: Number = 9i64;
+    let s: Either = "e";
+    println(f"{w.type_name_of()} {s.type_name_of()}");
+    // 2.6.7: an enum names its variants; a sum uses the types.
+    let o = Res::Ok(1);
+    let t: Either = 2;
+    match o {
+        Res::Ok(n) => print(f"Ok {n} | "),
+        Res::Err(m) => print(m),
+    }
+    match t {
+        n: i32 => println(f"{n}"),
+        m: str => println(m),
+    }
+}

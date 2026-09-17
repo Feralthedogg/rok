@@ -19,3 +19,4 @@ fn main() -> i32 {
     println(f"{outer::child::ask()} {outer::forward()}");
     return outer::child::ask() + outer::forward();  // 40 + 20
 }
+// spec: §5.4.5 §5.6.5

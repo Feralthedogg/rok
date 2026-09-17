@@ -1773,3 +1773,127 @@ impl Em<'_> {
         self.store(RAX, dst, to);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn em(obj: &mut Obj) -> Em<'_> {
+        Em {
+            obj,
+            start: 0,
+            code: Vec::new(),
+            relocs: Vec::new(),
+            fixes: Vec::new(),
+            labels: Vec::new(),
+            slot_off: Vec::new(),
+            frame: 0,
+            lines: Vec::new(),
+            held: Vec::new(),
+            escaped: Vec::new(),
+            pending: Vec::new(),
+            waits: Waits::default(),
+            flags: None,
+        }
+    }
+
+    /// The bytes `f` writes, checked against the reference assembler's
+    /// encodings (REX, `ModRM`, SIB, displacement and immediate forms).
+    fn bytes(f: impl FnOnce(&mut Em<'_>)) -> Vec<u8> {
+        let mut obj = Obj::new(true, true, false);
+        let mut e = em(&mut obj);
+        f(&mut e);
+        e.code
+    }
+
+    #[test]
+    fn modrm_forms() {
+        // mov rax, rcx / mov r9, r10
+        assert_eq!(bytes(|e| e.mov_rr(RAX, RCX)), [0x48, 0x8b, 0xc1]);
+        assert_eq!(bytes(|e| e.mov_rr(R9, R10)), [0x4d, 0x8b, 0xca]);
+        assert_eq!(bytes(|e| e.mov_rr(RDX, RDX)), []);
+        // lea rax, [rsp + 8]: a SIB byte for an rsp base.
+        let lea = |e: &mut Em<'_>| e.op(None, true, false, &[0x8d], RAX, Rm::M(RSP, 8));
+        assert_eq!(bytes(lea), [0x48, 0x8d, 0x44, 0x24, 0x08]);
+        // mov rax, [rbp]: rbp takes a zero disp8.
+        let rbp = |e: &mut Em<'_>| e.op(None, true, false, &[0x8b], RAX, Rm::M(RBP, 0));
+        assert_eq!(bytes(rbp), [0x48, 0x8b, 0x45, 0x00]);
+        // mov rdx, [r13 - 0x200]: disp32.
+        let r13 = |e: &mut Em<'_>| e.op(None, true, false, &[0x8b], RDX, Rm::M(13, -0x200));
+        assert_eq!(bytes(r13), [0x49, 0x8b, 0x95, 0x00, 0xfe, 0xff, 0xff]);
+        // mov r8, [r12 + 0x100]: SIB for r12, REX.R and REX.B.
+        let r12 = |e: &mut Em<'_>| e.op(None, true, false, &[0x8b], R8, Rm::M(12, 0x100));
+        assert_eq!(bytes(r12), [0x4d, 0x8b, 0x84, 0x24, 0x00, 0x01, 0x00, 0x00]);
+        // mov rcx, [rax]: no displacement.
+        let rax = |e: &mut Em<'_>| e.op(None, true, false, &[0x8b], RCX, Rm::M(RAX, 0));
+        assert_eq!(bytes(rax), [0x48, 0x8b, 0x08]);
+        // mov sil, [rax] needs an empty REX; mov al, [rcx] none.
+        let sil = |e: &mut Em<'_>| e.op(None, false, true, &[0x8a], RSI, Rm::M(RAX, 0));
+        assert_eq!(bytes(sil), [0x40, 0x8a, 0x30]);
+        let al = |e: &mut Em<'_>| e.op(None, false, true, &[0x8a], RAX, Rm::M(RCX, 0));
+        assert_eq!(bytes(al), [0x8a, 0x01]);
+        // movsd xmm1, [rsp + 0x80]: prefix before REX, disp32.
+        let sd = |e: &mut Em<'_>| {
+            e.op(
+                Some(0xf2),
+                false,
+                false,
+                &[0x0f, 0x10],
+                XMM1,
+                Rm::M(RSP, 0x80),
+            );
+        };
+        assert_eq!(
+            bytes(sd),
+            [0xf2, 0x0f, 0x10, 0x8c, 0x24, 0x80, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn mov_imm_picks_the_shortest_form() {
+        // mov r32, imm32 (zero-extends)
+        assert_eq!(bytes(|e| e.mov_imm(RAX, 1)), [0xb8, 1, 0, 0, 0]);
+        assert_eq!(
+            bytes(|e| e.mov_imm(R10, 0xffff_ffff)),
+            [0x41, 0xba, 0xff, 0xff, 0xff, 0xff]
+        );
+        // mov r64, simm32
+        assert_eq!(
+            bytes(|e| e.mov_imm(RCX, u64::MAX)),
+            [0x48, 0xc7, 0xc1, 0xff, 0xff, 0xff, 0xff]
+        );
+        assert_eq!(
+            bytes(|e| e.mov_imm(R9, i64::from(i32::MIN) as u64)),
+            [0x49, 0xc7, 0xc1, 0x00, 0x00, 0x00, 0x80]
+        );
+        // movabs
+        assert_eq!(
+            bytes(|e| e.mov_imm(RDX, 1 << 32)),
+            [0x48, 0xba, 0, 0, 0, 0, 1, 0, 0, 0]
+        );
+        assert_eq!(
+            bytes(|e| e.mov_imm(R11, 1 << 63)),
+            [0x49, 0xbb, 0, 0, 0, 0, 0, 0, 0, 0x80]
+        );
+        // Just below `i32::MIN`: not a simm32.
+        assert_eq!(
+            bytes(|e| e.mov_imm(RAX, (i64::from(i32::MIN) - 1) as u64)),
+            [0x48, 0xb8, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0xff]
+        );
+    }
+
+    #[test]
+    fn forward_jumps_patch_their_rel32() {
+        let code = bytes(|e| {
+            let at = e.jcc_fwd(CC_NE);
+            e.mov_imm(RAX, 1);
+            e.here(at);
+        });
+        assert_eq!(code, [0x0f, 0x85, 5, 0, 0, 0, 0xb8, 1, 0, 0, 0]);
+        let code = bytes(|e| {
+            let at = e.jmp_fwd();
+            e.here(at);
+        });
+        assert_eq!(code, [0xe9, 0, 0, 0, 0]);
+    }
+}

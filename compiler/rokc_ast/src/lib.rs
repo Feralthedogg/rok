@@ -4,6 +4,7 @@
 //! their token symbol; trait dispatch (`#[infix]` / `#[prefix]` /
 //! `#[postfix]` on stdlib trait methods) happens later.
 
+mod codec;
 pub mod defs;
 pub mod escape;
 pub mod print;

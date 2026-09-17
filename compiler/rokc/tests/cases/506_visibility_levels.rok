@@ -1,0 +1,56 @@
+// spec: §5.6.1 §5.6.3 §5.6.6 §5.6.7 §5.6.11 §5.6.12
+// expect-exit: 0
+// expect-stdout:
+// 1 2 3 4
+// 7 0 c
+// 10 20 1.5
+// 42
+
+// Spec 5.6: the four levels nest (pub ⊇ pub(pkg) ⊇ pub(sub) ⊇
+// private); a glob pulls in only what reaches the importer, so a
+// private item of the same name neither hides nor clashes; every item
+// form takes a leading visibility.
+mod lib {
+    pub fn a() -> i32 { 1 }
+    pub(pkg) fn b() -> i32 { 2 }
+    pub(sub) fn c() -> i32 { 3 }
+    fn d() -> i32 { 4 }
+    pub fn all() -> i32 { c() * 0 + d() }
+
+    pub mod sub {
+        pub fn via() -> i32 { sup::c() }
+    }
+
+    pub struct S { pub x: i32; }
+    pub enum E { One, Two }
+    pub union U { i: i32; f: f32; }
+    pub trait T { fn t(self) -> str; }
+    impl T for S { fn t(self) -> str { "c" } }
+    impl S { pub fn get(self) -> i32 { self.x } }
+    pub mod m { pub fn ten() -> i32 { 10 } }
+    pub const X: i32 = 20;
+    pub static Y: f64 = 1.5;
+    pub type Alias = S;
+    pub use pkg::shared::helper;
+}
+
+mod shared {
+    pub fn helper() -> i32 { 42 }
+}
+
+mod quiet {
+    // Private: invisible to the glob below, so no clash with `lib::a`.
+    fn a() -> i32 { 99 }
+    pub fn unused() -> i32 { a() }
+}
+
+use lib::*;
+use quiet::*;
+
+println(f"{a()} {b()} {lib::sub::via()} {lib::all()}");
+let s: Alias = S { x: 7 };
+let e = E::Two;
+let n = match e { E::One => 1, E::Two => 0 };
+println(f"{s.get()} {n} {s.t()}");
+println(f"{m::ten()} {X} {Y}");
+println(f"{helper()}");

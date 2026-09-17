@@ -1,0 +1,22 @@
+// spec: §3.11.1 §1.6.4
+// expect-exit: 0
+// expect-stdout:
+// z o o
+// d a o
+// i i c
+// true
+
+// An integer literal, as a value or a pattern, takes the integer member
+// of a sum that also holds `char` (a `char` takes no integer literal).
+fn lit(v: i32 | char) -> str { match v { 0 => "z", _ => "o" } }
+fn digit(v: i32 | char) -> str { match v { 0..=9 => "d", 'a'..='z' => "a", _ => "o" } }
+fn kind(v: i32 | f64 | char) -> str { match v { n: i32 => "i", f: f64 => "f", _ => "c" } }
+
+fn main() {
+    let x: i32 | char = 0;
+    let y: i32 | char = 'a';
+    println(f"{lit(x)} {lit(y)} {lit(5)}");
+    println(f"{digit(7)} {digit('q')} {digit(42)}");
+    println(f"{kind(0)} {kind(-3)} {kind('z')}");
+    println(f"{x is i32}");
+}

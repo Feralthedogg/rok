@@ -1,4 +1,5 @@
-// expect-exit: 12
+// expect-exit: 0
+// expect-stdout: 12
 
 pub mod parent {
     pub fn shared() -> i32 { 5i32 }
@@ -9,8 +10,8 @@ pub mod parent {
     }
 }
 
-fn main() -> i32 {
-    return parent::child::caller();   // 5+7 = 12
+fn main() {
+    println(f"{parent::child::caller()}");
 }
 
 // spec: 005.05-use

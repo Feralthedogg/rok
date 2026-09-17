@@ -58,3 +58,4 @@ fn main() {
 }
 
 // spec: 003.06-indexing-and-slicing
+// spec: §3.6.2

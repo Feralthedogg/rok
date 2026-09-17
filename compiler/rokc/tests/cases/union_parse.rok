@@ -1,14 +1,16 @@
-// expect-exit: 7
+// expect-exit: 0
+// expect-stdout: 8
 
 // A `union` declaration parses as an item; an unused one does not
 // affect the program.
+use rok::bare::mem::size_of;
 union Repr {
     bits: i64;
     parts: i32;
 }
 
-fn main() -> i32 {
-    return 7;
+fn main() {
+    println(f"{size_of::<Repr>()}");
 }
 
 // spec: 002.05-union

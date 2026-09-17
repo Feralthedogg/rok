@@ -69,6 +69,9 @@ version = "0.1.0"
 [[package]]
 name = "rokc_diagnostic"
 version = "0.1.0"
+dependencies = [
+ "rokc_core",
+]
 
 [[package]]
 name = "rokc_driver"
@@ -107,6 +110,7 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_ir_common",
+ "rokc_lexer",
  "rokc_parser",
 ]
 
@@ -133,6 +137,7 @@ name = "rokc_lexer"
 version = "0.1.0"
 dependencies = [
  "rokc_ast",
+ "rokc_core",
  "rokc_diagnostic",
 ]
 

@@ -22,3 +22,4 @@ fn main() -> i32 {
 }
 
 // spec: 003.12-match-expression
+// spec: §3.11.1

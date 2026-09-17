@@ -36,3 +36,4 @@ fn main() -> i32 {
     println(f"{sq.re} {sq.im}");
     return 0;
 }
+// spec: §6.5.2 §6.5.7

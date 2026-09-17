@@ -453,6 +453,66 @@ mod tests {
     }
 
     #[test]
+    fn none_is_stored_as_tag_zero() {
+        let (i32_, str_) = (HirTy::Prim(PrimTy::I32), HirTy::Prim(PrimTy::Str));
+        let sum = HirTy::Sum(vec![i32_.clone(), str_.clone(), HirTy::None]);
+        assert_eq!(
+            (0..3).map(|i| sum_tag(&sum, i)).collect::<Vec<_>>(),
+            [1, 2, 0]
+        );
+        // Members after `none` keep their index; no `none`, no shift.
+        let mid = HirTy::Sum(vec![i32_.clone(), HirTy::None, str_.clone()]);
+        assert_eq!(
+            (0..3).map(|i| sum_tag(&mid, i)).collect::<Vec<_>>(),
+            [1, 0, 2]
+        );
+        let plain = HirTy::Sum(vec![i32_, str_]);
+        assert_eq!(
+            (0..2).map(|i| sum_tag(&plain, i)).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(sum_tag(&HirTy::Prim(PrimTy::I64), 3), 3);
+    }
+
+    #[test]
+    fn payload_unions_take_max_size_and_align() {
+        let t = x64();
+        assert_eq!(unify_payload(&[], &t), None);
+        // Scalars: an unsigned int as wide as the widest.
+        let scalar = |ps: &[MirTy]| unify_payload(&tagged(ps), &t);
+        assert_eq!(
+            scalar(&[p(PrimTy::Bool), p(PrimTy::I16)]),
+            Some(p(PrimTy::U16))
+        );
+        assert_eq!(
+            scalar(&[p(PrimTy::F32), p(PrimTy::I8)]),
+            Some(p(PrimTy::U32))
+        );
+        // A 12-byte aggregate beside an `i64`: 16 bytes of 8-byte words.
+        let three = MirTy::Tuple(vec![p(PrimTy::I32), p(PrimTy::I32), p(PrimTy::I32)]);
+        assert_eq!(
+            scalar(&[three.clone(), p(PrimTy::I64)]),
+            Some(MirTy::Array(Box::new(p(PrimTy::U64)), 2))
+        );
+        // Three bytes beside a `u16`: 2-byte words.
+        let bytes = MirTy::Array(Box::new(p(PrimTy::U8)), 3);
+        assert_eq!(
+            scalar(&[bytes.clone(), p(PrimTy::U16)]),
+            Some(MirTy::Array(Box::new(p(PrimTy::U16)), 2))
+        );
+        // The union is as large and aligned as its largest member.
+        let u = scalar(&[three.clone(), bytes, p(PrimTy::I64)]).unwrap();
+        assert_eq!(t.size_align(&u), (16, 8));
+        // Identical aggregates keep their type.
+        assert_eq!(scalar(&[three.clone(), three.clone()]), Some(three));
+        // The tag comes first.
+        assert_eq!(
+            sum_layout(&tagged(&[p(PrimTy::I64)]), &t),
+            MirTy::Tuple(vec![p(PrimTy::I32), p(PrimTy::I64)])
+        );
+    }
+
+    #[test]
     fn unions_follow_the_pointer_width() {
         // `str | i64` on a 32-bit target: an 8-byte `str`, 4-aligned.
         let t = Target::builtin("i686-unknown-linux-gnu");

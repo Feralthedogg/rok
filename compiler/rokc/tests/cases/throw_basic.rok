@@ -1,6 +1,7 @@
 // expect-exit: 1
 // expect-stdout: before
 // expect-stderr: error: `main` returned an uncaught error: 7
+// expect-stderr: --> tests/cases/throw_basic.rok:11:5
 
 // An error escaping `fn main() throws (E)` is reported by the runtime and
 // ends the process with status 1 (spec 4.16.4) — not a panic (101).

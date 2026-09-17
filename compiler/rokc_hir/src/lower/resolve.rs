@@ -483,6 +483,7 @@ pub(super) fn resolve_ty_with_structs(
             let generics = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
             let Some(full) = sc.names.canon(&segs, sc.module, &[], sc.at) else {
                 if !p.span.is_dummy() {
+                    super::incr::touch_key(|| super::incr::Key::Unknown(segs.join("::")));
                     sc.names
                         .unknown_spans
                         .borrow_mut()

@@ -39,3 +39,4 @@ let r = try load(40) catch e: any Error {
 println(f"{r}");
 
 // spec: 004.14-throws
+// spec: std §2.14.6

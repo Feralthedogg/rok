@@ -46,3 +46,4 @@ fn main() {
     }
     println("done");
 }
+// spec: std 108-wit §1.8.1 §1.8.2

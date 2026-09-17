@@ -9,3 +9,4 @@ mod inner {
 fn main() -> i32 {
     return inner::private_helper();    // ERROR: private
 }
+// spec: §5.6.2

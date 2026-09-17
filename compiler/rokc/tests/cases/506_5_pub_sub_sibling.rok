@@ -1,0 +1,12 @@
+// spec: §5.6.5 §5.6.6
+// expect-error: 10:25: function `parent::shared` is private to module `parent` and cannot be used from `sibling`
+
+// Spec 5.6.5: `pub(sub)` reaches the defining module and its
+// descendants only, not a sibling.
+mod parent {
+    pub(sub) fn shared() -> i32 { 1 }
+}
+mod sibling {
+    pub fn f() -> i32 { pkg::parent::shared() }
+}
+println(f"{sibling::f()}");

@@ -1,0 +1,12 @@
+// spec: §6.6.4
+// expect-error: 9:1: keyword `twice` is registered twice (spec 6.6.4)
+
+// Spec 6.6.4: one keyword registered twice in a build is an error.
+#[keyword("twice")]
+fn a(x: i32) -> i32 { x * 2 }
+
+// The second registration is the one reported.
+#[keyword("twice")]
+fn b(x: i32) -> i32 { x * 3 }
+
+println(f"{twice(1)}");

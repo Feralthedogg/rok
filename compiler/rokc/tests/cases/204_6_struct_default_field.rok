@@ -11,3 +11,5 @@ fn main() -> i32 {
     println(f"{s.count}");
     return s.count;
 }
+
+// spec: §2.3.3

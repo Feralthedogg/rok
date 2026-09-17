@@ -17,3 +17,5 @@ fn main() -> i32 {
 }
 
 // spec: 002.10-generics
+
+// spec: §2.9.8

@@ -16,3 +16,4 @@ fn class(c: char) -> i32 {
 println(f"{class('b')} {class('x')} {class('3')} {class('7')} {class('!')}");
 
 // spec: 003.12-match-expression
+// spec: §3.11.1

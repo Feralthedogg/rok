@@ -28,3 +28,4 @@ try process::signal(15, || {}) catch e: SignalError {
 };
 try env::current_exe() catch e: IoError { println(f"current_exe: {e.kind():?}"); };
 println(f"pid: {process::id()}");
+// spec: std 307-process §3.7.6, 306-env §3.6.4

@@ -1,0 +1,11 @@
+// spec: §5.5.12
+// expect-error: 10:5: name `Item` imported twice with different targets: `foo::Item` and `bar::Item`
+
+// Spec 5.5.12: one short name imported from two modules is a conflict
+// (an alias resolves it).
+mod foo { pub struct Item { } }
+mod bar { pub struct Item { } }
+
+use foo::Item;
+use bar::Item;
+println("unreached");

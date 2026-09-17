@@ -1,0 +1,67 @@
+// spec: §3.16.1 §3.16.2 §3.16.5 §3.16.7 §3.16.8 §3.16.9
+// expect-exit: 0
+// expect-stdout:
+// 5 -1
+// 1 3 | 4
+// caught bad
+// 2 2 | calls=1
+// circle 2 0 none
+
+// spec 3.16.1 / 3.16.2: on a match the bindings continue past the
+// `let-else`, otherwise the divergent `else` runs. 3.16.7: `return`,
+// `break`, `continue`, `throw` and a `loop` without `break` all exit.
+// 3.16.8: same meaning as the `match` form. 3.16.9 / 3.16.5: the right
+// side runs once; bindings are visible after it.
+enum Shape { Circle(i32), Square(i32) }
+
+fn get(v: i32 | none) -> i32 {
+    let n: i32 = v else { return -1; };
+    n
+}
+
+fn get_match(v: i32 | none) -> i32 {
+    let n = match v {
+        m: i32 => m,
+        none => return -1,
+    };
+    n
+}
+
+fn check(v: i32 | str) throws (str) -> i32 {
+    let n: i32 = v else { throw "bad"; };
+    n
+}
+
+fn circle(s: Shape) -> str {
+    let Shape::Circle(r) = s else { return "none"; };
+    f"circle {r}"
+}
+
+fn never(v: i32 | none) -> i32 {
+    let n: i32 = v else { loop {} };
+    n
+}
+
+fn main() {
+    println(f"{get(5)} {get(none)}");
+    let src: List<i32 | none> = [1, none, 3, none, 4];
+    let seen: List<i32> = [];
+    for e in src {
+        let n: i32 = e else { continue; };
+        if n == 4 { break; }
+        seen.push(n);
+    }
+    let last = 0;
+    for e in src {
+        let n: i32 = e else { break; };
+        last = n;
+    }
+    println(f"{seen[0]} {seen[1]} | {last + 3}");
+    let msg = try f"{check("x")}" catch e { f"caught {e}" };
+    println(msg);
+    let calls = 0;
+    let make = [ref calls] || -> i32 | none { calls += 1; return 2; };
+    let k: i32 = make() else { return; };
+    println(f"{k} {get_match(2)} | calls={calls}");
+    println(f"{circle(Shape::Circle(2))} {never(0)} {circle(Shape::Square(1))}");
+}

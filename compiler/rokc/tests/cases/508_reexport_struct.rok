@@ -16,3 +16,4 @@ fn main() -> i32 {
     println(f"{p.x}");
     return 0;
 }
+// spec: §5.8.2

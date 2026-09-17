@@ -15,3 +15,4 @@ trait Mixed {
 }
 
 fn main() {}
+// spec: §6.7.9

@@ -119,3 +119,19 @@ fn qualified_path(module: &[String], name: &str) -> String {
         format!("{}::{}", module.join("::"), name)
     }
 }
+
+crate::codec_enum!(Visibility {
+    Pub,
+    Pkg,
+    Sub,
+    Private
+});
+
+impl crate::codec::Codec for DefId {
+    fn enc(&self, e: &mut crate::codec::Enc) {
+        e.u(u64::from(self.0));
+    }
+    fn dec(d: &mut crate::codec::Dec<'_>) -> Option<Self> {
+        Some(Self(u32::try_from(d.u()?).ok()?))
+    }
+}

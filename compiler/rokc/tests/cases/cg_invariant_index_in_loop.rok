@@ -4,6 +4,7 @@
 // panics after its store.
 // expect-exit: 101
 // expect-stdout: 27 9
+// expect-stderr: thread 'main' panicked at tests/cases/cg_invariant_index_in_loop.rok:14:14:
 // expect-stderr: List index out of bounds
 
 fn step(xs: List<i64>, ys: List<i64>, i: usize) -> i64 {

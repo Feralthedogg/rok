@@ -1,0 +1,83 @@
+// spec: 008.08-lowering-types §8.8.3 §8.8.7 §8.8.13 §8.8.14
+// spec: 008.09-lowering-control §8.9.1 §8.9.9 §8.9.10 §8.9.12
+// gc-stress: 30
+// only-pointer-width: 64
+// expect-exit: 0
+// expect-stdout:
+// copy: 1 2 / original: 1 0
+// arg copy: 99 / caller keeps 1
+// inline in list: 7 p-7 / 3 p-3
+// union: size 8, fd 2, val 4294967298
+// counter 10, literal 3 [1, 2, 3]
+// if value: big small
+// error returns: 300 kept k-299
+
+// spec 8.8.3: a struct is a value without a header: assignment and
+// argument passing copy its fields, a field write changes only that
+// copy, and in a `List` buffer it sits inline (a reference field stored
+// there takes the write barrier, 8.9.10). 8.8.7: a union is as big as
+// its largest field and every field reads the same bytes. 8.8.13 /
+// 8.8.14: locals and a list literal. 8.9.1: `if` as a value. 8.9.12: a
+// function's shadow-stack frame is unlinked on its error return too, so
+// collections after many of them still find every root.
+use rok::bare::mem::size_of;
+
+extern "C" {
+    fn rok_gc_collect();
+}
+
+struct Point { x: f64; y: f64; }
+struct Tagged { n: i32; label: str; }
+
+union EpollData {
+    ptr: usize;
+    fd: i32;
+    val: u64;
+}
+
+fn bump(p: Point) -> f64 {
+    p.x = 99.0;
+    p.x
+}
+
+fn fails(i: i32) throws (str) -> str {
+    let mine = f"tmp-{i}";
+    if i >= 0 { throw mine; }
+    mine
+}
+
+fn main() {
+    let a = Point { x: 1.0, y: 0.0 };
+    let b = a;
+    b.y = 2.0;
+    println(f"copy: {b.x} {b.y} / original: {a.x} {a.y}");
+    println(f"arg copy: {bump(a)} / caller keeps {a.x}");
+
+    let ts: List<Tagged> = [];
+    for i in 0..10 { ts.push(Tagged { n: i, label: "none" }); }
+    for i in 0..10 { ts[i].label = f"p-{i}"; }
+    unsafe { rok_gc_collect(); }
+    println(f"inline in list: {ts[7].n} {ts[7].label} / {ts[3].n} {ts[3].label}");
+
+    let d = EpollData { val: 0x1_0000_0002u64 };
+    println(f"union: size {size_of::<EpollData>()}, fd {unsafe { d.fd }}, val {unsafe { d.val }}");
+
+    let counter = 0i32;
+    for _ in 0..10 { counter = counter + 1i32; }
+    let lit = [1, 2, 3];
+    println(f"counter {counter}, literal {lit.len()} {lit:?}");
+
+    let big = if counter > 5 { "big" } else { "small" };
+    let small = if counter > 50 { "big" } else { "small" };
+    println(f"if value: {big} {small}");
+
+    let kept: List<str> = [];
+    let errs = 0;
+    for i in 0..300 {
+        kept.push(f"k-{i}");
+        let r = try fails(i) catch _ { "" };
+        if r == "" { errs += 1; }
+    }
+    unsafe { rok_gc_collect(); }
+    println(f"error returns: {errs} kept {kept[299]}");
+}

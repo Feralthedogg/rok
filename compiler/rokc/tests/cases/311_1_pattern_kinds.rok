@@ -1,0 +1,105 @@
+// spec: §3.11.1 §3.11.2 §3.11.5 §3.11.6
+// expect-exit: 0
+// expect-stdout:
+// int other zero hello yes none A
+// 1 2 [3, 4] | 1 [2, 3] 4 | 1 [2] 3 | 1-tuple 9
+// circle 2 rect 3 pending click 4 rect-any
+// origin-x 0 px 5 y0 7
+// letter digit other
+// minor 12 adult 40 small 3 point 0
+// equal first bigger second bigger
+// 3 [1, 2] 6 2
+
+// spec 3.11.1: literal (numbers, str, bool, none, char), identifier,
+// wildcard and typed wildcard, tuple with rest, `enum`, `struct`, range,
+// or- and `@` binding patterns. 3.11.2: a false guard fails the arm.
+// 3.11.5 / 3.11.6: irrefutable patterns in `let` / `for`, refutable ones
+// in `match` / `if let` / `let-else`.
+enum Shape { Circle(f64), Rectangle(f64, f64), Pending, Click { x: i32; y: i32; } }
+struct Point { x: i32; y: i32; }
+
+fn kind(v: i32 | str) -> str {
+    match v {
+        _: i32 => "int",
+        _ => "other",
+    }
+}
+
+fn lit(v: i32 | str | bool | none) -> str {
+    match v {
+        0 => "zero",
+        "hello" => "hello",
+        true => "yes",
+        none => "none",
+        _: str | i32 | bool => "other",
+    }
+}
+
+fn shape(s: Shape) -> str {
+    match s {
+        Shape::Circle(r) => f"circle {r as i32}",
+        Shape::Rectangle(w, ..) if w > 2.0 => f"rect {w as i32}",
+        Shape::Rectangle(..) => "rect-any",
+        Shape::Pending => "pending",
+        Shape::Click { x, .. } => f"click {x}",
+    }
+}
+
+fn pt(p: Point) -> str {
+    match p {
+        Point { x: 0, .. } => "origin-x 0",
+        Point { x: px, y: 0 } => f"px {px}",
+        Point { x, y } => f"y0 {x + y}",
+    }
+}
+
+fn ch(c: char) -> str {
+    match c {
+        'A' => "A",
+        'a'..='z' => "letter",
+        '0'..='9' => "digit",
+        _ => "other",
+    }
+}
+
+fn age(a: i32) -> str {
+    match a {
+        n @ 0..=17 => f"minor {n}",
+        n => f"adult {n}",
+    }
+}
+
+fn cmp(x: i32, y: i32) -> str {
+    match (x, y) {
+        (a, b) if a == b => "equal",
+        (a, b) if a > b => "first bigger",
+        _ => "second bigger",
+    }
+}
+
+fn main() {
+    println(f"{kind(1)} {kind("s")} {lit(0)} {lit("hello")} {lit(true)} {lit(none)} {ch('A')}");
+    let t = (1, 2, 3, 4);
+    let (first, second, ..rest) = t;
+    let (a, ..mid, d) = t;
+    let (h, ..m2, l) = (1, 2, 3);
+    let (only,) = (9,);
+    let (..) = t;
+    println(f"{first} {second} [{rest.0}, {rest.1}] | {a} [{mid.0}, {mid.1}] {d} | {h} [{m2.0}] {l} | 1-tuple {only}");
+    println(f"{shape(Shape::Circle(2.0))} {shape(Shape::Rectangle(3.0, 1.0))} {shape(Shape::Pending)} {shape(Shape::Click { x: 4, y: 0 })} {shape(Shape::Rectangle(1.0, 1.0))}");
+    println(f"{pt(Point { x: 0, y: 9 })} {pt(Point { x: 5, y: 0 })} {pt(Point { x: 3, y: 4 })}");
+    println(f"{ch('q')} {ch('7')} {ch('!')}");
+    let p @ Point { x: px, .. } = Point { x: 0, y: 1 };
+    println(f"{age(12)} {age(40)} small {match 3 { n @ (1 | 2 | 3) => n, _ => 0 }} point {px + p.x}");
+    println(f"{cmp(2, 2)} {cmp(3, 1)} {cmp(1, 3)}");
+
+    let total = 0;
+    for (i, v) in [(1, 10), (2, 20)] { total += i; if v == 0 { total = 0; } }
+    let ys: List<i32> = [];
+    let src: List<i32 | none> = [1, none, 2];
+    for e in src { if let v: i32 = e { ys.push(v); } }
+    let w: i32 | none = 6;
+    let Point { x: sx, y: sy } = Point { x: 1, y: 1 };
+    let v: i32 = w else { return; };
+    println(f"{total} {ys:?} {v} {sx + sy}");
+}

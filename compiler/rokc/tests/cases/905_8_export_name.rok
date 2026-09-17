@@ -21,3 +21,4 @@ fn main() -> i32 {
     println(f"{unsafe { rok_probe_905_compute(21i64) }}");
     return 0;
 }
+// spec: §5.9.10

@@ -63,3 +63,6 @@ fn main() {
 }
 
 // spec: std 202-non-zero
+
+// spec: refs-lang §2.7.6
+// spec: std §2.2.1-2.2.6

@@ -68,8 +68,14 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
         }
     }
     // The trailing expression is the block's value: it inherits the
-    // block's expected type.
-    let trailing = block.trailing.as_ref().map(|e| lower_expr(ctx, e));
+    // block's expected type. A labelled block's is a `break` to it
+    // (spec 3.9.6): one type with the other `break` values.
+    let label_target = (ctx.breakables.len().checked_sub(1))
+        .filter(|&i| block.label.is_some() && ctx.breakables[i].0 == block.label);
+    let trailing = block.trailing.as_ref().map(|e| match label_target {
+        Some(idx) => lower_break_value(ctx, idx, e),
+        None => lower_expr(ctx, e),
+    });
     ctx.pop_scope();
     HirBlock {
         stmts,
@@ -1043,9 +1049,9 @@ pub(super) fn lower_assign(
     }
 }
 
-fn tmp_path(what: &str, span: rokc_diagnostic::Span) -> Expr {
-    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+fn tmp_path(ctx: &LowerCtx<'_>, what: &str, span: rokc_diagnostic::Span) -> Expr {
+    let n = ctx.temps.get();
+    ctx.temps.set(n + 1);
     Expr {
         kind: ExprKind::Path(rokc_ast::Path {
             segments: vec![rokc_ast::PathSegment {
@@ -1093,14 +1099,14 @@ fn rewrite_index_store(
     body: impl FnOnce(&Expr, &Expr) -> Vec<Stmt>,
     span: rokc_diagnostic::Span,
 ) -> HirStmt {
-    let tmp = tmp_path("tmp", span);
+    let tmp = tmp_path(ctx, "tmp", span);
     // A literal / name index is read as is (and keeps its expected
     // `usize` type); anything else goes through a temp.
     let mut stmts = Vec::new();
     let i = if matches!(idx.kind, ExprKind::Literal(_) | ExprKind::Path(_)) {
         idx.clone()
     } else {
-        let i = tmp_path("idx", span);
+        let i = tmp_path(ctx, "idx", span);
         stmts.push(let_stmt(&i, idx.clone()));
         i
     };
@@ -4842,7 +4848,7 @@ fn assign_trait_call(
     }
     // `{ let #t = a; #t.op_assign(b); a = #t; }`: `ref self` updates the
     // temp, written back to any place (`xs[i] op= b`, `s.f op= b`).
-    let t = tmp_path("oa", span);
+    let t = tmp_path(ctx, "oa", span);
     let call = Expr {
         kind: ExprKind::MethodCall {
             receiver: Box::new(t.clone()),
@@ -5236,14 +5242,14 @@ fn strip_self_assoc(ty: &mut Ty) {
 #[derive(Clone)]
 pub(super) struct AnyDispatch {
     pub(super) id: FunctionId,
-    recv_ty: HirTy,
+    pub(super) recv_ty: HirTy,
     /// The trait declaring `method` (each implementor's method of it,
     /// whatever other traits share the name).
-    trait_key: String,
-    method: String,
-    params: Vec<HirTy>,
-    ret: HirTy,
-    span: rokc_diagnostic::Span,
+    pub(super) trait_key: String,
+    pub(super) method: String,
+    pub(super) params: Vec<HirTy>,
+    pub(super) ret: HirTy,
+    pub(super) span: rokc_diagnostic::Span,
 }
 
 pub(super) fn any_dispatcher(
@@ -5255,11 +5261,23 @@ pub(super) fn any_dispatcher(
     span: rokc_diagnostic::Span,
 ) -> FunctionId {
     let mut all = ctx.env.sink.any_dispatch.borrow_mut();
-    if let Some(d) = all
+    let found = all
         .iter()
         .find(|d| d.recv_ty == *recv_ty && d.method == method && d.trait_key == trait_key)
-    {
-        return d.id;
+        .map(|d| d.id);
+    super::incr::log(
+        || format!("d|{recv_ty:?}|{trait_key}|{method}"),
+        || {
+            super::incr::Lookup::AnyDispatch(
+                recv_ty.clone(),
+                trait_key.to_owned(),
+                method.to_owned(),
+                found,
+            )
+        },
+    );
+    if let Some(id) = found {
+        return id;
     }
     let id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(id.0 + 1);
@@ -6911,7 +6929,7 @@ fn path_method_hits(
         tys.push(HirTy::Enum(eid));
     } else {
         tys.extend(
-            LowerCtx::instantiations(&ctx.env.defs.struct_table.borrow(), full)
+            struct_instantiations(ctx, full)
                 .into_iter()
                 .map(HirTy::Struct),
         );
@@ -9723,10 +9741,11 @@ pub(super) fn lower_literal(
             // An unsuffixed integer in a float slot is that float
             // (`a * 2` with `a: f64`, `let x: f64 = 1`), if exact.
             // An integer member of an expected sum wins (`i32 | f64`).
-            if let Some(fty) = (!has_int_suffix(text)
-                && expected_prim(ctx, PrimTy::is_int).is_none())
-            .then(|| expected_prim(ctx, PrimTy::is_float))
-            .flatten()
+            // `char` takes no integer literal (`'a'` only).
+            let int_slot = |p: PrimTy| p.is_int() && !matches!(p, PrimTy::CChar | PrimTy::Char);
+            if let Some(fty) = (!has_int_suffix(text) && expected_prim(ctx, int_slot).is_none())
+                .then(|| expected_prim(ctx, PrimTy::is_float))
+                .flatten()
             {
                 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 let (bits, exact) = if fty == PrimTy::F32 {
@@ -9750,10 +9769,7 @@ pub(super) fn lower_literal(
             let ty = if has_int_suffix(text) {
                 suffix_ty
             } else {
-                expected_prim(ctx, |p| {
-                    p.is_int() && !matches!(p, PrimTy::CChar | PrimTy::Char)
-                })
-                .unwrap_or(PrimTy::I32)
+                expected_prim(ctx, int_slot).unwrap_or(PrimTy::I32)
             };
             if negate && !ty.is_signed_int() {
                 return ctx.error_expr(
@@ -10037,6 +10053,7 @@ fn lower_magic(
             .env
             .fn_table
             .get(&name)
+            .inspect(|s| super::incr::log_sig(&name, s))
             .filter(|s| s.variadic)
             .map(|s| s.param_tys.len() - 1),
     };
@@ -10267,7 +10284,7 @@ fn index_call(
         args.insert(0, CallArg::Positional(splice(ctx, i)));
         return method_call_on(ctx, recv_h, method, &args, span);
     }
-    let t = tmp_path("t", span);
+    let t = tmp_path(ctx, "t", span);
     let i = splice(ctx, i);
     args.insert(0, CallArg::Positional(from_end(i, len_of(&t, span), span)));
     let recv = splice(ctx, recv_h);
@@ -10327,7 +10344,7 @@ fn lower_slice(
         let b = b.map(|h| splice(ctx, h));
         return lower_expr(ctx, &slice_desugar(&t, a.as_ref(), b.as_ref(), None, span));
     }
-    let t = tmp_path("t", span);
+    let t = tmp_path(ctx, "t", span);
     let recv = splice(ctx, t_h);
     let mut bound = |h: Option<HirExpr>| h.map(|h| (is_signed(&h.ty), splice(ctx, h)));
     let (a, b) = (bound(a), bound(b));
@@ -10349,7 +10366,7 @@ fn lower_slice(
         let body = slice_desugar(&t, a.as_ref(), b.as_ref(), None, span);
         return lower_expr(ctx, &block_of(vec![let_stmt(&t, recv)], body, span));
     };
-    let kt = tmp_path("k", span);
+    let kt = tmp_path(ctx, "k", span);
     let opt = |x: Option<(bool, Expr)>| {
         x.map_or(
             Expr {
@@ -10464,4 +10481,14 @@ fn slice_desugar(
         }),
         span,
     }
+}
+
+/// The instances of generic struct `base` made so far.
+fn struct_instantiations(ctx: &LowerCtx<'_>, base: &str) -> Vec<StructId> {
+    let ids = LowerCtx::instantiations(&ctx.env.defs.struct_table.borrow(), base);
+    super::incr::log(
+        || format!("is|{base}"),
+        || super::incr::Lookup::StructInsts(base.to_owned(), ids.clone()),
+    );
+    ids
 }

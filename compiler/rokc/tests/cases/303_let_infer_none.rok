@@ -4,3 +4,4 @@
 // An unannotated `let` takes the initializer's static type; `none` alone has
 // none, so write `let x: T | none = none;`.
 let x = none;
+// spec: §5.1.7

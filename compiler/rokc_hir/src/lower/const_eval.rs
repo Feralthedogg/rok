@@ -1333,6 +1333,7 @@ impl Bodies for CtxBodies<'_, '_> {
             if !env.sink.const_lowering.borrow_mut().insert(id) {
                 return Callee::Refused(format!("`{}` depends on itself", name(&def.name)));
             }
+            super::incr::log_body(id, def);
             let f = super::collect::lower_decl(env, id.0 as usize, false);
             env.sink.const_lowering.borrow_mut().remove(&id);
             (f, is_std(&module))

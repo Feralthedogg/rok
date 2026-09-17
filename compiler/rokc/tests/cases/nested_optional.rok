@@ -109,3 +109,5 @@ fn main() -> i32 {
     println(f"flat: {flat is none}");
     0
 }
+
+// spec: §2.6.4 §2.6.5

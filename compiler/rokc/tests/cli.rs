@@ -264,6 +264,117 @@ fn edited_module_recompiles_its_unit_alone() {
     }
 }
 
+/// 902.16: the front end takes an unchanged file's parse and an
+/// unchanged body's lowering from the incremental directory (`-v` counts
+/// them), and its warnings and program are a clean build's; under
+/// `ROKC_INCR_VERIFY` a replay that differs from a clean lowering fails
+/// the build.
+#[test]
+fn front_end_reuses_parses_and_bodies() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("incr-front");
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    fs::write(
+        app.join("main.rok"),
+        "mod m;\n\nfn pure(x: i64) -> i64 { x }\n\nfn main() {\n    \
+         let a = try pure(1) catch _ { 0 };\n    println(f\"{a} {m::f(2)} {m::g()}\");\n}\n",
+    )
+    .unwrap();
+    let m = "pub fn f(x: i64) -> i64 {\n    x * 2\n}\n\n\
+             pub fn g() -> str {\n    let h = |s: str| s;\n    h(\"g\")\n}\n";
+    fs::write(app.join("m.rok"), m).unwrap();
+    let rokc_with = |vars: &[(&str, &str)], args: &[&str]| {
+        let mut cmd = Command::new(ROKC);
+        cmd.current_dir(&app)
+            .env("ROK_HOME", workspace())
+            .env("ROKC_INCR_VERIFY", "1")
+            .envs(vars.iter().copied())
+            .args(args)
+            .arg("--rokr")
+            .arg(&env.rokr);
+        let out = cmd.output().unwrap();
+        assert_exit(&out, 0);
+        out
+    };
+    // (files reused, files, bodies replayed, bodies), the warnings, the
+    // program's output.
+    let build = || {
+        let out = rokc_with(&[], &["check", "-v"]);
+        let stderr = text(&out.stderr);
+        let line = stderr
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Reused: "))
+            .unwrap_or_else(|| panic!("{stderr}"))
+            .to_owned();
+        let n: Vec<usize> = line
+            .split(|c: char| !c.is_ascii_digit())
+            .filter_map(|w| w.parse().ok())
+            .collect();
+        let warnings: Vec<String> = stderr
+            .lines()
+            .filter(|l| l.starts_with("warning"))
+            .map(str::to_owned)
+            .collect();
+        let run = rokc_with(&[], &["run", "-q"]);
+        ((n[0], n[1], n[2], n[3]), warnings, text(&run.stdout))
+    };
+    let clean = || {
+        let out = rokc_with(&[("ROKC_INCREMENTAL", "0")], &["check"]);
+        let stderr = text(&out.stderr);
+        let warnings: Vec<String> = stderr
+            .lines()
+            .filter(|l| l.starts_with("warning"))
+            .map(str::to_owned)
+            .collect();
+        warnings
+    };
+    let ((files0, files, bodies0, bodies), warnings, out) = build();
+    assert_eq!((files0, bodies0), (0, 0));
+    assert!(files > 2 && bodies > 3, "{files} {bodies}");
+    assert_eq!(out, "1 4 g\n");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("this `try` covers no throwing call")),
+        "{warnings:?}"
+    );
+    assert_eq!(warnings, clean());
+    // A body, with a closure more: that file is parsed and that body
+    // lowered again, all else is taken.
+    fs::write(
+        app.join("m.rok"),
+        m.replace("x * 2", "let k = |y: i64| y + 1;\n    k(x * 2)"),
+    )
+    .unwrap();
+    let (n, w, out) = build();
+    assert_eq!((n.0, n.1, n.3), (files - 1, files, bodies), "{n:?}");
+    assert!(n.2 + 2 >= bodies && n.2 < bodies, "{n:?}");
+    assert_eq!((w, out), (clean(), "1 5 g\n".to_owned()));
+    // Nothing changed: everything is taken.
+    let (n, w, _) = build();
+    assert_eq!(n, (files, files, bodies, bodies));
+    assert_eq!(w, warnings);
+    // A signature: that function, its caller (`main`, which read it)
+    // and `g` (moved) are lowered again.
+    let sig = m
+        .replace("-> i64 {", "-> i32 {")
+        .replace("x * 2", "(x * 2) as i32");
+    fs::write(app.join("m.rok"), &sig).unwrap();
+    let (n, w, out) = build();
+    assert_eq!((n.0, n.1, n.3, bodies - n.2), (files - 1, files, bodies, 3));
+    assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
+    // Another item: every body is lowered again.
+    fs::write(
+        app.join("m.rok"),
+        sig + "\npub struct S {\n    v: i64;\n}\n",
+    )
+    .unwrap();
+    let (n, w, out) = build();
+    assert_eq!((n.0, n.2), (files - 1, 0), "{n:?}");
+    assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
+}
+
 /// A library package builds by units: an edit recompiles its unit
 /// alone, the archive is a clean build's, and two such libraries with
 /// copies of the same instances link into one program.
@@ -646,6 +757,72 @@ fn fmt_writes_lf_and_keeps_literal_crlf() {
         fs::read_to_string(dir.join("w.rok")).unwrap(),
         "fn f() {\n    let s = \"a\r\nb\";\n}\n"
     );
+}
+
+/// Spec 9.5 in a host executable's symbol table: `_Y<pkg>_<path>_<name>_
+/// <typehash>`, one symbol per generic instance (9.5.1, 9.5.2); the same
+/// instance has the same typehash in another package's build while the
+/// package hash tells the two apart (9.5.7); `#[export_name]` is as
+/// written (9.5.8); the implicit `main` is mangled beside the platform
+/// `main` (9.5.9).
+#[test]
+fn symbols_follow_the_mangling_scheme() {
+    let Some(env) = setup() else { return };
+    if Command::new("nm").arg("--version").output().is_err() {
+        eprintln!("skipped: no nm");
+        return;
+    }
+    let dir = scratch("mangle");
+    let ident = "mod geom {\n    pub fn ident<T>(x: T) -> T { x }\n}\n";
+    for (name, body) in [
+        (
+            "a",
+            "#[export_name(\"rok_marker_fn\")]\npub fn marker() -> i32 { 3 }\n\
+             println(f\"{geom::ident(2)} {geom::ident(\"s\")} {marker()}\");\n",
+        ),
+        ("b", "println(f\"{geom::ident(5)}\");\n"),
+    ] {
+        fs::create_dir_all(dir.join(name)).unwrap();
+        fs::write(dir.join(name).join("main.rok"), format!("{ident}{body}")).unwrap();
+        assert_exit(&rokc(Some(&env), &dir, &["-q", "build", name, "-O0"]), 0);
+    }
+    // `(pkg hash, typehash)` of each `geom::ident` instance, and every
+    // symbol (Mach-O's leading `_` dropped).
+    let symbols = |name: &str| {
+        let exe = dir.join(name).join("target/debug").join(name);
+        let out = Command::new("nm").arg(&exe).output().unwrap();
+        let all: Vec<String> = text(&out.stdout)
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(2))
+            .map(|s| {
+                s.strip_prefix('_')
+                    .filter(|_| cfg!(target_os = "macos"))
+                    .unwrap_or(s)
+            })
+            .map(str::to_owned)
+            .collect();
+        let hex = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let mut inst: Vec<(String, String)> = all
+            .iter()
+            .filter_map(|s| {
+                let rest = s.strip_prefix("_Y")?;
+                let (pkg, rest) = rest.split_once('_')?;
+                let th = rest.strip_prefix("geom_ident_")?;
+                (hex(pkg, 8) && hex(th, 16)).then(|| (pkg.to_owned(), th.to_owned()))
+            })
+            .collect();
+        inst.sort();
+        (inst, all)
+    };
+    let (a, a_all) = symbols("a");
+    let (b, b_all) = symbols("b");
+    assert_eq!(a.len(), 2, "{a_all:?}");
+    assert_eq!(b.len(), 1, "{b_all:?}");
+    assert_ne!(a[0].0, b[0].0, "package hashes");
+    assert!(a.iter().any(|(_, th)| *th == b[0].1), "{a:?} {b:?}");
+    for want in ["rok_marker_fn", "main", &format!("_Y{}__main_", a[0].0)] {
+        assert!(a_all.iter().any(|s| s == want), "no {want}: {a_all:?}");
+    }
 }
 
 #[test]

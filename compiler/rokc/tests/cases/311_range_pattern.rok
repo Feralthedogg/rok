@@ -21,3 +21,4 @@ fn main() -> i32 {
     if classify(200) == 3 { println("other"); }
     return 0;
 }
+// spec: §3.11.1

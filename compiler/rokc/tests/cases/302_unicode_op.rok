@@ -12,3 +12,4 @@ fn main() -> i32 {
     if a ≤ 10 { println("less"); }
     return 0;
 }
+// spec: §3.1.8

@@ -2,6 +2,7 @@
 // (RawPath::from_bytes is unix-only, std 3.8.5)
 // needs: process
 // expect-exit: 0
+// expect-stderr: hi
 // expect-stdout:
 // exact: [abcd] [efgh] eof: UnexpectedEof
 // copy: 20000 same: true
@@ -123,3 +124,4 @@ fn main() throws (IoError) {
 }
 
 // spec: std 305-io
+// spec: std 305-io §3.5.2 §3.5.4

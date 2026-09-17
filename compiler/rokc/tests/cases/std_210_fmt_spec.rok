@@ -1,0 +1,82 @@
+// spec: std 210-fmt §2.10.1 §2.10.3-2.10.10
+// expect-exit: 0
+// expect-stdout:
+// [(1.5, 2.5)] [  (1.5, 2.5)]
+// hello
+// world "hello\nworld"
+// 'a' '\n' "q\"\\"
+// DPoint { x: 1.5, y: 2.5 } User { id: 1, name: "Alice" } Pair(1, "b") Leaf Node { v: 2 }
+// 1100101011111110 0xcafe CAFE 00101010 4.2e1 5.00
+// ff -ff 0b101 0o17 ff
+// 12345.678 1.2345678e4 1.235e4 1 0.1 1.5e-1 1.5E-1 NaN inf -inf
+// [42] [   42] [42   ] [   42] [ 42  ] [00042] [**42***]
+// [+  42] [+++42] [-   42] [-00042] [+42] [ab   ]
+// [3.14] [3] [    3.1416] [3.1416    ] [hello] [42]
+// [3.1416] [    3.1416] [ab]
+// [[1, 2]] [  "x"] [none]
+// (1, "a") 7 Ok(3) Err("e") {"k"}
+
+// Stdlib 2.10: f-string holes dispatch to `Display` / `Debug`
+// (`{:?}`), numbers apply the spec themselves, other values are padded
+// by the `Formatter`; the examples of 2.10.3-2.10.8 and the derived
+// `Debug` forms of 2.10.10; containers, tuples, sums and `Result` have
+// `Debug` (2.10.9).
+struct Point { x: f64; y: f64; }
+
+impl Display for Point {
+    fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.write_str("(");
+        try Display::fmt(self.x, ref f);
+        try f.write_str(", ");
+        try Display::fmt(self.y, ref f);
+        try f.write_str(")");
+    }
+}
+
+#[derive(Debug)]
+struct DPoint { x: f64; y: f64; }
+
+#[derive(Debug)]
+struct User { id: u64; name: str; }
+
+#[derive(Debug)]
+struct Pair(i32, str);
+
+#[derive(Debug)]
+enum Tree { Leaf, Node { v: i32 } }
+
+fn main() {
+    let p = Point { x: 1.5, y: 2.5 };
+    println(f"[{p}] [{p:>12}]");
+    let s = "hello\nworld";
+    println(f"{s} {s:?}");
+    println(f"{'a':?} {'\n':?} {"q\"\\":?}");
+    let dp = DPoint { x: 1.5, y: 2.5 };
+    let u = User { id: 1, name: "Alice" };
+    println(f"{dp:?} {u:?} {Pair(1, "b"):?} {Tree::Leaf:?} {Tree::Node { v: 2 }:?}");
+    let n: u32 = 0xCAFE;
+    println(f"{n:b} {n:#x} {n:X} {42:08b} {42:e} {5:.2f}");
+    let big: int = -255;
+    println(f"{-1i8:x} {big:x} {5:#b} {15:#o} {255u8:x}");
+    let x: f64 = 12345.678;
+    let nan = 0.0 / 0.0;
+    let inf = 1.0 / 0.0;
+    println(f"{x} {x:e} {x:.3e} {1.0} {0.1} {0.15:e} {0.15:E} {nan} {inf} {-inf}");
+    let m: i32 = 42;
+    println(f"[{m}] [{m:5}] [{m:<5}] [{m:>5}] [{m:^5}] [{m:0>5}] [{m:*^7}]");
+    println(f"[{m:=+5}] [{m:+=5}] [{-42:=6}] [{-42:06}] [{m:+}] [{"ab":5}]");
+    let pi: f64 = 3.141592653589793;
+    let hw = "hello world";
+    println(f"[{pi:.2}] [{pi:.0}] [{pi:10.4}] [{pi:<10.4}] [{hw:.5}] [{m:.3}]");
+    let prec = 4;
+    let width = 10;
+    println(f"[{pi:.{prec}}] [{pi:>${width}.${prec}}] [{"abc":.{prec - 2}}]");
+    let xs = [1, 2];
+    let o: str | none = none;
+    println(f"[{xs:?}] [{"x":>5?}] [{o:?}]");
+    let some: i32 | none = 7;
+    let ok: Result<i32, str> = Result::Ok(3);
+    let err: Result<i32, str> = Result::Err("e");
+    let set = {"k",};
+    println(f"{(1, "a"):?} {some:?} {ok:?} {err:?} {set:?}");
+}

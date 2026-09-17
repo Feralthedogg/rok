@@ -1,0 +1,37 @@
+// spec: §6.3.1 §6.3.2 §6.3.3 §6.3.5 §6.3.6 §6.3.7 §6.3.8 §6.3.9
+// rokc-arg: --cfg feature=gpu
+// expect-exit: 0
+// expect-stdout:
+// gpu 2 on
+// 7 true true
+
+// Spec 6.3: `#[cfg]` removes a false item (fn, mod, use,
+// static) before anything else sees it, so mutually
+// exclusive cfgs may define one name twice; `cfg!` is a constant.
+#[cfg(feature = "gpu")] fn run() -> str { "gpu" }
+#[cfg(not(feature = "gpu"))] fn run() -> str { "cpu" }
+
+struct Foo {
+    a: i32;
+    #[cfg(feature = "gpu")]
+    b: i32;
+}
+
+#[cfg(feature = "missing")]
+mod gone { pub fn f() -> i32 { undefined_call() } }
+
+#[cfg(feature = "gpu")]
+mod on { pub fn name() -> str { "on" } }
+
+#[cfg(feature = "missing")]
+use gone::f;
+
+#[cfg(all(feature = "gpu", not(feature = "minimal"), any(target_pointer_width = "64", target_pointer_width = "32")))]
+static SEVEN: i32 = 7;
+
+const HAS_GPU: bool = cfg!(feature = "gpu");
+
+let foo = Foo { a: 1, b: 1 };
+println(f"{run()} {foo.a + foo.b} {on::name()}");
+let little = cfg!(any(target_endian = "little", target_endian = "big"));
+println(f"{SEVEN} {HAS_GPU} {little}");

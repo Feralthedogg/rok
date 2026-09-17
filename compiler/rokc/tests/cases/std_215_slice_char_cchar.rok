@@ -1,0 +1,35 @@
+// spec: std 215-string §2.15.3-2.15.5
+// expect-exit: 0
+// expect-stdout:
+// 14 10 세계 세계! !
+// a true true 1 1 4 2
+// A 5 65 A A true
+// 65 10 1 true 5
+
+// Stdlib 2.15: `str` slices are byte ranges, clamped, negative from the
+// end (2.15.3); the `char` examples and conversions (2.15.4); `c_char`
+// literals are one C byte, passed to C as `ConstPtr<c_char>` (2.15.5).
+use rok::bare::mem::size_of;
+use rok::bare::ptr::{ConstPtr, addr_of};
+
+extern "C" {
+    fn strlen(s: ConstPtr<c_char>) -> usize;
+}
+
+fn main() throws {
+    let s: str = "hello, 세계!";
+    println(f"{s.len()} {s.chars().count()} {s[7:13]} {s[7:100]} {s[-1:]}");
+    let c: char = 'A';
+    let e: char = '😀';
+    let d = try '1'.to_digit(10);
+    println(f"{c.to_lowercase()} {c.is_alphabetic()} {c.is_ascii()} {d} {c.len_utf8()} {e.len_utf8()} {e.len_utf16()}");
+    let n: u32 = c as u32;
+    let b: u8 = 0x41;
+    let c3 = try char::try_from(n);
+    println(f"{char::from_u32(0x41) ?? '?'} {char::from_digit(5, 10)} {n} {b as char} {c3} {char::from_u32(0xD800) is none}");
+    let cc: c_char = c'A';
+    let nl: c_char = c'\n';
+    let bytes: [c_char; 6] = [c'h', c'e', c'l', c'l', c'o', c'\0'];
+    let len = unsafe { strlen(addr_of(bytes[0]).as_const()) };
+    println(f"{cc as i32} {nl as i32} {size_of::<c_char>()} {cc != nl} {len}");
+}

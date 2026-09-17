@@ -12,3 +12,4 @@ fn main() -> i32 {
     let r = try_double(3) ?? 0;
     return r + 3;       // 6 + 3 = 9
 }
+// spec: §3.14.10

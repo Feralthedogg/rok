@@ -1,6 +1,7 @@
 // expect-exit: 101
-// expect-stderr: panic_loc_array_index.rok:9:13:
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_array_index.rok:10:13:
 // expect-stderr: index out of bounds
+// expect-stdout:
 
 fn three() -> usize { 3 }
 

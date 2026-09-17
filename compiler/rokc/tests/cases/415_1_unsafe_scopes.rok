@@ -1,0 +1,58 @@
+// spec: §4.15.1 §4.15.2 §4.15.3 §4.15.4 §4.15.5 §4.15.6 §4.15.7
+// expect-exit: 0
+// expect-stdout:
+// h e
+// 104 101
+// 3 4
+// 5
+// 108
+// 7 9
+
+// Spec 4.15: an `unsafe fn` body is an unsafe scope; elsewhere unsafe
+// calls and pointer reads need an `unsafe { }` block, which is an
+// expression; `unsafe fn` values take safe ones; trait methods may be
+// `unsafe fn`; C functions are implicitly unsafe.
+use rok::bare::ptr::ConstPtr;
+
+extern "C" {
+    fn strlen(s: str) -> usize;
+}
+
+unsafe fn copy_two(p: ConstPtr<u8>) -> (u8, u8) {
+    let a = p.read();
+    let b = p.add(1).read();
+    (a, b)
+}
+
+unsafe fn plus(x: i32) -> i32 { x + 2 }
+
+trait RawAccess {
+    unsafe fn raw_get(self, idx: usize) -> u8;
+}
+
+struct Buffer { s: str; }
+
+impl RawAccess for Buffer {
+    unsafe fn raw_get(self, idx: usize) -> u8 {
+        self.s.as_ptr().add(idx).read()
+    }
+}
+
+let s = "hello";
+let (a, b) = unsafe { copy_two(s.as_ptr()) };
+println(f"{a as char} {b as char}");
+println(f"{a} {b}");
+
+let v: i32 = unsafe {
+    let x = plus(1);
+    x + 1
+};
+let f: unsafe fn(i32) -> i32 = plus;
+let g: unsafe fn(i32) -> i32 = |x| x * 2;
+println(f"{unsafe { f(1) }} {unsafe { g(2) }}");
+let n: usize = unsafe { strlen(s) };
+println(f"{n}");
+let buf = Buffer { s: "hello" };
+println(f"{unsafe { buf.raw_get(2) }}");
+let total = unsafe { f(5) } + v - v;
+println(f"{total} {unsafe { g(4) } + 1}");

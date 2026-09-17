@@ -95,3 +95,4 @@ println(f"io: {await reader} bytes");
 println(f"registrations left: {task::registrations()}");
 
 // spec: 004.12-async
+// spec: 007.08-coroutine §7.8.8 / 008.05-extern-symbols §8.5.3 §8.5.5

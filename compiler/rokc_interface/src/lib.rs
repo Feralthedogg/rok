@@ -130,6 +130,12 @@ impl Session {
         self.config.inline_prebuilt = on;
     }
 
+    /// Keep parses and lowered bodies in `dir` for the next compile of
+    /// the package (spec 9.2.16).
+    pub fn set_incremental(&mut self, dir: Option<PathBuf>) {
+        self.config.incremental = dir;
+    }
+
     pub fn compile_file(&self, path: &Path) -> CompileResult {
         let mut map = SourceMap::new();
         let r = compile_file(path, &self.config, &mut map);
@@ -157,6 +163,7 @@ impl Session {
                 sources: p.sources,
                 files: p.files,
                 source_map,
+                reuse: p.reuse,
             },
             Err(errors) => CompileResult {
                 modules: Vec::new(),
@@ -166,6 +173,7 @@ impl Session {
                 sources: Vec::new(),
                 files: Vec::new(),
                 source_map,
+                reuse: None,
             },
         }
     }
@@ -185,6 +193,8 @@ pub struct CompileResult {
     /// The compile's source files by span id: what its diagnostics and
     /// codegen's locations name.
     pub source_map: SourceMap,
+    /// What was taken from the incremental directory.
+    pub reuse: Option<rokc_driver::Reuse>,
 }
 
 impl CompileResult {

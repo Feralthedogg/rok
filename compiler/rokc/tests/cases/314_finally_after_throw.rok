@@ -17,3 +17,4 @@ fn main() -> i32 {
     try f() catch _ { println("propagated"); };
     return 0;
 }
+// spec: §3.14.5

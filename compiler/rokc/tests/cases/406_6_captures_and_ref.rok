@@ -1,0 +1,115 @@
+// spec: §4.6.3 §4.6.6 §4.6.7 §4.6.8 §4.6.10
+// spec: §4.7.1 §4.7.2 §4.7.3 §4.7.4 §4.7.5 §4.7.8 §4.7.9 §4.7.10
+// expect-exit: 0
+// expect-stdout:
+// 0 4
+// [1, 2, 3, 4] 1
+// 0
+// 1 2 3
+// 6 10 5
+// 2 caught
+// 2 3
+// 5 10
+// 0 10 1 0
+// 2 1
+
+// Spec 4.6 / 4.7: value captures copy (per loop iteration too), a
+// captured handle shares its object, `[ref x]` shares the binding and
+// outlives its scope; `ref` parameters are copy-in / copy-out (written
+// back on a throw too), marked at the call, implicit for receivers.
+struct Point { x: f64; y: f64; }
+
+struct Counter { count: i32; }
+impl Counter {
+    fn increment(ref self) { self.count = self.count + 1; }
+}
+
+fn make_counter() -> fn() -> i32 {
+    let count = 0;
+    [ref count] || { count = count + 1; count }
+}
+
+fn increment(ref n: i32) {
+    n = n + 1;
+}
+
+fn swap(ref a: i32, ref b: i32) {
+    let t = a;
+    a = b;
+    b = t;
+}
+
+fn bump_then_fail(ref n: i32) throws (str) {
+    n = n + 1;
+    throw "bad";
+}
+
+fn by_value(x: i32) { x = 10i32; }
+fn by_ref(ref x: i32) { x = 10i32; }
+
+fn set_x(p: Point) { p.x = 10.0; }
+fn set_x_ref(ref p: Point) { p.x = 10.0; }
+fn fill(xs: List<i32>) { xs.push(1); }
+fn reset(ref xs: List<i32>) { xs = []; }
+
+let fns: List<fn() -> i32> = [];
+for i in 0i32..5i32 {
+    fns.push(|| i);
+}
+println(f"{fns[0]()} {fns[4]()}");
+
+let xs = [1, 2, 3];
+let f = || { xs.push(4) };
+f();
+let p = Point { x: 0.0, y: 0.0 };
+let g = [ref p] || { p.x = 1.0 };
+g();
+println(f"{xs:?} {p.x}");
+
+let ys = [1, 2, 3];
+let h = [ref ys] || { ys = []; };
+h();
+println(f"{ys.len()}");
+
+let c = make_counter();
+println(f"{c()} {c()} {c()}");
+
+let x = 5i32;
+let y = 10i32;
+increment(ref x);
+let count = 0;
+let inc = [ref count] || { count = count + 1 };
+inc(); inc(); inc(); inc(); inc();
+println(f"{x} {y} {count}");
+
+let a = 1i32;
+let msg = try bump_then_fail(ref a) catch e { e };
+println(f"{a} caught");
+
+let ctr = Counter { count: 0 };
+ctr.increment();
+Counter::increment(ref ctr);
+let ctr2 = ctr;
+ctr2.increment();
+println(f"{ctr.count} {ctr2.count}");
+
+let v = 5i32;
+by_value(v);
+let w = v;
+by_ref(ref w);
+println(f"{v} {w}");
+
+let q = Point { x: 0.0, y: 0.0 };
+set_x(q);
+let q0 = q.x;
+set_x_ref(ref q);
+let zs: List<i32> = [];
+fill(zs);
+let zn = zs.len();
+reset(ref zs);
+println(f"{q0} {q.x} {zn} {zs.len()}");
+
+let s1 = 1i32;
+let s2 = 2i32;
+swap(ref s1, ref s2);
+println(f"{s1} {s2}");

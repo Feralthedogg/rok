@@ -19,3 +19,4 @@ fn wrap_c(x: i32) -> W { W { n: x + 2 } }
 fn wrap_v(x: i32) -> V { V { n: x } }
 
 fn main() -> i32 { 0 }
+// spec: §6.5.5

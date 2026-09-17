@@ -83,3 +83,4 @@ fn main() -> i32 {
 }
 
 // spec: 002.08-trait
+// spec: §5.2.2

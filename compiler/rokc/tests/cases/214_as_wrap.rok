@@ -15,3 +15,5 @@ fn main() -> i32 {
     println(f"{neg_wrap}");
     return 0;
 }
+
+// spec: §2.14.2

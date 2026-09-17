@@ -1,0 +1,36 @@
+// spec: §4.16.2 §4.16.5 §4.16.7 §4.16.8 §4.16.9
+// expect-exit: 0
+// expect-stdout:
+// hello, ada
+// hello, grace
+// 2 greeted
+// fetched 42
+// 3 4
+
+// Spec 4.16: a single file's top-level statements, in source order, are
+// the implicit `main` (async, since `await` appears at top level);
+// items declared later are visible; a top-level `let` reaches items
+// only through a closure; global state is a `static`.
+static COUNT: i32 = 3;
+
+let names = ["ada", "grace"];
+for n in names {
+    greet(n);
+}
+let total = names.len();
+println(f"{total} greeted");
+
+let body = await fetch();
+println(f"fetched {body}");
+
+let shift = 1;
+let bump = |x: i32| x + shift;
+println(f"{apply(bump, 2)} {COUNT + shift}");
+
+fn greet(name: str) {
+    println(f"hello, {name}");
+}
+
+async fn fetch() -> i32 { 42 }
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }

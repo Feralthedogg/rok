@@ -1,4 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_rem_by_zero_panics.rok:6:38:
+// expect-stderr: attempt to calculate the remainder with a divisor of zero
+// expect-stdout:
 
 fn r(a: u64, b: u64) -> u64 { return a % b; }
 

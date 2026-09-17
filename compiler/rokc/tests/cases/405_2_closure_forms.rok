@@ -1,0 +1,62 @@
+// spec: §4.5.2 §4.5.3 §4.5.4 §4.5.5 §4.5.6 §4.5.7 §4.5.8 §4.5.9 §4.5.11 §4.5.12
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 8 8 8
+// 15 10
+// 2 0 4 8
+// 10
+// 2 3 7
+// gen 1 2 3
+// later 6
+// stream 3
+// spawned 9
+
+// Spec 4.5: closure parameter / return typing, captures, closures as
+// values (variables, arguments, returns, collections), IIFE, the
+// `async` / `yield` variants and the `{ body }` zero-argument form.
+use rok::std::thread;
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { f(x) }
+
+fn make_adder(n: i32) -> fn(i32) -> i32 {
+    |x| x + n
+}
+
+fn named(x: i32) -> i32 { x + 1 }
+
+async fn main() {
+    let a = |x: i32| x * 2;
+    let b: fn(i32) -> i32 = |x| x * 2;
+    let c = |x: i32| -> i32 { x * 2 };
+    println(f"{a(4)} {b(4)} {c(4)}");
+
+    let n = 10;
+    let f = |x| x + n;
+    println(f"{f(5)} {apply(|x| x * 2, 5)}");
+
+    let handlers: List<fn(i32) -> i32> = [|x| x + 1, |x| x - 1, |x| x * 2, named];
+    println(f"{handlers[0](1)} {handlers[1](1)} {handlers[2](2)} {apply(handlers[3], 7)}");
+
+    let r = (|x: i32| -> i32 { x * 2 })(5);
+    println(f"{r}");
+
+    let xs = [1, 2];
+    let ys = xs.iter().map(|x| x * 2).collect::<List<i32>>();
+    let zs = xs.iter().map(|x| { let y = x * 2; y + 1 }).collect::<List<i32>>();
+    println(f"{ys[0]} {zs[0]} {make_adder(4)(3)}");
+
+    let g = yield || { yield 1; yield 2; yield 3; };
+    let s = "gen";
+    for v in g() { print(f"{s} {v}"); s = ""; }
+    println("");
+    let h = async || { 6 };
+    println(f"later {await h()}");
+    let st = async yield || { yield 1; yield 2; };
+    let total = 0;
+    for await v in st() { total += v; }
+    println(f"stream {total}");
+
+    let t = thread::spawn { 9 };
+    println(f"spawned {try! t.join()}");
+}

@@ -1,0 +1,158 @@
+// spec: §3.14.2 §3.14.3 §3.14.4 §3.14.5 §3.14.6 §3.14.7 §3.14.9
+// expect-exit: 0
+// expect-stdout:
+// 12 13 22
+// true 4 8080
+// timeout 3 | http 500 | any | 7
+// sum A | sum B | 2
+// body fin1 | caught fin2 | fin3 propagated
+// fin-ret 5 | fin-loop fin-loop 2
+// new
+// throw-arg handler
+
+// spec 3.14.2: `try` covers everything to its right (nested calls, a
+// chain, a block); after a binary operator it covers that operand.
+// 3.14.3: `try?` gives `T | none`. 3.14.4: `catch` clauses are tried top
+// to bottom by pattern (typed, struct, `any Error`); a sum-typed catch
+// binds the subset; a bare `catch` is `catch _`. 3.14.5 / 3.14.9:
+// `finally` runs on normal exit, after a handled error, before a
+// propagating one and on `return` / `break`; a `catch` throwing anew
+// wins. 3.14.6: the value is the left side's or the handler's. 3.14.7:
+// typed `throws (A | B)`. 3.14.9: a `throw` evaluates its operand first.
+#[derive(Debug)]
+struct TimeoutError { secs: i32; }
+impl Error for TimeoutError {}
+impl Display for TimeoutError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("timeout") }
+}
+#[derive(Debug)]
+struct HttpError { code: i32; msg: str; }
+impl Error for HttpError {}
+impl Display for HttpError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("http") }
+}
+#[derive(Debug)]
+struct A { v: i32; }
+impl Error for A {}
+impl Display for A {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("A") }
+}
+#[derive(Debug)]
+struct B { v: i32; }
+impl Error for B {}
+impl Display for B {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("B") }
+}
+
+fn num(x: i32) throws -> i32 {
+    if x < 0 { throw TimeoutError { secs: 1 }; }
+    x
+}
+fn inc(x: i32) throws -> i32 { x + 1 }
+
+fn fetch(k: i32) throws -> i32 {
+    if k == 1 { throw TimeoutError { secs: 3 }; }
+    if k == 2 { throw HttpError { code: 500, msg: "err" }; }
+    if k == 3 { throw A { v: -1 }; }
+    k
+}
+
+fn ab(k: i32) throws (A | B) -> i32 {
+    if k == 0 { throw A { v: 0 }; }
+    if k == 1 { throw B { v: 1 }; }
+    k
+}
+
+fn label(k: i32) -> str {
+    try f"{fetch(k)}"
+    catch e: TimeoutError { f"timeout {e.secs}" }
+    catch HttpError { code, msg } { f"http {code}" }
+    catch e: any Error { "any" }
+}
+
+fn sum_catch(k: i32) -> str {
+    try f"{ab(k)}" catch e: A | B {
+        match e {
+            _: A => "sum A",
+            _: B => "sum B",
+        }
+    }
+}
+
+fn propagate(log: List<str>) throws -> i32 {
+    try {
+        num(-1)
+    } catch e: HttpError {
+        0
+    } finally {
+        log.push("fin3");
+    }
+}
+
+fn early(log: List<str>) -> i32 {
+    try {
+        if num(1) > 0 { return 5; }
+        0
+    } catch _ {
+        0
+    } finally {
+        log.push("fin-ret");
+    }
+}
+
+fn rethrow() throws -> i32 {
+    try num(-1) catch _ { throw HttpError { code: 1, msg: "new" }; }
+}
+
+fn arg(log: List<str>) -> i32 {
+    log.push("throw-arg");
+    7
+}
+
+fn main() throws {
+    let a = try inc(num(11));
+    let b = try num(12).max(inc(12));
+    let c = 10 + try {
+        let x = num(5);
+        inc(x) * 2
+    };
+    println(f"{a} {b} {c}");
+
+    let none_v: i32 | none = try? num(-1);
+    let some_v: i32 | none = try? num(4);
+    let env_port: str | none = none;
+    println(f"{none_v is none} {some_v ?? 0} {env_port ?? "8080"}");
+
+    println(f"{label(1)} | {label(2)} | {label(3)} | {label(7)}");
+    let plain = try ab(2) catch { -1 };
+    println(f"{sum_catch(0)} | {sum_catch(1)} | {plain}");
+
+    let log: List<str> = [];
+    let ok = try { log.push("body"); num(1) } catch _ { 0 } finally { log.push("fin1"); };
+    let bad = try num(-1) catch _ { log.push("caught"); 0 } finally { log.push("fin2"); };
+    let p = try propagate(log) catch _ { log.push("propagated"); -1 };
+    println(f"{log[0]} {log[1]} | {log[2]} {log[3]} | {log[4]} {log[5]}");
+    if ok + bad + p != 0 { println("bad values"); }
+
+    let l2: List<str> = [];
+    let r = early(l2);
+    let n = 0;
+    loop {
+        n += 1;
+        try {
+            if n == 2 { break; }
+            num(n)
+        } catch _ { 0 } finally { l2.push("fin-loop"); };
+    }
+    println(f"{l2[0]} {r} | {l2[1]} {l2[2]} {n}");
+
+    let msg = try f"{rethrow()}" catch e: HttpError { e.msg } catch _ { "old" };
+    println(msg);
+
+    let l3: List<str> = [];
+    let h = {
+        throw A { v: arg(l3) };
+    } catch _ { l3.push("handler"); 0 };
+    println(f"{l3[0]} {l3[1]}");
+    if h != 0 { println("bad h"); }
+}

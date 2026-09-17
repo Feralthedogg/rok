@@ -18,3 +18,5 @@ fn main() -> i32 {
     println(f"{big}");
     return 0;
 }
+
+// spec: §1.6.1

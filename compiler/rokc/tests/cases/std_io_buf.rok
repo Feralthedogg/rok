@@ -65,3 +65,4 @@ fn main() throws (IoError) {
 }
 
 // spec: std 305-io
+// spec: std 305-io §3.5.3 §3.5.5

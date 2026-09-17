@@ -1,4 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_div_by_zero_panics.rok:6:38:
+// expect-stderr: attempt to divide by zero
+// expect-stdout:
 
 fn d(a: i32, b: i32) -> i32 { return a / b; }
 

@@ -14,3 +14,4 @@ fn main() -> i32 {
     println(f"{inner::helper()} {outer::extra()}");
     return inner::helper() + outer::extra();
 }
+// spec: §5.4.5

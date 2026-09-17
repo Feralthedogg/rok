@@ -41,3 +41,4 @@ fn main() -> i32 {
     println(f"done {left}");
     return 0;
 }
+// spec: 008.10 §8.10.5

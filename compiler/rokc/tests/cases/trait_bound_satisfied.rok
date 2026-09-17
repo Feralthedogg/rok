@@ -1,4 +1,5 @@
-// expect-exit: 14
+// expect-exit: 0
+// expect-stdout: 14
 
 // `T: Tally` bound: monomorphization checks that `Counter` has an
 // `impl Tally for Counter` block. It does → call lowers normally.
@@ -18,9 +19,9 @@ fn double<T: Tally>(x: T) -> i32 {
     return x.tally();
 }
 
-fn main() -> i32 {
+fn main() {
     let c = Counter { n: 7 };
-    return double(c);
+    println(f"{double(c)}");
 }
 
 // spec: 002.08-trait

@@ -141,6 +141,13 @@ impl SourceMap {
         self.file(id).map(|(p, _)| p.as_str())
     }
 
+    /// The id of the last file added at `path`.
+    #[must_use]
+    pub fn id_of(&self, path: &str) -> Option<u32> {
+        let i = self.files.iter().rposition(|(p, _)| p == path)?;
+        u32::try_from(i + 1).ok()
+    }
+
     fn source_by_path(&self, path: &str) -> Option<&str> {
         self.files
             .iter()
@@ -769,3 +776,74 @@ mod tests {
         );
     }
 }
+
+impl rokc_core::codec::Codec for Span {
+    fn enc(&self, e: &mut rokc_core::codec::Enc) {
+        if e.spans {
+            if self.file != 0 && !e.files.contains(&self.file) {
+                e.files.push(self.file);
+            }
+            if let Some((f, a, b)) = e.home {
+                let inside = self.file == f && self.start >= a && self.end <= b;
+                if self.file != 0 && !inside {
+                    match e.foreign.iter_mut().find(|(f, _)| *f == self.file) {
+                        Some((_, end)) => *end = (*end).max(self.end),
+                        None => e.foreign.push((self.file, self.end)),
+                    }
+                }
+            }
+            e.u(u64::from(self.file));
+            e.u(u64::from(self.start));
+            e.u(u64::from(self.end.wrapping_sub(self.start)));
+            e.u(u64::from(self.line));
+            e.u(u64::from(self.col));
+        }
+    }
+    fn dec(d: &mut rokc_core::codec::Dec<'_>) -> Option<Self> {
+        let old = u32::try_from(d.u()?).ok()?;
+        let file = d.file(old)?;
+        let start = u32::try_from(d.u()?).ok()?;
+        let len = u32::try_from(d.u()?).ok()?;
+        Some(Self {
+            start,
+            end: start.wrapping_add(len),
+            line: u32::try_from(d.u()?).ok()?,
+            col: u32::try_from(d.u()?).ok()?,
+            file,
+        })
+    }
+}
+
+rokc_core::codec_enum!(Severity {
+    Error,
+    Fatal,
+    Warning,
+    Note
+});
+rokc_core::codec_enum!(ErrorKind {
+    Lexical,
+    Parse,
+    Resolve,
+    Type,
+    Visibility,
+    Module,
+    Pattern,
+    Meta,
+    Lowering,
+    Codegen,
+    Linkage,
+    Unsupported,
+    Internal,
+    Other,
+    Lint,
+});
+rokc_core::codec_struct!(Label { span, message });
+rokc_core::codec_struct!(RokDiagnostic {
+    severity,
+    kind,
+    message,
+    file,
+    primary,
+    secondary,
+    notes,
+});

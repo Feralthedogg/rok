@@ -1,0 +1,34 @@
+// spec: std 304-thread §3.4.3
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// spawn: 42
+// builder: worker-1 7
+// multiple: [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
+// stdlib 3.4.3: spawn / join, a named builder with its own stack size,
+// and many handles collected then joined in order.
+use rok::std::thread;
+use rok::std::thread::JoinHandle;
+
+fn compute(i: i64) -> i64 { i * i }
+
+fn main() throws (thread::JoinError) {
+    let h = thread::spawn(|| { 40 + 2 });
+    println(f"spawn: {try h.join()}");
+
+    let b = try thread::Builder::new()
+        .name("worker-1")
+        .stack_size(4 * 1024 * 1024)
+        .spawn(|| { f"{thread::current().name() ?? "?"} 7" });
+    println(f"builder: {try b.join()}");
+
+    let handles: List<JoinHandle<i64>> = (0i64..10i64)
+        .map(|i| thread::spawn(|| { compute(i) }))
+        .collect();
+    let results: List<i64> = handles
+        .into_iter()
+        .map(|h| try! h.join())
+        .collect();
+    println(f"multiple: {results:?}");
+}

@@ -1,0 +1,53 @@
+// spec: std 103-mem §1.3.2 §1.3.4 §1.3.6
+// expect-exit: 0
+// expect-stdout:
+// slot: 1 2 3
+// new: 9
+// read/write: 5 6
+// copy (overlap): [1, 1, 2, 3, 8]
+// replace: 1 -> 40
+// volatile: 77
+// sizes: 8 true 8 4 true
+
+// stdlib 1.3: `MaybeUninit` written then taken out, the free raw memory
+// functions (`copy` allows overlap), and the size / align helpers.
+use rok::bare::mem::{
+    MaybeUninit, align_of, align_of_val, copy, min_align_of, read, read_volatile, replace,
+    size_of, size_of_val, write, write_volatile,
+};
+use rok::bare::ptr::{Ptr, addr_of};
+
+struct Big { a: i64; b: i64; c: i64; }
+
+fn big_value() -> Big { return Big { a: 1, b: 2, c: 3 }; }
+
+fn main() {
+    let slot: MaybeUninit<Big> = MaybeUninit::uninit();
+    slot.write(big_value());
+    let v: Big = unsafe { slot.assume_init() };
+    println(f"slot: {v.a} {v.b} {v.c}");
+    let n: MaybeUninit<i32> = MaybeUninit::new(9);
+    println(f"new: {unsafe { n.assume_init() }}");
+
+    let x: i64 = 5;
+    let y: i64 = 0;
+    let px: Ptr<i64> = addr_of(x);
+    let py: Ptr<i64> = addr_of(y);
+    unsafe { write(py, read(px.as_const()) + 1); }
+    println(f"read/write: {x} {y}");
+
+    let xs: [i32; 5] = [1, 2, 3, 5, 8];
+    let p: Ptr<i32> = addr_of(xs[0]);
+    unsafe { copy(p.as_const(), p.add(1), 3); }
+    println(f"copy (overlap): {xs:?}");
+
+    let old = unsafe { replace(p, 40) };
+    println(f"replace: {old} -> {xs[0]}");
+
+    unsafe { write_volatile(px, 77); }
+    println(f"volatile: {unsafe { read_volatile(px.as_const()) }}");
+
+    let w: i64 = 3;
+    let f: f32 = 1.0;
+    println(f"sizes: {size_of_val(w)} {align_of_val(w) == align_of::<i64>()} {size_of::<i64>()} {size_of_val(f)} {min_align_of::<i64>() == align_of::<i64>()}");
+}

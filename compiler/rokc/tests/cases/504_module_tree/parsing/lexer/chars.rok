@@ -1,0 +1,4 @@
+pub fn classify(c: char) -> char { if c.is_alphabetic() { 'c' } else { 'o' } }
+
+// `sup::` reaches the parent (`lexer`), `pkg::` the root.
+pub fn depth() -> i32 { sup::sup::sup::tools::nested::two() + 1 }

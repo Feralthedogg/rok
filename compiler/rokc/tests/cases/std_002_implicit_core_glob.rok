@@ -1,0 +1,47 @@
+// spec: std 002-import §0.2.2 §0.2.3 §0.2.6
+// expect-exit: 0
+// expect-stdout:
+// 6
+// 11
+// 6
+// 40
+// 1 2
+
+// stdlib 0.2: `use m::**` brings in the pub items of `m` and of every
+// submodule; the implicit `use rok::core::**;` makes core's items
+// (`List`, `Iterator::sum`, `println`, `Mutex`, the `task` module)
+// usable without a `use`, and the full path names the same item.
+mod geo {
+    pub fn top() -> i32 { 1 }
+    pub mod inner {
+        pub fn deep() -> i32 { 2 }
+        pub mod more { pub fn deeper() -> i32 { 3 } }
+    }
+}
+use geo::**;
+
+// A user `List` beside the implicit import, core's taken by an alias.
+mod own {
+    use rok::core::collections::list::List as CoreList;
+    struct List<T> { x: T; }
+    pub fn show() {
+        let l = List { x: 1 };
+        let c: CoreList<i32> = [1, 2];
+        println(f"{l.x} {c.len()}");
+    }
+}
+
+async fn main() {
+    let xs: List<i32> = [1, 2, 3];
+    let total: i32 = xs.iter().sum();
+    println(f"{total}");
+    let m = Mutex::new(5);
+    let n = rok::core::sync::Mutex::new(6);
+    using a = m.lock() {
+        using b = n.lock() { println(f"{a.get() + b.get()}"); }
+    }
+    println(f"{top() + deep() + deeper()}");
+    let t = task::spawn(async { 40 });
+    println(f"{await t}");
+    own::show();
+}

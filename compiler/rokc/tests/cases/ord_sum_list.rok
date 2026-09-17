@@ -53,3 +53,5 @@ fn main() -> i32 {
     println(f"generic: {smallest(ls).len() - 1} {low:?}");
     0
 }
+
+// spec: §2.6.4

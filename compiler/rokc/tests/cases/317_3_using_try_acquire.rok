@@ -1,0 +1,52 @@
+// spec: §3.17.2 §3.17.3 §3.17.4
+// expect-exit: 0
+// expect-stdout:
+// drop 1
+// first: line of 1
+// open failed 0
+// drop 2
+// read failed 2
+// inner 3 4
+// drop 4
+// drop 3
+
+// spec 3.17.2: the body's tail is the value; the resource drops at the
+// end. 3.17.3: `using f = try open(..)`: a failed acquisition binds
+// nothing, so nothing drops; an error in the body drops first, then
+// propagates. 3.17.4: nested `using` releases inner first.
+struct IoError { code: i32; }
+struct File { id: i32; }
+
+impl Drop for File {
+    fn drop(ref self) { println(f"drop {self.id}"); }
+}
+
+fn open(id: i32) throws (IoError) -> File {
+    if id == 0 { throw IoError { code: 0 }; }
+    File { id: id }
+}
+
+fn read_line(f: File) throws (IoError) -> str {
+    if f.id == 2 { throw IoError { code: 2 }; }
+    f"line of {f.id}"
+}
+
+fn read_first_line(id: i32) throws (IoError) -> str {
+    using f = try open(id) {
+        try read_line(f)
+    }
+}
+
+fn main() {
+    let first = try read_first_line(1) catch e { "?" };
+    println(f"first: {first}");
+    let a = try read_first_line(0) catch e { f"open failed {e.code}" };
+    println(a);
+    let b = try read_first_line(2) catch e { f"read failed {e.code}" };
+    println(b);
+    using x = (File { id: 3 }) {
+        using y = (File { id: 4 }) {
+            println(f"inner {x.id} {y.id}");
+        }
+    }
+}

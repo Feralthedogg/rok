@@ -3,7 +3,8 @@
 // Array lengths in signatures and fields read `use`d and path-named
 // consts; enum value variants go through the const evaluator (`const
 // fn` calls included).
-// expect-exit: 17
+// expect-exit: 0
+// expect-stdout: 3 6 5 3 4
 
 mod sizes;
 use sizes::N;
@@ -17,8 +18,8 @@ struct Grid { cells: [i32; N]; more: [i32; sizes::M]; }
 
 fn first(xs: [i32; N]) -> i32 { xs[0] }
 
-fn main() -> i32 {
+fn main() {
     let g = Grid { cells: [3, 2, 1], more: [0; 4] };
     let a: [i32; N] = [0; N];
-    return first(g.cells) + (Code::A as i32) + (Code::B as i32) + (a.len() as i32);
+    println(f"{first(g.cells)} {Code::A as i32} {Code::B as i32} {a.len()} {g.more.len()}");
 }

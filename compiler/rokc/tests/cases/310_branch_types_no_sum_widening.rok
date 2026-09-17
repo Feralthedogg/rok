@@ -12,3 +12,5 @@ fn pick(c: bool) {
 fn main() {
     pick(true);
 }
+// spec: §5.1.7
+// spec: §3.10.2

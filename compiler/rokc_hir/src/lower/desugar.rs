@@ -855,6 +855,7 @@ pub(super) fn lower_for(
             ctx,
             label,
             pat,
+            iter,
             start_e,
             end.as_deref(),
             *inclusive,
@@ -1185,12 +1186,14 @@ fn for_next_loop_sum(
 }
 
 /// Integer range loop. Exclusive: `c < end`. Inclusive uses a `go` flag
-/// so `a..=MAX` terminates instead of wrapping.
+/// so `a..=MAX` terminates instead of wrapping. Other bounds (a user
+/// `Step` type) iterate the range value `range` like any iterable.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_for_range(
     ctx: &mut LowerCtx<'_>,
     label: Option<&String>,
     pat: &AstPattern,
+    range: &Expr,
     start_e: &Expr,
     end_e: Option<&Expr>,
     inclusive: bool,
@@ -1210,6 +1213,10 @@ pub(super) fn lower_for_range(
         return None;
     }
     let elem_ty = start_h.ty.clone();
+    if !matches!(elem_ty, HirTy::Prim(p) if p.is_int()) {
+        let iter_h = lower_expected(ctx, range, HirTy::Unknown);
+        return Some(lower_for_iter(ctx, label, pat, iter_h, body, span, out));
+    }
     let prim = match &elem_ty {
         HirTy::Prim(p) if p.is_int() && end_h.as_ref().is_none_or(|e| e.ty == start_h.ty) => *p,
         _ => {

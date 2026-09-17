@@ -14,3 +14,4 @@ fn main() {
     println(f"{xs[::back].len()}");
     println(f"{xs[::k].len()}");
 }
+// spec: §3.6.2

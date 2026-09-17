@@ -1,0 +1,54 @@
+// spec: §4.4.1 §4.4.2 §4.4.3 §4.4.5 §4.4.7 §4.4.8 §4.4.10 §4.4.11
+// expect-exit: 0
+// expect-stdout:
+// 7 10 6
+// 12 4
+// 2 0 6
+// 9 9 hi
+// 5 any
+// ok 3
+
+// Spec 4.4: functions and closures share `fn(..) -> R` types; values go
+// in variables, collections and dicts; a generic function becomes a
+// value once its type is fixed; a diverging closure fits any return; a
+// call through a value is positional.
+fn add(x: i32, y: i32) -> i32 { x + y }
+
+fn twice(x: i32) -> i32 { x * 2 }
+
+fn id<T>(x: T) -> T { x }
+
+fn unit(x: i32) { }
+
+fn mul(a: i32, b: i32) -> i32 { a * b }
+
+fn dyn_f(x: any) -> any { x }
+
+let f = add;
+let g = |x: i32| -> i32 { x * 2 };
+let h: fn(i32) -> i32 = |x| x + 1;
+println(f"{f(3, 4)} {g(5)} {h(5)}");
+
+let k: fn(i32) -> i32 = twice;
+let m: fn(i32, i32) = |a, b| unit(a + b);
+m(1, 2);
+println(f"{k(6)} {f(2, 2)}");
+
+let handlers: List<fn(i32) -> i32> = [|x| x + 1, |x| x - 1, |x| x * 2];
+let out = [handlers[0](1), handlers[1](1)];
+let dispatch: Dict<str, fn(i32) -> i32> = {"dbl": twice, "neg": |x| -x};
+println(f"{out[0]} {out[1]} {dispatch["dbl"](3)}");
+
+let i2 = id::<i32>;
+let i3 = id::<str>;
+println(f"{i2(9)} {i2(9)} {i3("hi")}");
+
+let d: fn(any) -> any = dyn_f;
+let r = d(5);
+let label = if r is i32 { "any" } else { "?" };
+let v = match r { n: i32 => n, _ => 0 };
+println(f"{v} {label}");
+
+let never: fn() -> i32 = || panic("never");
+let fm: fn(i32, i32) -> i32 = mul;
+println(f"ok {fm(1, 3)}");

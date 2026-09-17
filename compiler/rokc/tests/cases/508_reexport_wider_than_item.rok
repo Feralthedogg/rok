@@ -14,3 +14,4 @@ pub use inner::open;
 fn main() {
     println(f"{open()}");
 }
+// spec: §5.8.4

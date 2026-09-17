@@ -21,3 +21,4 @@ fn main() {
     println(f"{p:?}");
     println(consumer::answer(p));
 }
+// spec: std 108-wit §1.8.2

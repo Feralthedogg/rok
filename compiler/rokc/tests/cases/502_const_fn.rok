@@ -14,3 +14,4 @@ fn main() -> i32 {
     println(f"{SIX + double(3)}");
     return 0;
 }
+// spec: §5.2.5

@@ -24,3 +24,4 @@ async fn main() {
     let v = await f;
     println(f"outer after {v}");
 }
+// spec: 008.10 §8.10.3

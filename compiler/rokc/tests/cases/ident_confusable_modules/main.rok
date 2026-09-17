@@ -1,4 +1,5 @@
-// expect-exit: 3
+// expect-exit: 0
+// expect-stdout: 2 1
 // expect-warning: identifier `σ2` looks like `σ²`
 // Spec 1.4.2: the confusable check covers the whole package — `σ²` here
 // and `σ2` in `calc.rok` warn though no one file has both.
@@ -6,6 +7,6 @@ mod calc;
 
 fn σ²(x: i32) -> i32 { x * x }
 
-fn main() -> i32 {
-    calc::two() + σ²(1)
+fn main() {
+    println(f"{calc::two()} {σ²(1)}");
 }

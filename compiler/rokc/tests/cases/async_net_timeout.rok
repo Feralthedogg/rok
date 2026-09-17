@@ -39,3 +39,4 @@ let (which, _) = await task::select([
 println(f"select: {if which == 1 { "timed out" } else { "data" }}");
 
 // spec: 004.12-async
+// spec: std 302-net §3.2.0

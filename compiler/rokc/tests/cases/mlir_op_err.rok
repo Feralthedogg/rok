@@ -22,3 +22,4 @@ fn main() -> i32 {
     };
     a + b + c + d + e + f
 }
+// spec: std 109-mlir §1.9.2 §1.9.7

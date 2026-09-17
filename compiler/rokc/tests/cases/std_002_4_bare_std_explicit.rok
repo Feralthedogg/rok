@@ -1,0 +1,12 @@
+// spec: std 002-import §0.2.4 §0.2.6
+// expect-error: cannot find function `Path::new` in this scope
+// expect-error: cannot find type `Ptr` in this scope
+// expect-error: function `rok::core::num::bigint::radix_chunk` is private
+// stdlib 0.2.4 / 0.2.6: only `rok::core` is imported implicitly —
+// `rok::std` and `rok::bare` items need a `use` — and `**` exposes no
+// private item.
+fn main() {
+    let path = Path::new("a");
+    let p: Ptr<u8> = Ptr::null();
+    rok::core::num::bigint::radix_chunk(1);
+}

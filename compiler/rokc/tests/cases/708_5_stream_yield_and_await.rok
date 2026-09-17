@@ -31,3 +31,4 @@ async fn main() {
     println(s);
     println(f"total {last}");
 }
+// spec: 008.10 §8.10.4

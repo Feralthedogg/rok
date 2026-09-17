@@ -7,3 +7,4 @@ struct V { x: i32; }
 impl Plus for V { fn add(self, o: V) -> V { return V { x: self.x + o.x }; } }
 
 fn main() -> i32 { let a = V { x: 1 }; let c = a + V { x: 2 }; return c.x; }
+// spec: §6.4.4 §6.7.3

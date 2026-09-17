@@ -5,3 +5,5 @@
 struct L { next: L; v: i32; }
 
 fn main() -> i32 { return 1; }
+
+// spec: §2.6.3

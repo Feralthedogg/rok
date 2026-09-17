@@ -557,12 +557,15 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     let env_ty = HirTy::Tuple(vec![callee_ty.clone()]);
     // One thunk per (callee, slot type): a named callee by id, a
     // captured one by its type.
-    let key = format!(
-        "throws|{target:?}|{}|{}",
-        ty_mangle(slot),
-        ty_mangle(&callee_ty)
-    );
+    let key = thunk_key("throws", target, slot, &callee_ty);
     let cached = ctx.env.sink.thunks.borrow().get(&key).copied();
+    super::incr::log(
+        || format!("h|{key}"),
+        || {
+            let k = super::incr::Key::Thunk("throws", target, slot.clone(), callee_ty.clone());
+            super::incr::Lookup::Thunk(k, cached)
+        },
+    );
     let id = cached.unwrap_or_else(|| {
         let id = FunctionId(ctx.env.sink.next_id.get());
         ctx.env.sink.next_id.set(id.0 + 1);
@@ -646,6 +649,10 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             span,
             facts: rokc_ir_common::FnFacts::default(),
         });
+        super::incr::touch(id);
+        super::incr::touch_key(|| {
+            super::incr::Key::Thunk("throws", target, slot.clone(), callee_ty.clone())
+        });
         ctx.env.sink.thunks.borrow_mut().insert(key, id);
         id
     });
@@ -716,12 +723,15 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     let env_ty = HirTy::Tuple(vec![callee_ty.clone()]);
     // One thunk per (callee, slot type): a named callee by id, a
     // captured one by its type.
-    let key = format!(
-        "never|{target:?}|{}|{}",
-        ty_mangle(slot),
-        ty_mangle(&callee_ty)
-    );
+    let key = thunk_key("never", target, slot, &callee_ty);
     let cached = ctx.env.sink.thunks.borrow().get(&key).copied();
+    super::incr::log(
+        || format!("h|{key}"),
+        || {
+            let k = super::incr::Key::Thunk("never", target, slot.clone(), callee_ty.clone());
+            super::incr::Lookup::Thunk(k, cached)
+        },
+    );
     let id = cached.unwrap_or_else(|| {
         let id = FunctionId(ctx.env.sink.next_id.get());
         ctx.env.sink.next_id.set(id.0 + 1);
@@ -815,6 +825,10 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
             is_generator: false,
             span,
             facts: rokc_ir_common::FnFacts::default(),
+        });
+        super::incr::touch(id);
+        super::incr::touch_key(|| {
+            super::incr::Key::Thunk("never", target, slot.clone(), callee_ty.clone())
         });
         ctx.env.sink.thunks.borrow_mut().insert(key, id);
         id
@@ -1157,8 +1171,9 @@ pub(super) fn lower_try(
             span,
         );
     }
-    // `try?` in statement position just drops the error.
-    if expected == HirTy::Unit || body.ty == HirTy::Unit {
+    // `try?` in statement position just drops the error; elsewhere a
+    // `()` operand gives `() | none` (spec 3.14.3).
+    if expected == HirTy::Unit {
         if !frame.hit {
             return body;
         }
@@ -1768,4 +1783,19 @@ pub(super) fn arm_filter(ctx: &LowerCtx<'_>, pat: &AstPattern) -> Option<HirTy> 
         }
         _ => None,
     }
+}
+
+/// The `thunks` key of a `kind` adapter of `target` (a captured callee:
+/// `None`) into `slot`.
+pub(super) fn thunk_key(
+    kind: &str,
+    target: Option<FunctionId>,
+    slot: &HirTy,
+    callee: &HirTy,
+) -> String {
+    format!(
+        "{kind}|{target:?}|{}|{}",
+        ty_mangle(slot),
+        ty_mangle(callee)
+    )
 }

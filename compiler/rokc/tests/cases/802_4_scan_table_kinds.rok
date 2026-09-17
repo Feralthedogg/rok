@@ -1,0 +1,89 @@
+// spec: 008.02-scan-table §8.2.1 §8.2.2 §8.2.4 §8.2.5 §8.2.6 §8.2.7 §8.2.12 §8.2.13 / 007.01 §7.1.5
+// gc-stress: 40
+// expect-exit: 0
+// expect-stdout:
+// points 3.5 4.5
+// pairs 3 4
+// results ok 7 | err e1 | pending
+// anys 5 s2 true 2.5
+// word-traced: unchanged true, moved false, 41
+// bytes id 1, words id 2
+
+// spec 8.2: each registered type's ScanTable (registered before the
+// entry point, 8.2.13) names its reference slots: none for a Point of
+// floats (8.2.4), two STRONG_REFs for a Pair of lists (8.2.5), one
+// SUM_PAYLOAD for an enum whose variants differ (8.2.6), ANY_SLOTs for
+// `any` (8.2.7). The gc-stress runs move every object reached through
+// them. A type id 2 buffer (8.2.12) scans each payload word as an
+// AMBIGUOUS_WORD: what it points at stays alive and does not move; a
+// type id 1 buffer is bytes, never scanned.
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::ConstPtr;
+
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;
+}
+
+struct Point { x: f64; y: f64; }
+struct Pair { a: List<i32>; b: List<f64>; }
+enum Res { Ok(i32), Err(str), Pending }
+
+fn addr<T>(b: GcBuf<T>) -> usize { unsafe { transmute_unchecked(b) } }
+fn id_of<T>(b: GcBuf<T>) -> u32 { unsafe { let p: ConstPtr<u32> = transmute_unchecked(addr(b)); p.read() } }
+
+fn churn() {
+    for i in 0..3000 { let _junk = f"junk{i}"; }
+    unsafe { rok_gc_collect(); }
+}
+
+/// A fresh object whose only reference afterwards is its address in
+/// `slot[0]`.
+fn stash(slot: GcBuf<usize>) -> usize {
+    let t: GcBuf<i64> = unsafe { buf_new(1) };
+    unsafe { t[0] = 41; slot[0] = addr(t); }
+    addr(t)
+}
+
+fn main() {
+    let pts: List<Point> = [];
+    let pairs: List<Pair> = [];
+    let rs: List<Res> = [];
+    let anys: List<any> = [];
+    for i in 0..3 {
+        pts.push(Point { x: i as f64 + 1.5, y: i as f64 + 2.5 });
+        pairs.push(Pair { a: [i, i + 1, i + 2], b: [i as f64 * 2.0] });
+        rs.push(match i { 0 => Res::Ok(7), 1 => Res::Err(f"e{i}"), _ => Res::Pending });
+        anys.push(if i == 0 { 5 } else if i == 1 { f"s{i + 1}" } else { true });
+    }
+    anys.push(2.5);
+    churn();
+    println(f"points {pts[2].x} {pts[2].y}");
+    println(f"pairs {pairs[2].a.len()} {pairs[2].b[0]}");
+    let shown: List<str> = [];
+    for r in rs {
+        shown.push(match r {
+            Res::Ok(v) => f"ok {v}",
+            Res::Err(e) => f"err {e}",
+            Res::Pending => "pending",
+        });
+    }
+    println(f"results {shown.join(" | ")}");
+    let a0: i32 = match anys[0] { v: i32 => v, _ => 0 };
+    let a1: str = match anys[1] { s: str => s, _ => "?" };
+    let a2: bool = match anys[2] { b: bool => b, _ => false };
+    let a3: f64 = match anys[3] { f: f64 => f, _ => 0.0 };
+    println(f"anys {a0} {a1} {a2} {a3}");
+
+    unsafe {
+        // One payload word holding the target's address as a plain number.
+        let words = rok_gc_alloc_slow(24, 8, 2u32);
+        let slot: GcBuf<usize> = transmute_unchecked(words);
+        let at = stash(slot);
+        churn();
+        let back: GcBuf<i64> = transmute_unchecked(slot[0]);
+        println(f"word-traced: unchanged {slot[0] == at}, moved {addr(back) != at}, {back[0]}");
+        let bytes: GcBuf<u8> = buf_new(8);
+        println(f"bytes id {id_of(bytes)}, words id {id_of(words)}");
+    }
+}

@@ -1,0 +1,67 @@
+// spec: §4.2.1 §4.2.3 §4.2.4 §4.2.8 §4.2.9 §4.2.10
+// expect-exit: 0
+// expect-stdout:
+// 3 0.1
+// 5 0.1
+// 5 1
+// Alice 30 -
+// Bob 0 bob@example.com
+// Charlie 25 -
+// abc
+// recv-arg
+// 7 str any
+// 8
+
+// Spec 4.2: positional, default and named arguments; defaults are const
+// and filled per call; arguments run left to right (receiver first);
+// static, generic and `any` parameters mix in one signature.
+const D: i32 = 3;
+
+fn retry(n: i32 = D, delay: f64 = 0.1f64) -> str {
+    f"{n} {delay}"
+}
+
+fn make_user(name: str, age: i32 = 0i32, email: str = "-") -> str {
+    f"{name} {age} {email}"
+}
+
+fn say(s: str) -> str {
+    print(s);
+    s
+}
+
+fn three(x: str, y: str, z: str) {
+    println("");
+}
+
+struct R { v: i32; }
+impl R {
+    fn take(self, s: str) -> i32 { self.v }
+}
+
+fn recv() -> R {
+    print("recv-");
+    R { v: 1 }
+}
+
+fn mixed(a: i32, b, c: any) -> str {
+    let k = if c is f64 { "any" } else { "?" };
+    f"{a} {b} {k}"
+}
+
+fn scope(x: i32, y: i32 = 1) -> i32 {
+    let x = x + y;
+    x * 2
+}
+
+println(retry());
+println(retry(5i32));
+println(retry(5i32, 1.0f64));
+println(make_user(name: "Alice", age: 30i32));
+println(make_user(name: "Bob", email: "bob@example.com"));
+println(make_user("Charlie", age: 25i32));
+three(say("a"), say("b"), say("c"));
+let r = recv().take(say("arg"));
+println("");
+println(mixed(7, "str", 1.5));
+println(f"{scope(3)}");

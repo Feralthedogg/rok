@@ -1,5 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/index_negative_oob_panics.rok:12:16:
 // expect-stderr: index -4 out of bounds for length 3
+// expect-stdout: 1
 
 // Spec 3.6: a negative index past the start panics after the
 // adjustment (`len + i` < 0).

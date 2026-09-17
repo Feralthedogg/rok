@@ -1,0 +1,11 @@
+// spec: §2.13.8 §2.13.6
+// expect-error: 9:13: expected expression, found `::`
+// expect-error: 10:16: expected path segment, found `::`
+
+// A path has no leading `::` and no empty segment.
+mod a { pub mod b { pub const C: i32 = 1; } }
+
+fn main() {
+    let x = ::a::b::C;
+    let y = a::::b::C;
+}

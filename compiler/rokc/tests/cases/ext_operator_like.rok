@@ -30,3 +30,5 @@ fn main() -> i32 {
     println(f"{s.v}");
     return 0;
 }
+// spec: §6.7.2 §6.7.9
+// spec: §3.1.7

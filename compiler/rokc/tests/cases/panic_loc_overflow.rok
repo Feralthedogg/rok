@@ -1,7 +1,8 @@
 // expect-exit: 101
 // debug-only
-// expect-stderr: panic_loc_overflow.rok:8:33:
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_overflow.rok:9:33:
 // expect-stderr: attempt to add with overflow
+// expect-stdout:
 
 fn big() -> i32 { 2147483647 }
 

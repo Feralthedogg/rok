@@ -222,6 +222,7 @@ pub fn lower_full(
     input: &crate::HirInput,
     sources: &rokc_diagnostic::SourceMap,
 ) -> HirModule {
+    let collect_started = rokc_diagnostic::time_passes().then(std::time::Instant::now);
     resolve::set_packages(input.packages.clone());
     super::const_eval::set_pointer_width(input.pointer_width);
     crate::clear_type_names();
@@ -252,6 +253,7 @@ pub fn lower_full(
         uses,
         reexports,
     ));
+    let reexports = &glob_reexports(raw_uses, &owned.items, reexports);
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -1822,10 +1824,22 @@ pub fn lower_full(
         })
         .collect();
     assign_discriminants(&env, &enum_decls);
+    if let Some(t) = collect_started {
+        eprintln!(
+            "time: {:>9.1}ms  hir collect",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
     rokc_diagnostic::time("hir consts", || super::const_eval::check_user_consts(&env));
-    let (mut functions, unlowered) = rokc_diagnostic::time("hir bodies", || {
-        lower_bodies(&env, &decl_roots, &prebuilt, &inline_copies)
+    let incr = input.bodies.as_ref().map(|b| {
+        rokc_diagnostic::time("hir interface", || {
+            super::incr::Incr::new(&env, &*b.0, program, raw_uses, input)
+        })
     });
+    let (mut functions, unlowered) = rokc_diagnostic::time("hir bodies", || {
+        lower_bodies(&env, &decl_roots, &prebuilt, &inline_copies, incr.as_ref())
+    });
+    let reuse = incr.map(|i| i.reuse.get()).unwrap_or_default();
     rokc_diagnostic::time("hir const fns", || {
         let extras = env.sink.extras.borrow().clone();
         let origin = env.sink.fn_origin.borrow().clone();
@@ -1972,6 +1986,7 @@ pub fn lower_full(
         any_types,
         any_tags: sink.any_tags.take(),
         type_visibility: names.visibility.clone(),
+        reuse,
     };
     module.diagnostics.extend(names.diags.into_inner());
     module.diagnostics.extend(sink.diagnostics.into_inner());
@@ -1982,11 +1997,12 @@ pub fn lower_full(
     check_value_types(&mut module);
     check_packed(&mut module);
     // The same root cause can be reached from several passes (e.g. a
-    // type resolved once per instantiation sweep): report it once.
+    // type resolved once per instantiation sweep): report each message
+    // once per place.
     let mut seen = std::collections::HashSet::new();
     module
         .diagnostics
-        .retain(|d| seen.insert(d.message.clone()));
+        .retain(|d| seen.insert((d.primary.as_ref().map(|l| l.span), d.message.clone())));
     // A derive that failed its field check leaves its generated impl's
     // errors (located at the attribute) as a cascade: drop them.
     module.diagnostics.retain(|d| {
@@ -2169,6 +2185,85 @@ fn resolve_projection_aliases(env: &Env<'_>) {
         rcx.resolve_ast_ty(body);
         if count() != before {
             names.broken_aliases.borrow_mut().insert(full.clone());
+        }
+    }
+}
+
+/// `reexports` plus one per item a `pub use m::*` reaches (spec 5.8):
+/// the non-private items of `m` and what `m` re-exports, through chains
+/// of glob re-exports, each no wider than its item (5.8.12).
+fn glob_reexports(
+    raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
+    items: &[Item],
+    reexports: &[crate::uses::ReExport],
+) -> Vec<crate::uses::ReExport> {
+    let mut globs: Vec<(&str, Visibility, String)> = Vec::new();
+    for (module, vis, tree) in raw_uses
+        .iter()
+        .filter(|(_, v, _)| *v != Visibility::Private)
+    {
+        let mut entries = Vec::new();
+        crate::uses::flatten_tree_for_local(tree, module, &mut entries);
+        for e in entries {
+            if let crate::uses::UseEntry::Glob { prefix } = e {
+                globs.push((module, *vis, prefix));
+            }
+        }
+    }
+    let mut out = reexports.to_vec();
+    if globs.is_empty() {
+        return out;
+    }
+    let public: Vec<(String, Visibility)> = items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(d) => Some((d.name.as_str(), d.vis)),
+            Item::Struct(d) => Some((d.name.as_str(), d.vis)),
+            Item::Enum(d) => Some((d.name.as_str(), d.vis)),
+            Item::Union(d) => Some((d.name.as_str(), d.vis)),
+            Item::Trait(d) => Some((d.name.as_str(), d.vis)),
+            Item::Const(d) => Some((d.name.as_str(), d.vis)),
+            Item::Static(d) => Some((d.name.as_str(), d.vis)),
+            Item::TypeAlias(d) => Some((d.name.as_str(), d.vis)),
+            Item::Mod(d) => Some((d.name.as_str(), d.vis)),
+            Item::Impl(_) | Item::Use(_) | Item::Extern(_) => None,
+        })
+        .filter(|(_, vis)| *vis != Visibility::Private)
+        .map(|(name, vis)| (name.to_owned(), vis))
+        .collect();
+    let mut seen: std::collections::HashSet<String> = out.iter().map(reexport_key).collect();
+    loop {
+        let mut grew = false;
+        for (module, vis, prefix) in &globs {
+            let reached: Vec<(String, Visibility)> = public
+                .iter()
+                .cloned()
+                .chain(
+                    out.iter()
+                        .filter(|r| r.vis != Visibility::Private)
+                        .map(|r| (reexport_key(r), r.vis)),
+                )
+                .filter(|(full, _)| module_of(full) == *prefix)
+                .collect();
+            for (full, item_vis) in reached {
+                let re = crate::uses::ReExport {
+                    module_path: (*module).to_owned(),
+                    short_name: full.rsplit("::").next().unwrap_or(&full).to_owned(),
+                    full_path: full,
+                    vis: if visibility_rank(item_vis) < visibility_rank(*vis) {
+                        item_vis
+                    } else {
+                        *vis
+                    },
+                };
+                if seen.insert(reexport_key(&re)) {
+                    out.push(re);
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            return out;
         }
     }
 }
@@ -3777,9 +3872,13 @@ fn lower_bodies(
     roots: &[bool],
     linked: &std::collections::HashSet<FunctionId>,
     copies: &std::collections::HashSet<FunctionId>,
+    incr: Option<&super::incr::Incr<'_>>,
 ) -> (Vec<HirFunction>, Vec<FunctionId>) {
     let decls = &env.decls;
-    let lower = |i: usize, stub: bool| lower_decl(env, i, stub);
+    let lower = |i: usize, stub: bool| match incr {
+        Some(incr) if !stub => incr.lower(env, i),
+        _ => lower_decl(env, i, stub),
+    };
     let mut done: Vec<Option<HirFunction>> = (0..decls.len()).map(|_| None).collect();
     let mut pending: std::collections::BTreeSet<usize> =
         (0..decls.len()).filter(|&i| roots[i]).collect();
@@ -5727,7 +5826,9 @@ fn add_self_assoc_sigs(program: &mut Program) {
                         if let rokc_ast::ThrowsKind::Typed(ts) = &mut d.throws {
                             ts.iter_mut().for_each(|t| subst_assoc_ty(t, &assoc));
                         }
-                        mark(d, assoc.keys().cloned().collect());
+                        let mut names: Vec<String> = assoc.keys().cloned().collect();
+                        names.sort_unstable();
+                        mark(d, names);
                     }
                 }
             }

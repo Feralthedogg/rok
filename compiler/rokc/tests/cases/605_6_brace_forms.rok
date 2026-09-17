@@ -1,0 +1,22 @@
+// spec: §6.5.1 §6.5.3 §6.5.4 §6.5.5 §6.5.6 §6.5.10 §6.5.11
+// expect-exit: 0
+// expect-stdout:
+// 1 7 1 9
+// 2 3 5
+// 2 3
+
+// Spec 6.5.6: `{e,}` is a one-element set, `{e}` always a block, a `:`
+// makes a dict, statements make a block. Core's collection and range
+// literals are handlers (a trailing separator allowed); the slot type
+// picks the set's element type.
+let one = {1,};
+let blk = { 7 };
+let d = { "a": 1 };
+let b = { let t = 4; t + 5 };
+println(f"{one.len()} {blk} {d["a"]} {b}");
+let xs = [1, 2,];
+let s: Set<i64> = {1, 2, 3};
+let r = 0..5;
+println(f"{xs.len()} {s.len()} {r.end}");
+let ri = 1..=2;
+println(f"{ri.end} {(0..3).len()}");

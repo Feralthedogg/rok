@@ -9,3 +9,4 @@ fn main() {
     let n = Named { tag: 1, name: "x" };
     println(f"{n.tag}");
 }
+// spec: §6.2.2

@@ -21,3 +21,4 @@ struct Odd { a: i32; }
 struct Tagged { a: i32; }
 
 fn main() {}
+// spec: §6.2.2

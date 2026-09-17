@@ -1,0 +1,88 @@
+// spec: std 204-ops-assign §2.4.2-2.4.4 §2.4.9
+// expect-exit: 0
+// expect-stdout:
+// 8 [1, 2, 3, 4] 5 15 7 1 3 7
+// 15 13 6 16 4 false true
+// 2.5 ab! 9 2
+// 3 [1, 2, 3]
+// 16 10
+
+// Stdlib 2.4: every arithmetic (2.4.2) and bitwise (2.4.3) compound
+// assignment on primitives, `%%=` floored, `bool` / `str` / `Dict`
+// forms; a user `AddAssign` updates its `ref self` in place (2.4.4) on
+// a type with no `Add` (no supertrait, 2.4.9), and through a `ref`
+// parameter the caller sees the change.
+struct Bag { n: i32; items: List<i32>; }
+
+impl AddAssign<i32> for Bag {
+    fn add_assign(ref self, rhs: i32) {
+        self.n += 1;
+        self.items.push(rhs);
+    }
+}
+
+fn bump(ref b: Bag) {
+    b += 3;
+}
+
+struct Acc { total: i32; }
+
+impl ShlAssign<i32> for Acc {
+    fn shl_assign(ref self, rhs: i32) { self.total <<= rhs; }
+}
+
+impl MulAssign for Acc {
+    fn mul_assign(ref self, rhs: Acc) { self.total *= rhs.total; }
+}
+
+fn main() {
+    let counter: i32 = 0;
+    counter += 5;
+    counter += 3;
+    let xs: List<i32> = [1, 2];
+    xs += [3, 4];
+    let a = 20;
+    a -= 15;
+    let m = 5;
+    m *= 3;
+    let d = 15;
+    d /= 2;
+    let r = 7;
+    r %= 3;
+    let f = -7;
+    f %%= 5;
+    let g = 7;
+    g %%= -3;
+    println(f"{counter} {xs:?} {a} {m} {d} {r} {f} {g + 9}");
+    let flags: u32 = 0xFF;
+    flags &= 0x0F;
+    let o: u32 = 0x05;
+    o |= 0x08;
+    let x = 5;
+    x ^= 3;
+    let n: i32 = 1;
+    n <<= 4;
+    let s = 64;
+    s >>= 4;
+    let b = true;
+    b &= false;
+    let c = false;
+    c |= true;
+    println(f"{flags} {o} {x} {n} {s} {b} {c}");
+    let h: f64 = 10.0;
+    h /= 4.0;
+    let t = "ab";
+    t += '!';
+    let dict = {"a": 1, "b": 2};
+    dict += {"a": 9};
+    println(f"{h} {t} {dict["a"]} {dict.len()}");
+    let bag = Bag { n: 0, items: [] };
+    bag += 1;
+    bag += 2;
+    bump(ref bag);
+    println(f"{bag.n} {bag.items:?}");
+    let acc = Acc { total: 1 };
+    acc <<= 3;
+    acc *= Acc { total: 2 };
+    println(f"{acc.total} {acc.total - 6}");
+}

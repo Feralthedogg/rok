@@ -7,3 +7,4 @@ fn main() {
     let (_: i32, c) = (1, 2);
     println(f"{a} {b} {c}");
 }
+// spec: §3.15.6

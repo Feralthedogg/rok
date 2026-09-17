@@ -87,3 +87,4 @@ fn main() throws (rok::bare::alloc::LayoutError) -> i32 {
     }
     return 0;
 }
+// spec: 008.04-safepoint §8.4.6 §8.4.10

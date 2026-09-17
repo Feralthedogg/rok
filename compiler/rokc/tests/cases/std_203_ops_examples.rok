@@ -1,0 +1,79 @@
+// spec: std 203-ops §2.3.1-2.3.3 §2.3.6 §2.3.7 §2.3.9
+// expect-exit: 0
+// expect-stdout:
+// 8 4 7 0.5 42 10
+// 19 22 43 50
+// 2 2.857142857142857 2 none 6 1.5 -2 2
+// 1 -1 2 -2 1 -1 -1 -1 0.5 7
+// -5 -3.14 -8 false 255 -256 255 -1
+// 0 15 false 255 240 6 16 -16777216 256 16 -1 2147483647
+// Vec3 { x: 1.5, y: 2.5, z: 3.5 } 6
+// lhs true
+
+// Stdlib 2.3: the examples of the arithmetic (2.3.1), unary (2.3.2) and
+// bitwise (2.3.3) traits on primitives, user `Mul` / `Add` impls
+// (2.3.1, 2.3.6) composed in one expression (2.3.7), and `bool`
+// `&&` / `||` short-circuiting (2.3.9).
+struct Matrix2x2 { a: f64; b: f64; c: f64; d: f64; }
+
+impl Mul<Matrix2x2> for Matrix2x2 {
+    type Output = Matrix2x2;
+
+    fn mul(self, rhs: Matrix2x2) -> Matrix2x2 {
+        Matrix2x2 {
+            a: self.a * rhs.a + self.b * rhs.c,
+            b: self.a * rhs.b + self.b * rhs.d,
+            c: self.c * rhs.a + self.d * rhs.c,
+            d: self.c * rhs.b + self.d * rhs.d,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Vec3 { x: f64; y: f64; z: f64; }
+
+impl Add for Vec3 {
+    type Output = Vec3;
+
+    fn add(self, rhs: Vec3) -> Vec3 {
+        Vec3 { x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z }
+    }
+}
+
+impl Mul<f64> for Vec3 {
+    type Output = Vec3;
+
+    fn mul(self, k: f64) -> Vec3 {
+        Vec3 { x: self.x * k, y: self.y * k, z: self.z * k }
+    }
+}
+
+fn rhs_bool() -> bool {
+    print("rhs ");
+    true
+}
+
+fn main() {
+    let a: i32 = 5;
+    let b: i32 = 3;
+    let x: f64 = 1.5;
+    let y: f64 = 2.5;
+    println(f"{a + b} {x + y} {10i32 - 3i32} {1.0f64 - 0.5f64} {6i32 * 7i32} {2.5f64 * 4.0f64}");
+    let m = Matrix2x2 { a: 1.0, b: 2.0, c: 3.0, d: 4.0 };
+    let n = Matrix2x2 { a: 5.0, b: 6.0, c: 7.0, d: 8.0 };
+    let p = m * n;
+    println(f"{p.a} {p.b} {p.c} {p.d}");
+    println(f"{20i32 / 7i32} {20.0f64 / 7.0f64} {20i32.checked_div(7i32) ?? -1} {20i32.checked_div(0i32):?} {20i32 % 7i32} {5.5f64 % 2.0f64} {(-5) % 3} {5 % (-3)}");
+    let i: i32 = -1;
+    let len: i32 = 8;
+    println(f"{7 % 3} {-7 % 3} {-7 %% 3} {7 %% -3} {7 % -3} {-7 % -3} {-7 %% -3} {(-5i32) %% 3i32 - 2} {(-7.5f64) %% 2.0f64} {i %% len}");
+    println(f"{-5i32} {-3.14f64} {-(a + b)} {!true} {!0u8} {!0xFFi32} {~0u8} {~0i32}");
+    println(f"{0xF0i32 & 0x0Fi32} {0xFFi32 & 0x0Fi32} {true & false} {0xF0i32 | 0x0Fi32} {0xFFi32 ^ 0x0Fi32} {0b1010 ^ 0b1100} {1i32 << 4} {0xFFi32 << 24} {1i32.wrapping_shl(40)} {256i32 >> 4} {-1i32 >> 1} {u32::MAX >> 1}");
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 } + Vec3 { x: 0.5, y: 0.5, z: 0.5 };
+    let w = v + Vec3 { x: 1.0, y: 1.0, z: 1.0 } * 2.0;
+    println(f"{v:?} {w.z + 0.5}");
+    let t = false && rhs_bool();
+    let u = true || rhs_bool();
+    print("lhs ");
+    println(f"{!t && u}");
+}

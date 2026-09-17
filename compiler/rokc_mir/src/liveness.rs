@@ -529,4 +529,63 @@ mod tests {
         got.sort_unstable();
         assert_eq!(got, vec![0, 1, 3]);
     }
+
+    /// bb0: x0 = x1; goto bb1
+    /// bb1: x2 = x0; if x3 -> bb1 / bb2   (a loop)
+    /// bb2: x4 = x0; return
+    fn looping() -> MirFunction {
+        let mut f = sample();
+        f.blocks[0].stmts = vec![assign(0, 1)];
+        f.blocks[0].terminator = Terminator::Goto {
+            target: BlockId(1),
+            args: vec![],
+        };
+        f.blocks[1].stmts = vec![assign(2, 0)];
+        f.blocks[1].terminator = Terminator::If {
+            cond: Operand::Copy(LocalId(3)),
+            then_bb: BlockId(1),
+            then_args: vec![],
+            else_bb: BlockId(2),
+            else_args: vec![],
+        };
+        f.blocks[2].stmts = vec![assign(4, 0)];
+        f
+    }
+
+    /// A value read in a loop and after it stays live around the back
+    /// edge: it dies at its use after the loop, not in the body.
+    #[test]
+    fn loop_keeps_values_live() {
+        let f = looping();
+        let d = deaths(&f, |_| true);
+        assert!(
+            !d.after_stmt[1][0].contains(&LocalId(0)),
+            "{:?}",
+            d.after_stmt
+        );
+        assert!(
+            d.after_stmt[2][0].contains(&LocalId(0)),
+            "{:?}",
+            d.after_stmt
+        );
+        // x1 dies at its one use; the condition on the loop's exit.
+        assert_eq!(d.after_stmt[0][0], vec![LocalId(1)]);
+        assert!(d.on_entry[2].contains(&LocalId(3)), "{:?}", d.on_entry);
+        assert!(!d.on_entry[1].contains(&LocalId(3)), "{:?}", d.on_entry);
+    }
+
+    /// A back-edge poll at the end of the loop body roots what the next
+    /// iteration and the exit read (x0, the condition x3), not x2.
+    #[test]
+    fn back_edge_poll_roots_loop_values() {
+        let f = looping();
+        let s = live_across(&f, |_| true, |_| None, |b| b == BlockId(1), false);
+        let mut got: Vec<u32> = s.iter().map(|l| l.0).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![0, 3]);
+        // Untracked locals are never roots.
+        let s = live_across(&f, |l| l != LocalId(0), |_| None, |_| true, true);
+        assert!(!s.contains(&LocalId(0)), "{s:?}");
+        assert!(s.contains(&LocalId(1)), "{s:?}");
+    }
 }

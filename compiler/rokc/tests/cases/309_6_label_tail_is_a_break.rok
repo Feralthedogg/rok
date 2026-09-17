@@ -1,0 +1,13 @@
+// spec: §3.9.6 §3.9.10
+// expect-error: 8:13: `break` values have different types `u8` and `str`
+
+// A labelled block's tail is a `break` to it: one type with the other
+// `break` values (an unsuffixed literal tail takes theirs, 309_1).
+fn main() {
+    let c = true;
+    let v = 'b: {
+        if c { break 'b 1u8; }
+        println("not reached");
+        "x"
+    };
+}

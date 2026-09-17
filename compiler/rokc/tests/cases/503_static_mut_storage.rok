@@ -13,3 +13,4 @@ fn bump() -> i32 {
 fn main() -> i32 {
     return bump();
 }
+// spec: §5.3.5

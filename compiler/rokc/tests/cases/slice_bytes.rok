@@ -24,3 +24,4 @@ fn main() throws (IoError) {
 }
 
 // spec: 003.06-indexing-and-slicing
+// spec: std §2.9.7

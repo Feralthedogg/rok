@@ -1,0 +1,74 @@
+// spec: 007.01-object-layout §7.1.1 §7.1.2 §7.1.3 §7.1.6 / 007.02-allocation §7.2.4 §7.2.5
+// spec: 008.01-object-header-abi §8.1.1 §8.1.2 §8.1.3 §8.1.4 §8.1.5 §8.1.6 §8.1.7 §8.1.8 §8.1.9
+// spec: 008.05-extern-symbols §8.5.1 rok_gc_pin
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// i32x1: size 24 value 7
+// u8x5: size 24
+// u16x9: size 40
+// i64x2048: size 16400 large true
+// type ids: same true runtime 1 user true
+// align32: payload 0 large true
+// pinned true, kept true 9
+// survivor sticky true, pinned false
+
+// spec 7.1.1 / 8.1.1-8.1.9: every GC object starts with a 16-byte
+// header, `type_id` (u32) at 0, `gc_flags` (u32) at 4, `gc_word` (u64,
+// the total size, a multiple of 8) at 8, the payload at 16; total size
+// = 16 + payload rounded up to 8 (an i32 object is 24 bytes, a 2048 x
+// i64 list buffer 16400 bytes, in the LOS with LARGE = bit 4). Over-8
+// alignment goes to the LOS with the payload aligned (7.1.2 /
+// 8.1.6). PINNED (bit 2) keeps an object in place across evacuating
+// collections (the gc-stress runs evacuate everything movable); a
+// survivor of a collection is STICKY (bit 1).
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::ConstPtr;
+
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_pin(obj: GcBuf<u8>) -> GcBuf<u8>;
+    fn rok_gc_unpin(obj: GcBuf<u8>);
+}
+
+#[repr(align(32))]
+struct A32 { x: i64; }
+
+struct P { a: str; b: i64; }
+
+fn addr<T>(b: GcBuf<T>) -> usize { unsafe { transmute_unchecked(b) } }
+fn u32_at(a: usize) -> u32 { unsafe { let p: ConstPtr<u32> = transmute_unchecked(a); p.read() } }
+fn u64_at(a: usize) -> u64 { unsafe { let p: ConstPtr<u64> = transmute_unchecked(a); p.read() } }
+fn size<T>(b: GcBuf<T>) -> u64 { u64_at(addr(b) + 8) }
+fn flags<T>(b: GcBuf<T>) -> u32 { u32_at(addr(b) + 4) }
+
+fn main() {
+    unsafe {
+        let one: GcBuf<i32> = buf_new(1);
+        one[0] = 7;
+        println(f"i32x1: size {size(one)} value {u32_at(addr(one) + 16)}");
+        let b5: GcBuf<u8> = buf_new(5);
+        println(f"u8x5: size {size(b5)}");
+        let h9: GcBuf<u16> = buf_new(9);
+        println(f"u16x9: size {size(h9)}");
+        let big: GcBuf<i64> = buf_new(2048);
+        println(f"i64x2048: size {size(big)} large {flags(big) & 16u32 != 0u32}");
+        let p1: GcBuf<P> = buf_new(1);
+        let p2: GcBuf<P> = buf_new(3);
+        let id = u32_at(addr(p1));
+        println(f"type ids: same {id == u32_at(addr(p2))} runtime {u32_at(addr(b5))} user {id >= 0x10000u32}");
+        let a: GcBuf<A32> = buf_new(1);
+        println(f"align32: payload {(addr(a) + 16) % 32} large {flags(a) & 16u32 != 0u32}");
+
+        let pin: GcBuf<u8> = buf_new(40);
+        pin[0] = 9u8;
+        let at = addr(pin);
+        let same = addr(rok_gc_pin(pin)) == at;
+        let pinned = same && flags(pin) & 4u32 != 0u32;
+        for i in 0..2000 { let _junk = f"junk{i}"; }
+        rok_gc_collect();
+        println(f"pinned {pinned}, kept {addr(pin) == at} {pin[0]}");
+        rok_gc_unpin(pin);
+        println(f"survivor sticky {flags(pin) & 2u32 != 0u32}, pinned {flags(pin) & 4u32 != 0u32}");
+    }
+}

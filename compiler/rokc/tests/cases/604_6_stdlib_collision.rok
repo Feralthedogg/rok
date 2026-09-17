@@ -11,3 +11,4 @@ trait MyAdd {
 fn main() -> i32 {
     return 0;
 }
+// spec: std 004-lang-slot-table §0.4.7

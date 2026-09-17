@@ -33,3 +33,4 @@ fn main() {
     };
     println(f"{n}");
 }
+// spec: §3.11.1

@@ -1,0 +1,47 @@
+// spec: §1.10.1 §1.10.2 §1.10.3 §1.10.5
+// expect-exit: 0
+// expect-stdout:
+// 16 true 3 2
+// -1 2 2 2
+// 2.5 true true true true
+// true true true
+// 3 [11, 22] [true, false] 3
+// 4 7 x
+// 2 b 6
+
+fn half(x: i32 | none) -> i32 | none {
+    let v = x?;
+    return v / 2;
+}
+
+struct P { v: i32; }
+
+fn main() {
+    // 1.10.2: the longest match (`<<=`, `==`, `..=`).
+    let x = 1;
+    x <<= 4;
+    let r = 1..=3;
+    println(f"{x} {x==16} {r.len()} {(1..3).len()}");
+    // `%` follows the dividend, `%%` / `%%=` the divisor.
+    let m = -7;
+    m %%= 3;
+    println(f"{-7 % 3} {-7 %% 3} {m} {5 %% 3}");
+    // Unicode operators.
+    println(f"{5.0 ÷ 2.0} {1 ≠ 2} {1 ≤ 1} {2 ≥ 1} {3 ≡ 3}");
+    println(f"{2 ∈ [1, 2]} {4 ∉ [1, 2]} {[1] ≡ [1]}");
+    // `?.`, `??`, `?`; broadcast tokens; `1.+2` is a float sum.
+    let p: P | none = P { v: 3 };
+    let q: P | none = none;
+    let a = [1, 2];
+    let b = [10, 20];
+    println(f"{p?.v ?? 0} {a.+b:?} {a.<[2, 1]:?} {1.+2}");
+    println(f"{half(8) ?? -1} {(q?.v ?? 7)} {'x'}");
+    // 1.10.5: `f` / `r` / `c` prefix a literal only when glued to it.
+    let f = 2;
+    let r_ = 'b';
+    let c = f * 3;
+    'outer: for i in 0..3 {
+        if i == 1 { break 'outer; }
+    }
+    println(f"{f} {r_} {c}");
+}

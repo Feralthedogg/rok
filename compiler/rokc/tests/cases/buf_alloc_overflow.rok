@@ -1,6 +1,6 @@
 // expect-exit: 101
 // expect-stdout: before
-// expect-stderr: allocation too large
+// expect-stderr: rok runtime: allocation too large
 
 // A buffer whose `len * size + header` overflows `usize` is a fatal
 // "allocation too large", not a small allocation written past its end.

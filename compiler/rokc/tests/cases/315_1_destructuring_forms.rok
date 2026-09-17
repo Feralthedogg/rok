@@ -1,0 +1,43 @@
+// spec: §3.15.1 §3.15.2 §3.15.4 §3.15.5 §3.15.6 §3.15.9 §3.15.10 §3.15.11
+// expect-exit: 0
+// expect-stdout:
+// 3 1 3 | 1 2 3
+// 3 4 2.5 | 3 3 | 3 4
+// 1 hi 1 hi
+// 1 2 | calls=1 7
+// [2, 3]
+
+// spec 3.15.2: tuple destructuring, `_` discards. 3.15.4: nesting,
+// including a struct inside a tuple. 3.15.5: struct fields bound,
+// partly (`..`) or renamed. 3.15.6: per-position or whole-pattern type.
+// 3.15.9: all bindings are in scope after the `let`. 3.15.10: the
+// right-hand side runs once. 3.15.11: swap and split in one `let`.
+struct Point { x: i32; y: i32; }
+
+fn divmod(a: i32, b: i32) -> (i32, i32) { (a / b, a % b) }
+
+fn main() {
+    let (q, r) = divmod(10, 3);
+    let (q2, _) = divmod(10, 3);
+    let ((a, b), c) = ((1, 2), 3);
+    println(f"{q} {r} {q2} | {a} {b} {c}");
+
+    let origin = Point { x: 3, y: 4 };
+    let (Point { x, y }, scale) = (origin, 2.5f64);
+    let Point { x: x2, .. } = origin;
+    let Point { x: px, y: py } = origin;
+    println(f"{x} {y} {scale} | {x2} {px} | {px} {py}");
+
+    let (n: i32, s: str) = (1i32, "hi");
+    let (n2, s2): (i32, str) = (1i32, "hi");
+    println(f"{n} {s} {n2} {s2}");
+
+    let calls = 0;
+    let make = [ref calls] || -> (i32, i32) { calls += 1; return (1, 2); };
+    let (m1, m2) = make();
+    let (m2, m1) = (m1, m2);
+    println(f"{m2} {m1} | calls={calls} {m1 + m2 + 4}");
+    let items = (1, 2, 3);
+    let (head, ..tail) = items;
+    if head == 1 { println(f"[{tail.0}, {tail.1}]"); }
+}

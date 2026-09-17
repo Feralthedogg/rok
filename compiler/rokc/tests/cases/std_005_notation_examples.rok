@@ -1,0 +1,27 @@
+// spec: std 005-notation §0.5.1 §0.5.4 §0.5.5
+// expect-exit: 0
+// expect-stdout:
+// 8 4
+// V(4, 6)
+// 127 none
+
+// stdlib 0.5: the notation's own example runs without imports; a user
+// type implements the `Add<Rhs = Self>` signature as written; the
+// saturating / checked variants are separate methods.
+struct V { x: i32; y: i32; }
+impl Add for V {
+    type Output = V;
+    fn add(self, rhs: V) -> V { return V { x: self.x + rhs.x, y: self.y + rhs.y }; }
+}
+
+let a: i32 = 5;
+let b: i32 = 3;
+let c = a + b;
+let x: f64 = 1.5;
+let y: f64 = 2.5;
+let z = x + y;
+println(f"{c} {z}");
+let v = V { x: 1, y: 2 } + V { x: 3, y: 4 };
+println(f"V({v.x}, {v.y})");
+let m: i8 = 120;
+println(f"{m.saturating_add(10)} {m.checked_add(10):?}");

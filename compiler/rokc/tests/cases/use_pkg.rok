@@ -1,4 +1,5 @@
-// expect-exit: 9
+// expect-exit: 0
+// expect-stdout: 9
 
 pub mod top {
     pub fn val() -> i32 { 9i32 }
@@ -9,8 +10,8 @@ mod nested {
     pub fn caller() -> i32 { val() }
 }
 
-fn main() -> i32 {
-    return nested::caller();
+fn main() {
+    println(f"{nested::caller()}");
 }
 
 // spec: 005.05-use

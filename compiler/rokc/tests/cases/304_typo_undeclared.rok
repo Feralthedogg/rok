@@ -7,3 +7,5 @@ fn main() -> i32 {
     coutner = counter + 1;    // typo: 'coutner' is undeclared
     return counter;
 }
+// spec: §3.4.2
+// spec: §5.1.2

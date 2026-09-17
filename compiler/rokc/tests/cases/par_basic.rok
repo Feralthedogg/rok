@@ -51,3 +51,4 @@ fn main() -> i32 {
 }
 
 // spec: std 219-par
+// spec: std §2.19.2-2.19.5

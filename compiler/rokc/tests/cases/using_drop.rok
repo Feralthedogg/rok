@@ -48,3 +48,4 @@ fn main() -> i32 {
 }
 
 // spec: 003.17-using-expression
+// spec: §3.17.4 §3.17.5 §3.17.6

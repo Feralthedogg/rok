@@ -1,0 +1,8 @@
+// A folder submodule of a folder module.
+pub mod chars;
+
+pub struct Token { pub v: i32; }
+
+impl Token {
+    pub fn show(self) -> str { f"tok:{self.v}" }
+}

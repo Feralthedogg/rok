@@ -1,0 +1,82 @@
+// spec: §2.2.1 §2.2.3 §2.2.4 §2.2.5 §2.2.6 §2.2.7 §2.2.8 §2.2.10
+// expect-exit: 0
+// expect-stdout:
+// i32 true true
+// str f64
+// 1 0 true
+// sum true
+// true i32
+// 5 1
+// f64 str
+// e: bad input
+
+enum Shape { Circle(f64), Square(f64) }
+
+struct Cell { tag: i32; payload: any; }
+
+#[derive(Debug)]
+struct ParseError { pos: i32; }
+
+impl Display for ParseError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("bad input") }
+}
+
+impl Error for ParseError {}
+
+fn compute(x, y) { x + y }
+
+fn describe(e: any Error) -> str {
+    let msg = f"{e}";
+    match e {
+        p: ParseError => f"e: {msg}",
+        _ => msg,
+    }
+}
+
+fn main() {
+    // 2.2.1 / 2.2.3: only a written `any` is dynamic; operators dispatch.
+    let z = 42i32;
+    let y: any = 42i32;
+    let w = y + 1i32;
+    let b = y == 42i32;
+    println(f"{z.type_name_of()} {w == 43i32} {b}");
+    // 2.2.4: an `any` slot takes another type.
+    let s: any = 42i32;
+    s = "hello";
+    let t1 = s.type_name_of();
+    s = 3.14f64;
+    println(f"{t1} {s.type_name_of()}");
+    // 2.2.5: `is` on `any`, on a sum stored whole, and on an enum variant.
+    let shapes = [Shape::Circle(1.0), Shape::Square(2.0), Shape::Circle(3.0)];
+    let circles = 0;
+    for sh in shapes {
+        if sh is Shape::Circle { circles += 1; }
+    }
+    let k: i32 | str = 7;
+    let held: any = k;
+    println(f"{circles - 1} {(z is f64) as i32} {held is (i32 | str)}");
+    match held {
+        v: i32 | str => println(f"sum {v is i32}"),
+        _ => println("other"),
+    }
+    // 2.2.6: narrowing in `&&` terms; assignment writes the slot back.
+    let v: any = 1i32;
+    if v is i32 && v > 0i32 {
+        v = v + 1i32;
+    }
+    println(f"{v == 2i32} {v.type_name_of()}");
+    // 2.2.7: untyped parameters are generic, monomorphized per call.
+    println(f"{compute(2, 3)} {compute(0.5, 0.5)}");
+    let c = Cell { tag: 1, payload: 5.5 };
+    // 2.2.8: a new scope may redeclare as a new slot.
+    let x = 1;
+    {
+        let x: any = "x";
+        println(f"{c.payload.type_name_of()} {x.type_name_of()}");
+    }
+    // 2.2.10: `any Error` widens to `any Display` and to `any`.
+    let e: any Error = ParseError { pos: 0 };
+    let d: any Display = e;
+    let a: any = e;
+    println(describe(e));
+}

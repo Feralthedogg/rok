@@ -66,3 +66,4 @@ for await x in m { total += x; }
 println(f"custom {total}");
 
 // spec: std 208-stream
+// spec: std §2.8.1 §2.8.2 §2.8.5

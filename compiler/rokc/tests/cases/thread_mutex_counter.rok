@@ -58,3 +58,4 @@ fn main() -> i32 {
 }
 
 // spec: std 304-thread
+// spec: std §2.16.4a §2.18.5

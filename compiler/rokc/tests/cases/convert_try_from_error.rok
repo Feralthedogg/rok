@@ -90,3 +90,4 @@ fn main() {
     };
     let _ = (e.v, b, p, h, i.v, j.v, c);
 }
+// spec: std §2.11.9

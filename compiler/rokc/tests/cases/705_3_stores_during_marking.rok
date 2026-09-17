@@ -31,3 +31,4 @@ fn main() -> i32 {
     println(f"total {total}");
     return 0;
 }
+// spec: 007.05-concurrent-collection §7.5.1 §7.5.2 §7.5.4

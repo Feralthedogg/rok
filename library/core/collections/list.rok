@@ -38,6 +38,7 @@ impl<T> List<T> {
         List::with_capacity(4)
     }
 
+    #[track_caller]
     pub fn with_capacity(cap: usize) -> List<T> {
         unsafe {
             let h: GcBuf<ListHead<T>> = buf_new(1);
@@ -70,6 +71,7 @@ impl<T> List<T> {
     }
 
     /// Room for `additional` more elements (doubling).
+    #[track_caller]
     pub fn reserve(self, additional: usize) {
         unsafe {
             let n = self.len();

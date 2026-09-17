@@ -1,0 +1,51 @@
+// spec: §2.13.1 §2.13.2 §2.13.3 §2.13.5 §2.13.6 §2.13.7
+// expect-exit: 0
+// expect-stdout:
+// 2147483647 0 0
+// 3 5
+// 42 [1.5, 2.5]
+// 1 g
+
+mod geom {
+    pub struct Point { pub x: i32; pub y: i32; }
+
+    impl Point {
+        pub fn origin() -> Point { Point { x: 0, y: 0 } }
+    }
+
+    pub mod inner {
+        pub fn sum(p: sup::Point) -> i32 { p.x + p.y }
+    }
+}
+
+fn out<T: Add<T>>(a: T, b: T) -> T::Output { a + b }
+
+fn pick(n: i32) -> pkg::geom::Point | str {
+    if n > 0 { return geom::Point { x: n, y: n }; }
+    "g"
+}
+
+fn main() {
+    // Associated items: a const, a static method, a turbofish `new`.
+    let o = geom::Point::origin();
+    let xs = List::<i32>::new();
+    println(f"{i32::MAX} {o.x} {xs.len()}");
+    // `T::Output` and an absolute `pkg::` path.
+    let p = pkg::geom::Point { x: 1, y: 2 };
+    println(f"{out(1, 2)} {geom::inner::sum(p) + 2}");
+    // Turbofish in expression position.
+    let n = try! "42".parse::<i32>();
+    let fs = [1.5, 2.5].iter().collect::<List<f64>>();
+    println(f"{n} {fs:?}");
+    // A path inside a sum type.
+    let a = pick(1);
+    let b = pick(0);
+    match a {
+        q: pkg::geom::Point => print(f"{q.x} "),
+        s: str => print(s),
+    }
+    match b {
+        q: geom::Point => println(f"{q.x}"),
+        s: str => println(s),
+    }
+}

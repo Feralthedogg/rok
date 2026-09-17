@@ -25,3 +25,4 @@ let v: i32 | f64 = pick();
 println(v.type_name_of());
 let z: any = "hello";
 println(z.type_name_of());
+// spec: §6.10.1

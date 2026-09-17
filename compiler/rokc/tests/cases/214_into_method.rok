@@ -9,3 +9,5 @@ fn main() -> i32 {
     println(f"{n}");
     return 0;
 }
+
+// spec: §2.14.3

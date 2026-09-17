@@ -1,5 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/list_with_capacity_overflow.rok:9:25:
 // expect-stderr: capacity overflow
+// expect-stdout:
 
 // A capacity whose byte size passes what one allocation can address
 // panics before allocating (no wrapped, too-small buffer).

@@ -6,3 +6,5 @@ fn main() -> i32 {
     let rok = 1;
     return rok;
 }
+
+// spec: §1.5.4

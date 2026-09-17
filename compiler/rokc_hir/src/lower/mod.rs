@@ -30,6 +30,7 @@ mod desugar;
 mod expr;
 mod frame_ptr;
 mod fstring;
+mod incr;
 mod infer;
 mod method_value;
 mod mono;
@@ -52,6 +53,7 @@ use expr::{
     hir_local, lower_block, lower_cond, lower_expr, lower_loop_body, lower_sibling_pair,
     method_call_on, parse_char_literal, parse_int_literal, resolve_enum_variant, variant_arg_tys,
 };
+pub use incr::{Bodies, BodyCache, BodyReuse, Unit};
 use mono::{
     bind_from_arg, bind_self, generic_enum_variants, generic_struct_fields, generic_subst,
     lower_fn, monomorphize, monomorphize_on, resolve_in_mono, unify_param_ty_with,
@@ -809,11 +811,15 @@ impl TypeDefs<'_> {
     }
 
     fn struct_id(&self, key: &str) -> Option<StructId> {
-        self.struct_table.borrow().get(key).copied()
+        let id = self.struct_table.borrow().get(key).copied();
+        incr::log_type(false, key, id.map(|i| i.0));
+        id
     }
 
     fn enum_id(&self, key: &str) -> Option<EnumId> {
-        self.enum_table.borrow().get(key).copied()
+        let id = self.enum_table.borrow().get(key).copied();
+        incr::log_type(true, key, id.map(|i| i.0));
+        id
     }
 
     /// Instance `base<args>` of a generic struct (the existing one, or a
@@ -828,7 +834,12 @@ impl TypeDefs<'_> {
         fields: impl FnOnce(&AstStructDef, &TySubst) -> Vec<HirField>,
     ) -> Option<StructId> {
         let key = mangle_inst(base, &args);
-        if let Some(id) = self.struct_id(&key) {
+        let found = self.struct_table.borrow().get(&key).copied();
+        incr::log(
+            || format!("ts|{key}"),
+            || incr::Lookup::StructInst(base.to_owned(), args.clone(), found),
+        );
+        if let Some(id) = found {
             return Some(id);
         }
         let def = *self.generic_structs.get(base)?;
@@ -860,7 +871,12 @@ impl TypeDefs<'_> {
         variants: impl FnOnce(&AstEnumDef, &TySubst) -> Vec<HirEnumVariant>,
     ) -> Option<EnumId> {
         let key = mangle_inst(base, &args);
-        if let Some(id) = self.enum_id(&key) {
+        let found = self.enum_table.borrow().get(&key).copied();
+        incr::log(
+            || format!("te|{key}"),
+            || incr::Lookup::EnumInst(base.to_owned(), args.clone(), found),
+        );
+        if let Some(id) = found {
             return Some(id);
         }
         let def = *self.generic_enums.get(base)?;
@@ -1700,6 +1716,31 @@ struct InstanceWarns {
 }
 
 impl InstanceWarns {
+    /// Instance `id` of the template at `template` is lowered.
+    fn instance(&mut self, template: rokc_diagnostic::Span, id: FunctionId) {
+        incr::log_warn(|| incr::WarnEvent::Instance(template, id));
+        self.instances.entry(template).or_default().insert(id);
+    }
+
+    /// Instance `id` of the template at `template` raised `d`.
+    fn warn(
+        &mut self,
+        template: rokc_diagnostic::Span,
+        d: rokc_diagnostic::RokDiagnostic,
+        id: FunctionId,
+    ) {
+        incr::log_warn(|| incr::WarnEvent::Warn(template, d.clone(), id));
+        let same = |(t, w, _): &&mut (_, rokc_diagnostic::RokDiagnostic, _)| {
+            *t == template && w.message == d.message && w.primary == d.primary
+        };
+        if let Some((_, _, by)) = self.warns.iter_mut().find(same) {
+            by.insert(id);
+        } else {
+            self.warns
+                .push((template, d, std::iter::once(id).collect()));
+        }
+    }
+
     /// The warnings every instance of their template raised.
     fn agreed(self) -> impl Iterator<Item = rokc_diagnostic::RokDiagnostic> {
         let instances = self.instances;
@@ -1917,6 +1958,9 @@ struct LowerCtx<'a> {
     /// What is being lowered (the expression, statement or item): where
     /// diagnostics without a location of their own go.
     at: std::cell::Cell<Span>,
+    /// Temporaries named so far (`expr::tmp_path`): their names count
+    /// per body, so a body lowers the same whatever was lowered before.
+    temps: std::cell::Cell<u32>,
 }
 
 /// Where a speculative lowering started (`probe_mark`); `rollback`
@@ -2055,6 +2099,7 @@ impl<'a> LowerCtx<'a> {
             infer_vars: false,
             splices: HashMap::new(),
             at: std::cell::Cell::new(at),
+            temps: std::cell::Cell::new(0),
         }
     }
 
@@ -2103,15 +2148,11 @@ impl<'a> LowerCtx<'a> {
         let Some(Some((template, id))) = self.env.sink.instances.borrow().last().copied() else {
             return;
         };
-        let mut iw = self.env.sink.instance_warns.borrow_mut();
-        let same = |(t, w, _): &&mut (_, rokc_diagnostic::RokDiagnostic, _)| {
-            *t == template && w.message == d.message && w.primary == d.primary
-        };
-        if let Some((_, _, by)) = iw.warns.iter_mut().find(same) {
-            by.insert(id);
-        } else {
-            iw.warns.push((template, d, std::iter::once(id).collect()));
-        }
+        self.env
+            .sink
+            .instance_warns
+            .borrow_mut()
+            .warn(template, d, id);
     }
 
     /// Report a type error and return a poisoned placeholder (`Unknown`
@@ -2748,8 +2789,13 @@ impl<'a> LowerCtx<'a> {
     // tag, which is then build-local.
     fn any_tag(&self, ty: &HirTy) -> u32 {
         let mut tags = self.env.sink.any_tags.borrow_mut();
-        if let Some((_, tag)) = tags.iter().find(|(t, _)| t == ty) {
-            return *tag;
+        let found = tags.iter().find(|(t, _)| t == ty).map(|(_, tag)| *tag);
+        incr::log(
+            || format!("a|{ty:?}"),
+            || incr::Lookup::AnyTag(ty.clone(), found),
+        );
+        if let Some(tag) = found {
+            return tag;
         }
         let mut tag = self.ty_name(ty).bytes().fold(0x811c_9dc5_u32, |h, b| {
             (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
@@ -2808,7 +2854,12 @@ impl<'a> LowerCtx<'a> {
 
     /// The instances of generic enum `base` made so far.
     fn enum_instantiations(&self, base: &str) -> Vec<EnumId> {
-        Self::instantiations(&self.env.defs.enum_table.borrow(), base)
+        let ids = Self::instantiations(&self.env.defs.enum_table.borrow(), base);
+        incr::log(
+            || format!("ie|{base}"),
+            || incr::Lookup::EnumInsts(base.to_owned(), ids.clone()),
+        );
+        ids
     }
 
     /// `instantiate_struct` for a generic enum.
@@ -2978,6 +3029,16 @@ impl<'a> LowerCtx<'a> {
             &set,
         ) {
             Ok(r) => r,
+            // An item and its re-exports are one item (spec 5.8.4).
+            Err(hits)
+                if hits.iter().all(|h| {
+                    let id = |k: &String| fns.get(k).map(|s| s.id);
+                    let def = |k: &String| gens.get(k).map(|d| std::ptr::from_ref::<FnDef>(d));
+                    id(h) == id(&hits[0]) && def(h) == def(&hits[0])
+                }) =>
+            {
+                hits.into_iter().next()
+            }
             Err(hits) => {
                 self.report_ambiguous(&segments.join("::"), &hits);
                 hits.into_iter().next()
@@ -3795,6 +3856,7 @@ impl<'a> LowerCtx<'a> {
     /// the declaration omits it (spec 4.1.3).
     fn sig_of_key(&self, key: &str) -> FnSig {
         let mut sig = self.env.fn_table[key].clone();
+        incr::log_sig(key, &sig);
         if self.env.infer_ret.contains(&sig.id) {
             sig.ret_ty = mono::decl_ret(self, sig.id, sig.ret_ty);
         }

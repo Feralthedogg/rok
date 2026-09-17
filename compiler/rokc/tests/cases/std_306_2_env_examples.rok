@@ -1,0 +1,37 @@
+// spec: std 306-env §3.6.2 §3.6.3
+// expect-exit: 1
+// expect-stderr: usage: tool <input>
+// expect-stdout:
+// log level: info debug
+// config: myapp.toml true
+// PATH dirs: true
+
+// stdlib 3.6.2: the spec's CLI flow — a missing variable falls back with
+// `try?`, `home_dir` / `/` build a config path, `split_paths` walks PATH,
+// and with no input argument the tool prints its usage to stderr and
+// exits 1. `set_var` is called first thing (3.6.3).
+use rok::std::env;
+use rok::std::path::Path;
+
+fn main() {
+    env::set_var("ROK_ENV_EXAMPLE_LEVEL", "debug");
+    let log_level = (try? env::var("ROK_ENV_EXAMPLE_UNSET")) ?? "info";
+    let set_level = (try? env::var("ROK_ENV_EXAMPLE_LEVEL")) ?? "info";
+    println(f"log level: {log_level} {set_level}");
+
+    let home = env::home_dir() ?? Path::from("nohome");
+    let config = home / ".config" / "myapp.toml";
+    println(f"config: {config.file_name() ?? "?"} {config.starts_with(home)}");
+
+    let path_str = (try? env::var("PATH")) ?? "";
+    let n = 0;
+    for dir in env::split_paths(path_str) { n += 1; }
+    println(f"PATH dirs: {n >= 0}");
+
+    let args = env::args();
+    if args.len() < 2 {
+        eprintln("usage: tool <input>");
+        env::exit(1);
+    }
+    println(f"input: {args[1]}");
+}

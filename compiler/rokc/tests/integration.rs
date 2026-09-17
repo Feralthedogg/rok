@@ -199,17 +199,33 @@ fn check_run(
     if !exit_matches(exit, expected) {
         return Err(format!("exit={exit} (expected {expected})"));
     }
-    let got = String::from_utf8_lossy(&run.stderr);
-    if let Some(want) = directives(source, "expect-stderr:").find(|w| !got.contains(w)) {
-        return Err(format!("stderr lacks {want:?}\n    stderr: {got:?}"));
-    }
-    if let Some(want) = parse_expect_stdout(source) {
-        let got = String::from_utf8_lossy(&run.stdout);
-        if got.trim_end() != want.trim_end() {
-            return Err(format!(
-                "stdout mismatch\n  want: {want:?}\n  got:  {got:?}"
-            ));
+    // Library panic locations are absolute: relative to the workspace.
+    let root = fs::canonicalize(workspace()).unwrap();
+    let root = format!("{}/", root.display()).replace('\\', "/");
+    let got = String::from_utf8_lossy(&run.stderr)
+        .replace('\\', "/")
+        .replace(&root, "");
+    // wasmtime's notice on `-S threads` (wasm32-wasi-threads) and the
+    // blank padding around it are not the program's.
+    let got = match got.split_once('\n') {
+        Some((first, rest)) if first.starts_with("WARNING: the `-Sthreads` flag") => {
+            rest.trim().to_owned()
         }
+        _ => got,
+    };
+    let got: Vec<&str> = got.lines().map(str::trim).collect();
+    let want: Vec<&str> = directives(source, "expect-stderr:").collect();
+    if got != want {
+        return Err(format!(
+            "stderr mismatch\n  want: {want:?}\n  got:  {got:?}"
+        ));
+    }
+    let want = parse_expect_stdout(source).ok_or("missing `// expect-stdout:` directive")?;
+    let got = String::from_utf8_lossy(&run.stdout);
+    if got.trim_end() != want.trim_end() {
+        return Err(format!(
+            "stdout mismatch\n  want: {want:?}\n  got:  {got:?}"
+        ));
     }
     Ok(())
 }

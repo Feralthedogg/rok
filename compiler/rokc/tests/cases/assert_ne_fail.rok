@@ -1,7 +1,10 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/assert_ne_fail.rok:10:5:
 // expect-stderr: assertion `left != right` failed
-// expect-stderr:   left: "a"
-// expect-stderr:  right: "a"
+// expect-stderr: left: "a"
+// expect-stderr: right: "a"
+// expect-stdout:
+
 // A failed `assert_ne` without a message; `Debug` quotes strings.
 fn main() -> i32 {
     assert_ne("a", "a");

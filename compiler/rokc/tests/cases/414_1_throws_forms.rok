@@ -1,0 +1,127 @@
+// spec: §4.14.1 §4.14.2 §4.14.3 §4.14.4 §4.14.5 §4.14.8 §4.14.9 §4.14.10 §4.14.11 §4.14.12
+// expect-exit: 0
+// expect-stdout:
+// 5 0
+// parse 7
+// io 2 timeout 3 ok 4
+// config io
+// 0 9
+// 4 4 -1
+// fetch 8 / net
+// lines a,b / line 3 bad
+// query 10 / sql
+
+// Spec 4.14: untyped and typed (sum) `throws`, exhaustive `catch` making
+// a caller non-throwing, rethrowing as another type, `try?` / `try!`,
+// throwing fn types (non-throwing values fit), `throws` with `async` /
+// `yield` (errors at `await` / each `next`, `try for`) and on methods.
+#[derive(Debug)]
+struct ParseError { at: i32; }
+impl Error for ParseError {}
+impl Display for ParseError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("parse") }
+}
+
+struct IOError { code: i32; }
+struct TimeoutError { secs: i32; }
+struct NetworkError {}
+struct SqlError {}
+enum ConfigError { Io, Syntax }
+
+fn add(x: i32, y: i32) -> i32 { x + y }
+
+fn parse(s: str) throws -> i32 {
+    if s == "x" { throw ParseError { at: 0 }; }
+    5
+}
+
+fn parse_or_load(n: i32) throws (ParseError | IOError | TimeoutError) -> i32 {
+    if n == 1 { throw ParseError { at: 7 }; }
+    if n == 2 { throw IOError { code: 2 }; }
+    if n == 3 { throw TimeoutError { secs: 3 }; }
+    n
+}
+
+fn caller(n: i32) -> str {
+    try { f"ok {parse_or_load(n)}" }
+    catch e: ParseError { f"parse {e.at}" }
+    catch e: IOError { f"io {e.code}" }
+    catch e: TimeoutError { f"timeout {e.secs}" }
+}
+
+fn load_config(n: i32) throws (ConfigError) -> i32 {
+    try parse_or_load(n)
+    catch e: IOError { throw ConfigError::Io; }
+    catch _ { throw ConfigError::Syntax; }
+}
+
+fn caller4(s: str, t: str) -> i32 {
+    let a = (try? parse(s)) ?? 0;
+    let b = try! parse(t);
+    a + b
+}
+
+fn len_of(s: str) -> i32 { s.len() as i32 }
+
+fn parse_typed(s: str) throws (ParseError) -> i32 {
+    if s == "" { throw ParseError { at: -1 }; }
+    s.len() as i32
+}
+
+async fn fetch(ok: bool) throws (NetworkError) -> i32 {
+    if !ok { throw NetworkError {}; }
+    8
+}
+
+yield fn lines(s: str) throws (ParseError) -> str {
+    for part in s.split(",") {
+        if part == "!" { throw ParseError { at: 3 }; }
+        yield part;
+    }
+}
+
+struct Database {}
+impl Database {
+    fn query(self, sql: str) throws (SqlError) -> i32 {
+        if sql == "" { throw SqlError {}; }
+        10
+    }
+}
+
+fn run_lines(s: str) throws (ParseError) -> str {
+    let out = "";
+    try for line in lines(s) {
+        out = if out == "" { line } else { f"{out},{line}" };
+    }
+    out
+}
+
+async fn main() {
+    println(f"{try parse("1") catch _ { 0 }} {try parse("x") catch _ { 0 }}");
+    println(caller(1));
+    println(f"{caller(2)} {caller(3)} {caller(4)}");
+    let cfg = try f"{load_config(2)}" catch e: ConfigError { match e { ConfigError::Io => "io", ConfigError::Syntax => "syntax" } };
+    println(f"config {cfg}");
+    println(f"{caller4("x", "1") - 5} {caller4("1", "1") - 1}");
+
+    let p: fn(str) throws (ParseError) -> i32 = len_of;
+    let q: fn(str) throws -> i32 = parse_typed;
+    let r = try p("abcd") catch _ { 0 };
+    let s = try q("abcd") catch _ { 0 };
+    let t = try q("") catch _ { -1 };
+    println(f"{r} {s} {t}");
+
+    let f = fetch(true);
+    let d = try await f catch e: NetworkError { 0 };
+    let n = try await fetch(false) catch e: NetworkError { -1 };
+    println(f"fetch {d} / {if n < 0 { "net" } else { "?" }}");
+
+    let ok = try run_lines("a,b") catch _ { "" };
+    let bad = try run_lines("a,!") catch e: ParseError { f"line {e.at} bad" };
+    println(f"lines {ok} / {bad}");
+
+    let db = Database {};
+    let rows = try db.query("select") catch _ { 0 };
+    let err = try f"{db.query("")}" catch e: SqlError { "sql" };
+    println(f"query {rows} / {err}");
+}

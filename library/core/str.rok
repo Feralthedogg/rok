@@ -85,6 +85,7 @@ impl str {
         (self[:i], self[i + sep.len():])
     }
     /// `n` copies back to back.
+    #[track_caller]
     pub fn repeat(self, n: usize) -> str {
         let b = StrBuf::with_capacity(cap_mul(self.len(), n));
         for _ in 0..n { b.push_str(self); }
@@ -485,6 +486,7 @@ impl !Sync for StrBuf {}
 impl StrBuf {
     pub fn new() -> StrBuf { StrBuf::with_capacity(16) }
 
+    #[track_caller]
     pub fn with_capacity(cap: usize) -> StrBuf {
         unsafe {
             let h: GcBuf<StrBufHead> = buf_new(1);
@@ -512,6 +514,7 @@ impl StrBuf {
     }
 
     /// Room for `additional` more bytes (doubling).
+    #[track_caller]
     pub fn reserve(self, additional: usize) {
         unsafe {
             let n = self.len();

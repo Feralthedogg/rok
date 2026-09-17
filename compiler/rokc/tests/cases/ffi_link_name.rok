@@ -14,3 +14,4 @@ extern "C" {
 fn main() {
     println(f"{unsafe { c_abs(-5) }} {unsafe { magnitude(7) }}");
 }
+// spec: §6.2.3

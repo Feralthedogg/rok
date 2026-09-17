@@ -1,5 +1,8 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/assert_fail.rok:9:5:
 // expect-stderr: assertion failed: x must be positive
+// expect-stdout:
+
 // A failed `assert` aborts (exit 101) with its message.
 fn main() -> i32 {
     let x = -1;

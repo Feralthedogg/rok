@@ -1,4 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_shift_overflow_panics.rok:6:38:
+// expect-stderr: attempt to shift left with overflow
+// expect-stdout:
 
 fn s(a: i32, n: i32) -> i32 { return a << n; }
 

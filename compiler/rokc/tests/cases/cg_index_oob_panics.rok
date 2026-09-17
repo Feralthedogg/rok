@@ -1,4 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_index_oob_panics.rok:9:12:
+// expect-stderr: index out of bounds
+// expect-stdout:
 
 fn main() -> i32 {
     let a: [i32; 3] = [1, 2, 3];

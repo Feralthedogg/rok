@@ -7,3 +7,5 @@ struct W<T> { a: T; b: T; }
 fn main() {
     let x: W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<W<i64>>>>>>>>>>>>>>>>>>>>>>>>>>> = panic("unreachable");
 }
+
+// spec: §2.6.3

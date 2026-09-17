@@ -214,3 +214,11 @@ pub fn apply_keywords(tokens: &mut Vec<Token>, kws: &KeywordTable, diags: &mut V
     }
     *tokens = out;
 }
+
+rokc_core::codec_struct!(KeywordDef {
+    name,
+    handler,
+    ty,
+    file,
+    span
+});

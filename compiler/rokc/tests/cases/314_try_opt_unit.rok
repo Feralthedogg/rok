@@ -1,0 +1,27 @@
+// spec: 003.14.3-try-opt
+// expect-exit: 0
+// expect-stdout:
+// true false true
+// none ok
+// 1
+
+// `try? e` is `T | none` (spec 3.14.3), also for `T = ()`: a function
+// returning nothing that throws only sometimes gives `none` when it threw.
+// In statement position the error is just dropped.
+#[derive(Debug)]
+struct E {}
+impl Display for E { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("E") } }
+impl Error for E {}
+
+fn v(x: i32) throws (E) { if x > 1 { throw E {}; } }
+fn w(x: i32) throws (E) { throw E {}; }
+
+fn main() -> i32 {
+    println(f"{(try? v(2)) is none} {(try? v(0)) is none} {(try? w(0)) is none}");
+    let a = match try? v(5) { none => "none", _ => "unit" };
+    let b = match try? v(1) { none => "none", _ => "ok" };
+    println(f"{a} {b}");
+    try? v(3);
+    println("1");
+    return 0;
+}

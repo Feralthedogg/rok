@@ -5,3 +5,5 @@
 trait Shape { fn area(self) -> i32; }
 
 fn total(a: Shape) -> i32 { return a.area(); }
+
+// spec: §2.12.1

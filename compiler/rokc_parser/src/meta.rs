@@ -1741,3 +1741,15 @@ const fn item_attrs_mut(item: &mut Item) -> &mut Vec<Attribute> {
         Item::Extern(x) => &mut x.attrs,
     }
 }
+
+rokc_core::codec_enum!(MetaKind { Derive, Attribute });
+rokc_core::codec_struct!(MetaDef {
+    kind,
+    name,
+    field_attr,
+    public,
+    file,
+    span,
+    body,
+    cfg
+});

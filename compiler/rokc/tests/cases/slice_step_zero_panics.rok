@@ -1,5 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/slice_step_zero_panics.rok:11:16:
 // expect-stderr: slice step must not be zero
+// expect-stdout: [1, 2, 3, 4, 5]
 
 // Spec 3.6.2: bounds clamp, but a zero step panics (Python's ValueError).
 fn main() {

@@ -1,4 +1,6 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/any_op_mismatch.rok:11:9:
+// expect-stderr: operator `<` is not defined for the runtime type of an `any` value
 // expect-stdout:
 // 1
 

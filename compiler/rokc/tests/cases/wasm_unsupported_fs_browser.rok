@@ -18,3 +18,4 @@ try fs::read_to_str("/data.txt") catch e: IoError { println(f"read: {e.kind():?}
 try fs::create_dir("/d") catch e: IoError { println(f"create_dir: {e.kind():?}"); };
 try fs::read_dir("/") catch e: IoError { println(f"read_dir: {e.kind():?}"); };
 println(f"exists: {fs::exists("/data.txt")}");
+// spec: std 301-fs §3.1.6

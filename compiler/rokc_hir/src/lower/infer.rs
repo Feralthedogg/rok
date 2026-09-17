@@ -22,6 +22,7 @@
 use super::*;
 
 /// An inference variable: what it is bound to, and where.
+#[derive(Clone)]
 pub(super) struct Var {
     ty: Option<HirTy>,
     /// Bound from an unsuffixed literal: a later concrete use of the same
@@ -31,6 +32,13 @@ pub(super) struct Var {
     /// The first use that disagreed with the binding: where, and the type.
     conflict: Option<(rokc_diagnostic::Span, HirTy)>,
 }
+
+rokc_core::codec_struct!(Var {
+    ty,
+    weak,
+    fixed,
+    conflict
+});
 
 pub(super) fn fresh(ctx: &LowerCtx<'_>) -> HirTy {
     let mut vars = ctx.env.sink.infer_vars.borrow_mut();

@@ -47,3 +47,4 @@ for await x in stream::select(nums(2, 1), nums(50, 1)) { c = c + 1; }
 println(f"select stops early {c < 10}");
 
 // spec: 004.12-async
+// spec: std §2.8.8

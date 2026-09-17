@@ -18,3 +18,5 @@ fn main() -> i32 {
     }
     return 0;
 }
+
+// spec: §1.7.1

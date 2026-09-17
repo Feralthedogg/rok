@@ -1,0 +1,34 @@
+// spec: §5.3.1 §5.3.2 §5.3.4 §5.3.6 §5.3.7 §5.3.9
+// expect-exit: 0
+// expect-stdout:
+// 1.0.0 42 false rok
+// 10 11 12
+// 3 2
+
+// Spec 5.3: statics carry visibility like other items, initialize in
+// declaration / dependency order, and mutate only through a wrapper.
+mod m {
+    pub static VERSION: str = "1.0.0";
+    pub(pkg) static INTERNAL: i32 = 42i32;
+    static _local: bool = false;
+    pub fn local() -> bool { return _local; }
+}
+
+static APP_NAME: str = "rok";
+static FIRST: i32 = 10;
+static SECOND: i32 = FIRST + 1;
+static THIRD: i32 = SECOND + 1;
+static COUNTER: Atomic<i32> = Atomic::new(0i32);
+static CELL: Mutex<List<i32>> = Mutex::new([]);
+
+fn bump() {
+    COUNTER.fetch_add(1);
+    using g = CELL.lock() { g.get().push(1); }
+}
+
+println(f"{m::VERSION} {m::INTERNAL} {m::local()} {APP_NAME}");
+println(f"{FIRST} {SECOND} {THIRD}");
+bump();
+bump();
+bump();
+using g = CELL.lock() { println(f"{COUNTER.load()} {g.get().len() - 1}"); }

@@ -1,0 +1,68 @@
+// spec: std 104-alloc §1.4.1 §1.4.2 §1.4.3
+// expect-exit: 0
+// expect-stdout:
+// array: 1000 499500
+// zeroed: 0 grown: 7 3
+// one: 12 many: 30
+// raii: 6
+// layout error: true
+
+// stdlib 1.4: memory outside the GC — `alloc` / `alloc_zeroed` /
+// `realloc` / `dealloc`, the typed helpers, the RAII `Allocation`, and
+// `Layout`'s overflow check.
+use rok::bare::alloc::{
+    Allocation, Layout, LayoutError, alloc, alloc_array, alloc_one, alloc_zeroed, dealloc,
+    dealloc_array, dealloc_one, realloc,
+};
+use rok::bare::ptr::{CPtr, Ptr};
+use rok::bare::ptr_cast;
+
+fn main() throws (LayoutError) {
+    // 1.4.2, the spec's example.
+    let layout = try Layout::array::<u32>(1000);
+    let p: CPtr<u8> = unsafe { alloc(layout) };
+    match p.as_ptr() {
+        raw: Ptr<u8> => {
+            let typed: Ptr<u32> = ptr_cast::<u32>(raw);
+            let sum = 0u64;
+            unsafe {
+                for i in 0u32..1000u32 { typed.add(i as usize).write(i); }
+                for i in 0usize..1000usize { sum += typed.add(i).read() as u64; }
+            }
+            println(f"array: {layout.size() / 4} {sum}");
+            unsafe { dealloc(raw, layout) };
+        }
+        none => panic("alloc failed"),
+    }
+
+    let l8 = try Layout::array::<u8>(8);
+    let z: Ptr<u8> = unsafe { alloc_zeroed(l8) }.as_ptr() ?? panic("alloc failed");
+    let zero = unsafe { z.add(7).read() };
+    unsafe { z.write(7u8); z.add(1).write(3u8); }
+    let g: Ptr<u8> = unsafe { realloc(z, l8, 4096) }.as_ptr() ?? panic("realloc failed");
+    println(f"zeroed: {zero} grown: {unsafe { g.read() }} {unsafe { g.add(1).read() }}");
+    unsafe { dealloc(g, try Layout::array::<u8>(4096)) };
+
+    let one: Ptr<i64> = unsafe { alloc_one::<i64>() }.as_ptr() ?? panic("alloc failed");
+    let many: Ptr<i32> = unsafe { alloc_array::<i32>(4) }.as_ptr() ?? panic("alloc failed");
+    unsafe {
+        one.write(12);
+        many.add(3).write(30);
+        println(f"one: {one.read()} many: {many.add(3).read()}");
+        dealloc_one(one);
+        dealloc_array(many, 4);
+    }
+
+    using buf = try Allocation::<u32>::new(3) {
+        let q = buf.as_ptr();
+        unsafe {
+            q.write(1);
+            q.add(1).write(2);
+            q.add(2).write(3);
+            println(f"raii: {q.read() + q.add(1).read() + q.add(2).read()}");
+        }
+    }
+
+    let huge = try Layout::array::<u64>(usize::MAX / 4) catch _: LayoutError { Layout::new::<u8>() };
+    println(f"layout error: {huge.size() == 1}");
+}

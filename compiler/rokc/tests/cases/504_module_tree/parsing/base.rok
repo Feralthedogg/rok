@@ -1,0 +1,4 @@
+pub fn base_name() -> str { "base" }
+
+// `pub(pkg)`: re-exported by `parsing` at most as `pub(pkg)`.
+pub(pkg) fn visible_count() -> i32 { 4 }

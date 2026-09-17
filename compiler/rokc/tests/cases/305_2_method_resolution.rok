@@ -1,0 +1,39 @@
+// spec: §3.5.2 §3.5.3
+// expect-exit: 0
+// expect-stdout:
+// inherent trait
+// 4 6
+// 42 [1.5, 2.5]
+// 6 6 3
+
+// spec 3.5.2: an inherent method wins over a trait method of the same
+// name; a trait method is reachable through the qualified path. A
+// `ref self` receiver is passed without writing `ref`. Turbofish names a
+// method's type arguments. 3.5.3: `Type::item` needs no instance, and
+// `obj.method(a)` is `Type::method(obj, a)`.
+struct P { x: i32; y: i32; }
+
+trait Named { fn name(self) -> str; }
+
+impl P {
+    fn name(self) -> str { "inherent" }
+    fn origin() -> P { P { x: 0, y: 0 } }
+    fn grow(ref self, by: i32) { self.x += by; self.y += by; }
+    fn sum(self) -> i32 { self.x + self.y }
+}
+impl Named for P {
+    fn name(self) -> str { "trait" }
+}
+
+fn main() {
+    let p = P::origin();
+    println(f"{p.name()} {Named::name(p)}");
+    p.grow(2);
+    let q = P { x: 1, y: 3 };
+    q.grow(1);
+    println(f"{p.sum()} {q.sum()}");
+    let v = try "42".parse::<i32>() catch _ { 0 };
+    let fs = [1.5, 2.5].iter().collect::<List<f64>>();
+    println(f"{v} {fs:?}");
+    println(f"{P::sum(q)} {q.sum() - 1 + 1} {P { x: 1, y: 2 }.sum()}");
+}

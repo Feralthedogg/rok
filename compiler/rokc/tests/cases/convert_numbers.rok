@@ -83,3 +83,4 @@ fn main() {
     let fine: f32 | none = try? f32::try_from(1.5);
     println(f"{show(narrow)} {show(fine)}");
 }
+// spec: std §2.11.2 §2.11.3 §2.11.5

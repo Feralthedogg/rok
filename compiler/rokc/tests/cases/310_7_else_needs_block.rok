@@ -1,0 +1,15 @@
+// spec: §3.10.6 §3.10.7
+// expect-error: 10:29: expected `{`, found integer literal `2`
+// expect-error: 13:26: expected expression, found keyword `let`
+
+// spec 3.10.7: only a block or another `if` follows `else`. 3.10.6:
+// `if let .. && let ..` chains are not part of the language.
+fn main() -> i32 {
+    let a = true;
+    let x: i32 | none = 1;
+    let v = if a { 1 } else 2;
+    let w = if a { 1 } else if !a { 2 } else { 3 };
+    let y: i32 | none = 2;
+    if let p: i32 = x && let q: i32 = y { return p + q; }
+    return v + w;
+}

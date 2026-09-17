@@ -13,3 +13,4 @@ fn main() -> i32 {
     if a == b { println("equal"); }
     return 0;
 }
+// spec: §6.2.1

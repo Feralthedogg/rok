@@ -17,3 +17,4 @@ fn main() throws {
     let z: i32 = try! parse3();
     println(f"{z}");
 }
+// spec: §3.14.3

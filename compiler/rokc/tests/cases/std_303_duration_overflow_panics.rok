@@ -1,7 +1,8 @@
 // rokc-arg: -C overflow-checks=on
 // expect-exit: 101
 // expect-stdout: 1s
-// expect-stderr: overflow
+// expect-stderr: thread 'main' panicked at tests/cases/std_303_duration_overflow_panics.rok:13:13:
+// expect-stderr: attempt to add with overflow
 
 // spec: 3.3.5
 // With overflow checks (debug) `Duration` overflow panics.

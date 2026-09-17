@@ -1,0 +1,36 @@
+// spec: std 303-time §3.3.2
+// expect-exit: 0
+// expect-stdout:
+// elapsed >= 2ms: true
+// since: 5ms backwards: none saturating: 0ns
+// checked: 5ms true
+// never backward: true
+
+// stdlib 3.3.2: `Instant` is monotonic; `duration_since` of a later
+// instant is `none` in the checked form and zero when saturating;
+// `checked_add` / `checked_sub` give `none` on overflow.
+use rok::std::time::{Duration, Instant};
+use rok::std::thread;
+
+let start = Instant::now();
+thread::sleep(Duration::ms(2));
+println(f"elapsed >= 2ms: {start.elapsed() >= Duration::ms(2)}");
+
+let a = Instant::now();
+let b = a + Duration::ms(5);
+let back = a.checked_duration_since(b);
+println(f"since: {b.duration_since(a)} backwards: {if back is none { "none" } else { "some" }} saturating: {a.saturating_duration_since(b)}");
+
+let c = a.checked_add(Duration::ms(5)) ?? a;
+let far = a.checked_add(Duration::MAX);
+let far2 = (a.checked_sub(Duration::MAX) ?? a).checked_sub(Duration::MAX);
+println(f"checked: {c - a} {far is none || far2 is none}");
+
+let prev = Instant::now();
+let ok = true;
+for i in 0..1000 {
+    let now = Instant::now();
+    if now < prev { ok = false; }
+    prev = now;
+}
+println(f"never backward: {ok}");

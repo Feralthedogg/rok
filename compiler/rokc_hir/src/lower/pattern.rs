@@ -1312,7 +1312,8 @@ pub(super) fn literal_to_const(
             if !has_int_suffix(text) {
                 ty = *sp;
             }
-            if ty != *sp || !sp.is_int() {
+            // A `char` is no integer: `0` on `i32 | char` is the `i32`.
+            if ty != *sp || !sp.is_int() || *sp == PrimTy::Char {
                 return None;
             }
             if !int_fits(value, ty) {

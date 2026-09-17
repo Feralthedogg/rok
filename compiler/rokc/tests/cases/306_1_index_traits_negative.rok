@@ -1,0 +1,56 @@
+// spec: §3.6.1 §3.6.2 §3.6.5
+// expect-exit: 0
+// expect-stdout:
+// 30 20 10 | 9 5
+// true 20
+// neg-key -1
+// target index value [1, 99, 3]
+// grid 7 grid 8 | 70
+// sl 2..4 | sl 0..1
+// [2, 3] [1, 2, 3, 4, 5]
+
+// spec 3.6.1: a negative signed index counts from the end (literal or
+// variable), an unsigned index is a plain position; `Dict` keys are
+// unaffected; `.get` gives `T | none`; for `arr[i] = v` the target, the
+// index, then the value are evaluated. 3.6.5: `Index` / `IndexSet` /
+// `Sliceable` impls give a user type brackets, `a[x:y]` and `a[x..y]`
+// both reaching `slice`.
+struct Grid { cells: List<i32>; }
+impl Index<(i32, i32)> for Grid {
+    type Output = str;
+    fn index(self, at: (i32, i32)) -> str { f"grid {at.0 + at.1}" }
+}
+impl IndexSet<i32> for Grid {
+    type Value = i32;
+    fn index_set(ref self, i: i32, v: i32) { self.cells[i] = v; }
+}
+impl Sliceable<Range<usize>> for Grid {
+    type Output = str;
+    fn slice(self, r: Range<usize>) -> str { f"sl {r.start}..{r.end}" }
+}
+
+fn main() {
+    let xs = [10, 20, 30];
+    let i = -2;
+    let u: usize = 0;
+    let arr: [i32; 3] = [5, 7, 9];
+    println(f"{xs[-1]} {xs[i]} {xs[u]} | {arr[-1]} {arr[-3]}");
+    println(f"{xs.get(5) is none} {xs.get(1) ?? 0}");
+    let d: Dict<i32, str> = { -1: "neg-key" };
+    println(f"{d[-1]} -1");
+
+    let log: List<str> = [];
+    let ys = [1, 2, 3];
+    let tgt = [ref log, ys] || -> List<i32> { log.push("target"); return ys; };
+    let idx = [ref log] || -> i32 { log.push("index"); return 1; };
+    let val = [ref log] || -> i32 { log.push("value"); return 99; };
+    tgt()[idx()] = val();
+    println(f"{log[0]} {log[1]} {log[2]} {ys:?}");
+
+    let g = Grid { cells: [0, 0] };
+    g[1] = 70;
+    println(f"{g[3, 4]} {g[(4, 4)]} | {g.cells[1]}");
+    println(f"{g[2:4]} | {g[0..1]}");
+    let zs = [1, 2, 3, 4, 5];
+    println(f"{zs[1..3]:?} {zs[..]:?}");
+}

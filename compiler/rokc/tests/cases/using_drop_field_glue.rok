@@ -45,3 +45,5 @@ fn main() {
     using s2 = s {}
     println("end");
 }
+// spec: std §2.13.4
+// spec: §3.17.7

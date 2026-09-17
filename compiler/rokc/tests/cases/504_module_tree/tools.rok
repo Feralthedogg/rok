@@ -1,0 +1,5 @@
+pub fn five() -> i32 { 5 }
+
+pub mod nested {
+    pub fn two() -> i32 { 2 }
+}

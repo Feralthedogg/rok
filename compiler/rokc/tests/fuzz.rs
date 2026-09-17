@@ -666,7 +666,13 @@ fn signature(o: &Outcome) -> Option<String> {
     if o.stderr.contains("has overflowed its stack") {
         return Some("stack overflow".into());
     }
-    if let Some(at) = o.stderr.find("panicked at ") {
+    // A panic report starts its line (a diagnostic quoting source that
+    // says "panicked at" does not).
+    let report = o.stderr.match_indices("panicked at ").find(|&(at, _)| {
+        let line = o.stderr[..at].rsplit('\n').next().unwrap_or("");
+        line.starts_with("thread '") && line.ends_with("' ")
+    });
+    if let Some((at, _)) = report {
         let rest = &o.stderr[at + "panicked at ".len()..];
         let loc = rest.lines().next().unwrap_or("");
         let file = loc.split(':').next().unwrap_or(loc);
@@ -987,5 +993,7 @@ fn generator_and_mutator_are_deterministic() {
         Some("panic compiler/rokc_hir/src/x.rs: index # out of #")
     );
     assert_eq!(signature(&run(Some(1), "error: [parse] x")), None);
+    let quoted = "error[E002]: x\n 1 | // thread 'main' panicked at a.rok:1:1:\n   |    ^\n";
+    assert_eq!(signature(&run(Some(1), quoted)), None);
     assert_eq!(signature(&run(None, "")).as_deref(), Some("signal"));
 }

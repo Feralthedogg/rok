@@ -1,0 +1,75 @@
+// spec: §2.1.1 §2.1.2 §2.1.3 §2.1.4 §2.1.5 §2.1.6 §2.1.7 §2.1.8 §2.1.9 §2.1.10
+// expect-exit: 0
+// expect-stdout:
+// 3 2.5 7
+// 1 1 0
+// none 5 true
+// 30 3 hi
+// (1,) 2 0 16
+// boom true
+// 2 3
+
+use rok::std::time::Duration;
+
+struct Point { x: i32; y: i32; }
+
+struct Pair<A, B> { a: A; b: B; }
+
+fn apply(f: fn(i32, i32) -> i32, a: i32, b: i32) -> i32 { f(a, b) }
+
+fn pick(n: i32) -> fn(i32) -> (i32 | str) {
+    if n > 0 { return |x: i32| -> i32 | str { x * 10 }; }
+    return |x: i32| -> i32 | str { "hi" };
+}
+
+fn show(v: i32 | str) -> str {
+    match v {
+        n: i32 => f"{n}",
+        s: str => s,
+    }
+}
+
+fn opt(n: i32) -> i32? {
+    if n > 0 { return n; }
+    return none;
+}
+
+fn first<I: Iterator>(it: I) -> I::Item | none { it.next() }
+
+fn main() {
+    // Simple names, paths and generic application (a trailing comma too).
+    let p: Point = Point { x: 1, y: 2 };
+    let xs: List<i32> = [p.x, p.y];
+    let dur: rok::std::time::Duration = Duration::sec(1);
+    let pr: Pair<i32, f64,> = Pair { a: 3, b: 2.5 };
+    let d: Dict<str, i32> = {"k": 7};
+    println(f"{pr.a} {pr.b} {d["k"]}");
+    // `|` binds loosest; `T?` is `T | none`, one layer over a sum.
+    let v: i32 | List<f32> = 1;
+    let w: (i32 | str)? = 1;
+    let z: i32 | str? = none;
+    println(f"{v is i32 as i32} {w is i32 as i32} {xs.len() - 2 + dur.as_secs() as usize - 1}");
+    match z {
+        none => print("none "),
+        _ => print("some "),
+    }
+    println(f"{opt(5) ?? 0} {(opt(0) ?? 0) == 0 && true}");
+    // Function types: the result `(i32 | str)` is grouped.
+    let f = pick(3);
+    let g = pick(0);
+    println(f"{show(f(3))} {apply(|a: i32, b: i32| a + b, 1, 2)} {show(g(1))}");
+    // Tuples (`(T,)`, unit) and arrays (`[T; N]`, `[T; 0]`).
+    let one: (i32,) = (1,);
+    let u: () = ();
+    let arr: [i32; 2] = [1, 1];
+    let empty: [u8; 0] = [];
+    let big: [u8; 16] = [0; 16];
+    println(f"{one:?} {arr[0] + arr[1]} {empty.len()} {big.len()}");
+    // Dynamic slots, constrained ones included.
+    let e: any Display = "boom";
+    let it: any = 9;
+    println(f"{e} {it is i32}");
+    let ys = [2, 3];
+    let fst = first(ys.iter());
+    println(f"{fst ?? 0} {ys[1]}");
+}

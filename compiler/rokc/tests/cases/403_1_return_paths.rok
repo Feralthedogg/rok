@@ -1,0 +1,106 @@
+// spec: §4.3.1 §4.3.2 §4.3.3 §4.3.5 §4.3.6 §4.3.8 §4.3.9 §4.3.10 §4.3.11
+// expect-exit: 0
+// expect-stdout:
+// 7
+// 0 10
+// false false true
+// 42 no
+// 3 1
+// side
+// side
+// 3 none
+// a b 5
+// cleanup 42
+// 100
+
+// Spec 4.3: the last expression is the result, `return` exits early
+// from anywhere (loops, `try` through its `finally`), differing paths
+// join into the declared sum, and a closure's `return` leaves only it.
+fn add(x: i32, y: i32) -> i32 {
+    x + y
+}
+
+fn early(x: i32) -> i32 {
+    if x < 0 { return 0; }
+    x * 2
+}
+
+fn validate(s: str) -> bool {
+    if s.len() == 0 { return false; }
+    if s.len() > 5 { return false; }
+    true
+}
+
+fn maybe_int(cond: bool) -> i32 | str {
+    if cond { return 42i32; }
+    "no"
+}
+
+fn divmod(n: i32, d: i32) -> (i32, i32) {
+    let q = n / d;
+    let r = n % d;
+    (q, r)
+}
+
+fn compute() -> i32 {
+    println("side");
+    1
+}
+
+fn find(xs: List<i32>, target: i32) -> i32 | none {
+    for x in xs {
+        if x == target { return x; }
+    }
+    none
+}
+
+fn a() -> i32 { print("a "); 2 }
+fn b() -> i32 { print("b "); 3 }
+
+fn sum_ab() -> i32 {
+    return a() + b();
+}
+
+fn cleanup_aware() -> i32 {
+    try {
+        return 42i32;
+    } finally {
+        print("cleanup ");
+    }
+}
+
+fn outer() -> i32 {
+    let f = |x: i32| -> i32 {
+        if x < 0 { return 0; }
+        x * 2
+    };
+    f(-5i32);
+    100i32
+}
+
+fn show(v: i32 | str) -> str {
+    match v {
+        n: i32 => f"{n}",
+        s: str => s,
+    }
+}
+
+fn show_opt(v: i32 | none) -> str {
+    match v {
+        n: i32 => f"{n}",
+        none => "none",
+    }
+}
+
+println(f"{add(3, 4)}");
+println(f"{early(-1)} {early(5)}");
+println(f"{validate("")} {validate("toolong")} {validate("ok")}");
+println(f"{show(maybe_int(true))} {show(maybe_int(false))}");
+let (quotient, remainder) = divmod(10i32, 3i32);
+println(f"{quotient} {remainder}");
+compute();
+_ = compute();
+println(f"{show_opt(find([1, 2, 3], 3))} {show_opt(find([1, 2], 9))}");
+println(f"{sum_ab()}");
+println(f"{cleanup_aware()}");
+println(f"{outer()}");

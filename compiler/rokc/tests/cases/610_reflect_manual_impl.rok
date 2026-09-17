@@ -10,3 +10,4 @@ impl Reflect for P {
     fn type_name_of(self) -> str { "P" }
     fn size_of(self) -> usize { 4 }
 }
+// spec: §6.10.1

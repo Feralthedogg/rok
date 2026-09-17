@@ -24,3 +24,4 @@ fn main() {
     let m = try get(false) catch e { e.code };
     println(f"{m}");
 }
+// spec: §3.14.4

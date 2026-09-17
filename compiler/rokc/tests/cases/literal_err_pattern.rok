@@ -8,3 +8,4 @@ fn f(x: i32) -> i32 {
 fn main() -> i32 {
     return 0;
 }
+// spec: §6.5.3

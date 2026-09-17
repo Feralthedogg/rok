@@ -1,0 +1,55 @@
+// spec: §3.10.1 §3.10.2 §3.10.3 §3.10.4 §3.10.8
+// expect-exit: 0
+// expect-stdout:
+// neg zero small big
+// unit 1 2.5
+// paren arg
+// -1 42
+// c1 c2 picked 2
+// 0
+
+// spec 3.10.1: `if` / `else if` / `else` chains. 3.10.2: without `else`
+// an `if` is unit; differing branch types fit a sum-typed slot.
+// 3.10.3: any `bool` expression is a condition; a struct literal there
+// needs parentheses (or an argument position). 3.10.4: a divergent
+// branch fits any type. 3.10.8: conditions are checked top to bottom
+// and only the chosen body runs.
+struct S { a: i32; }
+impl S { fn ok(self) -> bool { self.a > 0 } }
+fn check(s: S) -> bool { s.ok() }
+
+fn class(x: i32) -> str {
+    if x < 0 { "neg" } else if x == 0 { "zero" } else if x < 10 { "small" } else { "big" }
+}
+
+fn fits(cond: bool) -> i32 {
+    let x: i32 = if cond {
+        42
+    } else {
+        return -1;
+    };
+    x
+}
+
+fn main() {
+    println(f"{class(-3)} {class(0)} {class(4)} {class(99)}");
+    let c = true;
+    let b: () = if c { 1; };
+    let w: i32 | f64 = if c { 1i32 } else { 2.0f64 };
+    let w2: i32 | f64 = if !c { 1i32 } else { 2.5f64 };
+    let wn = match w { n: i32 => n, _ => 0 };
+    let wf = match w2 { f: f64 => f, _ => 0.0 };
+    println(f"unit {wn} {wf}");
+    let items = [1, 2];
+    if (S { a: 1 }).ok() && items.len() > 0 { print("paren "); }
+    if check(S { a: 1 }) && !(items.len() == 0) { println("arg"); }
+    println(f"{fits(false)} {fits(true)}");
+
+    let log: List<str> = [];
+    let probe = [ref log] |tag: str, v: bool| -> bool { log.push(tag); return v; };
+    let picked = if probe("c1", false) { 1 } else if probe("c2", true) { 2 } else if probe("c3", true) { 3 } else { 4 };
+    println(f"{log[0]} {log[1]} picked {picked}");
+    let ran = 0;
+    if false { ran += 1; } else if false { ran += 10; }
+    println(f"{ran}");
+}

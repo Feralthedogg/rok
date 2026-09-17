@@ -1,0 +1,78 @@
+// spec: §4.9.1 §4.9.2 §4.9.3 §4.9.4 §4.9.5 §4.9.6 §4.9.7 §4.9.8 §4.9.9 §4.9.10
+// expect-exit: 0
+// expect-stdout:
+// 0 0
+// 1 0
+// 5 25
+// 6 2
+// 9 9
+// 1 2
+// inherent trait
+// 4 7 [2, 4]
+
+// Spec 4.9: static, `self` and `ref self` methods; `self` in parameter
+// and body position, `Self` as a type; `ref` implicit on the receiver
+// only; inherent methods win over trait methods; methods take
+// defaults, named arguments and their own generics.
+struct Point { x: f64; y: f64; }
+
+impl Point {
+    fn origin() -> Point { Point { x: 0.0f64, y: 0.0f64 } }
+    fn from_polar(r: f64, theta: f64) -> Point { Point { x: r * theta.cos(), y: r * theta.sin() } }
+    fn new(x: f64, y: f64) -> Self { Point { x, y } }
+    fn distance(self, other: Point) -> f64 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        (dx * dx + dy * dy).sqrt()
+    }
+    fn distance_squared(self, other: Point) -> f64 {
+        let d = self.distance(other);
+        d * d
+    }
+    fn translate(ref self, dx: f64, dy: f64) {
+        self.x = self.x + dx;
+        self.y = self.y + dy;
+    }
+    fn replace_with(ref self, other: Point) {
+        self = other;
+    }
+    fn local_only(self) -> f64 {
+        self.x = 99.0;
+        self.x
+    }
+    pub fn shown(self) -> str { self._internal() }
+    fn _internal(self) -> str { f"{self.x} {self.y}" }
+    fn scaled(self, k: f64 = 2.0, add: f64 = 0.0) -> Point {
+        Point { x: self.x * k + add, y: self.y * k + add }
+    }
+    fn pick<U>(self, a: U, b: U) -> U { if self.x > 0.0 { a } else { b } }
+}
+
+trait Name { fn name(self) -> str; fn other(self) -> str; }
+impl Name for Point {
+    fn name(self) -> str { "trait" }
+    fn other(self) -> str { "trait" }
+}
+impl Point {
+    fn name(self) -> str { "inherent" }
+}
+
+let p = Point::origin();
+let q = Point::from_polar(1.0f64, 0.0f64);
+println(p.shown());
+println(q.shown());
+let a = Point::new(3.0, 4.0);
+println(f"{a.distance(p)} {a.distance_squared(p)}");
+let b = Point::new(1.0, 2.0);
+b.translate(5.0f64, 0.0f64);
+println(b.shown());
+let lo = b.local_only();
+b.replace_with(Point::new(9.0, 9.0));
+println(f"{lo - 90.0} {b.x}");
+let c = Point::new(1.0, 2.0);
+Point::translate(ref c, 0.0, 0.0);
+println(c.shown());
+println(f"{c.name()} {c.other()}");
+let d = c.scaled(add: 2.0);
+let picked = c.pick([2, 4], [0]);
+println(f"{d.x} {c.scaled(k: 3.0, add: 4.0).x} {picked:?}");

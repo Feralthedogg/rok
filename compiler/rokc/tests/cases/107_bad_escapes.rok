@@ -8,3 +8,5 @@ fn main() -> i32 {
     let c = 'ab';
     return 0;
 }
+
+// spec: §1.7.1 §1.8.3

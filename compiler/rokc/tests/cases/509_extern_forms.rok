@@ -1,0 +1,35 @@
+// spec: §5.9.1 §5.9.3 §5.9.4 §5.9.5 §5.9.6 §5.9.7 §5.9.11 §5.9.12
+// expect-exit: 0
+// expect-stdout:
+// freed 65
+// 5 3
+
+// Spec 5.9: an `extern "C"` block declares C functions (implicitly
+// unsafe; called inside `unsafe`) with per-item visibility; raw
+// pointers cross as `Ptr<T>`, nullable as `Ptr<T> | none`; extern
+// functions share one global name space, so any module calls them
+// unprefixed.
+use rok::bare::ptr::Ptr;
+
+extern "C" {
+    pub fn malloc(size: usize) -> Ptr<u8> | none;
+    fn free(p: Ptr<u8>);
+    pub fn llabs(x: i64) -> i64;
+    fn abs(x: i32) -> i32;
+}
+
+mod inner {
+    pub fn call() -> i64 { unsafe { llabs(-5) } }
+}
+
+let p = unsafe { malloc(1024usize) };
+match p {
+    q: Ptr<u8> => {
+        unsafe { q.write(65u8); }
+        let v = unsafe { q.read() };
+        unsafe { free(q) };
+        println(f"freed {v}");
+    }
+    none => println("no memory"),
+}
+println(f"{inner::call()} {unsafe { abs(-3) }}");

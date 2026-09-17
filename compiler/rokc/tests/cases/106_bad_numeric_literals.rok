@@ -10,3 +10,5 @@ fn main() -> i32 {
     let e = 300i8;
     return 0;
 }
+
+// spec: §1.6.5

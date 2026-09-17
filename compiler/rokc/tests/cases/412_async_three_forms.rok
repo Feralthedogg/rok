@@ -39,3 +39,5 @@ async fn main() {
     let acc = Acc { base: 10 };
     println(f"method {await acc.plus(5)}");
 }
+// spec: std §2.20.4
+// spec: §4.12.1 §4.12.6

@@ -1,0 +1,59 @@
+// spec: §4.5.10 §4.8.2 §4.8.4 §4.8.5 §4.8.6 §4.8.7 §4.8.8 §4.8.9
+// expect-exit: 0
+// expect-stdout:
+// 2 2 2
+// 3 6
+// 42 42
+// try 1
+// try 2
+// try 3
+// locked 7
+// compute task
+// inner outer
+// 3 1 4
+
+// Spec 4.8: trailing closures are optional; `{ body }` after a call is a
+// zero-parameter closure (empty parentheses may go), a lone `{ }` is a
+// block; they nest and mix with positional and named arguments; `|`
+// without the `|params| {` shape stays bitwise OR.
+fn apply(x: i32, f: fn(i32) -> i32) -> i32 { f(x) }
+
+fn call0(f: fn() -> i32) -> i32 { f() }
+
+fn retry(n: i32, body: fn(i32)) {
+    for i in 1..=n { body(i); }
+}
+
+fn with_lock(v: i32, body: fn(i32) -> i32) -> i32 { body(v) }
+
+fn run(name: str = "task", body: fn() -> str) -> str {
+    f"{body()} {name}"
+}
+
+fn outer(f: fn() -> str) -> str { f() }
+
+println(f"{apply(1, |x| x * 2)} {apply(1) |x| { x * 2 }} {apply(1, |x| { x * 2 })}");
+let three = call0 { 3 };
+let six = call0() { 6 };
+println(f"{three} {six}");
+
+let x = { 42 };
+let f = || { 42 };
+println(f"{x} {f()}");
+
+retry(3) |i| { println(f"try {i}"); };
+println(f"locked {with_lock(7) |v| { v }}");
+println(run(name: "task") { "compute" });
+
+let s = outer {
+    let inner = outer { "inner" };
+    f"{inner} outer"
+};
+println(s);
+
+let a = 1;
+let b = 2;
+let c = a | b;
+let ok = a == 1 || b == 9;
+let m = if ok { 4 } else { 0 };
+println(f"{c} {a} {m}");

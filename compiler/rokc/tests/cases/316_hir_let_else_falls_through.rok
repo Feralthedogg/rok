@@ -10,3 +10,4 @@ fn main() -> i32 {
     };
     return n;
 }
+// spec: §3.16.3

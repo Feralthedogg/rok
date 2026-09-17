@@ -200,8 +200,9 @@ impl Printer {
 
     /// Outer attributes, each on its own line; the parser's marker
     /// attributes are printed as the syntax they stand for instead.
+    /// The outer attributes; a module's inner ones go in its body.
     fn attrs(&mut self, attrs: &[Attribute]) {
-        for a in attrs {
+        for a in attrs.iter().filter(|a| !a.inner) {
             if a.path.len() == 1
                 && [
                     crate::EXTERN_C_FN_ATTR,
@@ -424,8 +425,19 @@ impl Printer {
                 match &m.items {
                     None => self.s(";"),
                     Some(items) => {
-                        self.s(" ");
-                        self.braced(items, Self::item);
+                        self.s(" {");
+                        self.indent += 1;
+                        for a in m.attrs.iter().filter(|a| a.inner) {
+                            self.nl();
+                            self.attr(a);
+                        }
+                        for x in items {
+                            self.nl();
+                            self.item(x);
+                        }
+                        self.indent -= 1;
+                        self.nl();
+                        self.s("}");
                     }
                 }
             }

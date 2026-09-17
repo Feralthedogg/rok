@@ -1,5 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/std_203_modulo_zero.rok:10:12:
 // expect-stderr: attempt to calculate the remainder with a divisor of zero
+// expect-stdout:
 
 // `%%` by zero panics like `%`.
 

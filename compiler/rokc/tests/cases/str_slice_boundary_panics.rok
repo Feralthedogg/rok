@@ -1,5 +1,7 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/str_slice_boundary_panics.rok:9:13:
 // expect-stderr: string slice is not on a char boundary
+// expect-stdout:
 
 // stdlib 2.15.3: slicing inside a UTF-8 sequence panics.
 fn main() -> i32 {

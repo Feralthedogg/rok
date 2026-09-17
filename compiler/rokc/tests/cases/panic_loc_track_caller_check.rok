@@ -1,6 +1,7 @@
 // expect-exit: 101
-// expect-stderr: panic_loc_track_caller_check.rok:11:5:
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_track_caller_check.rok:12:5:
 // expect-stderr: attempt to divide by zero
+// expect-stdout:
 
 // A compiler-generated check inside a `#[track_caller]` function
 // reports its caller.

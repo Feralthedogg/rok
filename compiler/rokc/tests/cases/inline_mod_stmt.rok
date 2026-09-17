@@ -9,3 +9,5 @@ mod inner {
 fn main() -> i32 {
     return inner::f();
 }
+// spec: §5.4.7
+// spec: §4.16.6

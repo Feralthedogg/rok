@@ -7,3 +7,5 @@ struct P { b: i64; c: i64; }
 struct Q { q: i32; }
 
 fn main() -> i32 { let q = Q { q: 5 }; return q.q; }
+
+// spec: §2.3.7

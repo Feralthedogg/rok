@@ -16,3 +16,4 @@ fn main() -> i32 {
     if enabled() == 0 { println("inactive"); }
     return 0;
 }
+// spec: §6.3.6 §6.3.8

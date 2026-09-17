@@ -47,3 +47,4 @@ fn main() -> i32 {
     });
     return 0;
 }
+// spec: std §2.8.3

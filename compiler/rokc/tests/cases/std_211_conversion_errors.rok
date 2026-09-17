@@ -1,0 +1,20 @@
+// spec: std 211-conversion §2.11.6 §2.11.7 §2.11.10
+// expect-error: integer literal `256` out of range for `u8`
+// expect-error: cannot cast `Vec3` as `str`
+// expect-error: only `u8` can be cast as `char`, not `i32`
+// expect-error: mismatched types: `let auto` expects `i64`, found `i32`
+
+// Stdlib 2.11: an annotated literal is range-checked (2.11.7); `as`
+// rejects user types, and `char` only comes from `u8` (2.11.6); an
+// `i32` result is not silently widened to `i64` (2.11.10).
+struct Vec3 { x: f64; y: f64; z: f64; }
+
+fn main() {
+    let w: u8 = 256;
+    let v = Vec3 { x: 1.0, y: 2.0, z: 3.0 };
+    let s: str = v as str;
+    let c = 300i32 as char;
+    let a: i32 = 5;
+    let b: i32 = 3;
+    let auto: i64 = a + b;
+}

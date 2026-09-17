@@ -1,0 +1,68 @@
+// spec: §4.13.1 §4.13.2 §4.13.3 §4.13.7 §4.13.8 §4.12.7
+// expect-exit: 0
+// expect-stdout:
+// fn 1 2
+// block 3 4
+// closure 5 6
+// lines a b
+// 1 7 [1, 2] 3
+// zip (1, 10) (2, 20)
+// merge 4
+
+// Spec 4.13: the three `async yield` forms give an `AsyncStream`, whose
+// body mixes `await` and `yield`; the four modifier combinations give
+// `R`, `AsyncFuture<R>`, `GenIter<R>`, `AsyncStream<R>`; library
+// combinators merge and zip streams.
+use rok::core::stream;
+
+async yield fn named() -> i32 { yield 1; yield 2; }
+
+async fn open(name: str) -> List<str> { ["a", "b"] }
+
+async yield fn read_lines(file: str) -> str {
+    let f = await open(file);
+    let i = 0usize;
+    loop {
+        let line: str | none = if i < f.len() { f[i] } else { none };
+        i += 1;
+        match line {
+            l: str => yield l,
+            none => break,
+        }
+    }
+}
+
+fn plain() -> i32 { 1 }
+async fn fut() -> i32 { 7 }
+yield fn gen() -> i32 { yield 1; yield 2; }
+async yield fn st() -> i32 { yield 3; }
+
+async fn show(label: str, s: AsyncStream<i32>) {
+    let out = label;
+    for await v in s { out = out + f" {v}"; }
+    println(out);
+}
+
+async fn main() {
+    await show("fn", named());
+    await show("block", async yield { yield 3; yield 4; });
+    let c = async yield || { yield 5; yield 6; };
+    await show("closure", c());
+
+    let out = "lines";
+    for await l in read_lines("a.txt") { out = out + f" {l}"; }
+    println(out);
+
+    let r: i32 = plain();
+    let f: AsyncFuture<i32> = fut();
+    let g: GenIter<i32> = gen();
+    let s: AsyncStream<i32> = st();
+    let gs = g.collect::<List<i32>>();
+    let ss = await s.collect();
+    println(f"{r} {await f} {gs:?} {ss[0]}");
+
+    let z = await stream::zip(named(), async yield { yield 10; yield 20; }).collect();
+    println(f"zip {z[0]:?} {z[1]:?}");
+    let m = await stream::merge(named(), async yield { yield 3; yield 4; }).collect();
+    println(f"merge {m.len()}");
+}

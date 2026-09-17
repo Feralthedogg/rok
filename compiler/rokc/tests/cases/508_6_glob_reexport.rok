@@ -1,0 +1,35 @@
+// spec: §5.8.6 §5.8.9 §5.8.12
+// expect-exit: 0
+// expect-stdout:
+// 1 2 3
+// 7 hi
+// 4 hi
+
+// `pub use m::*` re-exports m's items (functions, types, and
+// what m itself re-exports): reachable by path and through a glob `use`
+// of the re-exporting module (the prelude pattern).
+mod shapes {
+    pub mod inner {
+        pub fn one() -> i32 { 1 }
+        pub(pkg) fn two() -> i32 { 2 }
+        pub struct Pt { pub x: i32; }
+        pub mod deeper {
+            pub fn greet() -> str { "hi" }
+        }
+        pub use deeper::*;
+    }
+    pub use inner::*;
+}
+
+mod prelude {
+    pub use pkg::shapes::*;
+}
+
+use prelude::*;
+
+fn three() -> i32 { shapes::one() + shapes::two() }
+
+println(f"{shapes::one()} {shapes::two()} {three()}");
+let p = shapes::Pt { x: 7 };
+println(f"{p.x} {shapes::greet()}");
+println(f"{one() + Pt { x: 3 }.x} {greet()}");

@@ -57,3 +57,4 @@ fn main() -> i32 {
 }
 
 // spec: 006.08-meta-blocks
+// spec: §6.9.5

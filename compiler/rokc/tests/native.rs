@@ -375,8 +375,9 @@ fn main() {
 struct P { x: i32; y: f64; }
 ";
 
-/// `-g` (spec 9.9.6): a subprogram named by the rok path with its
-/// parameters and locals, and a line table pointing into the `.rok`.
+/// `-g` (spec 9.9.6), both back ends: a subprogram named by the rok
+/// path with its parameters and locals, and a line table pointing into
+/// the `.rok`; `llvm-dwarfdump --verify` finds no error.
 #[test]
 fn debug_info_names_functions_lines_and_locals() {
     let Some(env) = setup() else { return };
@@ -386,58 +387,61 @@ fn debug_info_names_functions_lines_and_locals() {
     else {
         return;
     };
-    let dir = scratch("debug");
-    fs::write(dir.join("main.rok"), DEBUGGEE).unwrap();
-    let exe = dir.join("out");
-    ok(&build(
-        &env,
-        &dir.join("main.rok"),
-        &["-g", "-o", exe.to_str().unwrap()],
-    ));
-    let run = Command::new(&exe).output().unwrap();
-    ok(&run);
-    assert_eq!(text(&run.stdout), "14\n");
-    // macOS keeps DWARF in the `.dSYM` clang's dsymutil step writes.
-    let dsym = dir.join("out.dSYM");
-    let target = if dsym.exists() { dsym } else { exe };
+    for backend in ["llvm", "native"] {
+        let dir = scratch(&format!("debug_{backend}"));
+        fs::write(dir.join("main.rok"), DEBUGGEE).unwrap();
+        let exe = dir.join("out");
+        let be = format!("backend={backend}");
+        ok(&build(
+            &env,
+            &dir.join("main.rok"),
+            &["-g", "-C", &be, "-o", exe.to_str().unwrap()],
+        ));
+        let run = Command::new(&exe).output().unwrap();
+        ok(&run);
+        assert_eq!(text(&run.stdout), "14\n");
+        // macOS keeps DWARF in the `.dSYM` clang's dsymutil step writes.
+        let dsym = dir.join("out.dSYM");
+        let target = if dsym.exists() { dsym } else { exe };
+        check_debuggee(dump, &target, backend);
+    }
+}
+
+fn check_debuggee(dump: &str, target: &Path, backend: &str) {
     let info = Command::new(dump)
         .arg("--debug-info")
-        .arg(&target)
+        .arg(target)
         .output()
         .unwrap();
     let info = text(&info.stdout);
     let sub = info
         .split("DW_TAG_subprogram")
         .find(|s| s.contains("(\"add\")") && s.contains("main.rok"))
-        .unwrap_or_else(|| panic!("no `add` subprogram:\n{info}"));
-    assert!(sub.contains("DW_AT_decl_line\t(1)"), "{sub}");
+        .unwrap_or_else(|| panic!("{backend}: no `add` subprogram:\n{info}"));
+    assert!(sub.contains("DW_AT_decl_line\t(1)"), "{backend}: {sub}");
     for var in ["(\"a\")", "(\"b\")", "(\"s\")", "(\"t\")", "\"i32\")"] {
-        assert!(sub.contains(var), "`add` lacks {var}:\n{sub}");
+        assert!(sub.contains(var), "{backend}: `add` lacks {var}:\n{sub}");
     }
-    assert!(
-        info.contains("(\"main\")"),
-        "no rok `main` subprogram:\n{info}"
-    );
     // The shadowing `x` lives in the `if` body's lexical block.
     let main = info
         .split("DW_TAG_subprogram")
         .find(|s| s.contains("(\"main\")") && s.contains("main.rok"))
-        .unwrap_or_else(|| panic!("no rok `main`:\n{info}"));
+        .unwrap_or_else(|| panic!("{backend}: no rok `main`:\n{info}"));
     let block = main
         .split("DW_TAG_lexical_block")
         .nth(1)
-        .unwrap_or_else(|| panic!("no lexical block:\n{main}"));
+        .unwrap_or_else(|| panic!("{backend}: no lexical block:\n{main}"));
     assert!(
         block.contains("(\"x\")") && block.contains("\"u8\")"),
-        "{block}"
+        "{backend}: {block}"
     );
     // Aggregates: a struct with its fields, `str`, a tuple, an array.
     let p = info
         .split("DW_TAG_structure_type")
         .find(|s| s.contains("DW_AT_name\t(\"P\")"))
-        .unwrap_or_else(|| panic!("no `P` type:\n{info}"));
+        .unwrap_or_else(|| panic!("{backend}: no `P` type:\n{info}"));
     for want in ["(\"x\")", "(\"y\")", "DW_AT_data_member_location\t(0x08)"] {
-        assert!(p.contains(want), "`P` lacks {want}:\n{p}");
+        assert!(p.contains(want), "{backend}: `P` lacks {want}:\n{p}");
     }
     for want in [
         "(\"p\")",
@@ -447,22 +451,70 @@ fn debug_info_names_functions_lines_and_locals() {
         "(\"tuple\")",
         "DW_TAG_array_type",
     ] {
-        assert!(info.contains(want), "no {want}:\n{info}");
+        assert!(info.contains(want), "{backend}: no {want}:\n{info}");
     }
     let lines = Command::new(dump)
         .arg("--debug-line")
-        .arg(&target)
+        .arg(target)
         .output()
         .unwrap();
     let lines = text(&lines.stdout);
-    assert!(lines.contains("main.rok"), "{lines}");
+    assert!(lines.contains("main.rok"), "{backend}: {lines}");
     // `let t = s * 2;` (line 3) has a row.
     assert!(
         lines
             .lines()
             .any(|l| l.split_whitespace().nth(1) == Some("3")),
-        "no line-3 row:\n{lines}"
+        "{backend}: no line-3 row:\n{lines}"
     );
+    verify_dwarf(dump, target, backend);
+}
+
+/// `(depth, tag, name)` of each entry of the unit named `unit` in a
+/// `--debug-info` dump, sorted. LLVM's `__ARRAY_SIZE_TYPE__` (the type
+/// of its subrange bounds) is left out.
+fn unit_dies(info: &str, unit: &str) -> Vec<(usize, String, String)> {
+    let mut out = Vec::new();
+    let mut inside = false;
+    for die in info.split("\n0x") {
+        let Some((_, rest)) = die.split_once(':') else {
+            continue;
+        };
+        let head = rest.lines().next().unwrap_or("");
+        let tag = head.trim();
+        if !tag.starts_with("DW_TAG_") && tag != "NULL" {
+            continue;
+        }
+        if tag == "DW_TAG_compile_unit" {
+            inside = rest.contains(&format!("DW_AT_name\t(\"{unit}\")"));
+            continue;
+        }
+        let name = rest
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("DW_AT_name\t(\""))
+            .map_or("", |n| n.trim_end_matches("\")"));
+        if inside && name != "__ARRAY_SIZE_TYPE__" {
+            let depth = head.len() - head.trim_start().len();
+            out.push((depth, tag.to_owned(), name.to_owned()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `llvm-dwarfdump --verify` reports no error (`dwarfdump` has no
+/// verifier).
+fn verify_dwarf(dump: &str, target: &Path, what: &str) {
+    if dump != "llvm-dwarfdump" {
+        return;
+    }
+    let verify = Command::new(dump)
+        .arg("--verify")
+        .arg(target)
+        .output()
+        .unwrap();
+    let verify = text(&verify.stdout);
+    assert!(!verify.contains("error:"), "{what}: {verify}");
 }
 
 const DEBUGGEE_TYPES: &str = "enum Shape { Circle(f64), Rect(i32, i32), Empty }
@@ -507,6 +559,7 @@ fn debug_info_shows_sums_and_gc_objects() {
     else {
         return;
     };
+    let mut units = Vec::new();
     for backend in ["llvm", "native"] {
         let dir = scratch(&format!("debug_types_{backend}"));
         fs::write(dir.join("main.rok"), DEBUGGEE_TYPES).unwrap();
@@ -525,6 +578,8 @@ fn debug_info_shows_sums_and_gc_objects() {
             .output()
             .unwrap();
         let info = text(&info.stdout);
+        verify_dwarf(dump, target, backend);
+        units.push(unit_dies(&info, "main.rok"));
         let part = info
             .split("DW_TAG_variant_part")
             .find(|s| s.contains("(\"Rect\")"))
@@ -590,7 +645,7 @@ fn debug_info_shows_sums_and_gc_objects() {
             .stderr(std::process::Stdio::null())
             .spawn()
         else {
-            return;
+            continue;
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while lldb.try_wait().unwrap().is_none() {
@@ -598,13 +653,13 @@ fn debug_info_shows_sums_and_gc_objects() {
                 let _ = lldb.kill();
                 let _ = lldb.wait();
                 eprintln!("skipped: lldb did not finish");
-                return;
+                continue;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let out = text(&lldb.wait_with_output().unwrap().stdout);
         if !out.contains("stop reason") {
-            return;
+            continue;
         }
         let vars = out.split("frame variable").nth(1).unwrap_or_default();
         assert!(vars.contains("value = (0 = 3, 1 = 4)"), "{backend}: {out}");
@@ -615,6 +670,9 @@ fn debug_info_shows_sums_and_gc_objects() {
         assert!(held.contains("value = (0 = 7)"), "{backend}: {out}");
         assert!(held.contains("total = 8"), "{backend}: {out}");
     }
+    // The same entries, tag and name, in the program's unit.
+    assert!(units[0].len() > 20, "{:?}", units[0]);
+    assert_eq!(units[0], units[1], "llvm vs native DIEs");
 }
 
 /// `-g` ELF executables for Linux, linked by the embedded lld from
@@ -719,13 +777,7 @@ fn elf_debug_info_of_several_objects() {
         }
         // Dropped code's DWARF addresses are the tombstone, so no unit
         // (rok's, the runtime's, the C library's) has an error.
-        let verify = Command::new(dump)
-            .arg("--verify")
-            .arg(&exe)
-            .output()
-            .unwrap();
-        let verify = text(&verify.stdout);
-        assert!(!verify.contains("error:"), "{t} {opt}: {verify}");
+        verify_dwarf(dump, &exe, &format!("{t} {opt}"));
     }
 }
 

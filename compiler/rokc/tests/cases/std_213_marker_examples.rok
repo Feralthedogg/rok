@@ -1,0 +1,56 @@
+// spec: std 213-marker §2.13.1-2.13.3 §2.13.9 §2.13.10
+// expect-exit: 0
+// expect-stdout:
+// [1, 2, 3] [1, 2, 3, 4] true
+// default 30 3 | shared [1, 2, 3, 9]
+// 3 2 1.5
+// 0 0 false true 0 0 0 true | 0 0 none
+// send ok
+
+// Stdlib 2.13: `clone` is a deep, explicit copy while `let` shares a
+// collection handle (2.13.1-2); `Copy` only selects types in bounds
+// (2.13.3); user types opt into `Send` / `Sync` with `unsafe impl`
+// (2.13.9); `Default` values and `#[derive(Default)]` (2.13.10).
+#[derive(Clone)]
+struct Config {
+    name: str;
+    timeout: u32;
+    retries: u32;
+}
+
+#[derive(Clone, Copy)]
+struct Vec3 { x: f64; y: f64; z: f64; }
+
+#[derive(Default, Debug)]
+struct Settings { level: i32; ratio: f64; tags: List<str>; owner: str | none; }
+
+use rok::bare::ptr::Ptr;
+
+struct Handle { raw: Ptr<u8>; }
+unsafe impl Send for Handle { }
+unsafe impl Sync for Handle { }
+
+fn twice<T: Copy>(x: T) -> (T, T) { (x, x) }
+
+fn needs_send<T: Send + Sync>(x: T) -> str { "send ok" }
+
+fn main() {
+    let a: List<i32> = [1, 2, 3];
+    let b = a.clone();
+    let same = a == b;
+    b.push(4);
+    println(f"{a:?} {b:?} {same}");
+    let c1 = Config { name: "default", timeout: 30, retries: 3 };
+    let c2 = c1.clone();
+    let xs: List<i32> = [1, 2, 3];
+    let ys = xs;
+    ys.push(9);
+    println(f"{c2.name} {c2.timeout} {c2.retries} | shared {xs:?}");
+    let (p, q) = twice(Vec3 { x: 1.5, y: 2.0, z: 3.0 });
+    let (m, n) = twice(1);
+    println(f"{p.z} {m + n} {q.x}");
+    let d = Settings::default();
+    println(f"{i32::default()} {f64::default()} {bool::default()} {str::default() == ""} {u8::default()} {List::<i32>::default().len()} {(char::default() as u32)} {int::default() == 0} | {d.level} {d.ratio} {d.owner:?}");
+    let h = Handle { raw: Ptr::dangling() };
+    println(needs_send(h));
+}

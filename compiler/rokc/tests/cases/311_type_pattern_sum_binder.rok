@@ -21,3 +21,5 @@ fn main() {
     println(g(2i64));
     println(g("s"));
 }
+
+// spec: §2.6.4 §2.6.8

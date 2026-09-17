@@ -86,3 +86,5 @@ println(f"{Color::field_names():?} {Color::methods().len()}");
 dump(p);
 
 // spec: 006.10-reflection
+// spec: std §2.12.3
+// spec: §6.10.2 §6.10.6

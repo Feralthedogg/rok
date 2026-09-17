@@ -36,3 +36,4 @@ fn main() {
 }
 
 // spec: std 102-cast §1.2.5
+// spec: std 102-cast §1.2.5 §1.2.6, 103-mem §1.3.5, 104-alloc §1.4.2

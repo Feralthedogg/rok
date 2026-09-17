@@ -1,12 +1,13 @@
-// expect-exit: 60
+// expect-exit: 0
+// expect-stdout: 60
 
-fn main() -> i32 {
+fn main() {
     let xs: [i32; 5] = [10i32, 12i32, 14i32, 12i32, 12i32];
     let total = 0i32;
     for v in xs {
         total += v;
     }
-    return total;
+    println(f"{total}");
 }
 
 // spec: 003.13-loop-expressions

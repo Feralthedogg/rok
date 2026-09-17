@@ -6,3 +6,6 @@ fn if_handler() {}
 fn main() -> i32 {
     return 0;
 }
+
+// spec: §1.5.3
+// spec: §6.6.4

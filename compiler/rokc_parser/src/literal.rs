@@ -872,3 +872,10 @@ mod tests {
         assert_eq!(split_suffix("7"), ("7", ""));
     }
 }
+
+rokc_core::codec_struct!(LiteralDef {
+    tokens,
+    handler,
+    file,
+    span
+});

@@ -1,0 +1,49 @@
+// spec: §2.4.1 §2.4.2 §2.4.3
+// expect-exit: 0
+// expect-stdout:
+// 0 3 404
+// ok 7
+// err 2 nope
+// pending
+// click 3
+
+enum Direction {
+    North,
+    East,
+    South,
+    West,
+}
+
+enum Status { Ok = 0, NotFound = 404, InternalError = 500 }
+
+enum Outcome {
+    Ok(i32),
+    Err { code: i32; msg: str; },
+    Pending,
+}
+
+enum Event {
+    Click { x: i32; y: i32; },
+    Scroll { dy: i32; },
+}
+
+fn show(o: Outcome) {
+    match o {
+        Outcome::Ok(v) => println(f"ok {v}"),
+        Outcome::Err { code, msg } => println(f"err {code} {msg}"),
+        Outcome::Pending => println("pending"),
+    }
+}
+
+fn main() {
+    // A payload-less enum casts to its tag (unit) or value.
+    println(f"{Direction::North as i32} {Direction::West as i32} {Status::NotFound as i32}");
+    for o in [Outcome::Ok(7), Outcome::Err { code: 2, msg: "nope" }, Outcome::Pending] {
+        show(o);
+    }
+    let e = Event::Click { x: 1, y: 2 };
+    match e {
+        Event::Click { x, y } => println(f"click {x + y}"),
+        Event::Scroll { dy } => println(f"scroll {dy}"),
+    }
+}

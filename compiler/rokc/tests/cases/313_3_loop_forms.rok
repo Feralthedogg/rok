@@ -1,0 +1,98 @@
+// spec: §3.13.1 §3.13.2 §3.13.3 §3.13.4 §3.13.5 §3.13.6 §3.13.7
+// expect-exit: 0
+// expect-stdout:
+// 16 unit unit
+// 3 10
+// 0:a 1:b 2:c | 4 6
+// 7 found
+// 6
+// w1 w2 w3 n1 n2 n3 n4
+// -1
+
+// spec 3.13.1: `break v` is the `loop`'s value; `break;` alone makes it
+// unit. 3.13.2 / 3.13.3: `while` and `for` are unit. 3.13.3: `for` takes
+// irrefutable patterns (tuple, struct). 3.13.4: `break 'outer v` leaves
+// a labeled loop with a value. 3.13.5: an unlabeled `break` exits the
+// innermost loop. 3.13.6: `while` checks before each pass, `for` calls
+// `next` before each. 3.13.7: a `loop` without `break` fits any type.
+struct Point { x: i32; y: i32; }
+
+fn find(xs: List<i32>, want: i32) -> i32 | str {
+    let r: i32 = 'outer: loop {
+        for x in xs {
+            if x == want { break 'outer x; }
+        }
+        break 'outer -1;
+    };
+    if r < 0 { return "missing"; }
+    return r;
+}
+
+fn forever(n: i32) -> i32 {
+    if n < 0 { return -1; }
+    let v: i32 = loop {};
+    v
+}
+
+struct Counter { n: i32; log: List<str>; }
+impl Iterator for Counter {
+    type Item = i32;
+    fn next(ref self) -> i32 | none {
+        self.n += 1;
+        self.log.push(f"n{self.n}");
+        if self.n > 3 { return none; }
+        return self.n;
+    }
+}
+
+fn main() {
+    let i = 1;
+    let v = loop {
+        i *= 2;
+        if i > 10 { break i; }
+    };
+    let u: () = loop { break; };
+    let w: () = while false {};
+    let f: () = for _ in 0..1 {};
+    println(f"{v} unit unit");
+
+    let outer_runs = 0;
+    let inner_seen = 0;
+    loop {
+        outer_runs += 1;
+        for x in [1, 2, 3, 4] {
+            if x == 3 { break; }
+            inner_seen += x;
+        }
+        if outer_runs == 3 { break; }
+    }
+    println(f"{outer_runs} {inner_seen + 1}");
+
+    let parts: List<str> = [];
+    for (k, s) in ["a", "b", "c"].iter().enumerate() { parts.push(f"{k}:{s}"); }
+    let sx = 0;
+    let sy = 0;
+    for Point { x, y } in [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] { sx += x; sy += y; }
+    println(f"{parts[0]} {parts[1]} {parts[2]} | {sx} {sy}");
+    let found = match find([5, 7, 9], 7) { n: i32 => n, _ => 0 };
+    let miss = match find([5], 7) { s: str => s, _ => "" };
+    println(f"{found} {if miss == "missing" { "found" } else { "?" }}");
+
+    let total = 0;
+    'rows: for r in 0..3 {
+        for c in 0..3 {
+            if c > r { continue 'rows; }
+            total += 1;
+        }
+    }
+    println(f"{total}");
+
+    let log: List<str> = [];
+    let k = 0;
+    while { k += 1; log.push(f"w{k}"); k < 3 } {}
+    let it = Counter { n: 0, log: [] };
+    for _ in it {}
+    let line = log.join(" ");
+    println(f"{line} {it.log.join(" ")}");
+    println(f"{forever(-5)}");
+}

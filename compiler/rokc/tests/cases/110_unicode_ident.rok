@@ -11,3 +11,5 @@ fn main() -> i32 {
     println(f"{σ}");
     return 0;
 }
+
+// spec: §1.4.1

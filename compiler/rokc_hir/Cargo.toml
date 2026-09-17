@@ -15,3 +15,6 @@ rokc_parser = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+rokc_lexer = { workspace = true }

@@ -1,12 +1,13 @@
-// expect-exit: 5
+// expect-exit: 0
+// expect-stdout: 1 2 1 1
 // expect-warning: identifier `σ2` looks like `σ²`
 // expect-warning: identifier `pаy` looks like `pay`
 // expect-warning: mixes Cyrillic with Latin
 // Spec 1.4.3: distinct names with one confusable skeleton warn.
-fn main() -> i32 {
+fn main() {
     let σ² = 1;
     let σ2 = 2;
     let pay = 1;
     let pаy = 1;
-    return σ² + σ2 + pay + pаy;
+    println(f"{σ²} {σ2} {pay} {pаy}");
 }

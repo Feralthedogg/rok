@@ -18,6 +18,7 @@ impl<T> Deque<T> {
         Deque::with_capacity(8)
     }
 
+    #[track_caller]
     pub fn with_capacity(cap: usize) -> Deque<T> {
         unsafe {
             let meta: GcBuf<usize> = buf_new(3);

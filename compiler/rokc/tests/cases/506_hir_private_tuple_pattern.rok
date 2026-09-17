@@ -12,3 +12,4 @@ fn main() -> i32 {
         a::S(x, _) => { return x; }
     }
 }
+// spec: §5.6.8

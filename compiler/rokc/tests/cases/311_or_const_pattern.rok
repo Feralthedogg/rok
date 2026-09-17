@@ -19,3 +19,4 @@ fn main() -> i32 {
     if classify(33) == 2 { println("punct"); }
     return 0;
 }
+// spec: §3.12.7

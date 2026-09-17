@@ -78,3 +78,4 @@ fn main() {
     let wn = match w { Wide::X => 0, Wide::Y => 16 };
     println(f"{os[0].a.a} {wn} {os[39].a.a} {os[5].y}");
 }
+// spec: §6.2.2

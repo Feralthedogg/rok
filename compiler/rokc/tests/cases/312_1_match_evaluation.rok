@@ -1,0 +1,99 @@
+// spec: §3.12.1 §3.12.2 §3.12.3 §3.12.4 §3.12.7 §3.12.8 §3.12.9 §3.12.10 §3.12.11 §3.12.12
+// expect-exit: 0
+// expect-stdout:
+// one two other | small medium large
+// 9 0
+// first
+// 1 other
+// scrutinee=1 guards=g1,g2 arm=2
+// 7 -1 -2
+// int 5 str 3
+// 4
+
+// spec 3.12.1 / 3.12.2: arms with a trailing comma, block arms whose
+// tail is the value. 3.12.3: first match wins. 3.12.4: a sum-typed slot
+// receives differing arm types. 3.12.7: or-patterns. 3.12.8: guards.
+// 3.12.9: a type pattern narrows. 3.12.10: the scrutinee runs once, a
+// guard only when its arm is reached. 3.12.11 / 3.12.12: a divergent
+// arm (or scrutinee) fits any type.
+fn name(v: i32) -> str {
+    match v {
+        1 => "one",
+        2 => "two",
+        _ => "other",
+    }
+}
+
+fn size(v: i32) -> str {
+    match v {
+        1 | 2 | 3 => "small",
+        4 | 5 | 6 => "medium",
+        _ => "large",
+    }
+}
+
+fn block_arm(v: i32 | none) -> i32 {
+    match v {
+        n: i32 => {
+            let x = n * 2;
+            x + 1
+        },
+        none => 0,
+    }
+}
+
+fn first(v: i32) -> str {
+    match v {
+        n if n > 0 => "first",
+        n if n > 1 => "second",
+        _ => "neither",
+    }
+}
+
+fn unwrap_or(v: i32 | none, d: i32) -> i32 {
+    let x: i32 = match v {
+        n: i32 => n,
+        none => return d,
+    };
+    x
+}
+
+fn diverge(v: i32) -> i32 {
+    let r: i32 = match { return v - 3; } { _ => 0 };
+    r
+}
+
+fn describe(v: i32 | str) -> str {
+    match v {
+        n: i32 => f"int {n + 1}",
+        s: str => f"str {s.len()}",
+    }
+}
+
+fn main() {
+    println(f"{name(1)} {name(2)} {name(5)} | {size(2)} {size(5)} {size(9)}");
+    println(f"{block_arm(4)} {block_arm(none)}");
+    println(first(5));
+    let w: i32 | str = match 1 { 1 => 1i32, _ => "other" };
+    let w2: i32 | str = match 2 { 1 => 1i32, _ => "other" };
+    let wv = match w { n: i32 => n, _ => 0 };
+    let ws = match w2 { s: str => s, _ => "" };
+    println(f"{wv} {ws}");
+
+    let log: List<str> = [];
+    let calls = 0;
+    let scrut = [ref calls] || -> i32 { calls += 1; return 3; };
+    let g = [ref log] |tag: str, b: bool| -> bool { log.push(tag); return b; };
+    let arm = match scrut() {
+        0 => 0,
+        n if g("g1", n == 1) => 1,
+        n if g("g2", n == 3) => 2,
+        n if g("g3", true) => 3,
+        _ => 4,
+    };
+    println(f"scrutinee={calls} guards={log[0]},{log[1]} arm={arm}");
+    println(f"{unwrap_or(7, -1)} {unwrap_or(none, -1)} {diverge(1)}");
+    println(f"{describe(4)} {describe("abc")}");
+    let n = match (1, 2) { (a, b) => { let s = a + b; s + 1 } };
+    println(f"{n}");
+}

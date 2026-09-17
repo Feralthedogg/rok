@@ -1,6 +1,7 @@
 // spec: 004.16.4-implicit-main-throws
 // expect-exit: 1
-// expect-stderr: `main` returned an uncaught error: bad 7
+// expect-stderr: error: `main` returned an uncaught error: bad 7
+// expect-stderr: --> tests/cases/416_entry_top_try.rok:22:13
 // expect-stdout:
 // 1
 

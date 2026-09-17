@@ -1,0 +1,47 @@
+// spec: 008.04-safepoint §8.4.1 §8.4.2 §8.4.3 §8.4.4 §8.4.6 §8.4.7 §8.4.10 §8.4.11
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// collections: true
+// yielder: 1000000 x-999
+// native: 300000
+
+// spec 8.4.11: user code may call `rok_runtime_yield` itself (the
+// spec's example loop); spec 8.4.10: a thread in a C call counts as
+// PARKED. While two threads run those loops, holding a GC reference
+// across every poll (8.4.7), main stops the world repeatedly (8.4.4 /
+// 8.4.6) and every thread finishes with its data intact.
+use rok::std::thread;
+
+extern "C" {
+    fn rok_runtime_yield();
+    fn rok_gc_collect();
+    fn rok_gc_stats_collections() -> u64;
+    fn llabs(x: i64) -> i64;
+}
+
+fn long_loop() -> str {
+    let last = "x";
+    let n = 0;
+    for i in 0..1_000_000 {
+        n += 1;
+        if i % 1000 == 0 { unsafe { rok_runtime_yield(); } }
+        if i % 1000 == 999 { last = f"x-{i % 1000}"; }
+    }
+    f"{n} {last}"
+}
+
+fn main() -> i32 {
+    let a = thread::spawn(|| long_loop());
+    let b = thread::spawn(|| {
+        let t = 0i64;
+        for i in 0..300_000 { t += unsafe { llabs(-1i64) }; }
+        t
+    });
+    let before = unsafe { rok_gc_stats_collections() };
+    for _ in 0..5 { unsafe { rok_gc_collect(); } }
+    println(f"collections: {unsafe { rok_gc_stats_collections() } >= before + 5u64}");
+    println(f"yielder: {try! a.join()}");
+    println(f"native: {try! b.join()}");
+    return 0;
+}

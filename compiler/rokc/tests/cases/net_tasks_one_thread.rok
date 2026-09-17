@@ -63,3 +63,4 @@ for i in 0..5 {
 }
 println(f"udp async: 5 datagrams, sum {await rx}");
 println(f"inherited listeners: {TcpListener::inherited().len()}");
+// spec: std 302-net §3.2.0 §3.2.6

@@ -8,3 +8,4 @@ mod a {
 }
 
 fn main() -> i32 { let s = a::mk(); s.0 = 4; return s.1; }
+// spec: §5.6.8

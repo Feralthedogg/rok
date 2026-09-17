@@ -48,3 +48,5 @@ fn main() {
 }
 
 // spec: 003.07-range-expressions
+// spec: std §2.7.3 §2.7.4 §2.7.9
+// spec: §3.7.4 §3.7.5 §3.7.6

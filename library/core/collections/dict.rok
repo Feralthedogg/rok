@@ -26,6 +26,7 @@ fn home(h: u64, mask: usize) -> usize {
 }
 
 /// An empty table of `cap` slots.
+#[track_caller]
 fn new_table<K, V>(cap: usize) -> DictHead<K, V> {
     unsafe {
         let n = cap_add(cap, 1);
@@ -63,6 +64,7 @@ impl<K: Hash, V> Dict<K, V> {
         Dict::with_capacity(4)
     }
 
+    #[track_caller]
     pub fn with_capacity(cap: usize) -> Dict<K, V> {
         unsafe {
             let c = 8usize;

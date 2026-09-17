@@ -15,3 +15,5 @@ impl Make for A {
 fn main() -> i32 {
     return <A as Make>::make();
 }
+
+// spec: §2.13.4

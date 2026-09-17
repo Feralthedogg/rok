@@ -1,6 +1,7 @@
 // expect-exit: 101
-// expect-stderr: panic_loc_try_force.rok:8:16:
-// expect-stderr: try! failed
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_try_force.rok:9:16:
+// expect-stderr: try! failed: the expression threw an error
+// expect-stdout:
 
 fn fails() throws (str) -> i32 { throw "boom"; }
 

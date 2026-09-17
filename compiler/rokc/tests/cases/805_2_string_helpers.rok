@@ -1,0 +1,39 @@
+// spec: 008.05-extern-symbols §8.5.2 rok_str_eq rok_str_byte rok_str_parse_int rok_str_parse_float
+// expect-exit: 0
+// expect-stdout:
+// eq 1 0 1
+// byte 104 111
+// int 0:-42 1 2 3 0:255
+// float 0:2.5 2
+
+// spec 8.5.2: the runtime's string helpers called directly: `rok_str_eq`
+// is 1 / 0, `rok_str_byte` the i-th byte, `rok_str_parse_int` returns 0
+// ok (value in out[0]), 1 empty, 2 invalid digit, 3 out of range,
+// `rok_str_parse_float` 0 ok or 2 invalid. Declared with the runtime
+// ABI (`extern "rok"`, 8.5 preamble): a `str` crosses as (ptr, len).
+extern "rok" {
+    fn rok_str_eq(a: str, b: str) -> i32;
+    fn rok_str_byte(s: str, i: usize) -> u8;
+    fn rok_str_parse_int(s: str, radix: u32, signed: i32, bits: u32, out: GcBuf<i64>) -> i32;
+    fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
+}
+
+fn main() {
+    unsafe {
+        let s = f"he{"llo"}";
+        println(f"eq {rok_str_eq(s, "hello")} {rok_str_eq(s, "hellp")} {rok_str_eq("", "")}");
+        println(f"byte {rok_str_byte(s, 0)} {rok_str_byte(s, 4)}");
+        let out: GcBuf<i64> = buf_new(1);
+        let a = rok_str_parse_int("-42", 10, 1, 32, out);
+        let av = out[0];
+        let empty = rok_str_parse_int("", 10, 1, 32, out);
+        let bad = rok_str_parse_int("12x", 10, 1, 32, out);
+        let big = rok_str_parse_int("300", 10, 0, 8, out);
+        let hex = rok_str_parse_int("ff", 16, 0, 8, out);
+        println(f"int {a}:{av} {empty} {bad} {big} {hex}:{out[0]}");
+        let f: GcBuf<f64> = buf_new(1);
+        let ok = rok_str_parse_float("2.5", f);
+        let fv = f[0];
+        println(f"float {ok}:{fv} {rok_str_parse_float("2.5.1", f)}");
+    }
+}

@@ -469,7 +469,12 @@ pub(super) fn monomorphize_on(
         fn_def.name.clone(),
         subst_tys.iter().map(ty_mangle).collect::<Vec<_>>(),
     );
-    if let Some(&existing_id) = ctx.env.sink.mono_cache.borrow().get(&key) {
+    let existing = ctx.env.sink.mono_cache.borrow().get(&key).copied();
+    super::incr::log(
+        || format!("m|{}|{}", key.0, key.1.join(",")),
+        || super::incr::Lookup::Mono(key.0.clone(), subst_tys.clone(), existing),
+    );
+    if let Some(existing_id) = existing {
         if being_inferred(ctx.env, existing_id) {
             return None;
         }
@@ -487,6 +492,8 @@ pub(super) fn monomorphize_on(
     let new_id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(new_id.0 + 1);
     // Pre-cache so a recursive call inside the body finds the in-progress mono.
+    super::incr::touch(new_id);
+    super::incr::touch_key(|| super::incr::Key::Mono(key.0.clone(), subst_tys.clone()));
     ctx.env.sink.mono_cache.borrow_mut().insert(key, new_id);
     // Resolve the return type up front for recursive calls in the body.
     let mut preview_ret_ty =
@@ -583,7 +590,7 @@ pub(super) fn monomorphize_on(
 /// Is `id`'s return type being inferred (a call of it from its own
 /// body)? Recorded for `infer_ret_of`.
 fn being_inferred(env: &Env<'_>, id: FunctionId) -> bool {
-    let open = matches!(env.sink.inferred_ret.borrow().get(&id), Some(None));
+    let open = matches!(inferred_ret(env, id), Some(None));
     if open {
         env.sink.recursive_ret.borrow_mut().push(id);
     }
@@ -628,6 +635,7 @@ fn var_instance(
 ) -> (FunctionId, HirTy) {
     let id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(id.0 + 1);
+    super::incr::touch(id);
     let self_hir = self_hint
         .cloned()
         .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, subst, None, t)));
@@ -688,6 +696,7 @@ pub(super) fn lower_fn_inner(
     let ret = if env.infer_ret.contains(&id) {
         let r = decl_ret_ok(env, id);
         if fn_def.body.is_some() {
+            super::incr::touch(id);
             if let Some((_, f)) = env.sink.inferred_fns.borrow_mut().remove(&id) {
                 return f;
             }
@@ -759,7 +768,7 @@ pub(super) fn infers_ret(
 /// The ok side of the return type of declaration `id` (in
 /// `Env::infer_ret`), inferred on first use.
 fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
-    let cached = env.sink.inferred_ret.borrow().get(&id).cloned();
+    let cached = inferred_ret(env, id);
     match cached {
         Some(Some(t)) => t,
         Some(None) => {
@@ -798,6 +807,7 @@ fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
 /// decl pass takes it (`lower_fn_inner`).
 fn keep_inferred(env: &Env<'_>, id: FunctionId, start: u32, done: Option<HirFunction>) {
     if let Some(f) = done {
+        super::incr::touch(id);
         env.sink.inferred_fns.borrow_mut().insert(id, (start, f));
     }
 }
@@ -848,9 +858,10 @@ fn infer_ret_of(
     subst: &HashMap<String, HirTy>,
     keep: bool,
 ) -> (HirTy, Option<HirFunction>) {
-    if let Some(Some(t)) = env.sink.inferred_ret.borrow().get(&id) {
-        return (t.clone(), None);
+    if let Some(Some(t)) = inferred_ret(env, id) {
+        return (t, None);
     }
+    super::incr::touch(id);
     env.sink.inferred_ret.borrow_mut().insert(id, None);
     let hits = env.sink.recursive_ret.borrow().len();
     let tentatives = env.sink.tentative_ret.borrow().len();
@@ -981,8 +992,7 @@ fn lower_fn_with(
     let instance =
         (!subst.is_empty() && !subst.values().any(|t| *t == nothrow)).then_some((fn_def.span, id));
     if let Some((t, id)) = instance {
-        let mut iw = env.sink.instance_warns.borrow_mut();
-        iw.instances.entry(t).or_default().insert(id);
+        env.sink.instance_warns.borrow_mut().instance(t, id);
     }
     env.sink.instances.borrow_mut().push(instance);
     let is_const = fn_def
@@ -990,6 +1000,7 @@ fn lower_fn_with(
         .iter()
         .any(|a| a.path == [rokc_ast::CONST_FN_ATTR]);
     let is_std = module == "rok" || module.starts_with("rok::");
+    super::incr::touch(id);
     env.sink
         .fn_origin
         .borrow_mut()
@@ -1634,4 +1645,16 @@ pub(super) fn assign_place(ctx: &LowerCtx<'_>, place: &HirExpr, value: HirExpr) 
         }
         _ => None,
     }
+}
+
+/// The inferred return type of `id` so far (`Some(None)`: being
+/// inferred).
+#[allow(clippy::option_option)] // the table's entry, if any
+fn inferred_ret(env: &Env<'_>, id: FunctionId) -> Option<Option<HirTy>> {
+    let r = env.sink.inferred_ret.borrow().get(&id).cloned();
+    super::incr::log(
+        || format!("r|{}", id.0),
+        || super::incr::Lookup::InferredRet(id, r.clone()),
+    );
+    r
 }

@@ -1465,3 +1465,173 @@ impl Em<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn em(obj: &mut Obj) -> Em<'_> {
+        Em {
+            obj,
+            start: 0,
+            code: Vec::new(),
+            relocs: Vec::new(),
+            fixes: Vec::new(),
+            labels: Vec::new(),
+            slot_off: Vec::new(),
+            frame: 0,
+            lines: Vec::new(),
+            held: Vec::new(),
+            escaped: Vec::new(),
+            pending: Vec::new(),
+            waits: Waits::default(),
+            next_rel: None,
+            flags: None,
+        }
+    }
+
+    /// Run the move-wide and 64-bit add / sub (immediate, extended
+    /// register) words of `code` on `x` (31 is `sp`).
+    fn run(code: &[u32], x: &mut [u64; 32]) {
+        for &w in code {
+            let (rd, rn) = ((w & 31) as usize, ((w >> 5) & 31) as usize);
+            let hw = (w >> 21) & 3;
+            let imm16 = u64::from((w >> 5) & 0xffff) << (16 * hw);
+            match w & 0xff80_0000 {
+                0xd280_0000 => x[rd] = imm16,
+                0x9280_0000 => x[rd] = !imm16,
+                0xf280_0000 => x[rd] = (x[rd] & !(0xffff << (16 * hw))) | imm16,
+                op @ (0x9100_0000 | 0xd100_0000) => {
+                    let imm = u64::from((w >> 10) & 0xfff) << (12 * ((w >> 22) & 1));
+                    x[rd] = if op == 0x9100_0000 {
+                        x[rn].wrapping_add(imm)
+                    } else {
+                        x[rn].wrapping_sub(imm)
+                    };
+                }
+                _ if w & 0xffe0_fc00 == 0x8b20_6000 => {
+                    x[rd] = x[rn].wrapping_add(x[((w >> 16) & 31) as usize]);
+                }
+                _ => panic!("unexpected word {w:#010x}"),
+            }
+        }
+    }
+
+    /// Halfword patterns: zeros, ones, and mixed values.
+    fn values() -> Vec<u64> {
+        let mut out = vec![0, 1, 0xffff, 0x1_0000, u64::MAX, u64::MAX - 1, 1 << 63];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..2000 {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let mut v = 0u64;
+            for h in 0..4 {
+                let part = match (seed >> (h * 8)) & 3 {
+                    0 => 0,
+                    1 => 0xffff,
+                    _ => (seed >> (16 + h * 11)) & 0xffff,
+                };
+                v |= part << (16 * h);
+            }
+            out.push(v);
+        }
+        out
+    }
+
+    #[test]
+    fn mov_imm_builds_every_value_in_fewest_words() {
+        let mut obj = Obj::new(false, false, false);
+        for v in values() {
+            let mut e = em(&mut obj);
+            e.mov_imm(X9, v);
+            let mut x = [0xdead_beef_u64; 32];
+            run(&e.code, &mut x);
+            assert_eq!(x[9], v, "{v:#x}: {:x?}", e.code);
+            let count = |y: u64| (0..4).filter(|h| (y >> (16 * h)) & 0xffff != 0).count();
+            let best = count(v).min(count(!v)).max(1);
+            assert_eq!(e.code.len(), best, "{v:#x}: {:x?}", e.code);
+        }
+    }
+
+    #[test]
+    fn add_imm_reaches_far_offsets() {
+        let mut obj = Obj::new(false, false, false);
+        let imms = [
+            0,
+            1,
+            -1,
+            8,
+            4095,
+            4096,
+            4097,
+            -4096,
+            -4097,
+            0xff_ffff,
+            -0xff_ffff,
+            1 << 24,
+            -(1 << 24) - 8,
+            i64::from(i32::MAX),
+            -(1 << 40),
+        ];
+        for imm in imms {
+            for (rd, rn) in [(X9, X9), (X9, SP), (SP, SP), (X10, X9)] {
+                let mut e = em(&mut obj);
+                e.add_imm(rd, rn, imm);
+                let mut x = [0u64; 32];
+                x[rn as usize] = 0x1000_0000_0000;
+                run(&e.code, &mut x);
+                let want = 0x1000_0000_0000u64.wrapping_add(imm as u64);
+                assert_eq!(x[rd as usize], want, "{imm} x{rd} x{rn}: {:x?}", e.code);
+                assert!(e.code.len() <= 2 || imm.unsigned_abs() >= 1 << 24, "{imm}");
+            }
+        }
+    }
+
+    /// A load's address: the scaled 12-bit form, the unscaled 9-bit form
+    /// or `x17` from `add_imm`.
+    #[test]
+    fn ldst_addresses_every_offset() {
+        let mut obj = Obj::new(false, false, false);
+        for op in [LDRX, LDRW, LDRH, LDRB, LDRD] {
+            let size = 1i64 << op.1;
+            for off in [
+                0,
+                size,
+                -size,
+                255,
+                -256,
+                -257,
+                4095 * size,
+                4096 * size,
+                12,
+                301,
+                1 << 20,
+            ] {
+                let mut e = em(&mut obj);
+                e.ldst(op, X9, X10, off);
+                let (last, setup) = e.code.split_last().unwrap();
+                let mut x = [0u64; 32];
+                x[10] = 0x10_0000;
+                run(setup, &mut x);
+                let base = x[((last >> 5) & 31) as usize];
+                let addr = if last & (1 << 24) != 0 {
+                    base + (u64::from((last >> 10) & 0xfff) << op.1)
+                } else {
+                    assert_eq!(last & ((1 << 21) | (3 << 10)), 0, "{last:#x}");
+                    let imm9 = i64::from(((last >> 12) & 0x1ff) as i32) << 55 >> 55;
+                    base.wrapping_add(imm9 as u64)
+                };
+                assert_eq!(
+                    addr,
+                    0x10_0000u64.wrapping_add(off as u64),
+                    "{size} {off}: {:x?}",
+                    e.code
+                );
+                assert_eq!(last & 31, X9, "{last:#x}");
+                let opcode = |w: u32| w & 0xffc0_0000 & !(1 << 24);
+                assert_eq!(opcode(*last), opcode(op.0), "{last:#x}");
+            }
+        }
+    }
+}

@@ -1,0 +1,58 @@
+// spec: std 107-ffi §1.7.1 §1.7.3 §1.7.4
+// expect-exit: 0
+// expect-stdout:
+// strlen: 5 0
+// getenv unset: true
+// buffer: [7, 7, 7, 7]
+// freed 4
+// cos: 1
+
+// stdlib 1.7: `extern "C"` declarations — a `str` argument goes as a
+// NUL-terminated `char*`, a nullable `char*` result is a `CPtr<c_char>`
+// — and a safe wrapper whose `Drop` releases the C resource at the end
+// of `using`.
+use rok::bare::ptr::{CPtr, Ptr};
+
+extern "C" {
+    fn malloc(size: usize) -> CPtr<u8>;
+    fn free(ptr: CPtr<u8>);
+    fn memset(p: CPtr<u8>, c: i32, n: usize) -> CPtr<u8>;
+    fn strlen(s: str) -> usize;
+    fn getenv(name: str) -> CPtr<c_char>;
+    fn cos(x: f64) -> f64;
+}
+
+/// A C buffer released by `using`.
+struct CBuf { p: CPtr<u8>; n: usize; }
+
+impl CBuf {
+    fn new(n: usize, fill: u8) -> CBuf {
+        let p = unsafe { malloc(n) };
+        if p.is_null() { panic("malloc failed"); }
+        unsafe { memset(p, fill as i32, n) };
+        return CBuf { p: p, n: n };
+    }
+    fn to_list(self) -> List<u8> {
+        let raw: Ptr<u8> = self.p.as_ptr() ?? panic("null");
+        let out: List<u8> = [];
+        for i in 0usize..self.n { out.push(unsafe { raw.add(i).read() }); }
+        return out;
+    }
+}
+
+impl Drop for CBuf {
+    fn drop(ref self) {
+        unsafe { free(self.p) };
+        println(f"freed {self.n}");
+    }
+}
+
+fn main() {
+    println(f"strlen: {unsafe { strlen("hello") }} {unsafe { strlen("") }}");
+    let v = unsafe { getenv("ROK_TEST_SURELY_UNSET_VARIABLE") };
+    println(f"getenv unset: {v.is_null()}");
+    using b = CBuf::new(4, 7u8) {
+        println(f"buffer: {b.to_list():?}");
+    }
+    println(f"cos: {unsafe { cos(0.0) }}");
+}

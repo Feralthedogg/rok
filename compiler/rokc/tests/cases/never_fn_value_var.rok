@@ -1,4 +1,6 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/never_fn_value_var.rok:10:17:
+// expect-stderr: die
 // expect-stdout:
 // 1
 

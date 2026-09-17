@@ -12,3 +12,5 @@ fn main() -> i32 {
 }
 
 // spec: 006.02-built-in-attributes
+// spec: std §2.13.3
+// spec: §6.2.1

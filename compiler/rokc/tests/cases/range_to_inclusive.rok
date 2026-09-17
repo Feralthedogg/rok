@@ -16,3 +16,4 @@ fn main() {
 }
 
 // spec: 003.07-range-expressions
+// spec: std §2.7.4

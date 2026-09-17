@@ -31,3 +31,5 @@ fn main() {
     let s: i32 | str = "whole";
     println(wide(s));
 }
+
+// spec: §2.2.5

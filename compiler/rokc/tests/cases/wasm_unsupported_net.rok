@@ -22,3 +22,5 @@ try TcpStream::connect(any) catch e: IoError { println(f"connect: {e.kind():?}")
 try UdpSocket::bind(any) catch e: IoError { println(f"udp: {e.kind():?}"); };
 try net::tcp_connect("localhost:80") catch e: IoError { println(f"resolve: {e.kind():?}"); };
 println(f"inherited: {TcpListener::inherited().len()}");
+// spec: std 302-net §3.2.8
+// spec: std 001-tier-model §0.1.4

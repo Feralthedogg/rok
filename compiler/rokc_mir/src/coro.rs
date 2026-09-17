@@ -724,6 +724,67 @@ mod tests {
         assert_eq!(stores, vec![(1, false), (2, false), (0, true)]);
     }
 
+    /// `async fn h(n) { let a = n + n; r = await a; return r + a }`: `r`
+    /// (local 1) comes with every resume.
+    fn awaiting() -> MirFunction {
+        let mut f = generator();
+        f.params = vec![LocalId(0), LocalId(1)];
+        f.param_tys = vec![I64, I64];
+        f.locals = (0..4)
+            .map(|i| LocalDecl {
+                id: LocalId(i),
+                name: None,
+                ty: I64,
+            })
+            .collect();
+        f.blocks = vec![
+            block(
+                0,
+                vec![add(2, 0, 0)],
+                Terminator::Suspend {
+                    value: Some(Operand::Copy(LocalId(2))),
+                    resume: BlockId(1),
+                    is_final: false,
+                },
+            ),
+            block(
+                1,
+                vec![add(3, 1, 2)],
+                Terminator::Return(Some(Operand::Copy(LocalId(3)))),
+            ),
+        ];
+        f
+    }
+
+    #[test]
+    fn resume_args_come_with_every_resume() {
+        let mut f = awaiting();
+        let ctor = transform(&mut f, 1, FunctionId(1));
+        // The constructor takes `n` only; `resume(frame, r)`.
+        assert_eq!(ctor.param_tys, vec![I64]);
+        assert_eq!(f.param_tys, vec![MirTy::GcRef, I64]);
+        // The frame keeps `n` and `a`, not the resume argument or `r + a`.
+        let Statement::Assign {
+            rvalue: RValue::HeapAlloc { ty: frame_ty },
+            ..
+        } = &ctor.blocks[0].stmts[0]
+        else {
+            panic!("ctor must allocate the frame first");
+        };
+        assert_eq!(
+            *frame_ty,
+            MirTy::Tuple(vec![MirTy::Prim(PrimTy::I32), I64, I64])
+        );
+        // The return reads the reloaded `a` and the new `r`.
+        assert!(
+            f.blocks
+                .iter()
+                .all(|b| !matches!(b.terminator, Terminator::Suspend { .. }))
+        );
+        let live = live_in(&awaiting());
+        assert_eq!(live[&BlockId(1)], BTreeSet::from([LocalId(1), LocalId(2)]));
+    }
+
     #[test]
     fn live_in_is_backward_dataflow() {
         let f = generator();

@@ -26,3 +26,4 @@ println(handle("s"));
 println(handle(true));
 println(classify(1));
 println(classify(1.0));
+// spec: §6.10.5

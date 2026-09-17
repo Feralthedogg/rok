@@ -7,3 +7,4 @@ mod a {
 }
 
 fn main() -> i32 { let s = a::S(1, 2); return s.1; }
+// spec: §5.6.8

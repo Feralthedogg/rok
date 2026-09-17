@@ -38,3 +38,4 @@ fn main() -> i32 {
     println(f"{p.my_hash()}");
     return 0;
 }
+// spec: §6.8.1 §6.8.2 §6.8.5

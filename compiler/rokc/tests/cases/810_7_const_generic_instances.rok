@@ -25,3 +25,4 @@ fn main() -> i32 {
     println(f"len {len([1u8, 2u8, 3u8])} {len([0u8; 2])} {len([7u8; 5])}");
     return 0;
 }
+// spec: 009.02-aot-pipeline §9.2.8

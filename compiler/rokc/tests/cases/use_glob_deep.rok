@@ -1,4 +1,5 @@
-// expect-exit: 21
+// expect-exit: 0
+// expect-stdout: 1 2 4
 
 pub mod outer {
     pub fn a() -> i32 { 1i32 }
@@ -14,9 +15,9 @@ pub mod outer {
 
 use outer::**;
 
-fn main() -> i32 {
+fn main() {
     // a, b, c all reachable through deep glob
-    return a() + b() + c() + 14i32;  // 1+2+4+14 = 21
+    println(f"{a()} {b()} {c()}");
 }
 
 // spec: 005.05-use

@@ -24,3 +24,4 @@ fn main() -> i32 {
     println(f"{m[t] + m[3, 4, 5] - m[1, 0]}");   // 3 + 12 - 3
     return 0;
 }
+// spec: 008.09-lowering-control §8.9.13

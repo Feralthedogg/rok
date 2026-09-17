@@ -1,5 +1,6 @@
 //! Hashes for build keys, symbol names and message signing: FNV-1a 64,
-//! FIPS 180-4 SHA-256, RFC 2104 HMAC-SHA256, lowercase hex.
+//! a fast word-at-a-time 64-bit hash, FIPS 180-4 SHA-256, RFC 2104
+//! HMAC-SHA256, lowercase hex.
 
 use std::fmt::Write as _;
 
@@ -18,6 +19,40 @@ pub fn fnv_add(h: u64, bytes: &[u8]) -> u64 {
 #[must_use]
 pub fn fnv(bytes: &[u8]) -> u64 {
     fnv_add(FNV_OFFSET, bytes)
+}
+
+const MIX: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// The high and low halves of `a * b` folded together.
+#[allow(clippy::cast_possible_truncation)]
+const fn mum(a: u64, b: u64) -> u64 {
+    let p = (a as u128) * (b as u128);
+    (p as u64) ^ ((p >> 64) as u64)
+}
+
+/// A 64-bit hash of `bytes`, eight at a time (the incremental caches'
+/// keys: fast over megabytes, not cryptographic).
+#[must_use]
+pub fn fast(bytes: &[u8]) -> u64 {
+    fast_add(0x243f_6a88_85a3_08d3, bytes)
+}
+
+/// `fast` continuing from `h` (`h` and `bytes` hash as one value).
+#[must_use]
+pub fn fast_add(h: u64, bytes: &[u8]) -> u64 {
+    let mut h = mum(h ^ bytes.len() as u64, MIX);
+    let mut words = bytes.chunks_exact(8);
+    for w in &mut words {
+        let mut b = [0u8; 8];
+        b.copy_from_slice(w);
+        h = mum(h ^ u64::from_le_bytes(b), MIX);
+    }
+    let mut b = [0u8; 8];
+    b[..words.remainder().len()].copy_from_slice(words.remainder());
+    mum(
+        mum(h ^ u64::from_le_bytes(b), MIX),
+        MIX ^ 0x5851_f42d_4c95_7f2d,
+    )
 }
 
 #[must_use]
@@ -114,6 +149,24 @@ pub fn hmac_sha256(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_hash_tells_inputs_apart() {
+        let mut seen = std::collections::HashSet::new();
+        // Lengths, tails, a byte moved, a byte changed.
+        for n in 0..40usize {
+            let v: Vec<u8> = (0..n).map(|i| u8::try_from(i * 7 % 251).unwrap()).collect();
+            assert!(seen.insert(fast(&v)), "{n}");
+            if n > 0 {
+                let mut w = v.clone();
+                w[n / 2] ^= 1;
+                assert!(seen.insert(fast(&w)), "{n}");
+            }
+        }
+        assert!(seen.insert(fast(&[0; 8])) && seen.insert(fast(&[0; 9])));
+        assert_eq!(fast(b"rok"), fast(b"rok"));
+        assert_ne!(fast_add(1, b"ab"), fast_add(2, b"ab"));
+    }
 
     #[test]
     fn known_vectors() {

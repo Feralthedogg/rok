@@ -1,4 +1,6 @@
 // expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_unsigned_sub_overflow_panics.rok:8:40:
+// expect-stderr: attempt to subtract with overflow
 // debug-only
 // expect-stdout:
 // 0

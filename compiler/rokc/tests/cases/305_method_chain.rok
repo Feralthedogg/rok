@@ -17,3 +17,4 @@ fn main() -> i32 {
     println(f"{r}");
     return 0;
 }
+// spec: §3.5.2
