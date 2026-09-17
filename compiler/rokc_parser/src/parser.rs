@@ -2456,7 +2456,24 @@ impl<'a> Parser<'a> {
             inner: false,
             span,
         });
-        self.parse_fn(vis, attrs)
+        let def = self.parse_fn(vis, attrs)?;
+        // Spec 5.2.5: no type arguments; introspection is meta blocks'.
+        for p in &def.params {
+            if let Some(rokc_ast::Ty {
+                kind: rokc_ast::TyKind::Path(path),
+                span,
+            }) = &p.ty
+            {
+                if matches!(path.segments.as_slice(), [s] if s.name == "type") {
+                    self.error(
+                        *span,
+                        "a `const fn` cannot take a type as an argument (spec 5.2.5): use a \
+                         generic parameter, or a meta block for type introspection",
+                    );
+                }
+            }
+        }
+        Some(def)
     }
 
     fn parse_fn(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<FnDef> {
@@ -3555,6 +3572,12 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         if self.at_nested_fn() {
             return Some((self.parse_nested_fn()?, false));
+        }
+        // Spec 5.2.2: `const NAME: T = e;` in a body.
+        if self.at_kw("const") && matches!(self.peek_next(), Some(TokenKind::Ident(_))) {
+            let c = self.parse_const(Visibility::Private, Vec::new())?;
+            let kind = StmtKind::Item(Item::Const(c));
+            return Some((Stmt { kind, span: start }, false));
         }
         match self.peek() {
             TokenKind::Use => {

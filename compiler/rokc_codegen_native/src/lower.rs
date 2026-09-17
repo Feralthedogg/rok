@@ -46,6 +46,9 @@ pub struct Ctx<'a> {
     /// `ScanTable` of each GC type (index + `gc_type_base`).
     pub gc_types: &'a mut Vec<Vec<u32>>,
     pub gc_type_base: u32,
+    /// In a codegen unit, the user package's hash in its GC type id
+    /// symbols (`Lower::gc_tid`).
+    pub gc_pkg: Option<&'a str>,
     pub overflow_checks: bool,
     /// `-g`: describe functions and their locals (`MirModule::debug`).
     pub debug: Option<&'a rokc_mir::DebugTypes>,
@@ -61,18 +64,16 @@ pub struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// The GC type id of `ty` objects (`array`: buffers of them).
-    pub fn gc_type_id(&mut self, ty: &MirTy, array: bool) -> u32 {
+    /// The index of `ty` objects' (`array`: buffers of them) GC type.
+    fn gc_type(&mut self, ty: &MirTy, array: bool) -> usize {
         let key = scan_table(ty, array, self.t);
-        let i = self
-            .gc_types
+        self.gc_types
             .iter()
             .position(|k| *k == key)
             .unwrap_or_else(|| {
                 self.gc_types.push(key);
                 self.gc_types.len() - 1
-            });
-        self.gc_type_base + i as u32
+            })
     }
 
     /// The symbol of a string literal's bytes (NUL-terminated).
@@ -1186,13 +1187,13 @@ impl<'c, 'a> FnLower<'c, 'a> {
     /// (the emitter's `emit_gc_object`).
     fn gc_object(&mut self, ty: &MirTy) -> Mem {
         let w = self.word();
-        let tid = self.c.gc_type_id(ty, false);
+        let tid = self.gc_tid(ty, false);
         let (size, align) = gc_object_size(ty, self.c.t);
         let obj = self.word_tmp();
         let args = [
             (V::I(i64::from(size)), w),
             (V::I(i64::from(align)), w),
-            (V::I(i64::from(tid)), K::I32),
+            (tid, K::I32),
         ];
         if size >= LOS_THRESHOLD || align > 8 {
             self.call_rt("rok_gc_alloc_slow", &args, Some((obj, w)));
@@ -1241,7 +1242,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
         self.push(Inst::Mov {
             k: K::I32,
             dst: Mem::Ind(cs, 0),
-            src: V::I(i64::from(tid)),
+            src: tid,
         });
         self.push(Inst::Mov {
             k: w,
@@ -1390,6 +1391,34 @@ impl<'c, 'a> FnLower<'c, 'a> {
         self.call_sym(f, &[], &MirTy::Unit, &[], None);
         self.push(Inst::Jmp(r));
         self.push(Inst::Label(r));
+    }
+
+    /// The GC type id of `ty` objects (`array`: buffers of them): a
+    /// constant, or in a codegen unit read from the symbol the glue
+    /// defines (`units::gc_symbol`), so the unit's code stays the same
+    /// when other units' types change the ids.
+    fn gc_tid(&mut self, ty: &MirTy, array: bool) -> V {
+        let i = self.c.gc_type(ty, array);
+        let Some(pkg) = self.c.gc_pkg else {
+            return V::I(i64::from(self.c.gc_type_base + i as u32));
+        };
+        let name = rokc_codegen_mlir::units::gc_symbol(pkg, &self.c.gc_types[i]);
+        let s = self.c.sym(&name);
+        // The glue is in the same executable, as a unit's statics are.
+        let p = self.word_tmp();
+        self.push(Inst::Sym {
+            dst: p,
+            sym: s,
+            got: false,
+        });
+        let Mem::Frame(ps, _) = p else { unreachable!() };
+        let tid = self.tmp_k(K::I32);
+        self.push(Inst::Mov {
+            k: K::I32,
+            dst: tid,
+            src: V::M(Mem::Ind(ps, 0)),
+        });
+        V::M(tid)
     }
 
     /// The address of static `name` in a word temp.
@@ -2101,9 +2130,9 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let w = self.word();
                 let (n, nk) = self.scalar(len, &MirTy::Prim(PrimTy::Usize));
                 let tid = if t.has_gc_ref(elem_ty) {
-                    self.c.gc_type_id(elem_ty, true)
+                    self.gc_tid(elem_ty, true)
                 } else {
-                    PLAIN_TYPE_ID
+                    V::I(i64::from(PLAIN_TYPE_ID))
                 };
                 let (size, align) = t.size_align(elem_ty);
                 let align = align.max(8);
@@ -2144,11 +2173,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let d = out(self, &MirTy::GcRef);
                 self.call_rt(
                     "rok_gc_alloc_slow",
-                    &[
-                        (V::M(total), w),
-                        (V::I(i64::from(align)), w),
-                        (V::I(i64::from(tid)), K::I32),
-                    ],
+                    &[(V::M(total), w), (V::I(i64::from(align)), w), (tid, K::I32)],
                     Some((d, w)),
                 );
             }

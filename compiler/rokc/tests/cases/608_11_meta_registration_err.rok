@@ -1,0 +1,20 @@
+// spec: 006.08-meta-blocks
+// expect-error: 13:1: derive `A` is defined by two meta blocks (spec 6.8.11)
+// expect-error: 10:28: unknown template token `@where_for_fields` (spec 6.9)
+
+// Spec 6.8.11: one meta block per derive name; spec 6.9.1:
+// `@where_for_fields` is reserved, so using it is an error.
+trait A { fn a() -> i32; }
+
+#[impl_derive(A)] @derive {
+    impl A for @Self where @where_for_fields(A) { fn a() -> i32 { 1 } }
+}
+
+#[impl_derive(A)] @derive {
+    impl A for @Self { fn a() -> i32 { 2 } }
+}
+
+#[derive(A)]
+struct S { x: i32; }
+
+fn main() -> i32 { return 0; }

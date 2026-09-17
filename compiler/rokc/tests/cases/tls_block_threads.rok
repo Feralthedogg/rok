@@ -1,0 +1,40 @@
+// Each thread allocates from its own TLAB, links its own shadow-stack
+// frames and polls its own yield flag, all slots of its own TLS block
+// `rok_tls` (803 §8.3.1), while collections stop every thread.
+// needs: threads
+// expect-exit: 0
+// expect-stdout: 1600000
+use rok::std::thread;
+
+extern "C" { fn rok_gc_collect(); }
+
+fn churn(n: i64) -> i64 {
+    let keep: List<List<i64>> = [];
+    let i: i64 = 0;
+    while i < n {
+        let xs: List<i64> = [1, 1];
+        if i % 2 == 0 {
+            keep.push(xs);
+        }
+        if i % 50000 == 0 {
+            unsafe { rok_gc_collect() };
+        }
+        i += 1;
+    }
+    let s: i64 = 0;
+    for xs in keep {
+        s += xs[0] + xs[1];
+    }
+    s
+}
+
+fn main() -> i32 {
+    let hs: List<thread::JoinHandle<i64>> = [];
+    for _ in 0..4 {
+        hs.push(thread::spawn(|| churn(400000)));
+    }
+    let total: i64 = 0;
+    for h in hs { total += try! h.join(); }
+    println(f"{total}");
+    return 0;
+}

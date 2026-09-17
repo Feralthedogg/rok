@@ -317,14 +317,14 @@ impl CompileResult {
     }
 
     /// Build a library package's static archive at `out` (spec 902.13),
-    /// with `object` its one object beside it (`build_archive`).
+    /// by codegen units with `opts.incremental`, and then how many it
+    /// compiled (`build_archive`).
     pub fn archive(
         &self,
         opts: &BuildOptions,
         out: &Path,
-        object: bool,
-    ) -> Result<(), RokDiagnostic> {
-        rokc_driver::build_archive(self.module()?, &self.source_map, opts, out, object)
+    ) -> Result<Option<UnitCounts>, RokDiagnostic> {
+        rokc_driver::build_archive(self.module()?, &self.source_map, opts, out)
     }
 }
 

@@ -714,12 +714,32 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
     else {
         return;
     };
+    // The files the functions are in, numbered in order of first use: an
+    // object names only its own files (a codegen unit's does not change
+    // when another file is added).
+    let mut used: Vec<u32> = vec![first_file];
+    for f in &fns {
+        let id = f.debug.as_ref().map_or(0, |d| d.0.file);
+        if id != 0 && !used.contains(&id) {
+            used.push(id);
+        }
+    }
+    let fid = |id: u32| {
+        let id = if id == 0 { first_file } else { id };
+        used.iter()
+            .position(|&u| u == id)
+            .map_or(0, |i| i as u32 + 1)
+    };
     let cwd = std::env::current_dir().unwrap_or_default();
-    let files: Vec<PathBuf> = sources.files().iter().map(|(p, _)| cwd.join(p)).collect();
-    let cu_path = files
-        .get(first_file as usize - 1)
-        .cloned()
-        .unwrap_or_default();
+    let all = sources.files();
+    let files: Vec<PathBuf> = used
+        .iter()
+        .map(|&id| {
+            all.get(id as usize - 1)
+                .map_or_else(PathBuf::new, |(p, _)| cwd.join(p))
+        })
+        .collect();
+    let cu_path = files[0].clone();
     let dir_of = |p: &Path| {
         p.parent()
             .map_or_else(String::new, |d| d.to_string_lossy().into_owned())
@@ -783,10 +803,9 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
     }
     for f in &fns {
         let (d, offs) = f.debug.as_ref().expect("debug");
-        let file = if d.file == 0 { first_file } else { d.file };
         info.b.push(A_SUB);
         cstr(&mut info.b, &d.name);
-        uleb(&mut info.b, u64::from(file));
+        uleb(&mut info.b, u64::from(fid(d.file)));
         uleb(&mut info.b, u64::from(d.line));
         info.addr(f.sym, f.start);
         if info.split {
@@ -813,7 +832,7 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
             };
             info.b.push(if v.arg.is_some() { A_PARAM } else { A_VAR });
             cstr(&mut info.b, &v.name);
-            uleb(&mut info.b, u64::from(d.file));
+            uleb(&mut info.b, u64::from(fid(d.file)));
             uleb(&mut info.b, u64::from(v.line));
             info.u32(ty);
             let mut loc = vec![DW_OP_FBREG];
@@ -832,13 +851,7 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
     let len = info.b.len() as u32 - 4;
     info.b[..4].copy_from_slice(&len.to_le_bytes());
 
-    let line = line_program(
-        &fns,
-        &files,
-        &dir_of,
-        first_file,
-        if obj.x86 { 1 } else { 4 },
-    );
+    let line = line_program(&fns, &files, &dir_of, &fid, if obj.x86 { 1 } else { 4 });
     let mut sect = |name: &'static str, data: Vec<u8>, relocs: Vec<Reloc>| {
         obj.extra.push((
             "__DWARF",
@@ -895,7 +908,7 @@ fn line_program(
     fns: &[&FnRange],
     files: &[PathBuf],
     dir_of: &dyn Fn(&Path) -> String,
-    cu_file: u32,
+    fid: &dyn Fn(u32) -> u32,
     unit: u32,
 ) -> (Vec<u8>, Vec<Reloc>) {
     let mut b = Vec::new();
@@ -948,10 +961,7 @@ fn line_program(
         b.extend_from_slice(&u64::from(f.start).to_le_bytes());
         // DW_LNS_set_file
         b.push(4);
-        uleb(
-            &mut b,
-            u64::from(if d.file == 0 { cu_file } else { d.file }),
-        );
+        uleb(&mut b, u64::from(fid(d.file)));
         let (mut addr, mut line) = (0u32, 1i64);
         let mut rows = vec![(0u32, d.line, 1u32)];
         rows.extend(f.lines.iter().map(|&(a, l, c, _)| (a, l, c)));

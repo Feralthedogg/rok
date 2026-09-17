@@ -46,7 +46,7 @@ pub fn compile(
         ..Pkgs::default()
     };
     if let Some(a) = unit {
-        a.core.hide_hash(&mut pkgs.link);
+        a.core.unit_pkgs(&mut pkgs);
     }
     let glue = unit.is_none_or(|a| a.glue);
     let in_unit = |f: FunctionId| unit.is_none_or(|a| a.core.defines(a.u, f));
@@ -229,6 +229,7 @@ pub fn compile(
         pkgs: &pkgs,
         gc_types: &mut gc_types,
         gc_type_base,
+        gc_pkg: unit.map(|a| a.core.placeholder.as_str()),
         overflow_checks: opts.overflow_checks,
         debug: opts.debug.then_some(&module.debug),
         local_statics: &local_statics,
@@ -431,7 +432,14 @@ fn glue_code(
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         let sym = ctx.sym(&format!("rok.scan{i}"));
         ctx.obj.define_data(sym, Sect::Const, &bytes, 4, false);
-        tables.push((gc_type_base + i as u32, sym));
+        let id = gc_type_base + i as u32;
+        tables.push((id, sym));
+        // A unit build's glue: the id units read (`Lower::gc_tid`).
+        if let Some(pkg) = ctx.gc_pkg {
+            let s = ctx.sym(&rokc_codegen_mlir::units::gc_symbol(pkg, &words));
+            ctx.obj
+                .define_data(s, Sect::Const, &id.to_le_bytes(), 4, true);
+        }
     }
     let mut roots = Vec::new();
     for s in &module.statics {

@@ -21,6 +21,11 @@ pub struct Pkgs {
     pub extern_statics: std::collections::HashSet<String>,
     /// Lazily initialized statics: name → symbol of their initializer.
     pub lazy_statics: std::collections::HashMap<String, String>,
+    /// A codegen unit build (`units`): a library's statics of other
+    /// packages it defines (compiled from source) are its copies,
+    /// `<symbol>.copy_Y<hash>_`, which the units share and another
+    /// package's copies do not collide with.
+    pub unit_copies: bool,
 }
 
 impl Pkgs {
@@ -29,7 +34,16 @@ impl Pkgs {
         if self.extern_statics.contains(name) {
             return name.to_owned();
         }
-        item(self.link.hash_of(name), name, "")
+        let sym = item(self.link.hash_of(name), name, "");
+        match self.link.lib.as_deref() {
+            Some(lib)
+                if self.unit_copies && !Link::owns(lib, name) && !self.link.in_prebuilt(name) =>
+            {
+                let own = self.link.packages.iter().find(|(p, _)| p == lib);
+                format!("{sym}.copy_Y{}_", own.map_or("", |(_, h)| h.as_str()))
+            }
+            _ => sym,
+        }
     }
 }
 

@@ -66,25 +66,26 @@ packages:
                                arguments, one per line
   clean [path]                 remove target/
 
-stones (the index is a git repository; nothing is uploaded):
-  login [<token>]              keep a GitHub token (read from stdin if not
-                               given) in $ROK_HOME/credentials.rokon, after
-                               checking it can push to the index
+stones (the index is a git repository; sources are not uploaded):
+  login [<token>]              keep a registry token (from <api>/me, e.g.
+                               https://rokstones.io/me; read from stdin if
+                               not given) in $ROK_HOME/credentials.rokon,
+                               after checking its account may publish
   logout                       remove it
   publish [--index <dir>] [--commit]
                                the index entry for this package (its git
                                remote `origin`, HEAD commit and tree); a dry
                                run, checked against the index checkout <dir>
                                if given. --commit: commit it to <dir>, or
-                               without --index, to the index and push (needs
-                               `rok login`)
+                               without --index, send it to the registry API
+                               (needs `rok login`)
   publish --native <file> [--index <dir>] [--commit]
                                the index entry of the native package
                                `Native { .. }` in <file>, each build fetched
                                and checked
   yank [--native] --vers <v> [--undo] [--index <dir>] [name]
                                mark a version yanked: committed to <dir>, or
-                               to the index and pushed (needs `rok login`);
+                               through the registry API (needs `rok login`);
                                --native: a native package's (named)
 
 compiler commands (rokc, with the dependencies; see `rokc help`):
@@ -1137,8 +1138,9 @@ fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// `rok search [--native] <query>`: `name = "newest"` for each stone (or
-/// native package) of the index whose name contains the query (any case).
+/// `rok search [--native] <query>`: `name newest — description` for each
+/// stone (or native package) of the index whose name contains the query
+/// (any case).
 fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
     let (q, native) = match args {
         [q] if !q.starts_with('-') => (q, false),
@@ -1161,13 +1163,16 @@ fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
     for n in names {
         let newest = if native {
             native::best(&native::entries(&index, &url, &n)?, &star)
-                .map(|e| (e.name.clone(), e.vers.clone()))
+                .map(|e| (e.name.clone(), e.vers.clone(), e.meta.clone()))
         } else {
             registry::best(&registry::entries(&index, &url, &n)?, &star)
-                .map(|e| (e.name.clone(), e.vers.clone()))
+                .map(|e| (e.name.clone(), e.vers.clone(), e.meta.clone()))
         };
-        if let Some((name, vers)) = newest {
-            println!("{name} = \"{vers}\"");
+        if let Some((name, vers, meta)) = newest {
+            match meta.iter().find(|(k, _)| *k == "description") {
+                Some((_, d)) => println!("{name} {vers} — {d}"),
+                None => println!("{name} {vers}"),
+            }
         }
     }
     Ok(0)
@@ -1217,57 +1222,52 @@ fn val<'a>(vals: &'a [(String, String)], f: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// Run `f` on the index checkout `index`, or without one, on a clone of
-/// the configured index, pushing what `f` commits (with `rok login`'s
-/// token); also the index's name for messages.
-fn on_index<T>(
-    index: Option<&str>,
-    f: impl FnOnce(&Path) -> Result<T, String>,
-) -> Result<(T, String), String> {
-    if let Some(i) = index {
-        return Ok((f(Path::new(i))?, i.to_owned()));
-    }
+/// The registry API of the configured index, and the token for it.
+fn api_token(g: &Global) -> Result<(String, String), String> {
     let home = home();
-    let url = registry::default_url(&home)?;
     let token = registry::token(&home)?;
-    Ok((registry::with_remote(&home, &url, &token, f)?, url))
+    let api = registry::api(&home, &registry::default_url(&home)?, g.quiet)?;
+    Ok((api, token))
 }
 
 /// `rok publish [--native <file>] [--index <dir>] [--commit]`: print the
 /// index line; with `--index`, check it against that checkout. With
-/// `--commit`, commit it there, or without `--index`, to the configured
-/// index, pushed.
+/// `--commit`, commit it there, or without `--index`, publish it through
+/// the registry API.
 fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
     let (vals, sw, pos) = flags(args, &["--index", "--native"], &["--commit"])?;
     if let Some(p) = pos.first() {
         return Err(format!("unexpected argument `{p}`"));
     }
     let write = sw.iter().any(|s| s == "--commit");
-    let index = val(&vals, "--index");
-    let (line, name, vers, rel, what) = if let Some(file) = val(&vals, "--native") {
-        let check = |i: Option<&Path>| native::publish(&home(), Path::new(file), i, write);
-        let e = if index.is_some() || write {
-            on_index(index, |i| check(Some(i)))?.0.0
-        } else {
-            check(None)?.0
-        };
+    let index = val(&vals, "--index").map(Path::new);
+    let remote = match index {
+        None if write => Some(api_token(g)?),
+        _ => None,
+    };
+    let (line, mut name, mut vers, rel, what) = if let Some(file) = val(&vals, "--native") {
+        let e = native::publish(&home(), Path::new(file), index, write)?.0;
         let rel = native::path(&e.name);
-        (e.to_line(), e.name, e.vers, rel, "native ")
+        (e.to_line(), e.name, e.vers.to_string(), rel, "native ")
     } else {
         let (dir, m) = this_package()?;
         let e = registry::entry_for(&dir, &m)?;
-        if index.is_some() || write {
-            on_index(index, |i| registry::publish(i, &e, write))?;
+        if let Some(i) = index {
+            registry::publish(i, &e, write)?;
         }
         let rel = registry::path(&e.name);
-        (e.to_line(), e.name, e.vers, rel, "")
+        (e.to_line(), e.name, e.vers.to_string(), rel, "")
+    };
+    let to = match (index, remote) {
+        (Some(i), _) => i.display().to_string(),
+        (None, Some((api, token))) => {
+            (name, vers) = registry::publish_api(&api, &token, &line)?;
+            api
+        }
+        (None, None) => registry::default_url(&home())?,
     };
     println!("{line}");
     if !g.quiet {
-        let to = match index {
-            Some(i) => i.to_owned(),
-            None => registry::default_url(&home())?,
-        };
         if write {
             eprintln!("   Published {what}{name} {vers} to {to}");
         } else {
@@ -1278,7 +1278,8 @@ fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
 }
 
 /// `rok yank [--native] --vers <v> [--undo] [--index <dir>] [name]`
-/// (default: this package's name; a native package is named).
+/// (default: this package's name; a native package is named): committed
+/// to the checkout `--index`, else through the registry API.
 fn cmd_yank(g: &Global, args: &[String]) -> Result<i32, String> {
     let (vals, sw, pos) = flags(args, &["--vers", "--index"], &["--undo", "--native"])?;
     let usage = "usage: rok yank [--native] --vers <version> [--undo] [--index <dir>] [name]";
@@ -1291,34 +1292,51 @@ fn cmd_yank(g: &Global, args: &[String]) -> Result<i32, String> {
         [] if !native => this_package()?.1.name.ok_or("rok.rokon has no `name`")?,
         _ => return Err(usage.into()),
     };
-    let yanked = !sw.iter().any(|s| s == "--undo");
-    let ((), to) = on_index(val(&vals, "--index"), |i| {
-        registry::yank(i, &name, vers, yanked, native)
-    })?;
+    let undo = sw.iter().any(|s| s == "--undo");
+    let to = if let Some(i) = val(&vals, "--index") {
+        registry::yank(Path::new(i), &name, vers, !undo, native)?;
+        i.to_owned()
+    } else {
+        let (api, token) = api_token(g)?;
+        registry::yank_api(&api, &token, &name, vers, undo, native)?;
+        api
+    };
     if !g.quiet {
-        let verb = if yanked { "Yanked" } else { "Unyanked" };
+        let verb = if undo { "Unyanked" } else { "Yanked" };
         eprintln!("   {verb} {name} {vers} in {to}");
     }
     Ok(0)
 }
 
-/// `rok login [<token>]`: keep a token that can push to the index.
+/// `rok login [<token>]`: keep a registry token whose account may
+/// publish.
 fn cmd_login(g: &Global, args: &[String]) -> Result<i32, String> {
     let (_, _, pos) = flags(args, &[], &[])?;
+    if pos.len() > 1 {
+        return Err("usage: rok login [<token>]".into());
+    }
     let home = home();
-    let url = registry::default_url(&home)?;
-    let token = match pos.as_slice() {
-        [t] => t.clone(),
-        [] => read_secret(&format!(
-            "a GitHub token with push access to {url} (not shown): "
+    let api = registry::api(&home, &registry::default_url(&home)?, g.quiet)?;
+    let token = match pos.first() {
+        Some(t) => t.clone(),
+        None => read_secret(&format!(
+            "a token from {api}/me (not shown; Ctrl-C to cancel): "
         ))?,
-        _ => return Err("usage: rok login [<token>]".into()),
     };
     registry::check_token(&token)?;
-    registry::check_push(&home, &url, &token)?;
+    let (login, publish) = registry::me(&api, &token)?;
+    if !publish {
+        return Err(
+            "this account cannot publish yet: publishing is open to rokstones.io maintainers only"
+                .into(),
+        );
+    }
     let file = registry::save_token(&home, &token)?;
     if !g.quiet {
-        eprintln!("   Logged in to {url} (token in {})", file.display());
+        eprintln!(
+            "   Logged in as {login} at {api} (token in {})",
+            file.display()
+        );
     }
     Ok(0)
 }
@@ -1342,51 +1360,140 @@ fn cmd_logout(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// A line of stdin, trimmed; not echoed when stdin is a terminal.
+/// A line of stdin, trimmed; not echoed when stdin is a terminal (echo
+/// comes back on Ctrl-C too).
 fn read_secret(prompt: &str) -> Result<String, String> {
     use std::io::IsTerminal;
     let tty = std::io::stdin().is_terminal();
-    if tty {
+    let hidden = tty && {
         eprint!("{prompt}");
-        echo(false);
-    }
+        echo::off()
+    };
     let mut line = String::new();
     let r = std::io::stdin().read_line(&mut line);
+    if hidden {
+        echo::on();
+    }
     if tty {
-        echo(true);
         eprintln!();
     }
     r.map_err(|e| format!("cannot read stdin: {e}"))?;
     Ok(line.trim().to_owned())
 }
 
-/// Turn the terminal's echo of stdin on or off.
-fn echo(on: bool) {
-    #[cfg(unix)]
-    let _ = Command::new("stty")
-        .arg(if on { "echo" } else { "-echo" })
-        .status();
-    #[cfg(windows)]
-    {
-        unsafe extern "system" {
-            fn GetStdHandle(which: u32) -> isize;
-            fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
-            fn SetConsoleMode(h: isize, mode: u32) -> i32;
+/// The terminal's echo of stdin, saved and turned off, then restored on
+/// `on` or on Ctrl-C (which then ends the process as it would have).
+#[cfg(unix)]
+mod echo {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // `struct termios` starts with `c_iflag`, `c_oflag`, `c_cflag`,
+    // `c_lflag` (`tcflag_t`); the rest is copied as is.
+    #[cfg(target_vendor = "apple")]
+    type Flag = u64;
+    #[cfg(not(target_vendor = "apple"))]
+    type Flag = u32;
+    const LFLAG: usize = 3 * size_of::<Flag>();
+    const ECHO: Flag = 8;
+    const SIGINT: i32 = 2;
+    const TCSANOW: i32 = 0;
+
+    /// The saved `termios`, larger than any.
+    static mut SAVED: [u64; 32] = [0; 32];
+    static HANDLER: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" {
+        fn tcgetattr(fd: i32, t: *mut u8) -> i32;
+        fn tcsetattr(fd: i32, when: i32, t: *const u8) -> i32;
+        fn signal(sig: i32, handler: usize) -> usize;
+        fn raise(sig: i32) -> i32;
+    }
+
+    // Async-signal-safe calls only.
+    extern "C" fn interrupted(_: i32) {
+        // SAFETY: `SAVED` is written before this handler is installed.
+        unsafe {
+            tcsetattr(0, TCSANOW, (&raw const SAVED).cast());
+            signal(SIGINT, 0);
+            raise(SIGINT);
         }
-        const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
-        const ENABLE_ECHO_INPUT: u32 = 4;
+    }
+
+    pub fn off() -> bool {
+        // SAFETY: `SAVED` is only touched here, before the handler is
+        // installed, and by `on` / the handler afterwards.
+        unsafe {
+            if tcgetattr(0, (&raw mut SAVED).cast()) != 0 {
+                return false;
+            }
+            let mut t = SAVED;
+            let lflag = (&raw mut t).cast::<u8>().add(LFLAG).cast::<Flag>();
+            lflag.write_unaligned(lflag.read_unaligned() & !ECHO);
+            let h = interrupted as extern "C" fn(i32) as usize;
+            HANDLER.store(signal(SIGINT, h), Ordering::Relaxed);
+            tcsetattr(0, TCSANOW, (&raw const t).cast());
+        }
+        true
+    }
+
+    pub fn on() {
+        // SAFETY: as in `off`.
+        unsafe {
+            tcsetattr(0, TCSANOW, (&raw const SAVED).cast());
+            signal(SIGINT, HANDLER.load(Ordering::Relaxed));
+        }
+    }
+}
+
+#[cfg(windows)]
+mod echo {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> isize;
+        fn GetConsoleMode(h: isize, mode: *mut u32) -> i32;
+        fn SetConsoleMode(h: isize, mode: u32) -> i32;
+        fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = 0xFFFF_FFF6;
+    const ENABLE_ECHO_INPUT: u32 = 4;
+    static SAVED: AtomicU32 = AtomicU32::new(0);
+
+    fn restore() {
+        // SAFETY: the console input handle.
+        unsafe {
+            SetConsoleMode(
+                GetStdHandle(STD_INPUT_HANDLE),
+                SAVED.load(Ordering::Relaxed),
+            )
+        };
+    }
+
+    /// Restore, then let the next handler (the default one) end the
+    /// process.
+    extern "system" fn interrupted(_: u32) -> i32 {
+        restore();
+        0
+    }
+
+    pub fn off() -> bool {
         // SAFETY: the console input handle and a local out-parameter.
         unsafe {
             let h = GetStdHandle(STD_INPUT_HANDLE);
             let mut m = 0;
-            if GetConsoleMode(h, &mut m) != 0 {
-                let m = if on {
-                    m | ENABLE_ECHO_INPUT
-                } else {
-                    m & !ENABLE_ECHO_INPUT
-                };
-                SetConsoleMode(h, m);
+            if GetConsoleMode(h, &mut m) == 0 {
+                return false;
             }
+            SAVED.store(m, Ordering::Relaxed);
+            SetConsoleCtrlHandler(Some(interrupted), 1);
+            SetConsoleMode(h, m & !ENABLE_ECHO_INPUT);
         }
+        true
+    }
+
+    pub fn on() {
+        restore();
+        // SAFETY: removes the handler `off` added.
+        unsafe { SetConsoleCtrlHandler(Some(interrupted), 0) };
     }
 }

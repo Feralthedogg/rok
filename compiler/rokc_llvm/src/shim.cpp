@@ -46,6 +46,7 @@
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/SimpleLoopUnswitch.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/LLVMDriver.h"
@@ -97,7 +98,8 @@ struct RokCompile {
   const char *features;
   int opt;
   int emit;
-  // rok_tls_* globals use the initial-exec TLS model (spec 8.3.8).
+  // rok_tls (the TLS block) and rok_tls_* globals use the initial-exec
+  // TLS model (spec 8.3.8).
   int tls_initial_exec;
   // A textual MLIR pass pipeline on builtin.module, mlir-opt syntax
   // without the anchor: "canonicalize,cse,convert-scf-to-cf,...".
@@ -311,6 +313,14 @@ void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o,
   pb.registerFunctionAnalyses(fam);
   pb.registerLoopAnalyses(lam);
   pb.crossRegisterProxies(lam, fam, cgam, mam);
+  // Non-trivial loop unswitching, which LLVM runs only at -O3, at -O2
+  // too: a bounds check of an invariant index after a store in the loop
+  // leaves the loop only by versioning it.
+  pb.registerLateLoopOptimizationsEPCallback(
+      [](llvm::LoopPassManager &lpm, llvm::OptimizationLevel l) {
+        if (l == llvm::OptimizationLevel::O2)
+          lpm.addPass(llvm::SimpleLoopUnswitchPass(true));
+      });
   llvm::ModulePassManager mpm;
   std::string level = std::string("O") + level_name(o.opt);
   std::string pipeline = o.opt == 0 ? "default<O0>"
@@ -716,7 +726,7 @@ int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
 void tls_model(llvm::Module &m, const RokCompile &o) {
   if (o.tls_initial_exec) {
     for (llvm::GlobalVariable &g : m.globals())
-      if (g.isThreadLocal() && g.getName().starts_with("rok_tls_"))
+      if (g.isThreadLocal() && g.getName().starts_with("rok_tls"))
         g.setThreadLocalMode(llvm::GlobalValue::InitialExecTLSModel);
   }
 }
@@ -947,12 +957,14 @@ struct RokUnit {
 // parallel; its bitcode goes to `bitcode[i]` for the next build), then
 // `thin_link` of every unit, reusing objects from `cache`. `alloc` is an
 // MLIR module defining `rok.alloc`, which every unit only declares.
-// Symbols with rok's mangling (`_Y`) are the program's own: nothing
-// outside the units refers to them, so the link may internalize them.
-// `hits` counts the objects the cache had.
+// In a program, symbols with rok's mangling (`_Y`) are its own: nothing
+// outside the units refers to them, so the link may internalize them. A
+// `library`'s users refer to its symbols, except to the copies of other
+// packages' code (`.copy_Y`) and the GC type ids (`_gctype.`) its units
+// share. `hits` counts the objects the cache had.
 int rok_llvm_compile_units(const RokUnit *units, size_t n, const char *alloc,
                            size_t alloc_len, const RokCompile *o,
-                           const char *cache, RokBuf *objects,
+                           const char *cache, int library, RokBuf *objects,
                            RokBuf *bitcode, size_t *hits, RokBuf *err,
                            RokBuf *warn) {
   llvm::SmallString<0> body;
@@ -983,6 +995,10 @@ int rok_llvm_compile_units(const RokUnit *units, size_t n, const char *alloc,
       return;
     }
     take_alloc(*m);
+    // The name goes into the module's hash, which the names of locals
+    // the thin link promotes carry: units of the same code in two
+    // packages must not promote to the same symbol.
+    m->setSourceFileName(units[i].name);
     llvm::raw_svector_ostream os(parts[i]);
     optimize(*m, *tm, *o, &os);
   });
@@ -997,8 +1013,11 @@ int rok_llvm_compile_units(const RokUnit *units, size_t n, const char *alloc,
   std::vector<llvm::SmallString<0>> out;
   if (thin_link(
           parts, names, body,
-          [](llvm::StringRef s) { return s.starts_with("_Y"); }, *o, cache,
-          hits, out, diags, err))
+          [&](llvm::StringRef s) {
+            return library ? s.contains(".copy_Y") || s.contains("_gctype.")
+                           : s.starts_with("_Y");
+          },
+          *o, cache, hits, out, diags, err))
     return 1;
   if (report(diags, err, warn))
     return 1;

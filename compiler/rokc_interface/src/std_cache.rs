@@ -235,7 +235,7 @@ fn build(key: &StdKey<'_>, root: &Path, dir: &Path) -> bool {
         SourceMap::new(),
     );
     let archive = tmp.join(format!("lib{}.a", rokc_driver::STD_PKG));
-    let ok = !r.has_errors() && r.archive(key.opts, &archive, false).is_ok();
+    let ok = !r.has_errors() && r.archive(key.opts, &archive).is_ok();
     if ok && std::fs::rename(&tmp, dir).is_ok() {
         return true;
     }

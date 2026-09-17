@@ -1,0 +1,41 @@
+// spec: 006.07-operator-magic
+// expect-exit: 0
+// expect-stdout: 123 true -1 360 4320
+
+// Spec 6.7: extension tokens in all three positions, several aliases
+// of one method on one level, and `swap` (`a ⋉ b` is `b.contains(a)`).
+struct V { x: i32; }
+
+trait Combine {
+    #[infix("⊕", like = "+")]
+    #[infix("⊞", like = "-")]
+    fn combine(self, rhs: V) -> V;
+}
+
+trait Has {
+    #[infix("⋉", like = "==", swap)]
+    fn contains(self, x: i32) -> bool;
+}
+
+trait Flip {
+    #[prefix("⊖", like = "-")]
+    fn flip(self) -> V;
+}
+
+trait Deg {
+    #[postfix("°", like = "?")]
+    fn deg(self) -> i32;
+}
+
+impl Combine for V { fn combine(self, rhs: V) -> V { V { x: self.x * 10 + rhs.x } } }
+impl Has for V { fn contains(self, x: i32) -> bool { self.x == x } }
+impl Flip for V { fn flip(self) -> V { V { x: -self.x } } }
+impl Deg for V { fn deg(self) -> i32 { self.x * 360 } }
+
+fn main() -> i32 {
+    let a = V { x: 1 };
+    let b = V { x: 2 };
+    let c = a ⊕ b ⊞ V { x: 3 };
+    println(f"{c.x} {2 ⋉ b} {(⊖a).x} {a°} {(a ⊕ b)°}");
+    return 0;
+}

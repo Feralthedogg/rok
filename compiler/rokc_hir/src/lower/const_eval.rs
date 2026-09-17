@@ -649,6 +649,10 @@ impl<'b> Interp<'b> {
             K::RawRead { .. } | K::RawWrite { .. } | K::AddrOf { .. } => {
                 runtime("accesses raw memory")
             }
+            K::SizeOf { ty, align: false } => match plain_size(ty) {
+                Some(n) => Ok(Value::Int(i128::from(n), PrimTy::Usize)),
+                None => runtime("asks for a type layout"),
+            },
             K::SizeOf { .. } => runtime("asks for a type layout"),
             K::MlirOp { .. } => runtime("runs an MLIR operation"),
             K::UnionWrite { value, .. } => Ok(Value::Union(Box::new(self.expr(value, f)?))),
@@ -873,6 +877,127 @@ fn pure_extern(name: &str, args: &[Value]) -> Option<Value> {
         }
         _ => return None,
     })
+}
+
+/// The byte size of a primitive, `()` or an array of them: the target
+/// layout (`rokc_mir::Target::size_align`) needs no more than the
+/// pointer width there.
+fn plain_size(ty: &HirTy) -> Option<u32> {
+    let word = pointer_width() / 8;
+    Some(match ty {
+        HirTy::Unit => 0,
+        HirTy::Prim(PrimTy::Str) => 2 * word,
+        HirTy::Prim(p) => p.bit_width(pointer_width()) / 8,
+        HirTy::Array(e, n) => plain_size(e)?.checked_mul(*n)?,
+        _ => return None,
+    })
+}
+
+/// Whether extern `name` runs at compile time (`pure_extern`, or a
+/// panic, which fails the evaluation).
+fn evaluable_extern(name: &str) -> bool {
+    name.starts_with("rok_panic")
+        || matches!(
+            name,
+            "rok_str_len"
+                | "rok_str_char_count"
+                | "rok_str_byte"
+                | "rok_str_cmp"
+                | "rok_str_concat"
+                | "rok_str_from_char"
+                | "rok_bytes_slice"
+        )
+}
+
+/// Spec 5.2.5: a `const fn` calls only `const fn`s and reads no
+/// `static`, whether or not it is ever evaluated. Checks the package's
+/// lowered `const fn` bodies (`fns`). Standard library callees count as
+/// `const` when their bodies are, transitively.
+pub(super) fn check_const_fns(env: &Env<'_>, fns: &[&HirFunction]) {
+    let Some(first) = fns.first() else { return };
+    let no_subst = HashMap::new();
+    let ctx = LowerCtx::new(env, &no_subst, None, first.span);
+    let mut bodies = CtxBodies::new(&ctx);
+    let mut memo: HashMap<FunctionId, Option<String>> = HashMap::new();
+    for f in fns {
+        let Some(body) = &f.body else { continue };
+        if let Some((at, why)) = impure(&mut bodies, body, &mut memo) {
+            let why = why.trim_end_matches(" (spec 5.2.5)");
+            let d = rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                at,
+                format!("`const fn {}` {why} (spec 5.2.5)", leaf_name(&f.name)),
+            );
+            env.sink.diagnostics.borrow_mut().push(d);
+        }
+    }
+}
+
+/// The first operation in `body` a `const fn` may not perform: where,
+/// and what.
+fn impure(
+    bodies: &mut CtxBodies<'_, '_>,
+    body: &HirBlock,
+    memo: &mut HashMap<FunctionId, Option<String>>,
+) -> Option<(Span, String)> {
+    let mut sites: Vec<(Span, Result<FunctionId, String>)> = Vec::new();
+    crate::each_block(body, &mut |e| match &e.kind {
+        HirExprKind::Call { callee, .. } => sites.push((e.span, Ok(*callee))),
+        HirExprKind::StaticRef(name) => {
+            sites.push((
+                e.span,
+                Err(format!("reads the static `{}`", leaf_name(name))),
+            ));
+        }
+        _ => {}
+    });
+    for (at, site) in sites {
+        let why = match site {
+            Ok(id) => callee_impure(bodies, id, memo),
+            Err(why) => Some(why),
+        };
+        if let Some(why) = why {
+            return Some((at, why));
+        }
+    }
+    None
+}
+
+/// Why calling `id` is not allowed in a `const fn`, if it is not.
+fn callee_impure(
+    bodies: &mut CtxBodies<'_, '_>,
+    id: FunctionId,
+    memo: &mut HashMap<FunctionId, Option<String>>,
+) -> Option<String> {
+    if let Some(r) = memo.get(&id) {
+        return r.clone();
+    }
+    // A user `const fn` is checked on its own.
+    let user = bodies
+        .ctx
+        .env
+        .sink
+        .fn_origin
+        .borrow()
+        .get(&id)
+        .is_none_or(|o| !o.1);
+    if user && is_const_fn(bodies.ctx, id) {
+        return None;
+    }
+    // Optimistic while in progress (recursion).
+    memo.insert(id, None);
+    let r = match bodies.callee(id) {
+        Callee::Body(func, _) => func.body.as_ref().and_then(|b| {
+            impure(bodies, b, memo)
+                .map(|(_, why)| format!("calls `{}`, which {why}", leaf_name(&func.name)))
+        }),
+        Callee::Extern(name) if evaluable_extern(&name) => None,
+        Callee::Extern(name) => Some(format!("calls the extern function `{name}`")),
+        Callee::Refused(why) => Some(why),
+        Callee::Poisoned => None,
+    };
+    memo.insert(id, r.clone());
+    r
 }
 
 /// A primitive's bits read back as primitive `to` (a union read).
@@ -1279,11 +1404,16 @@ pub(super) fn guard(
 /// A const item's value at a use (spec 5.2): evaluated, and embedded
 /// as a constant when it is plain data. Not evaluable is an error.
 pub(super) fn const_item(ctx: &LowerCtx<'_>, name: &str, v: HirExpr) -> HirExpr {
-    let what = format!("const `{}`", leaf_name(name));
+    constant(ctx, &format!("const `{}`", leaf_name(name)), v)
+}
+
+/// `v`, a constant expression (`what` in errors), evaluated and embedded
+/// when it is plain data.
+pub(super) fn constant(ctx: &LowerCtx<'_>, what: &str, v: HirExpr) -> HirExpr {
     match eval_in(ctx, &v) {
         Ok(val) => embed(ctx, &val, &v.ty, v.span).unwrap_or(v),
         Err(Stop::Runtime(op, why) | Stop::Fail(op, why)) => {
-            report(ctx, v.span, &what, op, &why);
+            report(ctx, v.span, what, op, &why);
             poison(v.span)
         }
         Err(_) => v,
@@ -1423,6 +1553,24 @@ pub(super) fn check_user_consts(env: &Env<'_>) {
             span,
         };
         super::expr::lower_path(&mut ctx, &path, span);
+    }
+    // Field defaults of the package's non-generic structs (spec 2.3.3).
+    let structs: Vec<HirStructDef> = env
+        .defs
+        .structs
+        .borrow()
+        .iter()
+        .filter(|d| d.generic_args.is_empty() && package_of(&module_of(&d.name)).is_empty())
+        .filter(|d| d.fields.iter().any(|f| f.default.is_some()))
+        .cloned()
+        .collect();
+    for d in structs {
+        for f in &d.fields {
+            if let Some(value) = &f.default {
+                let mut ctx = LowerCtx::new(env, &no_subst, None, value.span);
+                super::expr::field_default(&mut ctx, &d.name, &f.name, &f.ty, value);
+            }
+        }
     }
 }
 

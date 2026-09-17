@@ -12,6 +12,8 @@ mod rotate;
 mod specialize;
 mod stable_names;
 mod target;
+#[path = "../../../runtime/rokr_common/src/tls_abi.rs"]
+pub mod tls_abi;
 mod ty;
 
 pub use liveness::{Deaths, addressed, block_local, deaths, live_across};

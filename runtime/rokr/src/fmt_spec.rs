@@ -101,9 +101,6 @@ fn number(b: &mut &[u8]) -> Result<Option<usize>, &'static str> {
     Ok(Some(v))
 }
 
-/// Precisions above this are clamped.
-pub const MAX_PREC: usize = 500;
-
 /// An absent width / precision in [`pack`]'s counts word.
 const NO_COUNT: u64 = 0xFFFF_FFFF;
 
@@ -114,7 +111,7 @@ pub const PLAIN: (u64, u64) = (b' ' as u64, NO_COUNT | (NO_COUNT << 32));
 /// `spec` as the two words `core::fmt::Formatter` carries: flags — fill
 /// (bits 0..32), align, sign, type (a byte each from bit 32; `s d g` as
 /// none), `#` (bit 56), `0` (bit 57) — and counts — width, precision
-/// (32 bits each, all ones when absent; precision clamped).
+/// (32 bits each, all ones when absent).
 #[must_use]
 pub fn pack(s: &FmtSpec) -> (u64, u64) {
     let ty = if matches!(s.ty, b's' | b'd' | b'g') {
@@ -133,8 +130,7 @@ pub fn pack(s: &FmtSpec) -> (u64, u64) {
             u64::try_from(n).unwrap_or(NO_COUNT).min(NO_COUNT - 1)
         })
     };
-    let p = s.precision.map(|p| p.min(MAX_PREC));
-    (flags, count(s.width) | (count(p) << 32))
+    (flags, count(s.width) | (count(s.precision) << 32))
 }
 
 /// [`pack`]'s inverse.

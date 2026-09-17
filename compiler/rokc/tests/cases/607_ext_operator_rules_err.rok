@@ -1,0 +1,38 @@
+// spec: 006.07-operator-magic
+// expect-error: 17:5: `⊛` is not a spec 3.2 table token for `#[infix]`; a new token needs `like = "<existing token>"`
+// expect-error: 19:5: `#[infix]` takes only an operator token, `like = ".."` and `swap`
+// expect-error: 22:5: operator aliases of `a5` must share one precedence level (spec 6.7.12)
+// expect-error: 24:5: `é` can't be a new operator token: every character must be a Unicode `Pattern_Syntax` code point
+// expect-error: 26:5: `∈` has a fixed precedence (spec 3.2.3); `like` is only for new tokens
+// expect-error: 30:1: `#[infix]` can be attached only to a trait method signature (spec 6.7.13)
+// expect-error: 34:5: `#[postfix]` can be attached only to a trait method signature (spec 6.7.13)
+
+// Spec 6.7.2 / 6.7.12 / 6.7.13 / 1.10.4: a new token needs `like`, a
+// table token takes none, no precedence arguments, aliases share a
+// level, extension tokens are `Pattern_Syntax`, and the attributes go on
+// trait method signatures only.
+struct V { x: i32; }
+
+trait A {
+    #[infix("⊛")]
+    fn a3(self, r: V) -> V;
+    #[infix("⊘", like = "+", prec = 3)]
+    fn a4(self, r: V) -> V;
+    #[infix("≤")]
+    #[infix("⊲", like = "+")]
+    fn a5(self, r: V) -> bool;
+    #[infix("é", like = "+")]
+    fn a6(self, r: V) -> V;
+    #[infix("∈", like = "==")]
+    fn a7(self, r: V) -> bool;
+}
+
+#[infix("⊙", like = "+")]
+fn free(a: V, b: V) -> V { a }
+
+impl V {
+    #[postfix("⊚", like = "?")]
+    fn m(self) -> V { self }
+}
+
+fn main() -> i32 { return 0; }

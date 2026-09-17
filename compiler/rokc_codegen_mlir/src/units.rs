@@ -1,20 +1,28 @@
-//! Codegen units (spec 9.2.16): a program cut into parts that compile
-//! to objects of their own, so an incremental build compiles only the
-//! parts whose key changed and reuses the others' objects.
+//! Codegen units (spec 9.2.16): a package cut into parts that compile
+//! to objects of their own.
+//!
+//! An incremental build compiles only the parts whose key changed and
+//! reuses the others' objects.
 //!
 //! A function's unit is its home module (a generic instance from a
 //! library also by a hash of its type arguments): an edit to one module
 //! leaves the others' units as they were. A *glue* unit holds what is
-//! the whole program's: the statics, the C `main`, `rok.register_types`.
+//! the whole package's: the statics, the C `main`,
+//! `rok.register_types`.
 //!
 //! The units of one plan agree on everything a unit cannot see alone:
 //!
-//! - GC type ids: one table for the program (`Plan::gc_tables`), the
-//!   previous build's ids kept and new ones appended;
+//! - GC type ids: the program's `ScanTable`s in order (`Plan::gc_tables`),
+//!   as a clean build numbers them; a unit's code reads an id from a
+//!   symbol named by its table (`gc_symbol`), which the glue defines, so
+//!   a type another unit adds or drops does not change the unit's code;
 //! - linkage: a function another unit uses is external, and a private
-//!   copy of a prebuilt package's code that is (a generic instance)
-//!   gets the symbol `<symbol>.copy`, as the package's `.a` may define
-//!   the same instance;
+//!   copy of another package's code that is (a prebuilt package's
+//!   generic instance; in a library, any) gets the symbol
+//!   `<symbol>.copy_Y<hash>_` (the user package's hash), as that
+//!   package's `.a`, other libraries and the program may define the same
+//!   code; so do a library's copies of other packages' statics
+//!   (`Pkgs::unit_copies`);
 //! - the user package's hash in symbols: a placeholder
 //!   ([`Plan::placeholder`]) the driver replaces in the objects, so a
 //!   source edit (which changes the content hash) does not change every
@@ -60,8 +68,8 @@ pub struct Unit {
 /// A program's units and what they share.
 pub struct Plan {
     pub units: Vec<Unit>,
-    /// Every GC `ScanTable` of the program: type id `USER_TYPE_BASE +
-    /// type_offset + i`.
+    /// Every GC `ScanTable` of the program, sorted: type id
+    /// `USER_TYPE_BASE + type_offset + i`.
     pub gc_tables: Vec<Vec<u32>>,
     pub core: Arc<Core>,
 }
@@ -72,7 +80,7 @@ pub struct Core {
     pub unit_of: HashMap<FunctionId, usize>,
     /// Defined in one unit, used by another (or by the glue).
     pub shared: HashSet<FunctionId>,
-    /// Shared private copies: `<symbol>.copy`.
+    /// Shared private copies: `<symbol>.copy_Y<hash>_`.
     pub renamed: HashSet<FunctionId>,
     pub quiet: Arc<HashSet<FunctionId>>,
     pub reentrant: Arc<HashSet<FunctionId>>,
@@ -87,11 +95,9 @@ pub struct Core {
     pub statics: Vec<BTreeSet<String>>,
 }
 
-/// How to plan: `salt` names the build (compiler, target, options);
-/// `gc_tables`: the previous build's table (its ids are kept).
+/// How to plan: `salt` names the build (compiler, target, options).
 pub struct PlanOptions<'a> {
     pub salt: &'a str,
-    pub gc_tables: Vec<Vec<u32>>,
     pub debug: bool,
     /// The compile's sources (spans name them).
     pub sources: &'a rokc_diagnostic::SourceMap,
@@ -121,34 +127,72 @@ impl Core {
             .collect()
     }
 
+    /// `pkgs` as a unit names symbols: the user package's hash the
+    /// placeholder, copies renamed (`Pkgs::unit_copies`).
+    pub fn unit_pkgs(&self, pkgs: &mut Pkgs) {
+        self.hide_hash(&mut pkgs.link);
+        pkgs.unit_copies = true;
+    }
+
     /// `link` with the user package's hash the placeholder.
     pub fn hide_hash(&self, link: &mut Link) {
+        let own = own_package(link).to_owned();
         for (p, h) in &mut link.packages {
-            if p.is_empty() {
+            if *p == own {
                 h.clone_from(&self.placeholder);
             }
         }
     }
 }
 
-/// The symbol of `f` in a unit (`mangle::symbol_for`), `.copy` when
+/// The `Link::packages` prefix of the package a build compiles (the user
+/// package): a library's name, else `""`.
+#[must_use]
+pub fn own_package(link: &Link) -> &str {
+    link.lib.as_deref().unwrap_or("")
+}
+
+/// The symbol of `f` in a unit (`mangle::symbol_for`), a copy's when
 /// `renamed` (`Core::renamed`).
 #[must_use]
 pub fn symbol(f: &MirFunction, pkgs: &Pkgs, renamed: bool) -> String {
-    copy(mangle::symbol_for(f, pkgs), renamed)
+    copy(mangle::symbol_for(f, pkgs), renamed, pkgs)
 }
 
 /// The body symbol of a C-ABI definition in a unit (`mangle::mangled`).
 #[must_use]
 pub fn body_symbol(f: &MirFunction, pkgs: &Pkgs, renamed: bool) -> String {
-    copy(mangle::mangled(f, pkgs), renamed)
+    copy(mangle::mangled(f, pkgs), renamed, pkgs)
 }
 
-fn copy(s: String, renamed: bool) -> String {
-    if renamed { s + ".copy" } else { s }
+/// `s`, or (`renamed`) the user package's copy of it.
+fn copy(s: String, renamed: bool, pkgs: &Pkgs) -> String {
+    if renamed {
+        let own = own_package(&pkgs.link);
+        let pkg = pkgs.link.packages.iter().find(|(p, _)| p == own);
+        format!("{s}.copy_Y{}_", pkg.map_or("", |(_, h)| h.as_str()))
+    } else {
+        s
+    }
 }
 
-/// The units of `module`, a program (not a library, not a REPL cell).
+/// A symbol of a unit build that nothing outside the package refers to,
+/// though the package's units share it: a copy's (`Core::renamed`) or a
+/// GC type id's (`gc_symbol`).
+#[must_use]
+pub fn package_internal(symbol: &str) -> bool {
+    symbol.contains(".copy_Y") || symbol.contains("_gctype.")
+}
+
+/// The symbol of the GC type id of `table` in a unit build of the
+/// package with hash `pkg`: an `i32` the glue defines.
+#[must_use]
+pub fn gc_symbol(pkg: &str, table: &[u32]) -> String {
+    let bytes: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
+    format!("_Y{pkg}_gctype.{:016x}", fnv(&bytes))
+}
+
+/// The units of `module`, a program or library (not a REPL cell).
 #[must_use]
 pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
     let link = &module.link;
@@ -156,7 +200,7 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
     while link
         .packages
         .iter()
-        .any(|(p, h)| !p.is_empty() && *h == format!("{placeholder:08x}"))
+        .any(|(p, h)| p != own_package(link) && *h == format!("{placeholder:08x}"))
     {
         placeholder += 1;
     }
@@ -199,43 +243,48 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
 
     // What each unit refers to: its functions' calls and function
     // addresses, through the bodies of prebuilt functions kept for
-    // inlining (emitted with each unit that calls them).
+    // inlining (emitted with each unit that calls them). The glue calls
+    // `main` and the lazy statics' initializers.
     let mut refs: Vec<BTreeSet<FunctionId>> = vec![BTreeSet::new(); units.len()];
     let mut statics: Vec<BTreeSet<String>> = vec![BTreeSet::new(); units.len()];
+    let mut glue_calls: Vec<FunctionId> = module
+        .functions
+        .iter()
+        .filter(|f| f.facts.role == FnRole::Main && f.facts.linkage == Linkage::Defined)
+        .map(|f| f.id)
+        .collect();
+    for s in &module.statics {
+        glue_calls.extend(s.init_fn.filter(|i| index.contains_key(i)));
+        statics[glue].insert(s.name.clone());
+    }
     for (u, unit) in units.iter().enumerate() {
         let mut work: Vec<FunctionId> = unit.fns.clone();
         let mut seen: HashSet<FunctionId> = work.iter().copied().collect();
+        let mut visit = |g: FunctionId, work: &mut Vec<FunctionId>| {
+            if unit_of.get(&g) != Some(&u) {
+                refs[u].insert(g);
+            }
+            let inline = index
+                .get(&g)
+                .is_some_and(|&j| kept_body(&module.functions[j]));
+            if inline && seen.insert(g) {
+                work.push(g);
+            }
+        };
+        if u == glue {
+            for &g in &glue_calls {
+                visit(g, &mut work);
+            }
+        }
         while let Some(id) = work.pop() {
             let f = &module.functions[index[&id]];
             each_ref(f, &mut |r| match r {
-                Ref::Fn(g) => {
-                    if unit_of.get(&g) != Some(&u) {
-                        refs[u].insert(g);
-                    }
-                    let inline = index
-                        .get(&g)
-                        .is_some_and(|&j| kept_body(&module.functions[j]));
-                    if inline && seen.insert(g) {
-                        work.push(g);
-                    }
-                }
+                Ref::Fn(g) => visit(g, &mut work),
                 Ref::Static(s) => {
                     statics[u].insert(s.to_owned());
                 }
             });
         }
-    }
-    // The glue calls `main` and the lazy statics' initializers.
-    for f in &module.functions {
-        if f.facts.role == FnRole::Main && f.facts.linkage == Linkage::Defined {
-            refs[glue].insert(f.id);
-        }
-    }
-    for s in &module.statics {
-        if let Some(i) = s.init_fn.filter(|i| index.contains_key(i)) {
-            refs[glue].insert(i);
-        }
-        statics[glue].insert(s.name.clone());
     }
     let shared: HashSet<FunctionId> = refs
         .iter()
@@ -243,18 +292,30 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         .filter(|g| unit_of.contains_key(g))
         .copied()
         .collect();
+    // Copies: a prebuilt package's code, and a library's of other
+    // packages (compiled from source, as a program using it may be);
+    // not the `any` dispatchers, whose program's one replaces a
+    // library's weak one.
     let renamed: HashSet<FunctionId> = shared
         .iter()
-        .filter(|g| link.in_prebuilt(module.functions[index[g]].path()))
+        .filter(|g| {
+            let f = &module.functions[index[g]];
+            let path = f.path();
+            f.facts.role != FnRole::AnyDispatcher
+                && (link.in_prebuilt(path)
+                    || link.lib.as_deref().is_some_and(|l| !Link::owns(l, path)))
+        })
         .copied()
         .collect();
 
     let mut pkgs = Pkgs {
         link: link.clone(),
+        unit_copies: true,
         ..Pkgs::default()
     };
+    let own = own_package(link);
     for (p, h) in &mut pkgs.link.packages {
-        if p.is_empty() {
+        if p == own {
             h.clone_from(&placeholder);
         }
     }
@@ -282,22 +343,20 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
     let reentrant = reentrant_functions(module);
     let local_abi = local_abi(module, link, &shared);
 
-    // GC types: the previous build's ids, then the new tables.
-    let mut gc_tables = opts.gc_tables.clone();
-    let known: HashSet<Vec<u32>> = gc_tables.iter().cloned().collect();
-    let mut fresh: BTreeSet<Vec<u32>> = BTreeSet::new();
+    // GC types: every table the code allocates with, sorted.
     let fn_tables: HashMap<FunctionId, Vec<Vec<u32>>> = module
         .functions
         .iter()
         .filter(|f| !f.blocks.is_empty())
         .map(|f| (f.id, tables(f, &module.target)))
         .collect();
-    for t in fn_tables.values().flatten() {
-        if !known.contains(t) {
-            fresh.insert(t.clone());
-        }
-    }
-    gc_tables.extend(fresh);
+    let gc_tables: Vec<Vec<u32>> = fn_tables
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
     let core = Core {
         placeholder,
@@ -386,11 +445,12 @@ fn home(f: &MirFunction, link: &Link) -> String {
     let cut = path.find(['<', '{']).unwrap_or(path.len());
     let head = path[..cut].trim_end_matches(':');
     let module = head.rsplit_once("::").map_or("", |(m, _)| m);
+    let own = own_package(link);
     let library = link
         .packages
         .iter()
         .find(|(p, _)| p.is_empty() || Link::owns(p, path))
-        .is_some_and(|(p, _)| !p.is_empty());
+        .is_some_and(|(p, _)| !p.is_empty() && p != own);
     match &f.facts.mono_args {
         Some(args) if library => {
             format!("{module}#{}", fnv(args.as_bytes()) % INSTANCE_BUCKETS)
@@ -426,8 +486,12 @@ fn each_ref<'a>(f: &'a MirFunction, out: &mut dyn FnMut(Ref<'a>)) {
 
 /// The module-local calling convention (`Emitter::local_abi_functions`)
 /// of a unit build: internal functions only their own unit calls,
-/// directly.
+/// directly (in a library, not its own: its users call them).
 fn local_abi(module: &MirModule, link: &Link, shared: &HashSet<FunctionId>) -> HashSet<FunctionId> {
+    let private = |f: &MirFunction| match &link.lib {
+        Some(lib) => !Link::owns(lib, f.path()),
+        None => link.in_prebuilt(f.path()) || f.facts.export_name.is_none(),
+    };
     let mut out: HashSet<FunctionId> = module
         .functions
         .iter()
@@ -435,7 +499,7 @@ fn local_abi(module: &MirModule, link: &Link, shared: &HashSet<FunctionId>) -> H
             f.facts.linkage == Linkage::Defined
                 && f.facts.role == FnRole::Plain
                 && f.facts.abi == Abi::Rok
-                && (link.in_prebuilt(f.path()) || f.facts.export_name.is_none())
+                && private(f)
                 && !shared.contains(&f.id)
         })
         .map(|f| f.id)
@@ -562,11 +626,14 @@ impl Key<'_> {
             let _ = writeln!(self.b, "tables {:?}", s.gc_tables);
             for f in m.functions.iter().filter(|f| f.facts.role == FnRole::Main) {
                 let _ = write!(self.b, "main {} ", s.symbols[&f.id]);
+                // The C `main` is described at the user `main`.
+                self.span(f.span);
                 self.ty(&f.ret_ty);
             }
         } else {
+            // By content: a unit reads ids from symbols.
             for i in used {
-                let _ = writeln!(self.b, "table {i} {:?}", s.gc_tables[i]);
+                let _ = writeln!(self.b, "table {:?}", s.gc_tables[i]);
             }
         }
         self.layouts();

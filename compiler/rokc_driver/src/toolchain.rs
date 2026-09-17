@@ -328,7 +328,7 @@ pub fn link_executable(
         .as_deref()
         .filter(|_| crate::units::applies(module, opts))
     {
-        let (objects, c) = crate::units::objects(module, sources, opts, dir)?;
+        let (objects, c, _) = crate::units::objects(module, sources, opts, dir)?;
         counts = Some(c);
         objects
     } else if let Some(o) = crate::native::object(module, sources, opts)? {
@@ -347,8 +347,10 @@ pub fn link_executable(
     Ok(counts)
 }
 
-/// Library build (spec 902.13): `libfoo.a`, with `object` the one
-/// object `foo.o` beside it, else as many members as LLVM compiles in
+/// Library build (spec 902.13): `libfoo.a`.
+///
+/// By codegen units with `opts.incremental` (`units::applies`; and then
+/// how many it compiled), else as many members as LLVM compiles in
 /// parallel (a prebuilt dependency, the standard library cache).
 ///
 /// For a prebuilt-library build (`CompiledModule::interface`), its ROKHIR
@@ -359,23 +361,26 @@ pub fn build_archive(
     sources: &SourceMap,
     opts: &BuildOptions,
     archive_out: &Path,
-    object: bool,
-) -> Result<(), RokDiagnostic> {
-    let (objects, gc_types) = if let Some(o) = crate::native::object(module, sources, opts)? {
+) -> Result<Option<crate::units::UnitCounts>, RokDiagnostic> {
+    let mut counts = None;
+    let (objects, gc_types) = if let Some(dir) = opts
+        .incremental
+        .as_deref()
+        .filter(|_| crate::units::applies(module, opts))
+    {
+        let (objects, c, gc_types) = crate::units::objects(module, sources, opts, dir)?;
+        counts = Some(c);
+        (objects, gc_types)
+    } else if let Some(o) = crate::native::object(module, sources, opts)? {
         (vec![o.object], o.gc_types)
     } else {
-        let parts = usize::from(object);
-        let (objs, mlir) = llvm(module, sources, opts, rokc_llvm::Emit::Obj, parts)?;
+        let (objs, mlir) = llvm(module, sources, opts, rokc_llvm::Emit::Obj, 0)?;
         (objs, mlir.gc_types)
     };
     let tmp = TempDir::new(opts.keep_temps)?;
     let mut paths = Vec::new();
     for (i, o) in objects.iter().enumerate() {
-        let p = if object {
-            object_beside(archive_out)
-        } else {
-            tmp.path().join(format!("part{i}.o"))
-        };
+        let p = tmp.path().join(format!("part{i}.o"));
         std::fs::write(&p, o).map_err(|e| err(format!("cannot write {}: {e}", p.display())))?;
         paths.push(p);
     }
@@ -392,7 +397,7 @@ pub fn build_archive(
         std::fs::write(&path, r.encode())
             .map_err(|e| err(format!("cannot write {}: {e}", path.display())))?;
     }
-    Ok(())
+    Ok(counts)
 }
 
 /// A REPL cell (`opts.repl`) as an object for the session host, built by
@@ -490,16 +495,6 @@ fn llvm(
     }
     mlir.text = text;
     Ok((out, mlir))
-}
-
-/// `foo.o` beside `libfoo.a`.
-fn object_beside(archive: &Path) -> PathBuf {
-    let stem = archive
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("out");
-    let name = stem.strip_prefix("lib").unwrap_or(stem);
-    archive.with_file_name(format!("{name}.o"))
 }
 
 /// Link the objects `objs` of `module` with the runtime and the
@@ -770,40 +765,20 @@ fn native_lib_args(
     Ok(a)
 }
 
-/// The runtime's TLS slots (803 §8.3.1) for `wasm32-wasi-threads`, in
-/// wasm TLS (`__tls_base` + offset), each with the accessor the runtime
-/// reaches its own thread's copy through (`rokr_common::tls`, which
-/// stable Rust cannot define there). Name, size, alignment: the table
-/// in `rokr_common::tls`, at wasm32's pointer width.
-const WASM_TLS_SLOTS: [(&str, u32, u32); 15] = [
-    ("yield_flag", 1, 1),
-    ("tlab_cursor", 4, 4),
-    ("tlab_limit", 4, 4),
-    ("shadow_stack_top", 4, 4),
-    ("wb_log_cursor", 4, 4),
-    ("wb_log_limit", 4, 4),
-    ("mutator_state", 1, 1),
-    ("worker_id", 8, 8),
-    ("task_worker", 4, 4),
-    ("task_lane", 4, 4),
-    ("stack_guard", 8, 4),
-    ("satb_cursor", 4, 4),
-    ("satb_limit", 4, 4),
-    ("static_inits", 4, 4),
-    ("held_locks", 4, 4),
-];
-
-/// The object of [`WASM_TLS_SLOTS`], in `dir`.
+/// The runtime's TLS block `rok_tls` (803 §8.3.1) for
+/// `wasm32-wasi-threads`, in wasm TLS (`__tls_base` + offset), with the
+/// accessor the runtime reaches its own thread's copy through
+/// (`rokr_common::tls`, which stable Rust cannot define there), in `dir`.
 fn wasm_tls_object(t: &TargetSpec, dir: &Path) -> Result<PathBuf, RokDiagnostic> {
-    let mut ir = String::from("declare ptr @llvm.threadlocal.address.p0(ptr)\n");
-    for (name, size, align) in WASM_TLS_SLOTS {
-        ir.push_str(&format!(
-            "@rok_tls_{name} = thread_local global [{size} x i8] zeroinitializer, align {align}\n\
-             define hidden ptr @rokr_tls_{name}_addr() nounwind {{\n\
-             \x20 %p = call ptr @llvm.threadlocal.address.p0(ptr @rok_tls_{name})\n\
-             \x20 ret ptr %p\n}}\n"
-        ));
-    }
+    let size = rokc_mir::tls_abi::SIZE.offset(t.pointer_width / 8);
+    let align = rokc_mir::tls_abi::ALIGN;
+    let ir = format!(
+        "declare ptr @llvm.threadlocal.address.p0(ptr)\n\
+         @rok_tls = thread_local global [{size} x i8] zeroinitializer, align {align}\n\
+         define hidden ptr @rokr_tls_addr() nounwind {{\n\
+         \x20 %p = call ptr @llvm.threadlocal.address.p0(ptr @rok_tls)\n\
+         \x20 ret ptr %p\n}}\n"
+    );
     let obj = rokc_llvm::compile_llvm_ir(
         &ir,
         &rokc_llvm::Compile {

@@ -772,6 +772,7 @@ mod tests {
         assert_eq!((h.type_id, h.gc_word), (7, 24));
         str::tests::string_ops();
         fmt::tests::fmt_ops();
+        fmt::tests::exp_rounding();
         fmt::tests::formatter_ops();
         fuzz_tests::allocating();
     }

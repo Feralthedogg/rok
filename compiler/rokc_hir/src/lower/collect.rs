@@ -1826,6 +1826,26 @@ pub fn lower_full(
     let (mut functions, unlowered) = rokc_diagnostic::time("hir bodies", || {
         lower_bodies(&env, &decl_roots, &prebuilt, &inline_copies)
     });
+    rokc_diagnostic::time("hir const fns", || {
+        let extras = env.sink.extras.borrow().clone();
+        let origin = env.sink.fn_origin.borrow().clone();
+        let user_const = |f: &&HirFunction| match origin.get(&f.id) {
+            Some(&(is_const, std)) => is_const && !std,
+            None => env.decls.get(f.id.0 as usize).is_some_and(|d| {
+                let module = match d {
+                    MethodOrFn::Fn(f) => module_of(&f.name),
+                    MethodOrFn::Method { module, .. } => module.clone(),
+                };
+                d.def()
+                    .attrs
+                    .iter()
+                    .any(|a| a.path == [rokc_ast::CONST_FN_ATTR])
+                    && package_of(&module).is_empty()
+            }),
+        };
+        let fns: Vec<&HirFunction> = functions.iter().chain(&extras).filter(user_const).collect();
+        super::const_eval::check_const_fns(&env, &fns);
+    });
 
     // Spec 5.3.1: an initializer evaluated now needs no lazy init.
     let folded_statics: HashMap<String, ConstVal> = static_defs

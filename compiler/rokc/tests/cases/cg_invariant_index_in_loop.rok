@@ -1,0 +1,24 @@
+// A loop indexing with an invariant index after a store: optimized, the
+// loop is versioned on the bounds check (unswitched). Both versions run:
+// in bounds the sums are right, out of bounds the first iteration
+// panics after its store.
+// expect-exit: 101
+// expect-stdout: 27 9
+// expect-stderr: List index out of bounds
+
+fn step(xs: List<i64>, ys: List<i64>, i: usize) -> i64 {
+    let s: i64 = 0;
+    for j in 0..xs.len() {
+        xs[j] += 1;
+        s += ys[i] + xs[j];
+    }
+    s
+}
+
+fn main() -> i32 {
+    let xs: List<i64> = [1, 2, 3];
+    let ys: List<i64> = [5, 6];
+    println(f"{step(xs, ys, 1)} {xs[0] + xs[1] + xs[2]}");
+    step(xs, ys, 2);
+    return 0;
+}

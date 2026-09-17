@@ -72,7 +72,7 @@ pub struct Compile<'a> {
     pub target: &'a Target,
     pub opt: OptLevel,
     pub emit: Emit,
-    /// `rok_tls_*` globals use the initial-exec TLS model (spec 8.3.8);
+    /// `rok_tls` / `rok_tls_*` globals use the initial-exec TLS model (spec 8.3.8);
     /// off for JIT'd code.
     pub tls_initial_exec: bool,
     /// The MLIR pass pipeline ([`mlir_pipeline`]).
@@ -157,22 +157,24 @@ pub struct UnitsOutput {
     pub warnings: String,
 }
 
-/// A program's codegen units (`(name, input)`, the names stable across
+/// A package's codegen units (`(name, input)`, the names stable across
 /// builds) optimized at `c.opt` (above 0) to an object each.
 ///
 /// In-process `ThinLTO`: each unit given as MLIR through the pre-link
 /// pipeline, then the thin link, which imports across units what
 /// inlining wants and reuses from the `cache` directory the object of a
 /// unit whose inputs are unchanged. `alloc`: the MLIR module of
-/// `rok.alloc`, linked into each unit at the end. The program's own
-/// symbols (`_Y`) may be internalized.
+/// `rok.alloc`, linked into each unit at the end. A program's own
+/// symbols (`_Y`) may be internalized; a `library`'s only those its
+/// users cannot refer to (copies `.copy_Y`, GC type ids `_gctype.`).
 pub fn compile_units(
     units: &[(&str, UnitInput<'_>)],
     alloc: &str,
     c: &Compile<'_>,
     cache: &Path,
+    library: bool,
 ) -> Result<UnitsOutput, String> {
-    ffi::compile_units(units, alloc, c, cache)
+    ffi::compile_units(units, alloc, c, cache, library)
 }
 
 /// LLVM IR text → `c.emit` (`LlvmIr` only applies the TLS model).
@@ -553,6 +555,7 @@ mod ffi {
             alloc_len: usize,
             o: *const RokCompile,
             cache: *const c_char,
+            library: c_int,
             objects: *mut RokBuf,
             bitcode: *mut RokBuf,
             hits: *mut usize,
@@ -694,6 +697,7 @@ mod ffi {
         alloc: &str,
         o: &Compile<'_>,
         cache: &Path,
+        library: bool,
     ) -> Result<UnitsOutput, String> {
         let names = units
             .iter()
@@ -729,6 +733,7 @@ mod ffi {
                 alloc.len(),
                 opts,
                 cache.as_ptr(),
+                c_int::from(library),
                 objects.as_mut_ptr(),
                 bitcode.as_mut_ptr(),
                 &raw mut hits,
@@ -916,6 +921,7 @@ mod ffi {
         _: &str,
         _: &Compile<'_>,
         _: &std::path::Path,
+        _: bool,
     ) -> Result<super::UnitsOutput, String> {
         off()
     }

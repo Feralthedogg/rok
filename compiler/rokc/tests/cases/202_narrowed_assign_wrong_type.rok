@@ -1,6 +1,11 @@
-// spec: 002.02-any-slot
-// expect-error: mismatched types: assignment to `v` expects `i32`, found `bool`
+// spec: 002.02.6-narrowing
+// expect-error: 9:19: mismatched types: assignment to `v` expects `i32 | str`, found `bool`
 
-// Inside the narrowed block `v` is `i32`; assign another type outside the narrowing.
-let v: any = 1;
-if v is i32 { v = true; }
+// Inside the narrowed block `v` is `i32`; a value of another member of the
+// declared type ends the narrowing (spec 2.2.6), but one outside the
+// declared type is still an error, reported against the declared type.
+fn main() -> i32 {
+    let v: i32 | str = 1;
+    if v is i32 { v = true; }
+    return 0;
+}

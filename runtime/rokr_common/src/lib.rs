@@ -6,6 +6,7 @@
 pub mod gc_abi;
 pub mod object_header;
 pub mod tls;
+pub mod tls_abi;
 #[cfg(windows)]
 pub mod win;
 pub mod wtf8;

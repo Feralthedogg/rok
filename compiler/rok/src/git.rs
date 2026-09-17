@@ -24,16 +24,10 @@ pub struct Cache {
 
 /// `git -C dir args..` in a working tree (a package's, an index checkout's).
 pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    run_env(dir, args, &[])
-}
-
-/// `run` with extra environment variables.
-pub fn run_env(dir: &Path, args: &[&str], env: &[(String, String)]) -> Result<String, String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
-        .envs(env.iter().map(|(k, v)| (k, v)))
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")

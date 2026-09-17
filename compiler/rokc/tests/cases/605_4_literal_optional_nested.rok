@@ -1,0 +1,27 @@
+// spec: 006.05-literal-magic
+// expect-exit: 0
+// expect-stdout: 1 2 3 -1 23 12
+
+// Spec 6.5.4: a `?` group passes a value or `none`; a nested repetition
+// in a variadic `...[T; C]` slot passes one array per row, and the
+// first row's length fixes `C` (the 6.5.2 matrix example).
+struct V { a: i64; b: i64; }
+
+#[literal("v" "[" expr {"," expr}? "]")]
+fn v_literal(a: i64, b: i64 | none) -> V { V { a, b: b ?? -1 } }
+
+#[literal("w" "[" {{expr} % "," +} % ";" + "]")]
+fn w_literal<const C: usize>(rows: ...[i64; C]) -> i64 { rows.len() as i64 * 10 + C as i64 }
+
+fn total<const N: usize>(rows: ...[i64; N]) -> i64 {
+    let s = 0i64;
+    for r in rows { for x in r { s += x; } }
+    s
+}
+
+fn main() -> i32 {
+    let x = v[1, 2];
+    let y = v[3];
+    println(f"{x.a} {x.b} {y.a} {y.b} {w[1, 2, 3; 4, 5, 6]} {total([1, 2], [4, 5])}");
+    return 0;
+}

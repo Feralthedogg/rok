@@ -1005,7 +1005,9 @@ fn cmd_build(mut a: Args) {
             eprintln!("    Building {}", out.display());
         }
         if pkg.lib {
-            fail_on(result.archive(&a.opts, &out, true), &result.source_map);
+            let opts = unit_opts(a, &pkg, &pkg.name);
+            let counts = fail_on(result.archive(&opts, &out), &result.source_map);
+            report_units(a, counts);
         } else {
             link_exe(a, &pkg, result, &out, &pkg.name);
         }
@@ -1033,32 +1035,50 @@ fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &Co
     finished(a, started);
 }
 
-/// Link `result`'s executable at `out`. A package's builds by codegen
-/// units, reusing the unchanged ones' objects from
-/// `target/<profile>/incremental/<unit>/` (902.16); `-v` says how many
-/// it compiled.
-fn link_exe(a: &Args, pkg: &Package, result: &CompileResult, out: &Path, unit: &str) {
+/// The options of a build by codegen units, reusing the unchanged ones'
+/// objects from `target/<profile>/incremental/<unit>/` (902.16); an
+/// anonymous file's are in the target directory without a package
+/// (`out_dir`), one per file.
+fn unit_opts(a: &Args, pkg: &Package, unit: &str) -> BuildOptions {
     let mut opts = a.opts.clone();
-    if !pkg.anonymous {
-        opts.incremental = Some(out_dir(a, Some(pkg)).join("incremental").join(unit));
-    }
-    let counts = fail_on(result.link(&opts, out), &result.source_map);
-    if let Some(c) = counts.filter(|_| a.verbose > 0 && !a.quiet) {
-        let all = c.compiled.len() + c.reused;
-        let cached = c.cached.map_or_else(String::new, |k| {
-            format!(" ({k} of {all} optimized objects cached)")
-        });
-        eprintln!(
-            "       Units {} reused, {} compiled{cached}",
-            c.reused,
-            c.compiled.len()
-        );
-        if a.verbose > 1 {
-            for u in &c.compiled {
-                eprintln!("    Compiled unit {u}");
-            }
+    opts.incremental = Some(if pkg.anonymous {
+        let file = pkg.root.to_string_lossy();
+        let hash = rokc_core::hash::fnv(file.as_bytes());
+        out_dir(a, None)
+            .join("incremental")
+            .join(format!("{unit}-{hash:016x}"))
+    } else {
+        out_dir(a, Some(pkg)).join("incremental").join(unit)
+    });
+    opts
+}
+
+/// `-v`: how many units a build reused and compiled; `-vv`: which.
+fn report_units(a: &Args, counts: Option<rokc_interface::UnitCounts>) {
+    let Some(c) = counts.filter(|_| a.verbose > 0 && !a.quiet) else {
+        return;
+    };
+    let all = c.compiled.len() + c.reused;
+    let cached = c.cached.map_or_else(String::new, |k| {
+        format!(" ({k} of {all} optimized objects cached)")
+    });
+    eprintln!(
+        "       Units {} reused, {} compiled{cached}",
+        c.reused,
+        c.compiled.len()
+    );
+    if a.verbose > 1 {
+        for u in &c.compiled {
+            eprintln!("    Compiled unit {u}");
         }
     }
+}
+
+/// Link `result`'s executable at `out`, by codegen units (`unit_opts`).
+fn link_exe(a: &Args, pkg: &Package, result: &CompileResult, out: &Path, unit: &str) {
+    let opts = unit_opts(a, pkg, unit);
+    let counts = fail_on(result.link(&opts, out), &result.source_map);
+    report_units(a, counts);
 }
 
 /// The incremental-build key of `pkg` built into `out` (see `Fingerprint`).

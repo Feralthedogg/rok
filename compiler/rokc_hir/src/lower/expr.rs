@@ -26,7 +26,15 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                     }
                     None => lower_expected(ctx, init, HirTy::Unknown),
                 };
+                // `using <pattern> = e` binds from a temp the `using` drops
+                // whole (drop glue): its guard parts need no `using` of
+                // their own.
+                let tracked = ctx.guard_lets.len();
                 super::desugar::bind_irrefutable(ctx, pat, value, &mut stmts);
+                if matches!(&init.kind, ExprKind::Path(p) if p.segments[0].name.starts_with("#using"))
+                {
+                    ctx.guard_lets.truncate(tracked);
+                }
             }
             StmtKind::LetTuple {
                 names,
@@ -351,12 +359,10 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                 check_let_inferable(ctx, name, &init);
                 (init.ty.clone(), init)
             };
-            let guard = lock_guard(ctx, &declared_ty);
+            let ty = declared_ty.clone();
             let s = ctx.declare_var(name, declared_ty, init, stmt.span);
-            if let (Some(g), HirStmt::Let { local, .. }) = (guard, &s) {
-                let depth = ctx.scopes.len();
-                ctx.guard_lets
-                    .push((*local, depth, stmt.span, name.clone(), g));
+            if let HirStmt::Let { local, .. } = s {
+                ctx.track_guard(local, &ty, stmt.span, name);
             }
             Some(s)
         }
@@ -447,6 +453,23 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             None
         }
         StmtKind::Item(Item::Fn(f)) if rokc_ast::nested_marker_of(f).is_some() => None,
+        StmtKind::Item(Item::Const(c)) => {
+            // Spec 5.2.2 / 5.2.7: evaluated per instance of the body; a
+            // read inlines the value, the local only serves captures.
+            if ctx.lookup_in_current_scope(&c.name).is_some() {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!("`{}` is already declared in this scope", c.name),
+                );
+            }
+            let ty = ctx.resolve_ast_ty(&c.ty);
+            let v = lower_expected(ctx, &c.value, ty.clone());
+            let v = coerce(ctx, &ty, v, &|| format!("const `{}`", c.name));
+            let v = super::const_eval::const_item(ctx, &c.name, v);
+            let local = ctx.declare(Some(c.name.clone()), ty);
+            ctx.const_locals.insert(local, v.clone());
+            Some(HirStmt::Let { local, init: v })
+        }
         StmtKind::Item(_) => {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -575,6 +598,53 @@ fn check_let_inferable(ctx: &LowerCtx<'_>, name: &str, init: &HirExpr) {
     );
 }
 
+/// `name = value;` for local `local`.
+fn assign_local(ctx: &mut LowerCtx<'_>, name: &str, local: LocalId, value: &Expr) -> HirStmt {
+    let mark = ctx.probe_mark();
+    let mut v = lower_expected(ctx, value, ctx.var_ty(local));
+    let mut local = local;
+    if ctx.narrowed.contains_key(&local) && !coercible(ctx, &ctx.var_ty(local), &v.ty) {
+        ctx.rollback(&mark);
+        local = unnarrow(ctx, name, local, value);
+        v = lower_expected(ctx, value, ctx.var_ty(local));
+    }
+    let slot_ty = ctx.var_ty(local);
+    let value = coerce(ctx, &slot_ty, v, &|| format!("assignment to `{name}`"));
+    ctx.store_local(local, value)
+}
+
+/// Spec 2.2.6: assigning `value`, which the narrowed `local` does not
+/// take, ends the narrowing for the rest of its scope. The value goes to
+/// the innermost enclosing binding that takes it (else the declared one,
+/// which reports the mismatch); the rebindings in between leave their
+/// scopes.
+fn unnarrow(ctx: &mut LowerCtx<'_>, name: &str, local: LocalId, value: &Expr) -> LocalId {
+    let mut chain = vec![local];
+    while let Some((orig, orig_ty)) = ctx.narrowed.get(chain.last().unwrap()).cloned() {
+        chain.push(orig);
+        let retry = ctx.probe_mark();
+        let mut probe = ctx.clone();
+        let pv = lower_expected(&mut probe, value, orig_ty.clone());
+        let fits = probe.probe_clean(&retry) && coercible(ctx, &orig_ty, &pv.ty);
+        ctx.rollback(&retry);
+        if fits {
+            break;
+        }
+    }
+    let target = chain.pop().expect("narrowed local has an origin");
+    for rebound in chain {
+        if let Some(scope) = ctx
+            .scopes
+            .iter_mut()
+            .rev()
+            .find(|s| s.get(name) == Some(&rebound))
+        {
+            scope.remove(name);
+        }
+    }
+    target
+}
+
 /// `target = value;` for a local / static, a struct-field chain rooted
 /// at a local, or an element of a local array.
 pub(super) fn lower_assign(
@@ -593,6 +663,12 @@ pub(super) fn lower_assign(
         ExprKind::Path(p) if p.segments.len() == 1 => {
             let name = &p.segments[0].name;
             if let Some(local) = ctx.lookup(name) {
+                if ctx.const_locals.contains_key(&local) {
+                    ctx.emit_error(
+                        rokc_diagnostic::ErrorKind::Type,
+                        format!("cannot assign to const `{name}` (spec 5.2)"),
+                    );
+                }
                 if ctx.value_captured.contains(&local) {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -602,21 +678,7 @@ pub(super) fn lower_assign(
                         ),
                     );
                 }
-                let slot_ty = ctx.var_ty(local);
-                let v = lower_expected(ctx, value, slot_ty.clone());
-                // Spec 2.2.6: inside an `x is T` scope `x` is a `T`.
-                let what = ctx.narrowed.get(&local).map_or_else(
-                    || format!("assignment to `{name}`"),
-                    |(_, from)| {
-                        format!(
-                            "assignment to `{name}` (narrowed from `{}` by an `is` test; \
-                             spec 2.2.6)",
-                            ctx.ty_name(from)
-                        )
-                    },
-                );
-                let value = coerce(ctx, &slot_ty, v, &|| what.clone());
-                return Some(ctx.store_local(local, value));
+                return Some(assign_local(ctx, name, local, value));
             }
             let segs = [name.as_str()];
             if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
@@ -1305,8 +1367,15 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             type_args,
         } => {
             let all_args = with_trailing_closure(args, trailing_closure.as_deref());
+            let guards = ctx.guard_lets.clone();
             let recv_h = literal_conv_receiver(ctx, receiver, method)
                 .unwrap_or_else(|| lower_receiver(ctx, receiver));
+            // Calling a method on a guard does not move it.
+            if let HirExprKind::Local(l) = recv_h.kind {
+                ctx.guard_lets.retain(|g| g.0 != l);
+                ctx.guard_lets
+                    .extend(guards.into_iter().filter(|g| g.0 == l));
+            }
             ctx.method_type_args.clone_from(type_args);
             let method = match drop_method(ctx, &recv_h.ty, method, span) {
                 Ok(m) => m,
@@ -2123,10 +2192,7 @@ pub(super) fn lower_struct_init(
         match (v, &f.default) {
             (Some(v), _) => out.push(v),
             (None, Some(default_expr)) => {
-                let lowered = lower_expected(ctx, default_expr, f.ty.clone());
-                out.push(coerce(ctx, &f.ty, lowered, &|| {
-                    format!("the default of field `{}`", f.name)
-                }));
+                out.push(field_default(ctx, &def.name, &f.name, &f.ty, default_expr));
             }
             (None, None) => {
                 ctx.emit_error(
@@ -2149,6 +2215,29 @@ pub(super) fn lower_struct_init(
         ty: HirTy::Struct(struct_id),
         span,
     }
+}
+
+/// Field `field`'s default of struct `owner` (spec 2.3.3): a constant
+/// expression with names resolved in the struct's module, evaluated and
+/// embedded like a const.
+pub(super) fn field_default(
+    ctx: &mut LowerCtx<'_>,
+    owner: &str,
+    field: &str,
+    ty: &HirTy,
+    value: &Expr,
+) -> HirExpr {
+    let module = module_of(enum_base_name(owner));
+    let saved_module = std::mem::replace(&mut ctx.current_module, module);
+    let saved_uses = std::mem::replace(&mut ctx.local_uses, vec![Vec::new()]);
+    let saved_scopes = std::mem::replace(&mut ctx.scopes, vec![HashMap::new()]);
+    let v = lower_expected(ctx, value, ty.clone());
+    ctx.current_module = saved_module;
+    ctx.local_uses = saved_uses;
+    ctx.scopes = saved_scopes;
+    let what = format!("the default of field `{field}`");
+    let v = coerce(ctx, ty, v, &|| what.clone());
+    super::const_eval::constant(ctx, &what, v)
 }
 
 /// The `..base` of a struct update, lowered against the expected
@@ -6159,7 +6248,22 @@ fn call_generic_positional(
     if let Some(tail) = tail.filter(|_| lowered.len() + 1 == def.params.len()) {
         let i = lowered.len();
         let hint = generic_arg_hint(ctx, def, &subst, i, &super::throws::path_expr("#", span));
-        let elem = variadic_elem(ctx, &hint);
+        let mut elem = variadic_elem(ctx, &hint);
+        // `...[T; N]` with `N` unbound: the first array literal's length
+        // is `N` (as for a `[T; N]` parameter).
+        if let (HirTy::Unknown, Some(first)) = (&elem, tail.first()) {
+            let slice_elem =
+                def.params
+                    .get(i)
+                    .and_then(|p| p.ty.as_ref())
+                    .and_then(|t| match &t.kind {
+                        rokc_ast::TyKind::Path(p) => p.segments.last()?.generics.first(),
+                        _ => None,
+                    });
+            if let (Some(t), CallArg::Positional(e)) = (slice_elem, first) {
+                elem = ty_hint(ctx, def, &subst, Some(t), e);
+            }
+        }
         let parts = tail
             .iter()
             .filter_map(|a| match a {
@@ -6237,61 +6341,71 @@ fn generic_arg_hint(
     i: usize,
     e: &Expr,
 ) -> HirTy {
-    let hint = def
-        .params
-        .get(i)
-        .and_then(|p| p.ty.as_ref())
-        .map_or(HirTy::Unknown, |t| {
-            // Type params not bound yet stay opaque paths — never
-            // resolved as same-named types visible from `def`.
-            let mut partial = subst.clone();
-            for gp in &def.generics.params {
-                match gp {
-                    rokc_ast::GenericParam::Type { name, .. } => {
-                        partial
-                            .entry(name.clone())
-                            .or_insert_with(|| HirTy::Path(vec![name.clone()]));
-                    }
-                    // An unbound const parameter: `#N` (no value yet).
-                    rokc_ast::GenericParam::Const { name, .. } => {
-                        partial
-                            .entry(name.clone())
-                            .or_insert_with(|| HirTy::OpenConst(name.clone()));
-                    }
+    ty_hint(
+        ctx,
+        def,
+        subst,
+        def.params.get(i).and_then(|p| p.ty.as_ref()),
+        e,
+    )
+}
+
+/// The expected type of argument `e` for a parameter of `def` typed
+/// `param` (see `generic_arg_hint`).
+fn ty_hint(
+    ctx: &LowerCtx<'_>,
+    def: &FnDef,
+    subst: &HashMap<String, HirTy>,
+    param: Option<&Ty>,
+    e: &Expr,
+) -> HirTy {
+    let hint = param.map_or(HirTy::Unknown, |t| {
+        // Type params not bound yet stay opaque paths — never
+        // resolved as same-named types visible from `def`.
+        let mut partial = subst.clone();
+        for gp in &def.generics.params {
+            match gp {
+                rokc_ast::GenericParam::Type { name, .. } => {
+                    partial
+                        .entry(name.clone())
+                        .or_insert_with(|| HirTy::Path(vec![name.clone()]));
+                }
+                // An unbound const parameter: `#N` (no value yet).
+                rokc_ast::GenericParam::Const { name, .. } => {
+                    partial
+                        .entry(name.clone())
+                        .or_insert_with(|| HirTy::OpenConst(name.clone()));
                 }
             }
-            let mut ty = resolve_in_mono(ctx, def, &partial, None, t);
-            erase_unbound_errors(&mut ty);
-            let mut leftover = Vec::new();
-            collect_unknown_paths(&ty, &mut leftover);
-            let open = |t: &HirTy| {
-                let mut l = Vec::new();
-                collect_unknown_paths(t, &mut l);
-                !l.is_empty()
-            };
-            match ty {
-                _ if leftover.is_empty() => ty,
-                // `fn(T) -> U` with `U` still open: the closure
-                // still learns its parameter types; `U` binds from
-                // the closure afterwards.
-                HirTy::Fn(args, ret, b) => HirTy::Fn(
-                    args.into_iter()
-                        .map(|a| if open(&a) { HirTy::Unknown } else { a })
-                        .collect(),
-                    Box::new(if open(&ret) { HirTy::Unknown } else { *ret }),
-                    b,
-                ),
-                _ => HirTy::Unknown,
-            }
-        });
+        }
+        let mut ty = resolve_in_mono(ctx, def, &partial, None, t);
+        erase_unbound_errors(&mut ty);
+        let mut leftover = Vec::new();
+        collect_unknown_paths(&ty, &mut leftover);
+        let open = |t: &HirTy| {
+            let mut l = Vec::new();
+            collect_unknown_paths(t, &mut l);
+            !l.is_empty()
+        };
+        match ty {
+            _ if leftover.is_empty() => ty,
+            // `fn(T) -> U` with `U` still open: the closure
+            // still learns its parameter types; `U` binds from
+            // the closure afterwards.
+            HirTy::Fn(args, ret, b) => HirTy::Fn(
+                args.into_iter()
+                    .map(|a| if open(&a) { HirTy::Unknown } else { a })
+                    .collect(),
+                Box::new(if open(&ret) { HirTy::Unknown } else { *ret }),
+                b,
+            ),
+            _ => HirTy::Unknown,
+        }
+    });
     // `[T; N]` with `N` unbound and an array literal argument: the
     // literal's length is the array's (spec 2.11.6), else it would
     // default to a `List`.
-    let hint = match (
-        &hint,
-        def.params.get(i).and_then(|p| p.ty.as_ref()),
-        &e.kind,
-    ) {
+    match (&hint, param, &e.kind) {
         (HirTy::Unknown, Some(t), ExprKind::List(items)) => match &t.kind {
             rokc_ast::TyKind::Array(elem, _) => {
                 let mut et = resolve_in_mono(ctx, def, subst, None, elem);
@@ -6305,8 +6419,7 @@ fn generic_arg_hint(
             _ => hint,
         },
         _ => hint,
-    };
-    hint
+    }
 }
 
 /// `f::<T, 3>(..)`: bind explicit generic arguments by position into
@@ -8858,6 +8971,23 @@ pub(super) fn dispatch_user_op_lit(
     };
     let method = entry.method_name.clone();
     let op_trait = &entry.trait_name;
+    // Spec 6.7.8: the binding works only where its trait is visible.
+    let names = &ctx.env.names;
+    let cur = &ctx.current_module;
+    let visible = names
+        .visibility
+        .get(op_trait)
+        .is_none_or(|&v| super::resolve::visible_from(cur, &module_of(op_trait), v))
+        && super::resolve::hidden_module(&names.mod_vis, cur, op_trait).is_none();
+    if !visible {
+        return ctx.error_expr(
+            span,
+            format!(
+                "operator `{sym}` needs trait `{op_trait}`, which is not visible here (spec \
+                 6.7.8)"
+            ),
+        );
+    }
     // The impl must be of the trait that registered the operator (by its
     // full path), not another trait that happens to share its name.
     let is_op_trait = |t: &str| t == op_trait;
@@ -9320,6 +9450,11 @@ pub(super) fn lower_path(
             return h.clone();
         }
         if let Some(local) = ctx.lookup(name) {
+            if let Some(v) = ctx.const_locals.get(&local) {
+                return v.clone();
+            }
+            // A guard used as a value is moved: its new holder releases it.
+            ctx.guard_lets.retain(|g| g.0 != local);
             return ctx.read_local(local, span);
         }
     }

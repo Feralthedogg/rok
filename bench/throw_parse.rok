@@ -1,0 +1,84 @@
+// Recursive-descent evaluation of generated arithmetic: every grammar
+// level is a throwing call (spec 4.14) on the hot path; a division by
+// zero throws and is caught per expression. Output matches
+// bench/c/throw_parse.c.
+struct DivZero { at: usize; }
+
+// Tokens: 0..9 numbers; -1 `+`, -2 `*`, -3 `/`, -4 `(`, -5 `)`.
+fn gen(x: List<u64>, t: List<i64>, d: i64) {
+    x[0] = x[0].wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+    let r = (x[0] >> 33) as i64;
+    if d == 0 || r % 4 == 0 {
+        t.push(r % 10);
+    } else if r % 4 == 1 {
+        t.push(-4);
+        gen(x, t, d - 1);
+        t.push(-5);
+    } else {
+        gen(x, t, d - 1);
+        t.push(-1 - (r / 4) % 3);
+        gen(x, t, d - 1);
+    }
+}
+
+fn expr(t: List<i64>, p: List<usize>) throws (DivZero) -> i64 {
+    let v = try term(t, p);
+    while p[0] < t.len() && t[p[0]] == -1 {
+        p[0] += 1;
+        v = (v + try term(t, p)) % 1000003;
+    }
+    v
+}
+
+fn term(t: List<i64>, p: List<usize>) throws (DivZero) -> i64 {
+    let v = try factor(t, p);
+    while p[0] < t.len() && (t[p[0]] == -2 || t[p[0]] == -3) {
+        let op = t[p[0]];
+        p[0] += 1;
+        let w = try factor(t, p);
+        if op == -2 {
+            v = v * w % 1000003;
+        } else {
+            if w == 0 {
+                throw DivZero { at: p[0] };
+            }
+            v = v / w;
+        }
+    }
+    v
+}
+
+fn factor(t: List<i64>, p: List<usize>) throws (DivZero) -> i64 {
+    let c = t[p[0]];
+    p[0] += 1;
+    if c == -4 {
+        let v = try expr(t, p);
+        p[0] += 1;
+        return v;
+    }
+    c
+}
+
+fn main() -> i32 {
+    let x: List<u64> = [42u64];
+    let t: List<i64> = [];
+    let p: List<usize> = [0];
+    let sum: i64 = 0;
+    let errs: i64 = 0;
+    let at: usize = 0;
+    let toks: usize = 0;
+    for _ in 0..200000 {
+        t.clear();
+        gen(x, t, 12);
+        toks += t.len();
+        p[0] = 0;
+        let v = try expr(t, p) catch e: DivZero {
+            errs += 1;
+            at += e.at;
+            0
+        };
+        sum = (sum + v) % 1000003;
+    }
+    println(f"{toks} {errs} {at} {sum}");
+    return 0;
+}

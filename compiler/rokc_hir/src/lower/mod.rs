@@ -36,8 +36,8 @@ mod mono;
 mod pattern;
 mod reflect;
 mod resolve;
+pub use resolve::{CORE_PREFIX, is_dependency, root_path, set_packages};
 pub use resolve::{hidden_module, hidden_module_msg, module_visibility, visibility_rank};
-pub use resolve::{is_dependency, root_path, set_packages};
 mod send_check;
 mod throws;
 
@@ -1825,6 +1825,9 @@ struct LowerCtx<'a> {
     /// In a closure: locals holding a value capture (assigning one is an
     /// error, spec 4.6.4).
     value_captured: std::collections::HashSet<LocalId>,
+    /// Body `const`s (spec 5.2.2): the local naming one, and its value,
+    /// inlined at each read.
+    const_locals: HashMap<LocalId, HirExpr>,
     /// Set by a path call (`Tr::m(x)` / `Tr::m(ref x)`) whose first
     /// argument fills `self`: whether it was passed with `ref`. Taken by
     /// the argument lowering of that call.
@@ -1885,9 +1888,9 @@ struct LowerCtx<'a> {
     /// Narrowed rebinding (spec 2.2.6) → (original local, its type);
     /// assignments to the rebinding also store into the original.
     narrowed: HashMap<LocalId, (LocalId, HirTy)>,
-    /// `let`-bound lock guards no `using` has released yet (local, scope
-    /// depth, `let` span, binder, guard type): an error when their scope
-    /// ends (stdlib 2.16.3).
+    /// Lock guards bound by `let` or a pattern that no `using` has
+    /// released yet (local, scope depth, binding span, binder, guard
+    /// type): an error when their scope ends (stdlib 2.16.3).
     guard_lets: Vec<(LocalId, usize, Span, String, &'static str)>,
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
@@ -2024,6 +2027,7 @@ impl<'a> LowerCtx<'a> {
             pending_cells: Vec::new(),
             pending_resums: Vec::new(),
             value_captured: std::collections::HashSet::new(),
+            const_locals: HashMap::new(),
             unsafe_depth: 0,
             explicit_recv: None,
             breakables: Vec::new(),
@@ -3678,6 +3682,14 @@ impl<'a> LowerCtx<'a> {
     /// Spec 3.11.4: under an or-pattern sharing `name` across
     /// alternatives, the preset local, and each alternative binds the
     /// same type.
+    /// Track `local` if it binds a lock guard (`guard_lets`).
+    fn track_guard(&mut self, local: LocalId, ty: &HirTy, at: Span, name: &str) {
+        if let Some(g) = lock_guard(self, ty) {
+            let depth = self.scopes.len();
+            self.guard_lets.push((local, depth, at, name.to_owned(), g));
+        }
+    }
+
     fn declare_bound(&mut self, name: &str, ty: HirTy, at: rokc_diagnostic::Span) -> LocalId {
         if let Some(&local) = self.or_pattern_binders.last().and_then(|m| m.get(name)) {
             let existing = self.local_ty(local);
@@ -3700,6 +3712,7 @@ impl<'a> LowerCtx<'a> {
             return local;
         }
         let local = self.declare(Some(name.to_owned()), ty.clone());
+        self.track_guard(local, &ty, at, name);
         if self.ref_captured.contains(&(name.to_owned(), at)) {
             self.pending_cells.push((name.to_owned(), local, ty));
         }

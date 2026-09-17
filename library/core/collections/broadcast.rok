@@ -633,21 +633,18 @@ impl DotLogicalOr for Slice<bool> {
 // a const parameter the receiver leaves open cannot be matched (the
 // operator form is fused by the compiler instead).
 
-/// `[f(a[i], b[i])]`.
-fn array_zip<A, B, C, const N: usize>(a: [A; N], b: [B; N], f: fn(A, B) -> C) -> [C; N] {
-    // Item 0 seeds the array, so `N == 0` panics; an empty
-    // array literal of a generic element type would lift it.
-    let out = [f(a[0], b[0]); N];
-    for i in 1..N {
+/// `out` with `out[i] = f(a[i], b[i])`; `out` only supplies the
+/// storage, so an empty array calls nothing.
+fn array_zip<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: [B; N], f: fn(A, B) -> C) -> [C; N] {
+    for i in 0..N {
         out[i] = f(a[i], b[i]);
     }
     out
 }
 
-/// `[f(a[i], b)]`.
-fn array_right<A, B, C, const N: usize>(a: [A; N], b: B, f: fn(A, B) -> C) -> [C; N] {
-    let out = [f(a[0], b); N];
-    for i in 1..N {
+/// `out` with `out[i] = f(a[i], b)`.
+fn array_right<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: B, f: fn(A, B) -> C) -> [C; N] {
+    for i in 0..N {
         out[i] = f(a[i], b);
     }
     out
@@ -655,179 +652,179 @@ fn array_right<A, B, C, const N: usize>(a: [A; N], b: B, f: fn(A, B) -> C) -> [C
 
 impl<T: Add<Output = T>, const N: usize> DotAdd<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_add(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a + b }) }
+    fn dot_add(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a + b }) }
 }
 
 impl<T: Add<Output = T>, const N: usize> DotAdd<T> for [T; N] {
     type Output = [T; N];
-    fn dot_add(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a + b }) }
+    fn dot_add(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a + b }) }
 }
 
 impl<T: Sub<Output = T>, const N: usize> DotSub<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_sub(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a - b }) }
+    fn dot_sub(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a - b }) }
 }
 
 impl<T: Sub<Output = T>, const N: usize> DotSub<T> for [T; N] {
     type Output = [T; N];
-    fn dot_sub(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a - b }) }
+    fn dot_sub(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a - b }) }
 }
 
 impl<T: Mul<Output = T>, const N: usize> DotMul<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_mul(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a * b }) }
+    fn dot_mul(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a * b }) }
 }
 
 impl<T: Mul<Output = T>, const N: usize> DotMul<T> for [T; N] {
     type Output = [T; N];
-    fn dot_mul(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a * b }) }
+    fn dot_mul(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a * b }) }
 }
 
 impl<T: Div<Output = T>, const N: usize> DotDiv<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_div(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a / b }) }
+    fn dot_div(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a / b }) }
 }
 
 impl<T: Div<Output = T>, const N: usize> DotDiv<T> for [T; N] {
     type Output = [T; N];
-    fn dot_div(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a / b }) }
+    fn dot_div(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a / b }) }
 }
 
 impl<T: Rem<Output = T>, const N: usize> DotRem<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_rem(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a % b }) }
+    fn dot_rem(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a % b }) }
 }
 
 impl<T: Rem<Output = T>, const N: usize> DotRem<T> for [T; N] {
     type Output = [T; N];
-    fn dot_rem(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a % b }) }
+    fn dot_rem(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a % b }) }
 }
 
 impl<T: Modulo<Output = T>, const N: usize> DotModulo<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_modulo(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a %% b }) }
+    fn dot_modulo(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a %% b }) }
 }
 
 impl<T: Modulo<Output = T>, const N: usize> DotModulo<T> for [T; N] {
     type Output = [T; N];
-    fn dot_modulo(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a %% b }) }
+    fn dot_modulo(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a %% b }) }
 }
 
 impl<T: BitAnd<Output = T>, const N: usize> DotBitAnd<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_bitand(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a & b }) }
+    fn dot_bitand(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a & b }) }
 }
 
 impl<T: BitAnd<Output = T>, const N: usize> DotBitAnd<T> for [T; N] {
     type Output = [T; N];
-    fn dot_bitand(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a & b }) }
+    fn dot_bitand(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a & b }) }
 }
 
 impl<T: BitOr<Output = T>, const N: usize> DotBitOr<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_bitor(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a | b }) }
+    fn dot_bitor(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a | b }) }
 }
 
 impl<T: BitOr<Output = T>, const N: usize> DotBitOr<T> for [T; N] {
     type Output = [T; N];
-    fn dot_bitor(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a | b }) }
+    fn dot_bitor(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a | b }) }
 }
 
 impl<T: BitXor<Output = T>, const N: usize> DotBitXor<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_bitxor(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a ^ b }) }
+    fn dot_bitxor(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a ^ b }) }
 }
 
 impl<T: BitXor<Output = T>, const N: usize> DotBitXor<T> for [T; N] {
     type Output = [T; N];
-    fn dot_bitxor(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a ^ b }) }
+    fn dot_bitxor(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a ^ b }) }
 }
 
 impl<T: Shl<Output = T>, const N: usize> DotShl<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_shl(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a << b }) }
+    fn dot_shl(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a << b }) }
 }
 
 impl<T: Shl<Output = T>, const N: usize> DotShl<T> for [T; N] {
     type Output = [T; N];
-    fn dot_shl(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a << b }) }
+    fn dot_shl(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a << b }) }
 }
 
 impl<T: Shr<Output = T>, const N: usize> DotShr<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_shr(self, rhs: [T; N]) -> [T; N] { array_zip(self, rhs, |a: T, b: T| -> T { a >> b }) }
+    fn dot_shr(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a >> b }) }
 }
 
 impl<T: Shr<Output = T>, const N: usize> DotShr<T> for [T; N] {
     type Output = [T; N];
-    fn dot_shr(self, rhs: T) -> [T; N] { array_right(self, rhs, |a: T, b: T| -> T { a >> b }) }
+    fn dot_shr(self, rhs: T) -> [T; N] { array_right(self, self, rhs, |a: T, b: T| -> T { a >> b }) }
 }
 
 impl<T: PartialEq, const N: usize> DotEq<[T; N]> for [T; N] {
     type Output = [bool; N];
-    fn dot_eq(self, rhs: [T; N]) -> [bool; N] { array_zip(self, rhs, |a: T, b: T| -> bool { a == b }) }
+    fn dot_eq(self, rhs: [T; N]) -> [bool; N] { array_zip([false; N], self, rhs, |a: T, b: T| -> bool { a == b }) }
 }
 
 impl<T: PartialEq, const N: usize> DotEq<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_eq(self, rhs: T) -> [bool; N] { array_right(self, rhs, |a: T, b: T| -> bool { a == b }) }
+    fn dot_eq(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a == b }) }
 }
 
 impl<T: PartialEq, const N: usize> DotNe<[T; N]> for [T; N] {
     type Output = [bool; N];
-    fn dot_ne(self, rhs: [T; N]) -> [bool; N] { array_zip(self, rhs, |a: T, b: T| -> bool { a != b }) }
+    fn dot_ne(self, rhs: [T; N]) -> [bool; N] { array_zip([false; N], self, rhs, |a: T, b: T| -> bool { a != b }) }
 }
 
 impl<T: PartialEq, const N: usize> DotNe<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_ne(self, rhs: T) -> [bool; N] { array_right(self, rhs, |a: T, b: T| -> bool { a != b }) }
+    fn dot_ne(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a != b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotLt<[T; N]> for [T; N] {
     type Output = [bool; N];
-    fn dot_lt(self, rhs: [T; N]) -> [bool; N] { array_zip(self, rhs, |a: T, b: T| -> bool { a < b }) }
+    fn dot_lt(self, rhs: [T; N]) -> [bool; N] { array_zip([false; N], self, rhs, |a: T, b: T| -> bool { a < b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotLt<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_lt(self, rhs: T) -> [bool; N] { array_right(self, rhs, |a: T, b: T| -> bool { a < b }) }
+    fn dot_lt(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a < b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotGt<[T; N]> for [T; N] {
     type Output = [bool; N];
-    fn dot_gt(self, rhs: [T; N]) -> [bool; N] { array_zip(self, rhs, |a: T, b: T| -> bool { a > b }) }
+    fn dot_gt(self, rhs: [T; N]) -> [bool; N] { array_zip([false; N], self, rhs, |a: T, b: T| -> bool { a > b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotGt<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_gt(self, rhs: T) -> [bool; N] { array_right(self, rhs, |a: T, b: T| -> bool { a > b }) }
+    fn dot_gt(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a > b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotLe<[T; N]> for [T; N] {
     type Output = [bool; N];
-    fn dot_le(self, rhs: [T; N]) -> [bool; N] { array_zip(self, rhs, |a: T, b: T| -> bool { a <= b }) }
+    fn dot_le(self, rhs: [T; N]) -> [bool; N] { array_zip([false; N], self, rhs, |a: T, b: T| -> bool { a <= b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotLe<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_le(self, rhs: T) -> [bool; N] { array_right(self, rhs, |a: T, b: T| -> bool { a <= b }) }
+    fn dot_le(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a <= b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotGe<[T; N]> for [T; N] {
     type Output = [bool; N];
-    fn dot_ge(self, rhs: [T; N]) -> [bool; N] { array_zip(self, rhs, |a: T, b: T| -> bool { a >= b }) }
+    fn dot_ge(self, rhs: [T; N]) -> [bool; N] { array_zip([false; N], self, rhs, |a: T, b: T| -> bool { a >= b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotGe<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_ge(self, rhs: T) -> [bool; N] { array_right(self, rhs, |a: T, b: T| -> bool { a >= b }) }
+    fn dot_ge(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a >= b }) }
 }
 
 /// No short-circuit: both arrays are evaluated (2.6.2).
 impl<const N: usize> DotLogicalAnd for [bool; N] {
     type Output = [bool; N];
     fn dot_logical_and(self, rhs: [bool; N]) -> [bool; N] {
-        array_zip(self, rhs, |a: bool, b: bool| -> bool { a && b })
+        array_zip(self, self, rhs, |a: bool, b: bool| -> bool { a && b })
     }
 }
 
@@ -835,7 +832,7 @@ impl<const N: usize> DotLogicalAnd for [bool; N] {
 impl<const N: usize> DotLogicalOr for [bool; N] {
     type Output = [bool; N];
     fn dot_logical_or(self, rhs: [bool; N]) -> [bool; N] {
-        array_zip(self, rhs, |a: bool, b: bool| -> bool { a || b })
+        array_zip(self, self, rhs, |a: bool, b: bool| -> bool { a || b })
     }
 }
 

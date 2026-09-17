@@ -1,0 +1,23 @@
+// spec: 9.9.6
+// Optimized debug info with zero-sized locals (a field-less `self`, a
+// `()` binding): they have no location to describe.
+// rokc-arg: -g -O2
+// expect-exit: 0
+// expect-stdout: 42 ok
+
+struct Quiet {}
+
+impl Quiet {
+    fn say(self, n: i64) -> i64 {
+        n * 2
+    }
+}
+
+fn main() -> i32 {
+    let q = Quiet {};
+    let u = ();
+    let n = q.say(21);
+    eprintln("stderr works");
+    println(f"{n} ok");
+    return 0;
+}

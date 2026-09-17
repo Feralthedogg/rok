@@ -1,0 +1,25 @@
+// spec: 002.03-struct
+// expect-error: 17:14: the default of field `a` cannot be evaluated at compile time: calls `f`, which is not a `const fn`
+// expect-error: 18:13: the default of field `b` cannot be evaluated at compile time: attempt to multiply with overflow
+// expect-error: 19:14: the default of field `c` cannot be evaluated at compile time: reads the static `S`
+
+// Spec 2.3.3 / 5.2.8: field defaults are constant expressions, checked
+// at the declaration even when no literal omits the field, with names
+// resolved in the struct's module (a local `three` at the use does not
+// shadow the const fn).
+const fn three() -> i32 { 3 }
+fn f() -> i32 { 3 }
+static S: i32 = 1;
+struct Good {
+    a: i32 = 1 + three();
+}
+struct Bad {
+    a: i32 = f();
+    b: u8 = 200 * 2;
+    c: i32 = S;
+}
+fn main() -> i32 {
+    let three = 10;
+    let o = Good {};
+    return o.a + three;
+}

@@ -1,0 +1,24 @@
+// spec: 002.03-struct
+// expect-exit: 0
+// expect-stdout: 5 3 4
+
+// Spec 2.3.3: a field default's names resolve in the struct's module,
+// not at the literal (the local `BASE` / `step` here are not seen), and
+// a `const fn` default is folded like a const.
+mod cfg {
+    const BASE: i32 = 2;
+    const fn step() -> i32 { 1 }
+    pub struct Opts {
+        pub retry: i32 = BASE + 3;
+        pub wait: i32 = BASE + step();
+        pub n: i32;
+    }
+}
+
+fn main() -> i32 {
+    let BASE = 100;
+    let step = 7;
+    let o = cfg::Opts { n: 4 };
+    println(f"{o.retry} {o.wait} {o.n}");
+    return BASE - 100 + step - 7;
+}

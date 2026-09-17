@@ -11,6 +11,7 @@ use rokc_mir::gc_abi::{
     LOS_THRESHOLD, MIN_OBJECT_SIZE, PLAIN_TYPE_ID, SUM_DESC_SHIFT, SUM_PAYLOAD, TABLE_ARRAY,
     USER_TYPE_BASE,
 };
+use rokc_mir::tls_abi::{self, Slot};
 use rokc_mir::{
     BasicBlock, CAbi, GcSlot, Link, MirFunction, MirModule, MirTy, Operand, RValue, Statement,
     Target, Terminator,
@@ -137,6 +138,8 @@ pub struct Emitter {
     pub(crate) unit: Option<(std::sync::Arc<crate::units::Core>, usize)>,
     /// The unit holds the program's glue (statics, `main`, types).
     pub(crate) glue: bool,
+    /// The GC type id symbols the unit's code reads (`units::gc_symbol`).
+    gc_syms: BTreeSet<String>,
 }
 
 /// How a call reaches a module function.
@@ -180,9 +183,10 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
         format!("llvm.mlir.global external thread_local @{name}() {{addr_space = 0 : i32}} : {ty}")
     };
     let sig = match name {
-        "rok_tls_shadow_stack_top" => return Some(global("!llvm.ptr")),
-        "rok_tls_yield_flag" | "rok_tls_mutator_state" => return Some(global("i8")),
-        "rok_tls_tlab_cursor" | "rok_tls_tlab_limit" => return Some(global(&format!("i{pw}"))),
+        "rok_tls" => {
+            let n = rokc_mir::tls_abi::SIZE.offset(pw / 8);
+            return Some(global(&format!("!llvm.array<{n} x i8>")));
+        }
         "rok_panic_at" => format!("({s}, {s})"),
         "rok_cstr_len" => format!("(!llvm.ptr) -> i{pw}"),
         "rok_str_cstr" => format!("({s}) -> !llvm.ptr"),
@@ -297,6 +301,7 @@ impl Emitter {
             reentrant: std::sync::Arc::default(),
             unit: None,
             glue: true,
+            gc_syms: BTreeSet::new(),
         }
     }
 
@@ -489,7 +494,7 @@ impl Emitter {
 
         let unit = self.unit.clone();
         if let Some((core, _)) = &unit {
-            core.hide_hash(&mut self.pkgs.link);
+            core.unit_pkgs(&mut self.pkgs);
         }
         let view: Vec<&MirFunction> = unit.as_ref().map_or_else(
             || module.functions.iter().collect(),
@@ -737,6 +742,14 @@ impl Emitter {
                 )),
             }
         }
+        if !self.glue {
+            for sym in std::mem::take(&mut self.gc_syms) {
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global external constant @{sym}() {{addr_space = 0 : i32}} : i32"
+                );
+            }
+        }
         self.emit_string_globals();
         self.out.push_str("}\n");
     }
@@ -757,6 +770,13 @@ impl Emitter {
                 list.join(", ")
             );
             let id = self.gc_type_base() + i as u32;
+            if let Some((core, _)) = &self.unit {
+                let sym = crate::units::gc_symbol(&core.placeholder, words);
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global external constant @{sym}({id} : i32) {{addr_space = 0 : i32}} : i32"
+                );
+            }
             let _ = write!(
                 calls,
                 "    %t{i} = arith.constant {id} : i32\n    %s{i} = llvm.mlir.addressof @rok.scan{i} : !llvm.ptr\n    func.call @rok_gc_register_type(%t{i}, %s{i}) : (i32, !llvm.ptr) -> ()\n"
@@ -1133,6 +1153,8 @@ impl Emitter {
         emit.overflow_checks = self.overflow_checks;
         emit.gc_type_base = self.gc_type_base();
         emit.gc_types = std::mem::take(&mut self.gc_types);
+        emit.gc_pkg = self.unit.as_ref().map(|(c, _)| c.placeholder.clone());
+        emit.gc_syms = std::mem::take(&mut self.gc_syms);
         if let Some(di) = self.debug.as_mut() {
             emit.dbg = di.subprogram(f, f.path());
             if let Some(d) = &emit.dbg {
@@ -1141,7 +1163,10 @@ impl Emitter {
                     let Some(name) = l.name.as_deref().filter(|n| !n.starts_with('#')) else {
                         continue;
                     };
-                    if emit.is_block_param(l.id) {
+                    // A zero-sized value has nothing to show, and its
+                    // promoted `{}` location crashes LLVM's instruction
+                    // selection.
+                    if emit.is_block_param(l.id) || self.target.size_align(&l.ty).0 == 0 {
                         continue;
                     }
                     let arg = f.params.iter().position(|p| *p == l.id).map(|i| i + 1);
@@ -1170,6 +1195,7 @@ impl Emitter {
         self.str_globals = std::mem::take(&mut emit.str_globals);
         self.needs.append(&mut emit.needs);
         self.gc_types = std::mem::take(&mut emit.gc_types);
+        self.gc_syms = std::mem::take(&mut emit.gc_syms);
         for e in std::mem::take(&mut emit.errors) {
             self.errors.push((f.span, format!("in `{}`: {e}", f.name)));
         }
@@ -1536,6 +1562,11 @@ struct FnEmit<'a> {
     overflow_checks: bool,
     /// Lent `Emitter::gc_type_base()`.
     gc_type_base: u32,
+    /// In a codegen unit, the user package's hash in its GC type id
+    /// symbols (`gc_tid`).
+    gc_pkg: Option<String>,
+    /// Lent `Emitter::gc_syms`.
+    gc_syms: BTreeSet<String>,
     /// Blocks whose terminator takes a loop back-edge: a safepoint poll
     /// goes right before it (804 §8.4.8). Each maps to its loop headers.
     back_edges: HashMap<u32, HashSet<u32>>,
@@ -1588,9 +1619,10 @@ struct FnEmit<'a> {
     local_abi: bool,
     /// In `Emitter::reentrant`: polls on entry.
     entry_poll: bool,
-    /// This thread's address of each runtime TLS slot used
-    /// (`tls_addr`), computed once in the entry block.
-    tls: HashMap<&'static str, String>,
+    /// This thread's address of each runtime TLS slot used, by offset,
+    /// and of the block at `u32::MAX` (`tls_addr`), computed once in the
+    /// entry block.
+    tls: HashMap<u32, String>,
 }
 
 /// Blocks with an edge to a block on the current DFS path (a loop
@@ -1876,6 +1908,8 @@ impl<'a> FnEmit<'a> {
             sources,
             overflow_checks: true,
             gc_type_base: USER_TYPE_BASE,
+            gc_pkg: None,
+            gc_syms: BTreeSet::new(),
             back_edges: rokc_mir::back_edges(f),
             reentry: HashSet::new(),
             edge_from: (0, false),
@@ -1901,31 +1935,48 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// Address of TLS slot `name` (803) on this thread: one
-    /// `threadlocal.address` per function (a thread never changes under
-    /// a running function), so LLVM keeps it in a register instead of
-    /// recomputing it at each use (a call on some targets). Inside an
-    /// `__mlir_op` region, which may not see the entry block's values, a
-    /// fresh one.
-    fn tls_addr(&mut self, name: &'static str) -> String {
-        self.needs.insert(name);
+    /// Address of TLS slot `slot` of the block `rok_tls` (803) on this
+    /// thread: one `threadlocal.address` per function (a thread never
+    /// changes under a running function), so LLVM keeps it in a register
+    /// instead of recomputing it at each use (a call on some targets).
+    /// Inside an `__mlir_op` region, which may not see the entry block's
+    /// values, a fresh one.
+    fn tls_addr(&mut self, slot: Slot) -> String {
+        self.needs.insert("rok_tls");
+        let off = slot.offset(self.target.pointer_width / 8);
         let inline = !self.region_outer.is_empty();
-        if let Some(a) = self.tls.get(name).filter(|_| !inline) {
+        if let Some(a) = self.tls.get(&off).filter(|_| !inline) {
             return a.clone();
         }
-        let [g, a] = std::array::from_fn(|_| self.fresh_value());
-        let text = format!(
-            "    {g} = llvm.mlir.addressof @{name} : !llvm.ptr
-    {a} = \"llvm.intr.threadlocal.address\"({g}) : (!llvm.ptr) -> !llvm.ptr
-"
-        );
-        if inline {
-            self.body.push_str(&text);
+        let base = if let Some(b) = self.tls.get(&u32::MAX).filter(|_| !inline) {
+            b.clone()
         } else {
-            self.entry_allocas.push_str(&text);
-            self.tls.insert(name, a.clone());
-        }
+            let [g, b] = std::array::from_fn(|_| self.fresh_value());
+            let text = format!(
+                "    {g} = llvm.mlir.addressof @rok_tls : !llvm.ptr
+    {b} = \"llvm.intr.threadlocal.address\"({g}) : (!llvm.ptr) -> !llvm.ptr
+"
+            );
+            self.tls_text(inline, &text, u32::MAX, &b);
+            b
+        };
+        let a = self.fresh_value();
+        let text = format!(
+            "    {a} = llvm.getelementptr inbounds {base}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8\n"
+        );
+        self.tls_text(inline, &text, off, &a);
         a
+    }
+
+    /// `text` defining TLS address `a` (`tls` key `key`): in the region
+    /// `inline`, else in the entry block, remembered.
+    fn tls_text(&mut self, inline: bool, text: &str, key: u32, a: &str) {
+        if inline {
+            self.body.push_str(text);
+        } else {
+            self.entry_allocas.push_str(text);
+            self.tls.insert(key, a.to_owned());
+        }
     }
 
     /// Whether a collection can run while this function is active
@@ -2141,7 +2192,7 @@ impl<'a> FnEmit<'a> {
     /// opens after it.
     fn emit_poll_split(&mut self) -> u32 {
         self.needs.insert("rok_runtime_yield");
-        let a = self.tls_addr("rok_tls_yield_flag");
+        let a = self.tls_addr(tls_abi::YIELD_FLAG);
         let n = self.next_check;
         self.next_check += 1;
         let [flag, zero, set] = std::array::from_fn(|_| self.fresh_value());
@@ -2170,8 +2221,8 @@ impl<'a> FnEmit<'a> {
             (0, "rok_leave_native")
         };
         self.needs.insert(slow);
-        let sa = self.tls_addr("rok_tls_mutator_state");
-        let fa = self.tls_addr("rok_tls_yield_flag");
+        let sa = self.tls_addr(tls_abi::MUTATOR_STATE);
+        let fa = self.tls_addr(tls_abi::YIELD_FLAG);
         let n = self.next_check;
         self.next_check += 1;
         let [st, flag, zero, set] = std::array::from_fn(|_| self.fresh_value());
@@ -2449,7 +2500,7 @@ impl<'a> FnEmit<'a> {
         if roots.is_empty() {
             return;
         }
-        let tls = self.tls_addr("rok_tls_shadow_stack_top");
+        let tls = self.tls_addr(tls_abi::SHADOW_STACK_TOP);
         let n = roots.len();
         let frame_ty = format!("!llvm.struct<(ptr, i{pw}, array<{n} x ptr>)>");
         let [frame, prev, count, f0, f1] = std::array::from_fn(|_| self.fresh_value());
@@ -3253,16 +3304,15 @@ impl<'a> FnEmit<'a> {
     /// by; the flags are already 0); `rok_gc_alloc_slow` otherwise.
     fn emit_gc_object(&mut self, ty: &MirTy) -> String {
         let pw = self.pw;
-        let type_id = self.gc_type_id(ty, false);
+        let tid = self.gc_tid(ty, false);
         let (size, align) = gc_object_size(ty, self.target);
         let size = size.max(MIN_OBJECT_SIZE);
-        let [total, align_v, tid] = std::array::from_fn(|_| self.fresh_value());
+        let [total, align_v] = std::array::from_fn(|_| self.fresh_value());
         self.needs.insert("rok_gc_alloc_slow");
         let _ = write!(
             self.body,
             "    {total} = arith.constant {size} : i{pw}
     {align_v} = arith.constant {align} : i{pw}
-    {tid} = arith.constant {type_id} : i32
 "
         );
         if size >= LOS_THRESHOLD || align > 8 {
@@ -3287,8 +3337,8 @@ impl<'a> FnEmit<'a> {
         tid: &str,
     ) -> String {
         let pw = self.pw;
-        let cp = self.tls_addr("rok_tls_tlab_cursor");
-        let lp = self.tls_addr("rok_tls_tlab_limit");
+        let cp = self.tls_addr(tls_abi::TLAB_CURSOR);
+        let lp = self.tls_addr(tls_abi::TLAB_LIMIT);
         self.needs.insert("rok.alloc");
         let ok = ok.map_or_else(
             || {
@@ -3323,10 +3373,13 @@ impl<'a> FnEmit<'a> {
     }
 
     /// The GC type id of `ty` objects (`array`: of buffers of `ty`
-    /// elements), registered with its `ScanTable` at startup. Types with
-    /// the same table share an id (it only tells the collector where the
-    /// references are), so the ids stay the same across REPL cells.
-    fn gc_type_id(&mut self, ty: &MirTy, array: bool) -> u32 {
+    /// elements), registered with its `ScanTable` at startup, as an
+    /// `i32` value. Types with the same table share an id (it only tells
+    /// the collector where the references are), so the ids stay the same
+    /// across REPL cells. A codegen unit reads it from the symbol the
+    /// glue defines (`units::gc_symbol`): its code stays the same when
+    /// other units' types change the ids.
+    fn gc_tid(&mut self, ty: &MirTy, array: bool) -> String {
         let key = scan_table(ty, array, self.target);
         let index = self
             .gc_types
@@ -3336,7 +3389,22 @@ impl<'a> FnEmit<'a> {
                 self.gc_types.push(key);
                 self.gc_types.len() - 1
             });
-        self.gc_type_base + index as u32
+        let tid = self.fresh_value();
+        if let Some(pkg) = &self.gc_pkg {
+            let sym = crate::units::gc_symbol(pkg, &self.gc_types[index]);
+            let a = self.fresh_value();
+            let _ = write!(
+                self.body,
+                "    {a} = llvm.mlir.addressof @{sym} : !llvm.ptr
+    {tid} = llvm.load {a} invariant : !llvm.ptr -> i32
+"
+            );
+            self.gc_syms.insert(sym);
+        } else {
+            let id = self.gc_type_base + index as u32;
+            let _ = writeln!(self.body, "    {tid} = arith.constant {id} : i32");
+        }
+        tid
     }
 
     /// `rok_gc_alloc_slow(header + len * size, align, type_id)` for a
@@ -3347,14 +3415,16 @@ impl<'a> FnEmit<'a> {
         let pw = self.pw;
         let usize_ty = MirTy::Prim(PrimTy::Usize);
         let n = self.materialize_operand(len, &usize_ty);
-        let type_id = if self.target.has_gc_ref(elem_ty) {
-            self.gc_type_id(elem_ty, true)
+        let tid = if self.target.has_gc_ref(elem_ty) {
+            self.gc_tid(elem_ty, true)
         } else {
-            PLAIN_TYPE_ID
+            let t = self.fresh_value();
+            let _ = writeln!(self.body, "    {t} = arith.constant {PLAIN_TYPE_ID} : i32");
+            t
         };
         let (size, align) = self.target.size_align(elem_ty);
         let align = align.max(8);
-        let [sz, hd, bytes, sum, max_n, ovf, all, total, align_v, tid] =
+        let [sz, hd, bytes, sum, max_n, ovf, all, total, align_v] =
             std::array::from_fn(|_| self.fresh_value());
         self.needs.insert("rok_gc_alloc_slow");
         // `n * size + header` overflowing asks for `usize::MAX`, which the
@@ -3374,7 +3444,6 @@ impl<'a> FnEmit<'a> {
     {all} = arith.constant {all_v} : i{pw}
     {total} = arith.select {ovf}, {all}, {sum} : i{pw}
     {align_v} = arith.constant {align} : i{pw}
-    {tid} = arith.constant {type_id} : i32
 "
         );
         if align > 8 {

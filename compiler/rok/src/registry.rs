@@ -4,7 +4,7 @@
 //! first:
 //!
 //! ```text
-//! config.rokon     Registry { name: "rokstones.io", dl: "git", api: "https://rokstones.io" }
+//! config.rokon     Config { api: "https://rokstones.io" }   the registry API
 //! 1/a  2/ab  3/a/abc  ab/cd/abcd..      a stone's file (by its lowercased name)
 //! native/1/a  native/ab/cd/abcd..       a native package's (see `native`)
 //! ```
@@ -529,7 +529,7 @@ pub fn check_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The token for pushing to the index: `$ROK_REGISTRY_TOKEN`, else
+/// The token for the registry API: `$ROK_REGISTRY_TOKEN`, else
 /// `rok login`'s.
 pub fn token(home: &Path) -> Result<String, String> {
     pick_token(std::env::var("ROK_REGISTRY_TOKEN").ok(), home)
@@ -590,112 +590,136 @@ pub fn logout(home: &Path) -> Result<bool, String> {
     }
 }
 
-fn base64(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for c in data.chunks(3) {
-        let n = c
-            .iter()
-            .enumerate()
-            .fold(0u32, |n, (i, &b)| n | (u32::from(b) << (16 - 8 * i)));
-        for i in 0..4 {
-            out.push(if i <= c.len() {
-                A[((n >> (18 - 6 * i)) & 63) as usize] as char
-            } else {
-                '='
-            });
-        }
+/// The registry API of the index `url`: `api` of its `config.rokon`
+/// (`Config { api: "https://.." }`), without a trailing `/`. HTTPS only,
+/// except on the loopback host.
+pub fn api(home: &Path, url: &str, quiet: bool) -> Result<String, String> {
+    let cache = open(home, url, false, quiet)?;
+    let text = cache.show(url, "config.rokon")?.ok_or_else(|| {
+        format!("the index {url} has no config.rokon naming its API; use --index <checkout>")
+    })?;
+    let file = format!("{url}: config.rokon");
+    let doc = Doc::parse(&text, &file)?;
+    let a = doc.root().record("Config")?.req("api")?.string()?;
+    check_api(&a).map_err(|e| format!("{url}: config.rokon: {e}"))?;
+    Ok(a.trim_end_matches('/').to_owned())
+}
+
+fn check_api(a: &str) -> Result<(), String> {
+    let local = ["http://127.0.0.1", "http://localhost"].iter().any(|h| {
+        a.strip_prefix(h)
+            .is_some_and(|r| r.is_empty() || r.starts_with([':', '/']))
+    });
+    if a.starts_with("https://") || local {
+        Ok(())
+    } else {
+        Err(format!("api `{a}` must be an https:// URL"))
     }
-    out
 }
 
-/// `git args..` in `dir` against a remote with `token` as the HTTPS
-/// credential. It travels as `http.extraHeader` in git's environment
-/// config (`GIT_CONFIG_COUNT`, after any already there): on no command
-/// line, in no file, and stripped from errors. Credential helpers are
-/// off, so only the token is tried.
-fn remote(dir: &Path, args: &[&str], token: &str) -> Result<String, String> {
-    let n: usize = std::env::var("GIT_CONFIG_COUNT")
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0);
-    let secret = base64(format!("x-access-token:{token}").as_bytes());
-    let kv = [
-        ("credential.helper", String::new()),
-        ("http.extraHeader", format!("Authorization: Basic {secret}")),
-    ];
-    let mut env = vec![("GIT_CONFIG_COUNT".to_owned(), (n + kv.len()).to_string())];
-    for (i, (k, v)) in kv.into_iter().enumerate() {
-        env.push((format!("GIT_CONFIG_KEY_{}", n + i), k.to_owned()));
-        env.push((format!("GIT_CONFIG_VALUE_{}", n + i), v));
+/// `{api}{path}` with `token` as a bearer token: `GET`, or `POST` of
+/// `body`. The reply's text on a 2xx status; else an error, the reply's
+/// `Error { message }` if it has one. The token reaches `curl` on stdin,
+/// never on its command line, and is stripped from errors.
+fn call(api: &str, path: &str, token: &str, body: Option<&str>) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    // A curl config file: values quoted, `\` and `"` escaped.
+    let q = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let mut config = format!(
+        "header = {}\n",
+        q(&format!("Authorization: Bearer {token}"))
+    );
+    if let Some(b) = body {
+        config += "header = \"Content-Type: application/rokon; charset=utf-8\"\n";
+        config += &format!("data-raw = {}\n", q(b));
     }
-    git::run_env(dir, args, &env).map_err(|e| e.replace(token, "***").replace(&secret, "***"))
+    let url = format!("{api}{path}");
+    let hide = |e: String| e.replace(token, "***");
+    let mut child = Command::new("curl")
+        .args(["-sS", "--proto", "=https,http", "-w", "\n%{http_code}"])
+        .args(["--config", "-"])
+        .arg(&url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run `curl` (is it installed?): {e}"))?;
+    // Dropped after writing: curl reads to the end.
+    let sent = child
+        .stdin
+        .take()
+        .map(|mut i| i.write_all(config.as_bytes()));
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() || !matches!(sent, Some(Ok(()))) {
+        return Err(hide(format!(
+            "cannot reach {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let all = String::from_utf8_lossy(&out.stdout);
+    let (text, code) = all.rsplit_once('\n').unwrap_or(("", &all));
+    let code: u16 = code.trim().parse().unwrap_or(0);
+    if (200..300).contains(&code) {
+        return Ok(text.to_owned());
+    }
+    if code == 401 {
+        return Err(format!(
+            "{api} refused the token: create one at {api}/me, then run `rok login`"
+        ));
+    }
+    let message = Doc::parse(text, &url).ok().and_then(|d| {
+        let r = d.root().record("Error").ok()?;
+        r.req("message").and_then(|m| m.string()).ok()
+    });
+    Err(hide(match message {
+        Some(m) => format!("{api}: {m}"),
+        None => format!("{url}: HTTP status {code}"),
+    }))
 }
 
-/// An empty scratch path `$ROK_HOME/cache/registry/.<what>-<pid>`.
-fn scratch(home: &Path, what: &str) -> Result<PathBuf, String> {
-    let root = home.join("cache/registry");
-    std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let dir = root.join(format!(".{what}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(dir)
+/// The account `token` belongs to at `api`: its login, and whether it
+/// may publish.
+pub fn me(api: &str, token: &str) -> Result<(String, bool), String> {
+    let text = call(api, "/api/v1/me", token, None)?;
+    let file = format!("{api}/api/v1/me");
+    let doc = Doc::parse(&text, &file)?;
+    let r = doc.root().record("Me")?;
+    Ok((r.req("login")?.string()?, r.req("publish")?.bool()?))
 }
 
-/// Fail unless `token` may push to the index `url`: a dry-run push of a
-/// new branch makes git ask the index's receive-pack (which needs write
-/// access); nothing is sent.
-pub fn check_push(home: &Path, url: &str, token: &str) -> Result<(), String> {
-    let dir = scratch(home, "login")?;
-    // Local failures (`?`) apart from the push's.
-    let r = (|| -> Result<_, String> {
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        git::run(&dir, &["init", "--quiet"])?;
-        let tree = git::run(&dir, &["write-tree"])?;
-        let who = ["AUTHOR", "COMMITTER"].into_iter().flat_map(|r| {
-            [
-                (format!("GIT_{r}_NAME"), "rok".to_owned()),
-                (format!("GIT_{r}_EMAIL"), "rok@localhost".to_owned()),
-            ]
-        });
-        let c = git::run_env(
-            &dir,
-            &["commit-tree", "--no-gpg-sign", &tree, "-m", "rok login"],
-            &who.collect::<Vec<_>>(),
-        )?;
-        let spec = format!("{c}:refs/heads/rok-login-check");
-        Ok(
-            remote(&dir, &["push", "--dry-run", "--quiet", url, &spec], token).map_err(|e| {
-                format!(
-                    "this token cannot publish to {url}: publishing is limited to the index's \
-                 maintainers\n({e})"
-                )
-            }),
-        )
-    })();
-    let _ = std::fs::remove_dir_all(&dir);
-    r?.map(drop)
+/// Publish the index line `line` (`Stone { .. }` / `Native { .. }`)
+/// through `api`; the name and version it took.
+pub fn publish_api(api: &str, token: &str, line: &str) -> Result<(String, String), String> {
+    let text = call(api, "/api/v1/publish", token, Some(line))?;
+    let file = format!("{api}/api/v1/publish");
+    let doc = Doc::parse(&text, &file)?;
+    let r = doc.root().record("Published")?;
+    Ok((r.req("name")?.string()?, r.req("vers")?.string()?))
 }
 
-/// Run `f` on a fresh clone of the index `url`, then push what it
-/// committed, with `token`. Errors name `url` for the clone.
-pub fn with_remote<T>(
-    home: &Path,
-    url: &str,
+/// Yank (with `undo`, unyank) `name`'s version `vers` through `api`: a
+/// stone's, or with `native`, a native package's.
+pub fn yank_api(
+    api: &str,
     token: &str,
-    f: impl FnOnce(&Path) -> Result<T, String>,
-) -> Result<T, String> {
-    let dir = scratch(home, "push")?;
-    let shown = dir.display().to_string();
-    let parent = dir.parent().unwrap_or(&dir);
-    let r = remote(
-        parent,
-        &["clone", "--quiet", "--depth", "1", url, &shown],
-        token,
-    )
-    .and_then(|_| f(&dir))
-    .and_then(|v| remote(&dir, &["push", "--quiet", "origin", "HEAD"], token).map(|_| v));
-    let _ = std::fs::remove_dir_all(&dir);
-    r.map_err(|e| e.replace(&shown, url))
+    name: &str,
+    vers: &str,
+    undo: bool,
+    native: bool,
+) -> Result<(), String> {
+    let vers = Version::parse(vers)?.to_string();
+    let flag = |b| Value::new(Kind::Bool(b));
+    let body = rokc_rokon::to_line(&Value::record(
+        Some("Yank"),
+        vec![
+            ("name", Value::str(name)),
+            ("vers", Value::str(vers)),
+            ("undo", flag(undo)),
+            ("native", flag(native)),
+        ],
+    ));
+    call(api, "/api/v1/yank", token, Some(&body)).map(drop)
 }
 
 #[cfg(test)]
@@ -704,9 +728,21 @@ mod tests {
 
     #[test]
     fn tokens() {
-        assert_eq!(base64(b"x-access-token:ab"), "eC1hY2Nlc3MtdG9rZW46YWI=");
-        assert_eq!(base64(b"abc"), "YWJj");
-        assert_eq!(base64(b"a"), "YQ==");
+        for a in [
+            "https://rokstones.io",
+            "http://127.0.0.1:8080",
+            "http://localhost",
+        ] {
+            assert!(check_api(a).is_ok(), "{a}");
+        }
+        for a in [
+            "http://rokstones.io",
+            "http://127.0.0.1.x",
+            "file:///x",
+            "ftp://x",
+        ] {
+            assert!(check_api(a).is_err(), "{a}");
+        }
         let home = std::env::temp_dir().join(format!("rok-token-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let e = pick_token(None, &home).unwrap_err();

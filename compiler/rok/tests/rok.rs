@@ -7,10 +7,11 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 
 use std::fs;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 const ROK: &str = env!("CARGO_BIN_EXE_rok");
 
@@ -1166,7 +1167,7 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     assert_eq!(ok(&rok(home, &num, &["publish"])), line);
     assert_eq!(ok(&rok(home, &num, &["publish", "--index", &reg])), line);
     assert!(!index.join("3/n/num").exists());
-    // Without --index, --commit pushes to the configured index: a token first.
+    // Without --index, --commit goes through the registry API: a token first.
     fails(
         &rok(home, &num, &["publish", "--commit"]),
         "run `rok login` first",
@@ -1231,97 +1232,152 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     tree1
 }
 
-/// `login` / `logout`, and `publish` / `yank` without --index: a clone
-/// of the index (a bare repository standing in for the remote), the
-/// commit pushed with the token. git sends no HTTP header to a file://
-/// remote, so only the flow is checked here, not the authorization.
+/// A stand-in for the registry API on `http://127.0.0.1:<port>` (the
+/// port): token `rks_ok` is account `alice`, who may publish;
+/// `rks_reader` is `bob`, who may not; others get 401. Each name and
+/// version publishes once. Every request goes to `log` as
+/// `<method> <path> [<Authorization>] <body>`.
+fn fake_api(log: Arc<Mutex<Vec<String>>>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut published = Vec::new();
+        for conn in listener.incoming() {
+            let mut conn = conn.unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut start = String::new();
+            reader.read_line(&mut start).unwrap();
+            let (mut auth, mut len) = (String::new(), 0);
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                let Some((key, value)) = header.trim_end().split_once(": ") else {
+                    break;
+                };
+                match key.to_ascii_lowercase().as_str() {
+                    "authorization" => value.clone_into(&mut auth),
+                    "content-length" => len = value.parse().unwrap(),
+                    _ => {}
+                }
+            }
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let body = String::from_utf8(body).unwrap();
+            let mut words = start.split(' ');
+            let (method, path) = (words.next().unwrap(), words.next().unwrap());
+            log.lock()
+                .unwrap()
+                .push(format!("{method} {path} [{auth}] {body}"));
+            let field = |f: &str| {
+                let rest = body.split(&format!("{f}: \"")).nth(1).unwrap_or("");
+                rest.split('"').next().unwrap().to_owned()
+            };
+            let (code, reply) = match (auth.as_str(), path) {
+                ("Bearer rks_ok", "/api/v1/me") => {
+                    (200, "Me { login: \"alice\", publish: true }".to_owned())
+                }
+                ("Bearer rks_reader", "/api/v1/me") => {
+                    (200, "Me { login: \"bob\", publish: false }".to_owned())
+                }
+                ("Bearer rks_ok", "/api/v1/publish") => {
+                    let (n, v) = (field("name"), field("vers"));
+                    if published.contains(&(n.clone(), v.clone())) {
+                        let m = format!("{n} {v} is already in the index");
+                        (409, format!("Error {{ message: \"{m}\" }}"))
+                    } else {
+                        let reply = format!(
+                            "Published {{ name: \"{n}\", vers: \"{v}\", file: \"3/n/{n}\" }}"
+                        );
+                        published.push((n, v));
+                        (200, reply)
+                    }
+                }
+                ("Bearer rks_ok", "/api/v1/yank") => (
+                    200,
+                    format!(
+                        "Yanked {{ name: \"{}\", vers: \"{}\", yanked: true }}",
+                        field("name"),
+                        field("vers")
+                    ),
+                ),
+                _ => (401, "Error { message: \"bad token\" }".to_owned()),
+            };
+            let _ = write!(
+                conn,
+                "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+        }
+    });
+    port
+}
+
+/// `login` / `logout`, and `publish` / `yank` without --index: through
+/// the registry API named by the index's config.rokon (`fake_api`).
 #[test]
-fn login_publish_push() {
-    let root = scratch("push");
+fn login_publish_yank_api() {
+    let root = scratch("api");
     let home = root.join("home");
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let api = format!("http://127.0.0.1:{}", fake_api(log.clone()));
+    let last = || log.lock().unwrap().last().cloned().unwrap_or_default();
     let index = root.join("index");
     commit(
         &index,
-        &[(
-            "config.rokon",
-            "Registry { name: \"test\", dl: \"git\", api: \"x\" }\n",
-        )],
+        &[("config.rokon", &format!("Config {{ api: \"{api}\" }}\n"))],
     );
-    let bare = root.join("remote.git");
-    git(
-        &root,
-        &[
-            "clone",
-            "-q",
-            "--bare",
-            &index.display().to_string(),
-            "remote.git",
-        ],
-    );
-    let path = bare.display().to_string().replace('\\', "/");
-    let url = format!(
-        "file://{}{path}",
-        if path.starts_with('/') { "" } else { "/" }
-    );
-    let at = |dir: &Path, args: &[&str]| {
-        let mut c = rok_cmd(&home, dir, args);
-        // The clone's commit needs an identity; this also checks that
-        // the token's config is added after what is already there.
-        c.env("ROK_REGISTRY", &url)
-            .env("GIT_CONFIG_COUNT", "3")
-            .env("GIT_CONFIG_KEY_0", "user.name")
-            .env("GIT_CONFIG_VALUE_0", "t")
-            .env("GIT_CONFIG_KEY_1", "user.email")
-            .env("GIT_CONFIG_VALUE_1", "t@t")
-            .env("GIT_CONFIG_KEY_2", "commit.gpgsign")
-            .env("GIT_CONFIG_VALUE_2", "false");
+    let reg = index.display().to_string();
+    let at = |args: &[&str]| {
+        let mut c = rok_cmd(&home, &root.join("num"), args);
+        c.env("ROK_REGISTRY", &reg);
         c
     };
-    let run = |dir: &Path, args: &[&str]| at(dir, args).output().unwrap();
-    let num = root.join("num");
-    stone(&num, "num", "1.0.0", "", &[("lib.rok", ONE)]);
-    let token = "ghp_testtoken123";
+    // Every output, checked never to hold a token.
+    let done = |c: &mut Command| {
+        let out = c.output().unwrap();
+        for t in ["rks_ok", "rks_reader", "rks_nope"] {
+            assert!(!text(&out.stdout).contains(t) && !text(&out.stderr).contains(t));
+        }
+        out
+    };
+    let run = |args: &[&str]| done(&mut at(args));
+    stone(&root.join("num"), "num", "1.0.0", "", &[("lib.rok", ONE)]);
 
-    let out = run(&num, &["logout"]);
+    let out = run(&["logout"]);
     ok(&out);
     assert!(text(&out.stderr).contains("not logged in"));
-    fails(
-        &run(&num, &["publish", "--commit"]),
-        "run `rok login` first",
-    );
-    fails(
-        &run(&num, &["yank", "--vers", "1.0.0"]),
-        "run `rok login` first",
-    );
+    fails(&run(&["publish", "--commit"]), "run `rok login` first");
+    fails(&run(&["yank", "--vers", "1.0.0"]), "run `rok login` first");
+    // A dry run needs no token and sends nothing.
+    ok(&run(&["publish"]));
+    assert!(log.lock().unwrap().is_empty());
 
-    // A remote that does not take the push is refused, the token unsaid.
-    let out = at(&num, &["login", token])
-        .env("ROK_REGISTRY", "file:///no/such/index.git")
-        .output()
-        .unwrap();
+    // A bad token, and an account that may not publish: nothing saved.
     fails(
-        &out,
-        "this token cannot publish to file:///no/such/index.git",
+        &run(&["login", "rks_nope"]),
+        &format!("{api} refused the token: create one at {api}/me"),
     );
-    assert!(!text(&out.stderr).contains(token));
-    assert!(!home.join("credentials.rokon").exists());
+    assert_eq!(last(), "GET /api/v1/me [Bearer rks_nope] ");
+    fails(
+        &run(&["login", "rks_reader"]),
+        "this account cannot publish yet: publishing is open to rokstones.io maintainers only",
+    );
+    let cred = home.join("credentials.rokon");
+    assert!(!cred.exists());
 
     // The token from stdin.
-    let mut child = at(&num, &["login"])
+    let mut child = at(&["login"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    writeln!(child.stdin.take().unwrap(), "{token}").unwrap();
+    writeln!(child.stdin.take().unwrap(), "rks_ok").unwrap();
     let out = child.wait_with_output().unwrap();
     ok(&out);
-    assert!(!text(&out.stderr).contains(token) && !text(&out.stdout).contains(token));
-    let cred = home.join("credentials.rokon");
-    assert_eq!(
-        read(&cred),
-        format!("Credentials {{ token: \"{token}\" }}\n")
-    );
+    assert!(text(&out.stderr).contains("Logged in as alice"));
+    assert!(!text(&out.stderr).contains("rks_ok") && !text(&out.stdout).contains("rks_ok"));
+    assert_eq!(read(&cred), "Credentials { token: \"rks_ok\" }\n");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1331,34 +1387,55 @@ fn login_publish_push() {
         );
     }
 
-    // Publish: committed in a clone and pushed.
-    let line = ok(&run(&num, &["publish", "--commit"]));
-    assert_eq!(git(&bare, &["show", "HEAD:3/n/num"]) + "\n", line);
+    // Publish: the entry line is the body; a second time, the API's
+    // error is relayed.
+    let out = run(&["publish", "--commit"]);
+    let line = ok(&out);
+    assert!(line.starts_with("Stone { name: \"num\", vers: \"1.0.0\""));
     assert_eq!(
-        git(&bare, &["log", "-1", "--format=%s"]),
-        "Publish num 1.0.0"
+        last(),
+        format!("POST /api/v1/publish [Bearer rks_ok] {}", line.trim_end())
+    );
+    assert!(text(&out.stderr).contains(&format!("Published num 1.0.0 to {api}")));
+    fails(
+        &run(&["publish", "--commit"]),
+        &format!("{api}: num 1.0.0 is already in the index"),
+    );
+
+    // Yank with the environment's token, no file; a bad one is refused.
+    ok(&run(&["logout"]));
+    assert!(!cred.exists());
+    ok(&done(
+        at(&["yank", "--vers", "1.0.0"]).env("ROK_REGISTRY_TOKEN", "rks_ok"),
+    ));
+    assert_eq!(
+        last(),
+        "POST /api/v1/yank [Bearer rks_ok] Yank { name: \"num\", vers: \"1.0.0\", undo: false, \
+         native: false }"
+    );
+    ok(&done(
+        at(&["yank", "--native", "--undo", "--vers", "2.0.0", "z"])
+            .env("ROK_REGISTRY_TOKEN", "rks_ok"),
+    ));
+    assert_eq!(
+        last(),
+        "POST /api/v1/yank [Bearer rks_ok] Yank { name: \"z\", vers: \"2.0.0\", undo: true, \
+         native: true }"
     );
     fails(
-        &run(&num, &["publish", "--commit"]),
-        "num 1.0.0 is already in the index",
+        &done(at(&["yank", "--vers", "1.0.0"]).env("ROK_REGISTRY_TOKEN", "rks_nope")),
+        "refused the token",
     );
-    assert!(fs::read_dir(home.join("cache/registry")).unwrap().count() == 0);
 
-    // Yank with the environment's token, no file.
-    ok(&run(&num, &["logout"]));
-    assert!(!cred.exists());
-    let out = at(&num, &["yank", "--vers", "1.0.0"])
-        .env("ROK_REGISTRY_TOKEN", token)
-        .output()
-        .unwrap();
-    ok(&out);
-    assert!(git(&bare, &["show", "HEAD:3/n/num"]).contains("yanked: true"));
-    assert_eq!(git(&bare, &["log", "-1", "--format=%s"]), "Yank num 1.0.0");
-    let out = at(&num, &["yank", "--vers", "9.9.9"])
-        .env("ROK_REGISTRY_TOKEN", token)
-        .output()
-        .unwrap();
-    fails(&out, &format!("num 9.9.9 is not in the index {url}"));
+    // The API must be HTTPS off the loopback host.
+    commit(
+        &index,
+        &[("config.rokon", "Config { api: \"http://example.com\" }\n")],
+    );
+    fails(
+        &run(&["login", "rks_ok"]),
+        "api `http://example.com` must be an https:// URL",
+    );
 }
 
 /// Stones end to end on a local index: publish (dry run and commit),
@@ -1370,10 +1447,7 @@ fn stones_publish_add_update_yank() {
     let index = root.join("index");
     commit(
         &index,
-        &[(
-            "config.rokon",
-            "Registry { name: \"test\", dl: \"git\", api: \"https://rokstones.io\" }\n",
-        )],
+        &[("config.rokon", "Config { api: \"https://rokstones.io\" }\n")],
     );
     for kv in [
         ["user.name", "t"],
@@ -1493,20 +1567,14 @@ fn stones_publish_add_update_yank() {
         .env("ROK_REGISTRY", &reg)
         .output()
         .unwrap();
-    assert_eq!(ok(&out), "geom = \"0.3.0\"\n");
-    assert_eq!(
-        ok(&rok(&home, &root, &["search", "NU"])),
-        "num = \"2.0.0\"\n"
-    );
+    assert_eq!(ok(&out), "geom 0.3.0 — Shapes\n");
+    assert_eq!(ok(&rok(&home, &root, &["search", "NU"])), "num 2.0.0\n");
     // Either spelling of `-` / `_` finds a stone.
     let big = root.join("big-int");
     stone(&big, "big-int", "0.1.0", "", &[("lib.rok", ONE)]);
     ok(&rok(&home, &big, &["publish", "--index", &reg, "--commit"]));
     for q in ["big_int", "G-I", "big-int"] {
-        assert_eq!(
-            ok(&rok(&home, &root, &["search", q])),
-            "big-int = \"0.1.0\"\n"
-        );
+        assert_eq!(ok(&rok(&home, &root, &["search", q])), "big-int 0.1.0\n");
     }
 
     // A per-dependency index.
@@ -1549,7 +1617,10 @@ fn native_packages() {
     let root = scratch("native");
     let home = root.join("home");
     let index = root.join("index");
-    commit(&index, &[("config.rokon", "Registry { name: \"t\" }\n")]);
+    commit(
+        &index,
+        &[("config.rokon", "Config { api: \"https://rokstones.io\" }\n")],
+    );
     for kv in [
         ["user.name", "t"],
         ["user.email", "t@t"],
@@ -1636,7 +1707,7 @@ fn native_packages() {
     );
     assert_eq!(
         ok(&rok(&home, &root, &["search", "--native", "y"])),
-        "yy = \"1.0.0\"\n"
+        "yy 1.0.0\n"
     );
     assert_eq!(ok(&rok(&home, &root, &["search", "y"])), "");
     native_yank(&home, &root, &index, &line);

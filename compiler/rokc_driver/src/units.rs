@@ -1,12 +1,11 @@
 //! Incremental builds by codegen units (spec 9.2.16).
 //!
-//! A program's objects from its units (`rokc_codegen_mlir::units`), each
+//! A package's objects from its units (`rokc_codegen_mlir::units`), each
 //! compiled only when its key changed since the last build into the same
 //! directory. Its layout:
 //!
 //! - `stamp`: the compiler and build options the rest is for (another
 //!   one empties the directory);
-//! - `types`: the GC types' `ScanTable`s, one per line in id order;
 //! - `<key>.o`: a unit's object (native backend, LLVM at `-O0`);
 //! - `<key>.bc`: a unit's `ThinLTO` bitcode (LLVM above `-O0`), and
 //!   `thin/`, LLVM's cache of the objects the thin link made.
@@ -34,13 +33,12 @@ pub struct UnitCounts {
 
 /// Whether `module` builds by units into `opts.incremental`.
 ///
-/// A program (not a library or REPL cell) without what needs the whole
+/// A program or library (not a REPL cell) without what needs the whole
 /// module at once: MLIR plugins and passes, profile-guided optimization
 /// (it instruments and reads profiles in the whole-module pipeline).
-pub fn applies(module: &CompiledModule, opts: &BuildOptions) -> bool {
+pub fn applies(_module: &CompiledModule, opts: &BuildOptions) -> bool {
     opts.incremental.is_some()
         && opts.repl.is_none()
-        && module.mir.link.lib.is_none()
         && opts.profile == crate::Profile::Off
         && opts.mlir_passes.is_empty()
         && opts.mlir_dialect_plugins.is_empty()
@@ -48,35 +46,29 @@ pub fn applies(module: &CompiledModule, opts: &BuildOptions) -> bool {
 }
 
 /// The objects of `module` (`applies`), from `dir` where its units are
-/// unchanged.
+/// unchanged, and how many GC types it has.
 pub fn objects(
     module: &CompiledModule,
     sources: &SourceMap,
     opts: &BuildOptions,
     dir: &Path,
-) -> Result<(Vec<Vec<u8>>, UnitCounts), RokDiagnostic> {
+) -> Result<(Vec<Vec<u8>>, UnitCounts, u32), RokDiagnostic> {
     let mir = &module.mir;
     let native = crate::native::chosen_for(module, opts);
     let t = &*mir.target.spec;
     let data_layout = (!native).then(|| t.data_layout.clone());
-    let salt = salt(opts, sources, native, t, data_layout.as_deref());
+    let salt = salt(opts, native, t, data_layout.as_deref());
     open(dir, &salt)?;
-    let types = dir.join("types");
-    let previous = read_types(&types);
     let plan = rokc_diagnostic::time("units", || {
         units::plan(
             mir,
             &PlanOptions {
                 salt: &salt,
-                gc_tables: previous.clone(),
                 debug: opts.debug,
                 sources,
             },
         )
     });
-    if plan.gc_tables != previous {
-        write(&types, write_types(&plan.gc_tables).as_bytes())?;
-    }
     let (objects, counts, keep) = if native {
         rokc_diagnostic::time("native", || by_native(module, sources, opts, &plan, dir))?
     } else if opts.opt_level == "0" {
@@ -89,7 +81,7 @@ pub fn objects(
         .link
         .packages
         .iter()
-        .find(|(p, _)| p.is_empty())
+        .find(|(p, _)| p == units::own_package(&mir.link))
         .map_or("", |(_, h)| h.as_str());
     let objects = rokc_diagnostic::time("rehash", || {
         objects
@@ -97,15 +89,15 @@ pub fn objects(
             .map(|o| rehash(o, plan.placeholder(), real))
             .collect()
     });
-    Ok((objects, counts))
+    Ok((objects, counts, plan.gc_tables.len() as u32))
 }
 
 /// What the units' entries are for: this compiler, the target, the
-/// options that change code; under `-g` also where the sources are
-/// (debug info names them).
+/// options that change code; under `-g` also the directory the source
+/// paths are relative to (debug info names them absolute; a unit's key
+/// has the paths of its own spans).
 fn salt(
     opts: &BuildOptions,
-    sources: &SourceMap,
     native: bool,
     t: &rokc_llvm::Target,
     data_layout: Option<&str>,
@@ -121,10 +113,6 @@ fn salt(
     if opts.debug {
         let cwd = std::env::current_dir().unwrap_or_default();
         s.push_str(&format!("{}\n", cwd.display()));
-        for (p, _) in sources.files() {
-            s.push_str(p);
-            s.push('\n');
-        }
     }
     s
 }
@@ -139,32 +127,6 @@ fn open(dir: &Path, salt: &str) -> Result<(), RokDiagnostic> {
     std::fs::create_dir_all(dir)
         .map_err(|e| err(format!("cannot create {}: {e}", dir.display())))?;
     write(&stamp, salt.as_bytes())
-}
-
-fn read_types(path: &Path) -> Vec<Vec<u32>> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    let parsed: Option<Vec<Vec<u32>>> = text
-        .lines()
-        .map(|l| {
-            l.split(',')
-                .filter(|w| !w.is_empty())
-                .map(|w| w.parse().ok())
-                .collect()
-        })
-        .collect();
-    parsed.unwrap_or_default()
-}
-
-fn write_types(tables: &[Vec<u32>]) -> String {
-    let mut s = String::new();
-    for t in tables {
-        let words: Vec<String> = t.iter().map(u32::to_string).collect();
-        s.push_str(&words.join(","));
-        s.push('\n');
-    }
-    s
 }
 
 /// `path` holds `bytes`, or what it held: written beside it, then
@@ -375,17 +337,24 @@ fn by_thin_link(
     let fresh: Vec<Option<Vec<u8>>> = paths.iter().map(|p| std::fs::read(p).ok()).collect();
     let want: Vec<bool> = fresh.iter().map(Option::is_none).collect();
     let texts = mlir(module, sources, opts, plan, data_layout, &want)?;
-    let inputs: Vec<(&str, rokc_llvm::UnitInput<'_>)> = plan
+    // Named by package too (a library's units may hold the same code as
+    // another package's).
+    let own = units::own_package(&module.mir.link);
+    let names: Vec<String> = plan
         .units
         .iter()
+        .map(|u| format!("{own}/{}", u.name))
+        .collect();
+    let inputs: Vec<(&str, rokc_llvm::UnitInput<'_>)> = names
+        .iter()
         .enumerate()
-        .map(|(u, unit)| {
+        .map(|(u, name)| {
             let input = match (&fresh[u], &texts[u]) {
                 (Some(b), _) => rokc_llvm::UnitInput::Bitcode(b),
                 (None, Some(text)) => rokc_llvm::UnitInput::Mlir(text),
                 (None, None) => rokc_llvm::UnitInput::Mlir(""),
             };
-            (unit.name.as_str(), input)
+            (name.as_str(), input)
         })
         .collect();
     let opt = rokc_llvm::OptLevel::parse(&opts.opt_level)
@@ -395,7 +364,7 @@ fn by_thin_link(
     let alloc = rokc_codegen_mlir::alloc_module(&module.mir.target);
     let cache = dir.join("thin");
     let out = rokc_diagnostic::time("llvm", || {
-        rokc_llvm::compile_units(&inputs, &alloc, &c, &cache)
+        rokc_llvm::compile_units(&inputs, &alloc, &c, &cache, module.mir.link.lib.is_some())
     })
     .map_err(|e| err(format!("LLVM back end failed:\n{e}")))?;
     for w in out.warnings.lines() {

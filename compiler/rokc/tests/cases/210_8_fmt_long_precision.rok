@@ -1,0 +1,24 @@
+// spec: std 210-fmt §2.10.8
+// expect-exit: 0
+// expect-stdout:
+// 5.00|4.2e1|1.235e4|51966|12345.6780|2e1|1.30e3
+// 602 702 600 2+600+2
+// 0.10000000000000000555
+
+// Stdlib 2.10.5 / 2.10.8: integer `f` is fixed point, integer precision
+// is otherwise ignored, and precision has no upper bound (floats, text
+// truncation and integer exponent form alike).
+fn main() -> i32 {
+    let x: f64 = 12345.678;
+    let n: u32 = 0xCAFE;
+    println(f"{5:.2f}|{42:e}|{x:.3e}|{n:.3}|{x:10.4}|{19:.0e}|{1295:.2e}");
+    let p = 600;
+    let big = f"{0.1:.{p}}";
+    let wide = f"{1.0e300:.400f}";
+    let long = f"{"ab":x<1000}";
+    let cut = f"{long:.{p}}";
+    let e = f"{12:.{p}e}";
+    println(f"{big.len()} {wide.len()} {cut.len()} 2+{e.len() - 4}+2");
+    println(f"{big:.22}");
+    return 0;
+}

@@ -225,6 +225,28 @@ fn edited_module_recompiles_its_unit_alone() {
         let (units, out) = build();
         assert_eq!(units, ["<root>", "b"], "{opt}");
         assert_eq!(out, "7 hi 2\n");
+        // A new GC type, then gone again: the type ids are a clean
+        // build's.
+        let a = fs::read_to_string(app.join("a.rok")).unwrap();
+        fs::write(
+            app.join("a.rok"),
+            format!(
+                "{a}\npub fn rows() -> i64 {{\n    \
+                 let t: List<(str, str, i64, str, i64)> = [(\"x\", \"y\", 1, \"z\", 2)];\n    \
+                 t.len() as i64\n}}\n"
+            ),
+        )
+        .unwrap();
+        let main = fs::read_to_string(app.join("main.rok")).unwrap();
+        fs::write(
+            app.join("main.rok"),
+            main.replace("{xs.len()}", "{xs.len()} {a::rows()}"),
+        )
+        .unwrap();
+        assert_eq!(build().1, "7 hi 2 1\n");
+        fs::write(app.join("a.rok"), a).unwrap();
+        fs::write(app.join("main.rok"), main).unwrap();
+        assert_eq!(build().1, "7 hi 2\n");
         // The same executable as a clean build's.
         let exe = |name: &str| {
             let profile = if opt == "-O2" { "release" } else { "debug" };
@@ -240,6 +262,160 @@ fn edited_module_recompiles_its_unit_alone() {
             "{opt}: not the clean build's executable"
         );
     }
+}
+
+/// A library package builds by units: an edit recompiles its unit
+/// alone, the archive is a clean build's, and two such libraries with
+/// copies of the same instances link into one program.
+#[test]
+fn library_builds_by_units() {
+    let Some(env) = setup() else { return };
+    for opt in ["-O0", "-O2"] {
+        let dir = scratch(&format!("units_lib{opt}"));
+        let (a, b) = (dir.join("liba"), dir.join("libb"));
+        let app = dir.join("app");
+        for d in [&a, &b, &app] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(
+            a.join("lib.rok"),
+            "mod util;\n\nstatic NAMES: List<str> = [\"x\", \"yy\"];\n\n\
+             pub fn total(n: i64) -> i64 {\n    let t: i64 = 0;\n    for i in 0..n {\n        \
+             t += util::weight(f\"p{i}\");\n    }\n    t + NAMES.len() as i64\n}\n",
+        )
+        .unwrap();
+        let util = "pub fn weight(s: str) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
+                    d[s] = s.len() as i64;\n    d.get(s) ?? 0\n}\n";
+        fs::write(a.join("util.rok"), util).unwrap();
+        fs::write(
+            b.join("lib.rok"),
+            "pub fn words(n: i64) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
+             for i in 0..n {\n        d[f\"w{i}\"] = i;\n    }\n    d.get(\"w2\") ?? 0\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("main.rok"),
+            "use liba::total;\nuse libb::words;\n\nprintln(f\"{total(3)} {words(4)}\");\n",
+        )
+        .unwrap();
+        let profile = if opt == "-O2" { "release" } else { "debug" };
+        let archive = |d: &Path, n: &str| d.join(format!("target/{profile}/lib{n}.a"));
+        let (lib_a, lib_b) = (archive(&a, "liba"), archive(&b, "libb"));
+        let extern_a = format!("liba={}", lib_a.display());
+        let build = |args: &[&str]| {
+            let out = rokc(Some(&env), &dir, &[&["build", "-vv", opt], args].concat());
+            assert_exit(&out, 0);
+            let mut units: Vec<String> = text(&out.stderr)
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("Compiled unit "))
+                .map(str::to_owned)
+                .collect();
+            units.sort();
+            units
+        };
+        let run = || {
+            let extern_b = format!("libb={}", lib_b.display());
+            let exe = dir.join("app.bin");
+            let out = rokc(
+                Some(&env),
+                &dir,
+                &[
+                    "build", "-q", opt, "app", "--extern", &extern_a, "--extern", &extern_b, "-o",
+                ]
+                .into_iter()
+                .chain([exe.to_str().unwrap()])
+                .collect::<Vec<_>>(),
+            );
+            assert_exit(&out, 0);
+            text(&Command::new(&exe).output().unwrap().stdout)
+        };
+        assert!(build(&["liba"]).len() > 2);
+        // Built after `liba`: its GC types follow `liba`'s.
+        build(&["libb", "--extern", &extern_a]);
+        assert_eq!(run(), "8 2\n");
+        fs::write(a.join("util.rok"), util.replace("as i64;", "as i64 + 1;")).unwrap();
+        assert_eq!(build(&["liba"]), ["liba::util"], "{opt}");
+        assert_eq!(run(), "11 2\n");
+        let incremental = fs::read(&lib_a).unwrap();
+        fs::remove_dir_all(a.join("target")).unwrap();
+        build(&["liba"]);
+        assert!(
+            incremental == fs::read(&lib_a).unwrap(),
+            "{opt}: not the clean build's archive"
+        );
+    }
+}
+
+/// An anonymous file builds by units too, kept per file in the target
+/// directory without a package (`ROKC_TARGET_DIR`, else the system's
+/// temporary one), not in a `target/` beside the script.
+#[test]
+fn anonymous_file_reuses_its_units() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("units_anon");
+    fs::write(dir.join("hello.rok"), "println(f\"{[1, 2].len()}\");\n").unwrap();
+    let cache = dir.join("cache");
+    let run = || {
+        let out = Command::new(ROKC)
+            .current_dir(&dir)
+            .env("ROK_HOME", workspace())
+            .env("ROKC_TARGET_DIR", &cache)
+            .args(["run", "-v", "hello.rok", "--rokr"])
+            .arg(&env.rokr)
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "2\n");
+        text(&out.stderr)
+    };
+    assert!(!run().contains(" 0 compiled"));
+    assert!(run().contains(" 0 compiled"));
+    let units = fs::read_dir(cache.join("debug/incremental")).unwrap();
+    let names: Vec<String> = units
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.len() == 1 && names[0].starts_with("hello-"),
+        "{names:?}"
+    );
+    assert!(!dir.join("target").exists());
+}
+
+/// Under `-g` a unit's debug info names only its own files: a new file
+/// recompiles what imports it (and the C `main`, whose line moved), not
+/// every unit.
+#[test]
+fn new_file_under_debug_info_recompiles_its_importers() {
+    let Some(env) = setup() else { return };
+    let app = scratch("units_g").join("app");
+    fs::create_dir_all(&app).unwrap();
+    let main = "fn main() -> i32 {\n    println(f\"{a::one()} {b::two()}\");\n    return 0;\n}\n";
+    fs::write(app.join("main.rok"), format!("mod a;\nmod b;\n\n{main}")).unwrap();
+    fs::write(app.join("a.rok"), "pub fn one() -> i64 {\n    1\n}\n").unwrap();
+    fs::write(app.join("b.rok"), "pub fn two() -> i64 {\n    2\n}\n").unwrap();
+    let build = || {
+        let out = rokc(Some(&env), &app, &["build", "-vv", "-g"]);
+        assert_exit(&out, 0);
+        let mut units: Vec<String> = text(&out.stderr)
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Compiled unit "))
+            .map(str::to_owned)
+            .collect();
+        units.sort();
+        units
+    };
+    assert!(build().len() > 3);
+    // `a` < `aa` < `b`: the new file comes between the others.
+    fs::write(app.join("aa.rok"), "pub fn three() -> i64 {\n    3\n}\n").unwrap();
+    let main = main.replace("b::two()}", "b::two()} {aa::three()}");
+    fs::write(
+        app.join("main.rok"),
+        format!("mod a;\nmod aa;\nmod b;\n\n{main}"),
+    )
+    .unwrap();
+    assert_eq!(build(), ["<glue>", "<root>", "aa"]);
+    let run = rokc(Some(&env), &app, &["run", "-q", "-g"]);
+    assert_eq!(text(&run.stdout), "1 2 3\n");
 }
 
 /// `-vv` (909.5): the files read and the generic instances made.
@@ -293,7 +469,6 @@ fn lib_package_builds_archive_and_runs_tests() {
 
     assert_exit(&rokc(Some(&env), &dir, &["build", "mylib"]), 0);
     assert!(lib.join("target/debug/libmylib.a").is_file());
-    assert!(lib.join("target/debug/mylib.o").is_file());
     // A library has no entry point.
     assert_exit(&rokc(Some(&env), &dir, &["run", "mylib"]), 1);
 
@@ -1210,7 +1385,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
-        "Concrete .o files:\n  geo.o (",
+        "Concrete .o files:\n  part0.o (",
     ] {
         assert!(info.contains(want), "{want:?} in\n{info}");
     }

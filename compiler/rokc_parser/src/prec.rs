@@ -213,6 +213,32 @@ fn collect_items(
             }
             continue;
         }
+        let stray = match item {
+            Item::Fn(f) => f.attrs.iter().collect(),
+            Item::Impl(i) => i
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    rokc_ast::ImplItem::Method(m) => Some(&m.attrs),
+                    _ => None,
+                })
+                .flatten()
+                .collect(),
+            _ => Vec::new(),
+        };
+        for attr in stray {
+            if let [p] = attr.path.as_slice() {
+                if matches!(p.as_str(), "infix" | "prefix" | "postfix") {
+                    diags.push(meta_err(
+                        attr,
+                        format!(
+                            "`#[{p}]` can be attached only to a trait method signature (spec \
+                             6.7.13)"
+                        ),
+                    ));
+                }
+            }
+        }
         let Item::Trait(t) = item else { continue };
         let trait_name = module
             .iter()
@@ -385,8 +411,8 @@ fn collect_attr(
             diags.push(meta_err(
                 attr,
                 format!(
-                    "`{symbol}` is not a {name} operator of the spec 3.2 table; a new token \
-                     needs `like = \"<existing token>\"`"
+                    "`{symbol}` is not a spec 3.2 table token for `#[{name}]`; a new \
+                     token needs `like = \"<existing token>\"`"
                 ),
             ));
             return None;

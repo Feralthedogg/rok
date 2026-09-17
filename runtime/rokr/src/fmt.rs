@@ -10,21 +10,18 @@ use core::ptr;
 use rokr_common::object_header::{HEADER_SIZE, ObjectHeader};
 
 use crate::fmt_spec::parse;
-use crate::fmt_spec::{FmtSpec, MAX_PREC, pack, unpack};
-use crate::str::{RokStr, alloc_str, build, escape, text};
+use crate::fmt_spec::{FmtSpec, pack, unpack};
+use crate::str::{RokStr, alloc_str, escape, text};
 
-/// Fits any `f64` at [`MAX_PREC`] places.
+/// A panic message (cut at its size).
 struct Buf {
-    b: [u8; 1100],
+    b: [u8; 256],
     n: usize,
 }
 
 impl Buf {
     const fn new() -> Self {
-        Self { b: [0; 1100], n: 0 }
-    }
-    fn bytes(&self) -> &[u8] {
-        &self.b[..self.n]
+        Self { b: [0; 256], n: 0 }
     }
 }
 
@@ -58,7 +55,7 @@ fn fail(spec: &str, why: &str) -> ! {
 pub unsafe extern "C" fn rok_fmt_spec_parse(spec: RokStr, out: *mut u8) {
     let t = text(&spec);
     let s = parse(t).unwrap_or_else(|why| fail(t, why));
-    let opt = |v: Option<usize>| v.map_or(-1, |v| v.min(MAX_PREC) as i64);
+    let opt = |v: Option<usize>| v.map_or(-1, |v| v as i64);
     let ty = if matches!(s.ty, b's' | b'd' | b'g') {
         0
     } else {
@@ -90,13 +87,15 @@ pub unsafe extern "C" fn rok_fmt_spec_parse(spec: RokStr, out: *mut u8) {
 /// width; `f` then takes 6 places. Every float rendering comes here.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_fmt_float(v: f64, is_f32: u32, ty: u32, prec: i64) -> RokStr {
-    build(&[float_text(v, is_f32, ty, prec).bytes()])
+    let mut w = W::of(rok_fmt_new(32));
+    float_write(&mut w, v, is_f32, ty, prec);
+    rok_fmt_finish(w.done())
 }
 
 #[allow(clippy::cast_possible_truncation)] // `f32` values widened by the caller
-fn float_text(v: f64, is_f32: u32, ty: u32, prec: i64) -> Buf {
-    let mut out = Buf::new();
-    let p = usize::try_from(prec).ok().map(|p| p.min(MAX_PREC));
+fn float_write(out: &mut W, v: f64, is_f32: u32, ty: u32, prec: i64) {
+    let start = out.len;
+    let p = usize::try_from(prec).ok();
     let x = v as f32;
     let exp = ty == u32::from(b'e') || ty == u32::from(b'E');
     let _ = match (exp, ty == u32::from(b'f'), p, is_f32 != 0) {
@@ -111,57 +110,54 @@ fn float_text(v: f64, is_f32: u32, ty: u32, prec: i64) -> Buf {
     };
     if ty == u32::from(b'E') {
         // `inf` / `NaN` hold no `e`.
-        out.b[..out.n]
+        out.tail_mut(start)
             .iter_mut()
             .filter(|c| **c == b'e')
             .for_each(|c| *c = b'E');
     }
-    out
 }
 
-/// The decimal digits `digits` of an integer in `1.5e3` form: shortest
+/// The decimal digits `d` of an integer in `1.5e3` form: shortest
 /// exact without a precision (`prec < 0`), else rounded half up to
 /// `prec` fraction digits.
-fn exp_text(d: &[u8], prec: i64, upper: bool) -> Buf {
-    let mut out = Buf::new();
+fn exp_write(out: &mut W, d: &[u8], prec: i64, upper: bool) {
     if d.is_empty() {
-        let _ = out.write_str("0e0");
-        return out;
+        out.put(b"0e0");
+        return;
     }
     let mut exp = d.len() - 1;
-    let mut m = [b'0'; MAX_PREC + 2];
+    // `k` significant digits: `d[..keep]`, then `bump` on the last one
+    // kept (a carry turns trailing `9`s into `0`s), then `0`s.
     let k = match usize::try_from(prec) {
         Err(_) => d.iter().rposition(|&c| c != b'0').map_or(1, |i| i + 1),
-        Ok(p) => p.min(MAX_PREC) + 1,
+        Ok(p) => p.saturating_add(1),
     };
-    let take = k.min(d.len());
-    m[..take].copy_from_slice(&d[..take]);
+    let mut keep = k.min(d.len());
+    let mut bump = false;
     if d.len() > k && d[k] >= b'5' {
-        let mut i = k;
-        loop {
-            if i == 0 {
-                // 9.99 rounds to 10.0: one more exponent.
-                m[0] = b'1';
-                m[1..k].fill(b'0');
-                exp += 1;
-                break;
-            }
-            i -= 1;
-            if m[i] == b'9' {
-                m[i] = b'0';
-            } else {
-                m[i] += 1;
-                break;
-            }
+        if let Some(i) = d[..k].iter().rposition(|&c| c != b'9') {
+            keep = i;
+            bump = true;
+        } else {
+            // 9.99 rounds to 10.0: one more exponent.
+            keep = 0;
+            exp += 1;
         }
     }
-    let _ = out.write_char(char::from(m[0]));
-    if k > 1 {
-        let _ = out.write_char('.');
-        let _ = out.write_str(core::str::from_utf8(&m[1..k]).unwrap_or(""));
+    let lead = match (bump, keep) {
+        (true, _) => Some(d[keep] + 1),
+        (false, 0) => Some(b'1'),
+        _ => None,
+    };
+    let sig = d[..keep].iter().copied().chain(lead);
+    let zeros = k - keep - usize::from(lead.is_some());
+    for (i, c) in sig.chain(core::iter::repeat_n(b'0', zeros)).enumerate() {
+        out.put(&[c]);
+        if i == 0 && k > 1 {
+            out.put(b".");
+        }
     }
     let _ = write!(out, "{}{exp}", if upper { 'E' } else { 'e' });
-    out
 }
 
 // A `core::fmt::Formatter`'s text: a GC string being filled, held as a
@@ -230,6 +226,13 @@ impl W {
         // SAFETY: `start < len <= cap` bytes of text.
         unsafe { core::slice::from_raw_parts(self.p.add(start), self.len - start) }
     }
+    fn tail_mut(&mut self, start: usize) -> &mut [u8] {
+        if start >= self.len {
+            return &mut [];
+        }
+        // SAFETY: `start < len <= cap` bytes of text.
+        unsafe { core::slice::from_raw_parts_mut(self.p.add(start), self.len - start) }
+    }
     /// `count` copies of `c` at byte `at`, moving what follows.
     fn insert(&mut self, at: usize, c: char, count: usize) {
         if count == 0 {
@@ -248,6 +251,13 @@ impl W {
             }
         }
         self.len += n;
+    }
+}
+
+impl core::fmt::Write for W {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.put(s.as_bytes());
+        Ok(())
     }
 }
 
@@ -327,18 +337,23 @@ struct Body {
 }
 
 /// A number: its sign, `prefix` under `#`, `body`, padded.
-fn number(w: &mut W, spec: &FmtSpec, neg: bool, prefix: &[u8], body: &[u8], how: Body) {
+fn number(
+    w: &mut W,
+    spec: &FmtSpec,
+    neg: bool,
+    prefix: &[u8],
+    body: impl FnOnce(&mut W),
+    how: Body,
+) {
     let start = w.len;
     w.put(sign(spec, neg));
     if spec.alt {
         w.put(prefix);
     }
     let mid = w.len;
-    w.put(body);
+    body(w);
     if how.upper {
-        // SAFETY: `mid..len` was just written.
-        unsafe { core::slice::from_raw_parts_mut(w.p.add(mid), w.len - mid) }
-            .make_ascii_uppercase();
+        w.tail_mut(mid).make_ascii_uppercase();
     }
     if how.zeros > 0 {
         w.put(b".");
@@ -367,23 +382,23 @@ fn digits(w: &mut W, spec: &FmtSpec, neg: bool, d: &[u8]) {
             spec,
             neg,
             b"0x",
-            d,
+            |w| w.put(d),
             Body {
                 upper: true,
                 ..plain
             },
         ),
-        b'b' | b'o' | b'x' => number(w, spec, neg, radix_prefix(spec.ty), d, plain),
+        b'b' | b'o' | b'x' => number(w, spec, neg, radix_prefix(spec.ty), |w| w.put(d), plain),
         b'e' | b'E' => {
             let prec = spec.precision.map_or(-1, |p| p as i64);
-            let body = exp_text(d, prec, spec.ty == b'E');
-            number(w, spec, neg, b"", body.bytes(), plain);
+            let upper = spec.ty == b'E';
+            number(w, spec, neg, b"", |w| exp_write(w, d, prec, upper), plain);
         }
         b'f' => {
             let zeros = spec.precision.unwrap_or(6);
-            number(w, spec, neg, b"", d, Body { zeros, ..plain });
+            number(w, spec, neg, b"", |w| w.put(d), Body { zeros, ..plain });
         }
-        _ => number(w, spec, neg, b"", d, plain),
+        _ => number(w, spec, neg, b"", |w| w.put(d), plain),
     }
 }
 
@@ -503,7 +518,7 @@ pub extern "C" fn rok_fmt_integral(
         &spec,
         nonneg == 0,
         prefix.bytes(),
-        buf.bytes(),
+        |w| w.put(buf.bytes()),
         Body::default(),
     );
     w.done()
@@ -521,12 +536,12 @@ pub extern "C" fn rok_fmt_f64(h: RokStr, flags: u64, counts: u64, v: f64, is_f32
     }
     let neg = v.is_sign_negative() && !v.is_nan();
     let prec = spec.precision.map_or(-1, |p| p as i64);
-    let body = float_text(v.abs(), is_f32, spec.ty.into(), prec);
     let how = Body {
         text: !v.is_finite(),
         ..Body::default()
     };
-    number(&mut w, &spec, neg, b"", body.bytes(), how);
+    let body = |w: &mut W| float_write(w, v.abs(), is_f32, spec.ty.into(), prec);
+    number(&mut w, &spec, neg, b"", body, how);
     w.done()
 }
 
@@ -602,8 +617,9 @@ pub mod tests {
         assert_eq!(f32_text(0.1, 0), "0.1");
         assert_eq!(f32_text(0.1, b'e'), "1e-1");
         let e = |d: &'static str, p: i64| {
-            let b = exp_text(d.as_bytes(), p, false);
-            core::str::from_utf8(b.bytes()).unwrap().to_owned()
+            let mut w = W::of(rok_fmt_new(1));
+            exp_write(&mut w, d.as_bytes(), p, false);
+            text(&rok_fmt_finish(w.done())).to_owned()
         };
         assert_eq!(e("42", -1), "4.2e1");
         assert_eq!(e("1000", -1), "1e3");
@@ -628,6 +644,21 @@ pub mod tests {
         let sp = parse("*^+#012.3x").unwrap();
         let (fl, co) = pack(&sp);
         assert_eq!(unpack(fl, co), sp);
+    }
+
+    // Allocates: called from the GC test (single mutator).
+    pub fn exp_rounding() {
+        let e = |d: &'static str, p: i64| {
+            let mut w = W::of(rok_fmt_new(1));
+            exp_write(&mut w, d.as_bytes(), p, false);
+            text(&rok_fmt_finish(w.done())).to_owned()
+        };
+        assert_eq!(e("19", 0), "2e1");
+        assert_eq!(e("1295", 2), "1.30e3");
+        assert_eq!(e("5", 3), "5.000e0");
+        // No precision cap.
+        assert_eq!(e("12", 600).len(), 2 + 600 + 2);
+        assert_eq!(text(&rok_fmt_float(0.1, 0, 0, 700)).len(), 2 + 700);
     }
 
     // Allocates: called from the GC test (single mutator).

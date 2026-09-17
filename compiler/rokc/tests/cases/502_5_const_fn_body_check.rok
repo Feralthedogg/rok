@@ -1,0 +1,21 @@
+// spec: 005.02-const
+// expect-error: 12:33: `const fn h` calls `g`, which is not a `const fn` (spec 5.2.5)
+// expect-error: 13:30: `const fn io` calls `println`, which calls the extern function
+// expect-error: 14:24: `const fn st` reads the static `S` (spec 5.2.5)
+
+// Spec 5.2.5: a `const fn` calls only `const fn`s and does no I/O nor
+// reads a global, checked even when it is never evaluated. Standard
+// library functions count as `const` when their bodies are pure (`abs`,
+// `str` concatenation and `len` here).
+static S: i32 = 4;
+fn g() -> i32 { 3 }
+const fn h(x: i32) -> i32 { x + g() }
+const fn io(x: i32) -> i32 { println("x"); x }
+const fn st() -> i32 { S }
+const fn ok(x: i32) -> i32 { let s = "ab" + "c"; x.abs() + s.len() as i32 }
+const fn gen<T>(x: T) -> T { x }
+const fn rec(n: i64) -> i64 { if n == 0 { 0 } else { rec(n - 1) + 1 } }
+fn main() -> i32 {
+    println(f"{ok(-1)} {gen(1)} {rec(3)}");
+    return 0;
+}

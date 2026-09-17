@@ -46,7 +46,7 @@ impl Bits {
 }
 
 /// Locals a statement reads, and the one it (fully) defines.
-fn stmt_uses(s: &Statement) -> (Vec<LocalId>, Option<LocalId>) {
+pub fn stmt_uses(s: &Statement) -> (Vec<LocalId>, Option<LocalId>) {
     let mut ops = Vec::new();
     let mut def = None;
     match s {
@@ -84,7 +84,7 @@ fn copies(ops: &[Operand]) -> Vec<LocalId> {
         .collect()
 }
 
-fn term_uses(t: &Terminator) -> Vec<LocalId> {
+pub fn term_uses(t: &Terminator) -> Vec<LocalId> {
     match t {
         Terminator::Goto { args, .. } => copies(args),
         Terminator::If {

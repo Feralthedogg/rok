@@ -11,6 +11,7 @@ some of them (same algorithm, same output). Not run by CI.
 | `binary_trees`   | short-lived trait objects, GC throughput                  | ✓ |
 | `json_tokenizer` | building a 6 MB `str` with `StrBuf`, byte-wise scanning   | ✓ |
 | `word_count`     | `split_whitespace` + `Dict<str, i64>` counting            | ✓ |
+| `throw_parse`    | recursive throwing calls (`try`), errors caught per expr  | ✓ |
 | `alloc_*`, `gc_*`, `store_heavy`, `wb_threads`, `timers`, `fstring_heavy` | allocation, collector, write barriers, timers, f-strings | |
 
 ## Running

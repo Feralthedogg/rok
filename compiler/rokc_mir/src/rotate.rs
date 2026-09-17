@@ -6,7 +6,8 @@
 //! path), and a load hoisted out of an unrotated body is speculated,
 //! which drops its TBAA tag: rotated, a length load leaves the loop with
 //! its tag, so it stays valid across the poll's yield (`REF_ONLY_CALLS`)
-//! and leaves the enclosing loop too.
+//! and leaves the enclosing loop too. The counter's step moves into the
+//! bottom test (`sink_step`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -134,7 +135,78 @@ pub fn rotate(f: &mut MirFunction) {
             }
         }
         f.blocks.push(copy);
+        sink_step(f, h, next, &body);
         next += 1;
+    }
+}
+
+/// The counter step of a rotated loop (header `h`, its test's copy
+/// `copy`) moved from the top of the body into `copy`, in front of the
+/// test: `for i in a..b` steps the counter before its body runs, and a
+/// step left at the top of the rotated body is a block away from the
+/// body's own `i + 1`s, which LLVM then computes again. Only a counter
+/// the loop reads nowhere after its step, nor anything after the loop.
+fn sink_step(f: &mut MirFunction, h: u32, copy: u32, body: &HashSet<u32>) {
+    let Some(hb) = f.blocks.iter().find(|b| b.id.0 == h) else {
+        return;
+    };
+    let Terminator::If {
+        then_bb, else_bb, ..
+    } = &hb.terminator
+    else {
+        return;
+    };
+    let first = if body.contains(&then_bb.0) {
+        then_bb.0
+    } else {
+        else_bb.0
+    };
+    if f.blocks
+        .iter()
+        .any(|b| b.id.0 != h && b.id.0 != copy && succs(b).contains(&first))
+    {
+        return;
+    }
+    let Some(bi) = f.blocks.iter().position(|b| b.id.0 == first) else {
+        return;
+    };
+    let Some(k) = f.blocks[bi].stmts.iter().position(|s| {
+        matches!(s, Statement::Assign {
+            target,
+            rvalue: RValue::BinOp { op: PrimOp::Add, lhs: Operand::Copy(l), rhs: Operand::Const(_), .. },
+        } if target == l)
+    }) else {
+        return;
+    };
+    let Statement::Assign { target: c, .. } = f.blocks[bi].stmts[k] else {
+        return;
+    };
+    if crate::addressed(f).contains(&c) {
+        return;
+    }
+    // Besides the tests (`h`, `copy`), `c` is read only before the step
+    // in its block, and the loop writes it only there.
+    for b in &f.blocks {
+        let id = b.id.0;
+        if id == h || id == copy {
+            continue;
+        }
+        if b.params.contains(&c) || crate::liveness::term_uses(&b.terminator).contains(&c) {
+            return;
+        }
+        for (i, s) in b.stmts.iter().enumerate() {
+            if id == first && i <= k {
+                continue;
+            }
+            let (uses, def) = crate::liveness::stmt_uses(s);
+            if uses.contains(&c) || (def == Some(c) && body.contains(&id)) {
+                return;
+            }
+        }
+    }
+    let step = f.blocks[bi].stmts.remove(k);
+    if let Some(cb) = f.blocks.iter_mut().find(|b| b.id.0 == copy) {
+        cb.stmts.insert(0, step);
     }
 }
 
@@ -300,6 +372,20 @@ mod tests {
         let edges = back_edges(&f);
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[&4], HashSet::from([2]));
+        // The step moved in front of the bottom test.
+        assert!(f.blocks[2].stmts.is_empty());
+        assert_eq!(f.blocks[4].stmts.len(), 2);
+    }
+
+    #[test]
+    fn a_counter_read_after_its_step_keeps_it() {
+        let mut f = counting(false);
+        f.blocks[2]
+            .stmts
+            .push(op(2, PrimOp::Lt, 0, Operand::Copy(LocalId(1))));
+        rotate(&mut f);
+        assert_eq!(f.blocks[2].stmts.len(), 2);
+        assert_eq!(f.blocks[4].stmts.len(), 1);
     }
 
     #[test]

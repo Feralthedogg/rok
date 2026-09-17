@@ -1,0 +1,48 @@
+// Rotated counted loops step their counter at the bottom test: `continue`,
+// `break`, nesting and a counter read after the loop all see the same
+// values as before.
+// expect-exit: 0
+// expect-stdout: 20 7 9 3 5 45
+
+fn main() -> i32 {
+    let s = 0;
+    for i in 0..10 {
+        if i % 2 == 1 {
+            continue;
+        }
+        s += i;
+    }
+    let b = 0;
+    for i in 3..100 {
+        if i == 7 {
+            b = i;
+            break;
+        }
+    }
+    let i = 0;
+    while i < 9 {
+        i += 1;
+    }
+    let k = 0;
+    while k < 10 {
+        if k == 3 {
+            break;
+        }
+        k += 1;
+    }
+    let n = 0;
+    while n < 5 {
+        n += 1;
+        if n == 2 {
+            continue;
+        }
+    }
+    let t = 0;
+    for a in 0..10 {
+        for c in 0..a {
+            t += 1;
+        }
+    }
+    println(f"{s} {b} {i} {k} {n} {t}");
+    return 0;
+}

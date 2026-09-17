@@ -76,7 +76,7 @@ pub fn compact(body: &str) -> String {
     for line in body.lines() {
         let hoist = def(line).and_then(|(name, rest)| {
             let op = CONST_OPS.iter().any(|p| rest.starts_with(p))
-                && !rest.starts_with("llvm.mlir.addressof @rok_tls_");
+                && !rest.starts_with("llvm.mlir.addressof @rok_tls");
             if !op {
                 return None;
             }
