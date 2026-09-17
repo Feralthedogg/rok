@@ -48,6 +48,8 @@ pub enum TokenKind {
     StrLit(String),
     /// `r"raw"` or `r#"raw"#`.
     RawStrLit(String),
+    /// `b"bytes"` (a `[u8; N]`).
+    ByteStrLit(String),
     // `f"x = {x:>{w}}"` (spec 1.7.3) is `FStrStart`, `FStrText` runs and
     // holes, `FStrEnd`. A hole is `HoleStart`, its code as ordinary
     // tokens, an optional `HoleSpec` with `SpecText` runs and nested
@@ -231,6 +233,7 @@ impl TokenKind {
             Self::CharLit(s) => return format!("'{s}'"),
             Self::CCharLit(s) => return format!("c'{s}'"),
             Self::StrLit(s) => return format!("\"{s}\""),
+            Self::ByteStrLit(s) => return format!("b\"{s}\""),
             Self::FStrStart(t) => return if *t { "f\"\"\"" } else { "f\"" }.to_owned(),
             Self::FStrText(s) => return s.replace('{', "{{").replace('}', "}}"),
             Self::SpecText(s) => return s.replace('$', "$$"),
@@ -336,6 +339,7 @@ impl TokenKind {
             Self::FloatLit(s) => format!("float literal `{s}`"),
             Self::CharLit(_) | Self::CCharLit(_) => format!("character literal `{}`", self.text()),
             Self::StrLit(_) | Self::RawStrLit(_) => "string literal".to_owned(),
+            Self::ByteStrLit(_) => "byte string literal".to_owned(),
             Self::FStrStart(_) | Self::FStrText(_) | Self::FStrEnd(_) => "f-string".to_owned(),
             Self::HoleStart | Self::HoleEnd | Self::HoleSpec | Self::SpecText(_) => {
                 "f-string hole".to_owned()
@@ -425,6 +429,7 @@ rokc_core::codec_enum!(TokenKind {
     CCharLit(x0),
     StrLit(x0),
     RawStrLit(x0),
+    ByteStrLit(x0),
     FStrStart(x0),
     FStrText(x0),
     HoleStart,

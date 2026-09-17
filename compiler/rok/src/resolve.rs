@@ -11,20 +11,28 @@
 //! Native packages (`native` of every package reached, an index entry's
 //! `kind: "native"` dependencies, a native package's `deps`) are a
 //! namespace of their own, resolved the same way afterwards.
+//!
+//! That graph, optional dependencies included, is what `rok.lock` pins,
+//! whatever features a build asks for. Features then pick the packages a
+//! build has, and each one's features: from the root's (`--features`,
+//! `default` unless `--no-default-features`), along every dependency
+//! enabled, one set per package for the whole graph. The root's
+//! `dev_deps` count only for a test build.
 // Greedy, no backtracking: a root requirement both sides accept
 // (`rok add x@=1.2.0`) settles a conflict.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::git::Cache;
 use crate::lock::{Lock, Locked, LockedNative};
-use crate::manifest::{self, Dep, Manifest, NativeDep, NativeSource, Source};
+use crate::manifest::{self, Dep, Enables, Features, Manifest, NativeDep, NativeSource, Source};
 use crate::native;
 use crate::registry;
 use crate::semver::{Req, Version};
 
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // independent switches
 pub struct Options {
     pub offline: bool,
     /// `--locked`: fail instead of changing `rok.lock`.
@@ -33,6 +41,13 @@ pub struct Options {
     /// (empty: all).
     pub update: Option<Vec<String>>,
     pub quiet: bool,
+    /// `--features`: the root's features, `<dep>/<feature>` and the
+    /// other forms of a feature's list.
+    pub features: Vec<String>,
+    pub all_features: bool,
+    pub no_default_features: bool,
+    /// A test / bench build: with the root's `dev_deps`.
+    pub dev: bool,
 }
 
 /// What a command works on: a project (a directory with `rok.rokon`), a
@@ -50,17 +65,25 @@ pub struct Resolved {
     pub name: String,
     /// The package's `lib.rok`.
     pub root: PathBuf,
-    /// Reached only through the root's `dev_deps`.
-    pub dev: bool,
-    /// Its own dependencies' names.
-    pub deps: Vec<String>,
+    /// Its enabled features, sorted.
+    pub features: Vec<String>,
+}
+
+/// A package of the whole graph.
+struct Node {
+    name: String,
+    root: PathBuf,
+    deps: Vec<Dep>,
+    features: Features,
 }
 
 /// What a build uses: packages each after its own dependencies, native
-/// packages each before its own (the order a linker wants).
+/// packages each before its own (the order a linker wants), and the
+/// root's features.
 pub struct Graph {
     pub packages: Vec<Resolved>,
     pub natives: Vec<native::Resolved>,
+    pub features: Vec<String>,
 }
 
 /// A native package's identity.
@@ -71,8 +94,9 @@ enum NativeId {
 }
 
 /// A native requirement: the dependency, what its relative url is
-/// relative to, who requires it, and whether only dev dependencies do.
-type NativeReq = (NativeDep, Option<String>, String, bool);
+/// relative to, who requires it, and the package that does (its key;
+/// `""` the root).
+type NativeReq = (NativeDep, Option<String>, String, String);
 
 /// Where a package came from: two requirements of one name must agree.
 #[derive(PartialEq, Eq)]
@@ -96,6 +120,8 @@ impl std::fmt::Display for Id {
 
 struct Resolver<'a> {
     home: PathBuf,
+    /// The package being built (`Context::base`, resolved).
+    root: PathBuf,
     cache: Cache,
     index: Cache,
     /// For `Dep::version(..)` without `registry`.
@@ -107,7 +133,7 @@ struct Resolver<'a> {
     /// What each name resolved to, who required it, and how (a stone's
     /// requirement).
     seen: HashMap<String, (Id, String, String)>,
-    out: Vec<Resolved>,
+    out: Vec<Node>,
     natives: Vec<NativeReq>,
 }
 
@@ -134,6 +160,7 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, Stri
     }
     let mut r = Resolver {
         home: home.to_path_buf(),
+        root: rokc_core::real_path(&ctx.base).unwrap_or_else(|_| ctx.base.clone()),
         cache: Cache::new(home),
         index: Cache::index(home),
         registry: registry::default_url(home)?,
@@ -148,11 +175,16 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, Stri
     let base = ctx.base.display().to_string();
     r.natives.extend(ctx.manifest.native.iter().map(|d| {
         let by = "the root package".to_owned();
-        (d.clone(), Some(base.clone()), by, false)
+        (d.clone(), Some(base.clone()), by, String::new())
     }));
-    // Normal dependencies first: whatever they reach is not dev-only.
-    r.walk(&ctx.manifest.deps, &ctx.base, "the root package", false)?;
-    r.walk(&ctx.manifest.dev_deps, &ctx.base, "the root package", true)?;
+    let all: Vec<Dep> = ctx
+        .manifest
+        .deps
+        .iter()
+        .chain(&ctx.manifest.dev_deps)
+        .cloned()
+        .collect();
+    r.walk(&all, &ctx.base, "the root package")?;
     let natives = r.natives()?;
     if let Some(path) = &ctx.lock_path {
         let text = r.new.to_text();
@@ -169,14 +201,231 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, Stri
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
         }
     }
-    let packages = order(r.out, |p| &p.name, |p| p.deps.clone());
-    let mut natives = order(
+    let nodes = order(
+        r.out,
+        |p| &p.name,
+        |p| p.deps.iter().map(|d| d.name.clone()).collect(),
+    );
+    let mut root_deps = ctx.manifest.deps.clone();
+    if opts.dev {
+        root_deps.extend(ctx.manifest.dev_deps.iter().cloned());
+    }
+    let mut on = Features::default();
+    let root_features = activate(&nodes, root_deps, &ctx.manifest.features, opts, &mut on)?;
+    let packages: Vec<Resolved> = nodes
+        .into_iter()
+        .filter_map(|n| {
+            let features = on
+                .iter()
+                .find(|(k, _)| *k == manifest::key(&n.name))?
+                .1
+                .clone();
+            Some(Resolved {
+                name: n.name,
+                root: n.root,
+                features,
+            })
+        })
+        .collect();
+    let mut natives: Vec<native::Resolved> = order(
         natives,
         |n| &n.name,
         |n| n.entry.deps.iter().map(|d| d.name.clone()).collect(),
-    );
+    )
+    .into_iter()
+    .filter(|n| {
+        n.users
+            .iter()
+            .any(|u| u.is_empty() || on.iter().any(|(k, _)| k == u))
+    })
+    .collect();
     natives.reverse();
-    Ok(Graph { packages, natives })
+    Ok(Graph {
+        packages,
+        natives,
+        features: root_features,
+    })
+}
+
+/// The features `opts` asks of the root (with `deps` and `features`):
+/// the root's, and in `on` each package reached (by key) with its own.
+fn activate(
+    nodes: &[Node],
+    deps: Vec<Dep>,
+    features: &Features,
+    opts: &Options,
+    on: &mut Features,
+) -> Result<Vec<String>, String> {
+    let root = Node {
+        name: String::new(),
+        root: PathBuf::new(),
+        deps,
+        features: features.clone(),
+    };
+    let mut all: Vec<&Node> = nodes.iter().collect();
+    all.push(&root);
+    let mut a = Activation {
+        index: all
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (manifest::key(&n.name), i))
+            .collect(),
+        nodes: all,
+        on: HashMap::new(),
+        edges: HashSet::new(),
+        weak: Vec::new(),
+    };
+    let r = nodes.len();
+    a.enable(r)?;
+    let cli = "--features";
+    if !opts.no_default_features && features.iter().any(|(n, _)| n == "default") {
+        a.apply(r, "default", cli)?;
+    }
+    if opts.all_features {
+        for (f, _) in features {
+            a.apply(r, f, cli)?;
+        }
+    }
+    for f in &opts.features {
+        a.apply(r, f, cli)?;
+    }
+    let mine = a.on.remove(&r).unwrap_or_default().into_iter().collect();
+    for (i, n) in nodes.iter().enumerate() {
+        if let Some(f) = a.on.remove(&i) {
+            on.push((manifest::key(&n.name), f.into_iter().collect()));
+        }
+    }
+    Ok(mine)
+}
+
+/// Feature resolution over `nodes` (the root last).
+struct Activation<'a> {
+    nodes: Vec<&'a Node>,
+    index: HashMap<String, usize>,
+    /// The packages reached, and their features.
+    on: HashMap<usize, BTreeSet<String>>,
+    /// Dependencies enabled: (package, dependency key).
+    edges: HashSet<(usize, String)>,
+    /// `<dep>?/<feature>` waiting for its dependency: (package,
+    /// dependency key, feature).
+    weak: Vec<(usize, String, String)>,
+}
+
+impl Activation<'_> {
+    fn who(&self, n: usize) -> String {
+        match self.nodes[n].name.as_str() {
+            "" => "the root package".to_owned(),
+            name => format!("package `{name}`"),
+        }
+    }
+
+    /// Package `n` is in the build, with its non-optional dependencies.
+    fn enable(&mut self, n: usize) -> Result<(), String> {
+        if self.on.contains_key(&n) {
+            return Ok(());
+        }
+        self.on.insert(n, BTreeSet::new());
+        let deps: Vec<String> = self.nodes[n]
+            .deps
+            .iter()
+            .filter(|d| !d.optional)
+            .map(|d| d.name.clone())
+            .collect();
+        for d in deps {
+            self.edge(n, &d)?;
+        }
+        Ok(())
+    }
+
+    /// Package `n`'s dependency `dep` is enabled: it is in the build with
+    /// the features `n` asks of it. Its key.
+    fn edge(&mut self, n: usize, dep: &str) -> Result<usize, String> {
+        let Some(d) = self.nodes[n]
+            .deps
+            .iter()
+            .find(|d| manifest::same(&d.name, dep))
+            .cloned()
+        else {
+            return Err(format!("{} has no dependency `{dep}`", self.who(n)));
+        };
+        let key = manifest::key(dep);
+        let Some(&t) = self.index.get(&key) else {
+            return Err(format!("dependency `{dep}` was not resolved"));
+        };
+        if !self.edges.insert((n, key.clone())) {
+            return Ok(t);
+        }
+        self.enable(t)?;
+        let by = self.who(n);
+        for f in &d.features {
+            self.feature(t, f, &by)?;
+        }
+        if d.default_features && self.nodes[t].features.iter().any(|(f, _)| f == "default") {
+            self.feature(t, "default", &by)?;
+        }
+        let waiting: Vec<String> = self
+            .weak
+            .iter()
+            .filter(|(w, k, _)| *w == n && *k == key)
+            .map(|(_, _, f)| f.clone())
+            .collect();
+        for f in waiting {
+            self.feature(t, &f, &by)?;
+        }
+        Ok(t)
+    }
+
+    /// Feature `f` of package `n` (which is in the build), required by
+    /// `by`.
+    fn feature(&mut self, n: usize, f: &str, by: &str) -> Result<(), String> {
+        let Some((_, list)) = self.nodes[n].features.iter().find(|(x, _)| x == f) else {
+            return Err(format!(
+                "{} has no feature `{f}` (required by {by})",
+                self.who(n)
+            ));
+        };
+        let list = list.clone();
+        if !self.on.entry(n).or_default().insert(f.to_owned()) {
+            return Ok(());
+        }
+        let by = self.who(n);
+        for e in &list {
+            self.apply(n, e, &by)?;
+        }
+        Ok(())
+    }
+
+    /// Entry `e` of a feature list of package `n`.
+    fn apply(&mut self, n: usize, e: &str, by: &str) -> Result<(), String> {
+        match Enables::parse(e) {
+            Enables::Feature(f) => self.feature(n, f, by),
+            Enables::Dep(d) => self.edge(n, d).map(drop),
+            Enables::DepFeature {
+                dep,
+                feature,
+                weak: false,
+            } => {
+                let t = self.edge(n, dep)?;
+                self.feature(t, feature, by)
+            }
+            Enables::DepFeature { dep, feature, .. } => {
+                let key = manifest::key(dep);
+                if !self.nodes[n]
+                    .deps
+                    .iter()
+                    .any(|d| manifest::same(&d.name, dep))
+                {
+                    return Err(format!("{} has no dependency `{dep}`", self.who(n)));
+                }
+                if self.edges.contains(&(n, key.clone())) {
+                    let t = self.index[&key];
+                    return self.feature(t, feature, by);
+                }
+                self.weak.push((n, key, feature.to_owned()));
+                Ok(())
+            }
+        }
+    }
 }
 
 /// `items` each after the ones its `deps` name.
@@ -216,7 +465,8 @@ fn order<T>(
 }
 
 impl Resolver<'_> {
-    fn walk(&mut self, deps: &[Dep], base: &Path, by: &str, dev: bool) -> Result<(), String> {
+    /// Every package `deps` reach, optional ones too.
+    fn walk(&mut self, deps: &[Dep], base: &Path, by: &str) -> Result<(), String> {
         let mut queue: Vec<(Dep, PathBuf, String)> = deps
             .iter()
             .map(|d| (d.clone(), base.to_path_buf(), by.to_owned()))
@@ -243,6 +493,13 @@ impl Resolver<'_> {
                 ));
             }
             let (dir, id, stone_deps) = self.locate(&dep, &base)?;
+            if dir == self.root {
+                return Err(format!(
+                    "dependency `{}` (required by {by}) is the package being built; a package \
+                     names its own items with `pkg::`",
+                    dep.name
+                ));
+            }
             if let Some((prev, prev_by, _)) = self.seen.get(&manifest::key(&dep.name)) {
                 if *prev == id {
                     continue;
@@ -262,34 +519,34 @@ impl Resolver<'_> {
                 ));
             }
             let me = format!("`{}`", dep.name);
-            let (next, natives) = match stone_deps {
+            let (next, natives, features) = match stone_deps {
                 Some(d) => d,
                 None => match manifest::find(&dir) {
                     Some(m) => {
                         let m = manifest::load(&m)?;
-                        (m.deps, m.native)
+                        (m.deps, m.native, m.features)
                     }
-                    None => (Vec::new(), Vec::new()),
+                    None => (Vec::new(), Vec::new(), Vec::new()),
                 },
             };
             let base = dir.display().to_string();
+            let user = manifest::key(&dep.name);
             self.natives.extend(
                 natives
                     .into_iter()
-                    .map(|n| (n, Some(base.clone()), me.clone(), dev)),
+                    .map(|n| (n, Some(base.clone()), me.clone(), user.clone())),
             );
-            let deps = next.iter().map(|d| d.name.clone()).collect();
-            queue.extend(next.into_iter().map(|d| (d, dir.clone(), me.clone())));
+            queue.extend(next.iter().map(|d| (d.clone(), dir.clone(), me.clone())));
             let req = match &dep.source {
                 Source::Registry { req, .. } => req.clone(),
                 _ => String::new(),
             };
             self.seen.insert(manifest::key(&dep.name), (id, by, req));
-            self.out.push(Resolved {
+            self.out.push(Node {
                 name: dep.name,
                 root,
-                dev,
-                deps,
+                deps: next,
+                features,
             });
         }
         Ok(())
@@ -491,13 +748,7 @@ impl Resolver<'_> {
             .deps
             .iter()
             .filter(|d| !d.dev && !d.native)
-            .map(|d| Dep {
-                name: d.name.clone(),
-                source: Source::Registry {
-                    req: d.req.clone(),
-                    registry: registry(d),
-                },
-            })
+            .map(|d| d.to_dep(url))
             .collect();
         let natives = e
             .deps
@@ -517,7 +768,7 @@ impl Resolver<'_> {
                 registry: url.to_owned(),
                 vers: e.vers,
             },
-            Some((deps, natives)),
+            Some((deps, natives, e.features)),
         ))
     }
 
@@ -528,7 +779,7 @@ impl Resolver<'_> {
         let mut seen: HashMap<String, (usize, NativeId, String, String)> = HashMap::new();
         let mut i = 0;
         while i < self.natives.len() {
-            let (dep, base, by, dev) = self.natives[i].clone();
+            let (dep, base, by, user) = self.natives[i].clone();
             i += 1;
             let how = match &dep.source {
                 NativeSource::Registry { req, registry } => format!(
@@ -557,7 +808,9 @@ impl Resolver<'_> {
                         dep.name, e.vers
                     ));
                 }
-                out[*j].dev &= dev;
+                if !out[*j].users.contains(&user) {
+                    out[*j].users.push(user);
+                }
                 continue;
             }
             let (entry, id, base, registry) = match &dep.source {
@@ -588,15 +841,34 @@ impl Resolver<'_> {
                 {
                     *r = Some(registry.clone());
                 }
-                self.natives.push((d, base.clone(), me.clone(), dev));
+                self.natives
+                    .push((d, base.clone(), me.clone(), user.clone()));
             }
             seen.insert(manifest::key(&dep.name), (out.len(), id, by, how));
             out.push(native::Resolved {
                 name: dep.name,
                 entry,
                 base,
-                dev,
+                users: vec![user],
             });
+        }
+        // A native package's dependencies serve its users too.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for i in 0..out.len() {
+                for d in out[i].entry.deps.clone() {
+                    let Some(j) = out.iter().position(|o| manifest::same(&o.name, &d.name)) else {
+                        continue;
+                    };
+                    for u in out[i].users.clone() {
+                        if !out[j].users.contains(&u) {
+                            out[j].users.push(u);
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
         Ok(out)
     }
@@ -702,8 +974,8 @@ impl Resolver<'_> {
     }
 }
 
-/// A stone's dependencies and native packages.
-type StoneDeps = (Vec<Dep>, Vec<NativeDep>);
+/// A stone's dependencies, native packages and features.
+type StoneDeps = (Vec<Dep>, Vec<NativeDep>, Features);
 
 #[cfg(test)]
 mod tests {
@@ -711,18 +983,102 @@ mod tests {
 
     #[test]
     fn dependencies_come_first() {
-        let r = |n: &str, deps: &[&str]| Resolved {
-            name: n.into(),
-            root: PathBuf::new(),
-            dev: false,
-            deps: deps.iter().map(|d| (*d).to_owned()).collect(),
-        };
+        let r = |n: &str, deps: &[&'static str]| (n.to_owned(), deps.to_vec());
         // Breadth-first from the root: b, a, c; c needs a.
         let all = vec![r("b", &["a", "c"]), r("a", &[]), r("c", &["a"])];
-        let names: Vec<String> = order(all, |p| &p.name, |p| p.deps.clone())
+        let deps = |p: &(String, Vec<&str>)| p.1.iter().map(|d| (*d).to_owned()).collect();
+        let names: Vec<String> = order(all, |p| &p.0, deps)
             .into_iter()
-            .map(|d| d.name)
+            .map(|d| d.0)
             .collect();
         assert_eq!(names, ["a", "c", "b"]);
+    }
+
+    /// A node: name, dependencies (`?` optional), features.
+    type Spec<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a [&'a str])]);
+
+    fn graph(nodes: &[Spec<'_>]) -> Vec<Node> {
+        nodes
+            .iter()
+            .map(|(name, deps, features)| Node {
+                name: (*name).to_owned(),
+                root: PathBuf::new(),
+                deps: deps
+                    .iter()
+                    .map(|d| Dep {
+                        optional: d.ends_with('?'),
+                        ..Dep::new(
+                            d.trim_end_matches('?').to_owned(),
+                            Source::Path(String::new()),
+                        )
+                    })
+                    .collect(),
+                features: features
+                    .iter()
+                    .map(|(f, l)| ((*f).to_owned(), l.iter().map(|e| (*e).to_owned()).collect()))
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn features_unify_and_follow_dependencies() {
+        let nodes = graph(&[
+            (
+                "tls",
+                &[],
+                &[("default", &["ring"]), ("ring", &[]), ("fast", &[])],
+            ),
+            ("json", &[], &[("pretty", &[])]),
+            (
+                "http",
+                &["tls?", "json"],
+                &[
+                    ("tls", &["dep:tls"]),
+                    ("both", &["tls?/fast", "json/pretty"]),
+                ],
+            ),
+            ("cli", &["http"], &[]),
+        ]);
+        let run = |root: &[&str], fs: &[(&str, &[&str])], o: Options| {
+            let root = graph(&[("", root, fs)]).remove(0);
+            let mut on = Features::default();
+            activate(&nodes, root.deps, &root.features, &o, &mut on).map(|mine| (mine, on))
+        };
+        let opts = |features: &[&str]| Options {
+            features: features.iter().map(|f| (*f).to_owned()).collect(),
+            ..Options::default()
+        };
+        // `http` without `tls`: the weak `tls?/fast` waits, `tls` is out.
+        let (_, on) = run(&["http", "cli"], &[], opts(&["http/both"])).unwrap();
+        let names: Vec<&str> = on.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(names, ["json", "http", "cli"]);
+        assert_eq!(on[0].1, ["pretty"]);
+        // `tls` comes in (with its default) and the weak feature applies.
+        let (_, on) = run(&["http"], &[], opts(&["http/both", "http/tls"])).unwrap();
+        assert_eq!(
+            on[0],
+            (
+                "tls".into(),
+                vec!["default".into(), "fast".into(), "ring".into()]
+            )
+        );
+        // The root's default, and `--no-default-features`.
+        let fs: &[(&str, &[&str])] = &[("default", &["x"]), ("x", &["http/tls"])];
+        let (mine, on) = run(&["http"], fs, opts(&[])).unwrap();
+        assert_eq!((mine.len(), on.len()), (2, 3));
+        let o = Options {
+            no_default_features: true,
+            ..Options::default()
+        };
+        let (mine, on) = run(&["http"], fs, o).unwrap();
+        assert_eq!((mine.len(), on.len()), (0, 2));
+        let e = run(&["http"], &[], opts(&["http/nope"])).unwrap_err();
+        assert_eq!(
+            e,
+            "package `http` has no feature `nope` (required by --features)"
+        );
+        let e = run(&["http"], &[], opts(&["zip/x"])).unwrap_err();
+        assert_eq!(e, "the root package has no dependency `zip`");
     }
 }

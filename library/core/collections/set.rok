@@ -9,33 +9,33 @@ pub struct Set<T> {
 impl<T> !Sync for Set<T> {}
 
 impl<T: Hash> Set<T> {
-    pub fn new() -> Set<T> {
+    pub const fn new() -> Set<T> {
         Set { d: Dict::new() }
     }
 
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         self.d.len()
     }
 
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.d.is_empty()
     }
 
     /// `true` when `x` was not there yet.
-    pub fn insert(self, x: T) -> bool {
+    pub const fn insert(self, x: T) -> bool {
         self.d.insert(x, true) is none
     }
 
     /// `true` when `x` was there.
-    pub fn remove(self, x: T) -> bool {
+    pub const fn remove(self, x: T) -> bool {
         !(self.d.remove(x) is none)
     }
 
-    pub fn contains(self, x: T) -> bool {
+    pub const fn contains(self, x: T) -> bool {
         self.d.contains_key(x)
     }
 
-    pub fn union(self, other: Set<T>) -> Set<T> {
+    pub const fn union(self, other: Set<T>) -> Set<T> {
         let out: Set<T> = Set::new();
         for x in self.d.keys() {
             out.insert(x);
@@ -46,7 +46,7 @@ impl<T: Hash> Set<T> {
         out
     }
 
-    pub fn intersection(self, other: Set<T>) -> Set<T> {
+    pub const fn intersection(self, other: Set<T>) -> Set<T> {
         let out: Set<T> = Set::new();
         for x in self.d.keys() {
             if other.contains(x) {
@@ -56,7 +56,7 @@ impl<T: Hash> Set<T> {
         out
     }
 
-    pub fn difference(self, other: Set<T>) -> Set<T> {
+    pub const fn difference(self, other: Set<T>) -> Set<T> {
         let out: Set<T> = Set::new();
         for x in self.d.keys() {
             if !other.contains(x) {
@@ -66,11 +66,11 @@ impl<T: Hash> Set<T> {
         out
     }
 
-    pub fn symmetric_difference(self, other: Set<T>) -> Set<T> {
+    pub const fn symmetric_difference(self, other: Set<T>) -> Set<T> {
         self.difference(other).union(other.difference(self))
     }
 
-    pub fn is_subset(self, other: Set<T>) -> bool {
+    pub const fn is_subset(self, other: Set<T>) -> bool {
         for x in self.d.keys() {
             if !other.contains(x) {
                 return false;
@@ -79,15 +79,15 @@ impl<T: Hash> Set<T> {
         true
     }
 
-    pub fn is_superset(self, other: Set<T>) -> bool {
+    pub const fn is_superset(self, other: Set<T>) -> bool {
         other.is_subset(self)
     }
 
-    pub fn is_disjoint(self, other: Set<T>) -> bool {
+    pub const fn is_disjoint(self, other: Set<T>) -> bool {
         self.intersection(other).is_empty()
     }
 
-    pub fn to_list(self) -> List<T> {
+    pub const fn to_list(self) -> List<T> {
         self.d.keys().collect()
     }
 
@@ -102,7 +102,7 @@ impl<T: Hash> Default for Set<T> {
 
 /// A new set with every element cloned (stdlib 2.13.2).
 impl<T: Hash + Clone> Clone for Set<T> {
-    fn clone(self) -> Set<T> {
+    const fn clone(self) -> Set<T> {
         let r: Set<T> = Set::new();
         for x in self {
             r.insert(x.clone());
@@ -115,14 +115,14 @@ impl<T: Hash + Clone> Clone for Set<T> {
 impl<T: Hash> IntoIterator for Set<T> {
     type IntoIter = KeysIter<T, bool>;
     type Item = T;
-    fn into_iter(self) -> KeysIter<T, bool> {
+    const fn into_iter(self) -> KeysIter<T, bool> {
         self.d.keys()
     }
 }
 
 /// `it.collect()` into a set (2.9.9).
 impl<T: Hash> FromIterator<T> for Set<T> {
-    fn from_iter<I>(it: I) -> Set<T> {
+    const fn from_iter<I>(it: I) -> Set<T> {
         let out: Set<T> = Set::new();
         for x in it {
             out.insert(x);
@@ -133,7 +133,7 @@ impl<T: Hash> FromIterator<T> for Set<T> {
 
 /// Same members.
 impl<T: Hash> PartialEq for Set<T> {
-    fn eq(self, rhs: Set<T>) -> bool {
+    const fn eq(self, rhs: Set<T>) -> bool {
         if self.len() != rhs.len() { return false; }
         for x in self {
             if !rhs.contains(x) { return false; }
@@ -147,7 +147,7 @@ impl<T: Hash> Eq for Set<T> {}
 
 /// Order-independent: member hashes combine by xor.
 impl<T: Hash> Hash for Set<T> {
-    fn hash(self) -> u64 {
+    const fn hash(self) -> u64 {
         let h = self.len() as u64;
         for x in self { h ^= x.hash(); }
         h
@@ -170,7 +170,7 @@ impl<T: Hash + Debug> Debug for Set<T> {
 
 /// `{a, b}` / `{a,}` (refs-lang 6.5.1, 6.5.6; `{ a }` is a block).
 #[literal("{" {expr} % "," + "}")]
-pub fn set_literal<T: Hash>(items: ...T) -> Set<T> {
+pub const fn set_literal<T: Hash>(items: ...T) -> Set<T> {
     let s: Set<T> = Set::new();
     for x in items {
         s.insert(x);

@@ -26,7 +26,7 @@ pub trait Into {
 }
 
 impl<S> Into for S {
-    fn into<T: From<S>>(self) -> T { T::from(self) }
+    const fn into<T: From<S>>(self) -> T { T::from(self) }
 }
 
 /// A conversion that can fail (2.11.4). `Error` is what it throws:
@@ -43,7 +43,7 @@ pub trait TryInto {
 }
 
 impl<S> TryInto for S {
-    fn try_into<T: TryFrom<S>>(self) throws (T::Error) -> T { try T::try_from(self) }
+    const fn try_into<T: TryFrom<S>>(self) throws (T::Error) -> T { try T::try_from(self) }
 }
 
 /// Out-of-range values clamp to the nearest end (2.11.5).
@@ -56,7 +56,7 @@ pub trait SaturatingInto {
 }
 
 impl<S> SaturatingInto for S {
-    fn saturating_into<T: SaturatingFrom<S>>(self) -> T { T::saturating_from(self) }
+    const fn saturating_into<T: SaturatingFrom<S>>(self) -> T { T::saturating_from(self) }
 }
 
 /// Keep the low bits — `as` spelled as a method (2.11.5).
@@ -69,87 +69,87 @@ pub trait WrappingInto {
 }
 
 impl<S> WrappingInto for S {
-    fn wrapping_into<T: WrappingFrom<S>>(self) -> T { T::wrapping_from(self) }
+    const fn wrapping_into<T: WrappingFrom<S>>(self) -> T { T::wrapping_from(self) }
 }
 
-fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty } }
+const fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty } }
 
 // From (lossless)
 
 impl From<i8> for i16 {
     #[intrinsic("rok.cast.i8.i16")]
-    fn from(value: i8) -> i16 { value as i16 }
+    const fn from(value: i8) -> i16 { value as i16 }
 }
 
 impl From<i8> for i32 {
     #[intrinsic("rok.cast.i8.i32")]
-    fn from(value: i8) -> i32 { value as i32 }
+    const fn from(value: i8) -> i32 { value as i32 }
 }
 
 impl From<i8> for i64 {
     #[intrinsic("rok.cast.i8.i64")]
-    fn from(value: i8) -> i64 { value as i64 }
+    const fn from(value: i8) -> i64 { value as i64 }
 }
 
 impl From<i8> for isize {
     #[intrinsic("rok.cast.i8.isize")]
-    fn from(value: i8) -> isize { value as isize }
+    const fn from(value: i8) -> isize { value as isize }
 }
 
 impl From<i8> for f32 {
     #[intrinsic("rok.cast.i8.f32")]
-    fn from(value: i8) -> f32 { value as f32 }
+    const fn from(value: i8) -> f32 { value as f32 }
 }
 
 impl From<i8> for f64 {
     #[intrinsic("rok.cast.i8.f64")]
-    fn from(value: i8) -> f64 { value as f64 }
+    const fn from(value: i8) -> f64 { value as f64 }
 }
 
 impl From<i16> for i32 {
     #[intrinsic("rok.cast.i16.i32")]
-    fn from(value: i16) -> i32 { value as i32 }
+    const fn from(value: i16) -> i32 { value as i32 }
 }
 
 impl From<i16> for i64 {
     #[intrinsic("rok.cast.i16.i64")]
-    fn from(value: i16) -> i64 { value as i64 }
+    const fn from(value: i16) -> i64 { value as i64 }
 }
 
 impl From<i16> for isize {
     #[intrinsic("rok.cast.i16.isize")]
-    fn from(value: i16) -> isize { value as isize }
+    const fn from(value: i16) -> isize { value as isize }
 }
 
 impl From<i16> for f32 {
     #[intrinsic("rok.cast.i16.f32")]
-    fn from(value: i16) -> f32 { value as f32 }
+    const fn from(value: i16) -> f32 { value as f32 }
 }
 
 impl From<i16> for f64 {
     #[intrinsic("rok.cast.i16.f64")]
-    fn from(value: i16) -> f64 { value as f64 }
+    const fn from(value: i16) -> f64 { value as f64 }
 }
 
 impl From<i32> for i64 {
     #[intrinsic("rok.cast.i32.i64")]
-    fn from(value: i32) -> i64 { value as i64 }
+    const fn from(value: i32) -> i64 { value as i64 }
 }
 
 impl From<i32> for isize {
     #[intrinsic("rok.cast.i32.isize")]
-    fn from(value: i32) -> isize { value as isize }
+    const fn from(value: i32) -> isize { value as isize }
 }
 
 impl From<i32> for f64 {
     #[intrinsic("rok.cast.i32.f64")]
-    fn from(value: i32) -> f64 { value as f64 }
+    const fn from(value: i32) -> f64 { value as f64 }
 }
 
 #[cfg(target_pointer_width = "64")]
 impl From<i64> for isize {
     #[intrinsic("rok.cast.i64.isize")]
-    fn from(value: i64) -> isize { value as isize }
+    const fn from(value: i64) -> isize { value as isize }
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -163,88 +163,88 @@ impl TryFrom<i64> for isize {
 
 impl From<isize> for i64 {
     #[intrinsic("rok.cast.isize.i64")]
-    fn from(value: isize) -> i64 { value as i64 }
+    const fn from(value: isize) -> i64 { value as i64 }
 }
 
 impl From<u8> for u16 {
     #[intrinsic("rok.cast.u8.u16")]
-    fn from(value: u8) -> u16 { value as u16 }
+    const fn from(value: u8) -> u16 { value as u16 }
 }
 
 impl From<u8> for u32 {
     #[intrinsic("rok.cast.u8.u32")]
-    fn from(value: u8) -> u32 { value as u32 }
+    const fn from(value: u8) -> u32 { value as u32 }
 }
 
 impl From<u8> for u64 {
     #[intrinsic("rok.cast.u8.u64")]
-    fn from(value: u8) -> u64 { value as u64 }
+    const fn from(value: u8) -> u64 { value as u64 }
 }
 
 impl From<u8> for usize {
     #[intrinsic("rok.cast.u8.usize")]
-    fn from(value: u8) -> usize { value as usize }
+    const fn from(value: u8) -> usize { value as usize }
 }
 
 impl From<u8> for i16 {
     #[intrinsic("rok.cast.u8.i16")]
-    fn from(value: u8) -> i16 { value as i16 }
+    const fn from(value: u8) -> i16 { value as i16 }
 }
 
 impl From<u8> for i32 {
     #[intrinsic("rok.cast.u8.i32")]
-    fn from(value: u8) -> i32 { value as i32 }
+    const fn from(value: u8) -> i32 { value as i32 }
 }
 
 impl From<u8> for i64 {
     #[intrinsic("rok.cast.u8.i64")]
-    fn from(value: u8) -> i64 { value as i64 }
+    const fn from(value: u8) -> i64 { value as i64 }
 }
 
 impl From<u16> for u32 {
     #[intrinsic("rok.cast.u16.u32")]
-    fn from(value: u16) -> u32 { value as u32 }
+    const fn from(value: u16) -> u32 { value as u32 }
 }
 
 impl From<u16> for u64 {
     #[intrinsic("rok.cast.u16.u64")]
-    fn from(value: u16) -> u64 { value as u64 }
+    const fn from(value: u16) -> u64 { value as u64 }
 }
 
 impl From<u16> for usize {
     #[intrinsic("rok.cast.u16.usize")]
-    fn from(value: u16) -> usize { value as usize }
+    const fn from(value: u16) -> usize { value as usize }
 }
 
 impl From<u16> for i32 {
     #[intrinsic("rok.cast.u16.i32")]
-    fn from(value: u16) -> i32 { value as i32 }
+    const fn from(value: u16) -> i32 { value as i32 }
 }
 
 impl From<u16> for i64 {
     #[intrinsic("rok.cast.u16.i64")]
-    fn from(value: u16) -> i64 { value as i64 }
+    const fn from(value: u16) -> i64 { value as i64 }
 }
 
 impl From<u32> for u64 {
     #[intrinsic("rok.cast.u32.u64")]
-    fn from(value: u32) -> u64 { value as u64 }
+    const fn from(value: u32) -> u64 { value as u64 }
 }
 
 impl From<u32> for usize {
     #[intrinsic("rok.cast.u32.usize")]
-    fn from(value: u32) -> usize { value as usize }
+    const fn from(value: u32) -> usize { value as usize }
 }
 
 impl From<u32> for i64 {
     #[intrinsic("rok.cast.u32.i64")]
-    fn from(value: u32) -> i64 { value as i64 }
+    const fn from(value: u32) -> i64 { value as i64 }
 }
 
 #[cfg(target_pointer_width = "64")]
 impl From<u64> for usize {
     #[intrinsic("rok.cast.u64.usize")]
-    fn from(value: u64) -> usize { value as usize }
+    const fn from(value: u64) -> usize { value as usize }
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -258,19 +258,19 @@ impl TryFrom<u64> for usize {
 
 impl From<usize> for u64 {
     #[intrinsic("rok.cast.usize.u64")]
-    fn from(value: usize) -> u64 { value as u64 }
+    const fn from(value: usize) -> u64 { value as u64 }
 }
 
 impl From<f32> for f64 {
     #[intrinsic("rok.cast.f32.f64")]
-    fn from(value: f32) -> f64 { value as f64 }
+    const fn from(value: f32) -> f64 { value as f64 }
 }
 
 // TryFrom (integers that may not fit)
 
 impl TryFrom<i8> for u8 {
     type Error = OverflowError;
-    fn try_from(value: i8) throws (OverflowError) -> u8 {
+    const fn try_from(value: i8) throws (OverflowError) -> u8 {
         if value < 0 { throw overflow("u8"); }
         value as u8
     }
@@ -278,7 +278,7 @@ impl TryFrom<i8> for u8 {
 
 impl TryFrom<i8> for u16 {
     type Error = OverflowError;
-    fn try_from(value: i8) throws (OverflowError) -> u16 {
+    const fn try_from(value: i8) throws (OverflowError) -> u16 {
         if value < 0 { throw overflow("u16"); }
         value as u16
     }
@@ -286,7 +286,7 @@ impl TryFrom<i8> for u16 {
 
 impl TryFrom<i8> for u32 {
     type Error = OverflowError;
-    fn try_from(value: i8) throws (OverflowError) -> u32 {
+    const fn try_from(value: i8) throws (OverflowError) -> u32 {
         if value < 0 { throw overflow("u32"); }
         value as u32
     }
@@ -294,7 +294,7 @@ impl TryFrom<i8> for u32 {
 
 impl TryFrom<i8> for u64 {
     type Error = OverflowError;
-    fn try_from(value: i8) throws (OverflowError) -> u64 {
+    const fn try_from(value: i8) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
     }
@@ -302,7 +302,7 @@ impl TryFrom<i8> for u64 {
 
 impl TryFrom<i8> for usize {
     type Error = OverflowError;
-    fn try_from(value: i8) throws (OverflowError) -> usize {
+    const fn try_from(value: i8) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
     }
@@ -310,7 +310,7 @@ impl TryFrom<i8> for usize {
 
 impl TryFrom<i16> for i8 {
     type Error = OverflowError;
-    fn try_from(value: i16) throws (OverflowError) -> i8 {
+    const fn try_from(value: i16) throws (OverflowError) -> i8 {
         if value < i8::MIN as i16 || value > i8::MAX as i16 { throw overflow("i8"); }
         value as i8
     }
@@ -318,7 +318,7 @@ impl TryFrom<i16> for i8 {
 
 impl TryFrom<i16> for u8 {
     type Error = OverflowError;
-    fn try_from(value: i16) throws (OverflowError) -> u8 {
+    const fn try_from(value: i16) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as i16 { throw overflow("u8"); }
         value as u8
     }
@@ -326,7 +326,7 @@ impl TryFrom<i16> for u8 {
 
 impl TryFrom<i16> for u16 {
     type Error = OverflowError;
-    fn try_from(value: i16) throws (OverflowError) -> u16 {
+    const fn try_from(value: i16) throws (OverflowError) -> u16 {
         if value < 0 { throw overflow("u16"); }
         value as u16
     }
@@ -334,7 +334,7 @@ impl TryFrom<i16> for u16 {
 
 impl TryFrom<i16> for u32 {
     type Error = OverflowError;
-    fn try_from(value: i16) throws (OverflowError) -> u32 {
+    const fn try_from(value: i16) throws (OverflowError) -> u32 {
         if value < 0 { throw overflow("u32"); }
         value as u32
     }
@@ -342,7 +342,7 @@ impl TryFrom<i16> for u32 {
 
 impl TryFrom<i16> for u64 {
     type Error = OverflowError;
-    fn try_from(value: i16) throws (OverflowError) -> u64 {
+    const fn try_from(value: i16) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
     }
@@ -350,7 +350,7 @@ impl TryFrom<i16> for u64 {
 
 impl TryFrom<i16> for usize {
     type Error = OverflowError;
-    fn try_from(value: i16) throws (OverflowError) -> usize {
+    const fn try_from(value: i16) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
     }
@@ -358,7 +358,7 @@ impl TryFrom<i16> for usize {
 
 impl TryFrom<i32> for i8 {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> i8 {
+    const fn try_from(value: i32) throws (OverflowError) -> i8 {
         if value < i8::MIN as i32 || value > i8::MAX as i32 { throw overflow("i8"); }
         value as i8
     }
@@ -366,7 +366,7 @@ impl TryFrom<i32> for i8 {
 
 impl TryFrom<i32> for i16 {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> i16 {
+    const fn try_from(value: i32) throws (OverflowError) -> i16 {
         if value < i16::MIN as i32 || value > i16::MAX as i32 { throw overflow("i16"); }
         value as i16
     }
@@ -374,7 +374,7 @@ impl TryFrom<i32> for i16 {
 
 impl TryFrom<i32> for u8 {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> u8 {
+    const fn try_from(value: i32) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as i32 { throw overflow("u8"); }
         value as u8
     }
@@ -382,7 +382,7 @@ impl TryFrom<i32> for u8 {
 
 impl TryFrom<i32> for u16 {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> u16 {
+    const fn try_from(value: i32) throws (OverflowError) -> u16 {
         if value < 0 || value > u16::MAX as i32 { throw overflow("u16"); }
         value as u16
     }
@@ -390,7 +390,7 @@ impl TryFrom<i32> for u16 {
 
 impl TryFrom<i32> for u32 {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> u32 {
+    const fn try_from(value: i32) throws (OverflowError) -> u32 {
         if value < 0 { throw overflow("u32"); }
         value as u32
     }
@@ -398,7 +398,7 @@ impl TryFrom<i32> for u32 {
 
 impl TryFrom<i32> for u64 {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> u64 {
+    const fn try_from(value: i32) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
     }
@@ -406,7 +406,7 @@ impl TryFrom<i32> for u64 {
 
 impl TryFrom<i32> for usize {
     type Error = OverflowError;
-    fn try_from(value: i32) throws (OverflowError) -> usize {
+    const fn try_from(value: i32) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
     }
@@ -414,7 +414,7 @@ impl TryFrom<i32> for usize {
 
 impl TryFrom<i64> for i8 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> i8 {
+    const fn try_from(value: i64) throws (OverflowError) -> i8 {
         if value < i8::MIN as i64 || value > i8::MAX as i64 { throw overflow("i8"); }
         value as i8
     }
@@ -422,7 +422,7 @@ impl TryFrom<i64> for i8 {
 
 impl TryFrom<i64> for i16 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> i16 {
+    const fn try_from(value: i64) throws (OverflowError) -> i16 {
         if value < i16::MIN as i64 || value > i16::MAX as i64 { throw overflow("i16"); }
         value as i16
     }
@@ -430,7 +430,7 @@ impl TryFrom<i64> for i16 {
 
 impl TryFrom<i64> for i32 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> i32 {
+    const fn try_from(value: i64) throws (OverflowError) -> i32 {
         if value < i32::MIN as i64 || value > i32::MAX as i64 { throw overflow("i32"); }
         value as i32
     }
@@ -438,7 +438,7 @@ impl TryFrom<i64> for i32 {
 
 impl TryFrom<i64> for u8 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> u8 {
+    const fn try_from(value: i64) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as i64 { throw overflow("u8"); }
         value as u8
     }
@@ -446,7 +446,7 @@ impl TryFrom<i64> for u8 {
 
 impl TryFrom<i64> for u16 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> u16 {
+    const fn try_from(value: i64) throws (OverflowError) -> u16 {
         if value < 0 || value > u16::MAX as i64 { throw overflow("u16"); }
         value as u16
     }
@@ -454,7 +454,7 @@ impl TryFrom<i64> for u16 {
 
 impl TryFrom<i64> for u32 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> u32 {
+    const fn try_from(value: i64) throws (OverflowError) -> u32 {
         if value < 0 || value > u32::MAX as i64 { throw overflow("u32"); }
         value as u32
     }
@@ -462,7 +462,7 @@ impl TryFrom<i64> for u32 {
 
 impl TryFrom<i64> for u64 {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> u64 {
+    const fn try_from(value: i64) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
     }
@@ -470,7 +470,7 @@ impl TryFrom<i64> for u64 {
 
 impl TryFrom<i64> for usize {
     type Error = OverflowError;
-    fn try_from(value: i64) throws (OverflowError) -> usize {
+    const fn try_from(value: i64) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
     }
@@ -478,7 +478,7 @@ impl TryFrom<i64> for usize {
 
 impl TryFrom<isize> for i8 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> i8 {
+    const fn try_from(value: isize) throws (OverflowError) -> i8 {
         if value < i8::MIN as isize || value > i8::MAX as isize { throw overflow("i8"); }
         value as i8
     }
@@ -486,7 +486,7 @@ impl TryFrom<isize> for i8 {
 
 impl TryFrom<isize> for i16 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> i16 {
+    const fn try_from(value: isize) throws (OverflowError) -> i16 {
         if value < i16::MIN as isize || value > i16::MAX as isize { throw overflow("i16"); }
         value as i16
     }
@@ -494,7 +494,7 @@ impl TryFrom<isize> for i16 {
 
 impl TryFrom<isize> for i32 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> i32 {
+    const fn try_from(value: isize) throws (OverflowError) -> i32 {
         if value < i32::MIN as isize || value > i32::MAX as isize { throw overflow("i32"); }
         value as i32
     }
@@ -502,7 +502,7 @@ impl TryFrom<isize> for i32 {
 
 impl TryFrom<isize> for u8 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> u8 {
+    const fn try_from(value: isize) throws (OverflowError) -> u8 {
         if value < 0 || value > u8::MAX as isize { throw overflow("u8"); }
         value as u8
     }
@@ -510,7 +510,7 @@ impl TryFrom<isize> for u8 {
 
 impl TryFrom<isize> for u16 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> u16 {
+    const fn try_from(value: isize) throws (OverflowError) -> u16 {
         if value < 0 || value > u16::MAX as isize { throw overflow("u16"); }
         value as u16
     }
@@ -518,7 +518,7 @@ impl TryFrom<isize> for u16 {
 
 impl TryFrom<isize> for u32 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> u32 {
+    const fn try_from(value: isize) throws (OverflowError) -> u32 {
         if value < 0 || value > u32::MAX as isize { throw overflow("u32"); }
         value as u32
     }
@@ -526,7 +526,7 @@ impl TryFrom<isize> for u32 {
 
 impl TryFrom<isize> for u64 {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> u64 {
+    const fn try_from(value: isize) throws (OverflowError) -> u64 {
         if value < 0 { throw overflow("u64"); }
         value as u64
     }
@@ -534,7 +534,7 @@ impl TryFrom<isize> for u64 {
 
 impl TryFrom<isize> for usize {
     type Error = OverflowError;
-    fn try_from(value: isize) throws (OverflowError) -> usize {
+    const fn try_from(value: isize) throws (OverflowError) -> usize {
         if value < 0 { throw overflow("usize"); }
         value as usize
     }
@@ -542,7 +542,7 @@ impl TryFrom<isize> for usize {
 
 impl TryFrom<u8> for i8 {
     type Error = OverflowError;
-    fn try_from(value: u8) throws (OverflowError) -> i8 {
+    const fn try_from(value: u8) throws (OverflowError) -> i8 {
         if value > i8::MAX as u8 { throw overflow("i8"); }
         value as i8
     }
@@ -550,7 +550,7 @@ impl TryFrom<u8> for i8 {
 
 impl TryFrom<u8> for isize {
     type Error = OverflowError;
-    fn try_from(value: u8) throws (OverflowError) -> isize {
+    const fn try_from(value: u8) throws (OverflowError) -> isize {
         if value > isize::MAX as u8 { throw overflow("isize"); }
         value as isize
     }
@@ -558,7 +558,7 @@ impl TryFrom<u8> for isize {
 
 impl TryFrom<u16> for i8 {
     type Error = OverflowError;
-    fn try_from(value: u16) throws (OverflowError) -> i8 {
+    const fn try_from(value: u16) throws (OverflowError) -> i8 {
         if value > i8::MAX as u16 { throw overflow("i8"); }
         value as i8
     }
@@ -566,7 +566,7 @@ impl TryFrom<u16> for i8 {
 
 impl TryFrom<u16> for i16 {
     type Error = OverflowError;
-    fn try_from(value: u16) throws (OverflowError) -> i16 {
+    const fn try_from(value: u16) throws (OverflowError) -> i16 {
         if value > i16::MAX as u16 { throw overflow("i16"); }
         value as i16
     }
@@ -574,7 +574,7 @@ impl TryFrom<u16> for i16 {
 
 impl TryFrom<u16> for isize {
     type Error = OverflowError;
-    fn try_from(value: u16) throws (OverflowError) -> isize {
+    const fn try_from(value: u16) throws (OverflowError) -> isize {
         if value > isize::MAX as u16 { throw overflow("isize"); }
         value as isize
     }
@@ -582,7 +582,7 @@ impl TryFrom<u16> for isize {
 
 impl TryFrom<u16> for u8 {
     type Error = OverflowError;
-    fn try_from(value: u16) throws (OverflowError) -> u8 {
+    const fn try_from(value: u16) throws (OverflowError) -> u8 {
         if value > u8::MAX as u16 { throw overflow("u8"); }
         value as u8
     }
@@ -590,7 +590,7 @@ impl TryFrom<u16> for u8 {
 
 impl TryFrom<u32> for i8 {
     type Error = OverflowError;
-    fn try_from(value: u32) throws (OverflowError) -> i8 {
+    const fn try_from(value: u32) throws (OverflowError) -> i8 {
         if value > i8::MAX as u32 { throw overflow("i8"); }
         value as i8
     }
@@ -598,7 +598,7 @@ impl TryFrom<u32> for i8 {
 
 impl TryFrom<u32> for i16 {
     type Error = OverflowError;
-    fn try_from(value: u32) throws (OverflowError) -> i16 {
+    const fn try_from(value: u32) throws (OverflowError) -> i16 {
         if value > i16::MAX as u32 { throw overflow("i16"); }
         value as i16
     }
@@ -606,7 +606,7 @@ impl TryFrom<u32> for i16 {
 
 impl TryFrom<u32> for i32 {
     type Error = OverflowError;
-    fn try_from(value: u32) throws (OverflowError) -> i32 {
+    const fn try_from(value: u32) throws (OverflowError) -> i32 {
         if value > i32::MAX as u32 { throw overflow("i32"); }
         value as i32
     }
@@ -614,7 +614,7 @@ impl TryFrom<u32> for i32 {
 
 impl TryFrom<u32> for isize {
     type Error = OverflowError;
-    fn try_from(value: u32) throws (OverflowError) -> isize {
+    const fn try_from(value: u32) throws (OverflowError) -> isize {
         if value > isize::MAX as u32 { throw overflow("isize"); }
         value as isize
     }
@@ -622,7 +622,7 @@ impl TryFrom<u32> for isize {
 
 impl TryFrom<u32> for u8 {
     type Error = OverflowError;
-    fn try_from(value: u32) throws (OverflowError) -> u8 {
+    const fn try_from(value: u32) throws (OverflowError) -> u8 {
         if value > u8::MAX as u32 { throw overflow("u8"); }
         value as u8
     }
@@ -630,7 +630,7 @@ impl TryFrom<u32> for u8 {
 
 impl TryFrom<u32> for u16 {
     type Error = OverflowError;
-    fn try_from(value: u32) throws (OverflowError) -> u16 {
+    const fn try_from(value: u32) throws (OverflowError) -> u16 {
         if value > u16::MAX as u32 { throw overflow("u16"); }
         value as u16
     }
@@ -638,7 +638,7 @@ impl TryFrom<u32> for u16 {
 
 impl TryFrom<u64> for i8 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> i8 {
+    const fn try_from(value: u64) throws (OverflowError) -> i8 {
         if value > i8::MAX as u64 { throw overflow("i8"); }
         value as i8
     }
@@ -646,7 +646,7 @@ impl TryFrom<u64> for i8 {
 
 impl TryFrom<u64> for i16 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> i16 {
+    const fn try_from(value: u64) throws (OverflowError) -> i16 {
         if value > i16::MAX as u64 { throw overflow("i16"); }
         value as i16
     }
@@ -654,7 +654,7 @@ impl TryFrom<u64> for i16 {
 
 impl TryFrom<u64> for i32 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> i32 {
+    const fn try_from(value: u64) throws (OverflowError) -> i32 {
         if value > i32::MAX as u64 { throw overflow("i32"); }
         value as i32
     }
@@ -662,7 +662,7 @@ impl TryFrom<u64> for i32 {
 
 impl TryFrom<u64> for i64 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> i64 {
+    const fn try_from(value: u64) throws (OverflowError) -> i64 {
         if value > i64::MAX as u64 { throw overflow("i64"); }
         value as i64
     }
@@ -670,7 +670,7 @@ impl TryFrom<u64> for i64 {
 
 impl TryFrom<u64> for isize {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> isize {
+    const fn try_from(value: u64) throws (OverflowError) -> isize {
         if value > isize::MAX as u64 { throw overflow("isize"); }
         value as isize
     }
@@ -678,7 +678,7 @@ impl TryFrom<u64> for isize {
 
 impl TryFrom<u64> for u8 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> u8 {
+    const fn try_from(value: u64) throws (OverflowError) -> u8 {
         if value > u8::MAX as u64 { throw overflow("u8"); }
         value as u8
     }
@@ -686,7 +686,7 @@ impl TryFrom<u64> for u8 {
 
 impl TryFrom<u64> for u16 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> u16 {
+    const fn try_from(value: u64) throws (OverflowError) -> u16 {
         if value > u16::MAX as u64 { throw overflow("u16"); }
         value as u16
     }
@@ -694,7 +694,7 @@ impl TryFrom<u64> for u16 {
 
 impl TryFrom<u64> for u32 {
     type Error = OverflowError;
-    fn try_from(value: u64) throws (OverflowError) -> u32 {
+    const fn try_from(value: u64) throws (OverflowError) -> u32 {
         if value > u32::MAX as u64 { throw overflow("u32"); }
         value as u32
     }
@@ -702,7 +702,7 @@ impl TryFrom<u64> for u32 {
 
 impl TryFrom<usize> for i8 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> i8 {
+    const fn try_from(value: usize) throws (OverflowError) -> i8 {
         if value > i8::MAX as usize { throw overflow("i8"); }
         value as i8
     }
@@ -710,7 +710,7 @@ impl TryFrom<usize> for i8 {
 
 impl TryFrom<usize> for i16 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> i16 {
+    const fn try_from(value: usize) throws (OverflowError) -> i16 {
         if value > i16::MAX as usize { throw overflow("i16"); }
         value as i16
     }
@@ -718,7 +718,7 @@ impl TryFrom<usize> for i16 {
 
 impl TryFrom<usize> for i32 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> i32 {
+    const fn try_from(value: usize) throws (OverflowError) -> i32 {
         if value > i32::MAX as usize { throw overflow("i32"); }
         value as i32
     }
@@ -726,7 +726,7 @@ impl TryFrom<usize> for i32 {
 
 impl TryFrom<usize> for i64 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> i64 {
+    const fn try_from(value: usize) throws (OverflowError) -> i64 {
         if value > i64::MAX as usize { throw overflow("i64"); }
         value as i64
     }
@@ -734,7 +734,7 @@ impl TryFrom<usize> for i64 {
 
 impl TryFrom<usize> for isize {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> isize {
+    const fn try_from(value: usize) throws (OverflowError) -> isize {
         if value > isize::MAX as usize { throw overflow("isize"); }
         value as isize
     }
@@ -742,7 +742,7 @@ impl TryFrom<usize> for isize {
 
 impl TryFrom<usize> for u8 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> u8 {
+    const fn try_from(value: usize) throws (OverflowError) -> u8 {
         if value > u8::MAX as usize { throw overflow("u8"); }
         value as u8
     }
@@ -750,7 +750,7 @@ impl TryFrom<usize> for u8 {
 
 impl TryFrom<usize> for u16 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> u16 {
+    const fn try_from(value: usize) throws (OverflowError) -> u16 {
         if value > u16::MAX as usize { throw overflow("u16"); }
         value as u16
     }
@@ -758,7 +758,7 @@ impl TryFrom<usize> for u16 {
 
 impl TryFrom<usize> for u32 {
     type Error = OverflowError;
-    fn try_from(value: usize) throws (OverflowError) -> u32 {
+    const fn try_from(value: usize) throws (OverflowError) -> u32 {
         if value > u32::MAX as usize { throw overflow("u32"); }
         value as u32
     }
@@ -769,7 +769,7 @@ impl TryFrom<usize> for u32 {
 
 impl TryFrom<f32> for i8 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> i8 {
+    const fn try_from(value: f32) throws (OverflowError) -> i8 {
         let x = (value as f64).trunc();
         if !(x >= i8::MIN as f64 && x < i8::MAX as f64 + 1.0) { throw overflow("i8"); }
         x as i8
@@ -778,7 +778,7 @@ impl TryFrom<f32> for i8 {
 
 impl TryFrom<f32> for i16 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> i16 {
+    const fn try_from(value: f32) throws (OverflowError) -> i16 {
         let x = (value as f64).trunc();
         if !(x >= i16::MIN as f64 && x < i16::MAX as f64 + 1.0) { throw overflow("i16"); }
         x as i16
@@ -787,7 +787,7 @@ impl TryFrom<f32> for i16 {
 
 impl TryFrom<f32> for i32 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> i32 {
+    const fn try_from(value: f32) throws (OverflowError) -> i32 {
         let x = (value as f64).trunc();
         if !(x >= i32::MIN as f64 && x < i32::MAX as f64 + 1.0) { throw overflow("i32"); }
         x as i32
@@ -796,7 +796,7 @@ impl TryFrom<f32> for i32 {
 
 impl TryFrom<f32> for i64 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> i64 {
+    const fn try_from(value: f32) throws (OverflowError) -> i64 {
         let x = (value as f64).trunc();
         if !(x >= i64::MIN as f64 && x < i64::MAX as f64 + 1.0) { throw overflow("i64"); }
         x as i64
@@ -805,7 +805,7 @@ impl TryFrom<f32> for i64 {
 
 impl TryFrom<f32> for isize {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> isize {
+    const fn try_from(value: f32) throws (OverflowError) -> isize {
         let x = (value as f64).trunc();
         if !(x >= isize::MIN as f64 && x < isize::MAX as f64 + 1.0) { throw overflow("isize"); }
         x as isize
@@ -814,7 +814,7 @@ impl TryFrom<f32> for isize {
 
 impl TryFrom<f32> for u8 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> u8 {
+    const fn try_from(value: f32) throws (OverflowError) -> u8 {
         let x = (value as f64).trunc();
         if !(x >= u8::MIN as f64 && x < u8::MAX as f64 + 1.0) { throw overflow("u8"); }
         x as u8
@@ -823,7 +823,7 @@ impl TryFrom<f32> for u8 {
 
 impl TryFrom<f32> for u16 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> u16 {
+    const fn try_from(value: f32) throws (OverflowError) -> u16 {
         let x = (value as f64).trunc();
         if !(x >= u16::MIN as f64 && x < u16::MAX as f64 + 1.0) { throw overflow("u16"); }
         x as u16
@@ -832,7 +832,7 @@ impl TryFrom<f32> for u16 {
 
 impl TryFrom<f32> for u32 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> u32 {
+    const fn try_from(value: f32) throws (OverflowError) -> u32 {
         let x = (value as f64).trunc();
         if !(x >= u32::MIN as f64 && x < u32::MAX as f64 + 1.0) { throw overflow("u32"); }
         x as u32
@@ -841,7 +841,7 @@ impl TryFrom<f32> for u32 {
 
 impl TryFrom<f32> for u64 {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> u64 {
+    const fn try_from(value: f32) throws (OverflowError) -> u64 {
         let x = (value as f64).trunc();
         if !(x >= u64::MIN as f64 && x < u64::MAX as f64 + 1.0) { throw overflow("u64"); }
         x as u64
@@ -850,7 +850,7 @@ impl TryFrom<f32> for u64 {
 
 impl TryFrom<f32> for usize {
     type Error = OverflowError;
-    fn try_from(value: f32) throws (OverflowError) -> usize {
+    const fn try_from(value: f32) throws (OverflowError) -> usize {
         let x = (value as f64).trunc();
         if !(x >= usize::MIN as f64 && x < usize::MAX as f64 + 1.0) { throw overflow("usize"); }
         x as usize
@@ -859,7 +859,7 @@ impl TryFrom<f32> for usize {
 
 impl TryFrom<f64> for i8 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> i8 {
+    const fn try_from(value: f64) throws (OverflowError) -> i8 {
         let x = (value as f64).trunc();
         if !(x >= i8::MIN as f64 && x < i8::MAX as f64 + 1.0) { throw overflow("i8"); }
         x as i8
@@ -868,7 +868,7 @@ impl TryFrom<f64> for i8 {
 
 impl TryFrom<f64> for i16 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> i16 {
+    const fn try_from(value: f64) throws (OverflowError) -> i16 {
         let x = (value as f64).trunc();
         if !(x >= i16::MIN as f64 && x < i16::MAX as f64 + 1.0) { throw overflow("i16"); }
         x as i16
@@ -877,7 +877,7 @@ impl TryFrom<f64> for i16 {
 
 impl TryFrom<f64> for i32 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> i32 {
+    const fn try_from(value: f64) throws (OverflowError) -> i32 {
         let x = (value as f64).trunc();
         if !(x >= i32::MIN as f64 && x < i32::MAX as f64 + 1.0) { throw overflow("i32"); }
         x as i32
@@ -886,7 +886,7 @@ impl TryFrom<f64> for i32 {
 
 impl TryFrom<f64> for i64 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> i64 {
+    const fn try_from(value: f64) throws (OverflowError) -> i64 {
         let x = (value as f64).trunc();
         if !(x >= i64::MIN as f64 && x < i64::MAX as f64 + 1.0) { throw overflow("i64"); }
         x as i64
@@ -895,7 +895,7 @@ impl TryFrom<f64> for i64 {
 
 impl TryFrom<f64> for isize {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> isize {
+    const fn try_from(value: f64) throws (OverflowError) -> isize {
         let x = (value as f64).trunc();
         if !(x >= isize::MIN as f64 && x < isize::MAX as f64 + 1.0) { throw overflow("isize"); }
         x as isize
@@ -904,7 +904,7 @@ impl TryFrom<f64> for isize {
 
 impl TryFrom<f64> for u8 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> u8 {
+    const fn try_from(value: f64) throws (OverflowError) -> u8 {
         let x = (value as f64).trunc();
         if !(x >= u8::MIN as f64 && x < u8::MAX as f64 + 1.0) { throw overflow("u8"); }
         x as u8
@@ -913,7 +913,7 @@ impl TryFrom<f64> for u8 {
 
 impl TryFrom<f64> for u16 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> u16 {
+    const fn try_from(value: f64) throws (OverflowError) -> u16 {
         let x = (value as f64).trunc();
         if !(x >= u16::MIN as f64 && x < u16::MAX as f64 + 1.0) { throw overflow("u16"); }
         x as u16
@@ -922,7 +922,7 @@ impl TryFrom<f64> for u16 {
 
 impl TryFrom<f64> for u32 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> u32 {
+    const fn try_from(value: f64) throws (OverflowError) -> u32 {
         let x = (value as f64).trunc();
         if !(x >= u32::MIN as f64 && x < u32::MAX as f64 + 1.0) { throw overflow("u32"); }
         x as u32
@@ -931,7 +931,7 @@ impl TryFrom<f64> for u32 {
 
 impl TryFrom<f64> for u64 {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> u64 {
+    const fn try_from(value: f64) throws (OverflowError) -> u64 {
         let x = (value as f64).trunc();
         if !(x >= u64::MIN as f64 && x < u64::MAX as f64 + 1.0) { throw overflow("u64"); }
         x as u64
@@ -940,7 +940,7 @@ impl TryFrom<f64> for u64 {
 
 impl TryFrom<f64> for usize {
     type Error = OverflowError;
-    fn try_from(value: f64) throws (OverflowError) -> usize {
+    const fn try_from(value: f64) throws (OverflowError) -> usize {
         let x = (value as f64).trunc();
         if !(x >= usize::MIN as f64 && x < usize::MAX as f64 + 1.0) { throw overflow("usize"); }
         x as usize
@@ -950,7 +950,7 @@ impl TryFrom<f64> for usize {
 impl TryFrom<f64> for f32 {
     type Error = OverflowError;
     /// Throws when a finite `value` is beyond `f32`'s range.
-    fn try_from(value: f64) throws (OverflowError) -> f32 {
+    const fn try_from(value: f64) throws (OverflowError) -> f32 {
         if value.is_finite() && value.abs() > f32::MAX as f64 { throw overflow("f32"); }
         value as f32
     }
@@ -959,58 +959,58 @@ impl TryFrom<f64> for f32 {
 // SaturatingFrom
 
 impl SaturatingFrom<i8> for i16 {
-    fn saturating_from(value: i8) -> i16 { value as i16 }
+    const fn saturating_from(value: i8) -> i16 { value as i16 }
 }
 
 impl SaturatingFrom<i8> for i32 {
-    fn saturating_from(value: i8) -> i32 { value as i32 }
+    const fn saturating_from(value: i8) -> i32 { value as i32 }
 }
 
 impl SaturatingFrom<i8> for i64 {
-    fn saturating_from(value: i8) -> i64 { value as i64 }
+    const fn saturating_from(value: i8) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<i8> for isize {
-    fn saturating_from(value: i8) -> isize { value as isize }
+    const fn saturating_from(value: i8) -> isize { value as isize }
 }
 
 impl SaturatingFrom<i8> for u8 {
-    fn saturating_from(value: i8) -> u8 {
+    const fn saturating_from(value: i8) -> u8 {
         if value < 0 { return 0; }
         value as u8
     }
 }
 
 impl SaturatingFrom<i8> for u16 {
-    fn saturating_from(value: i8) -> u16 {
+    const fn saturating_from(value: i8) -> u16 {
         if value < 0 { return 0; }
         value as u16
     }
 }
 
 impl SaturatingFrom<i8> for u32 {
-    fn saturating_from(value: i8) -> u32 {
+    const fn saturating_from(value: i8) -> u32 {
         if value < 0 { return 0; }
         value as u32
     }
 }
 
 impl SaturatingFrom<i8> for u64 {
-    fn saturating_from(value: i8) -> u64 {
+    const fn saturating_from(value: i8) -> u64 {
         if value < 0 { return 0; }
         value as u64
     }
 }
 
 impl SaturatingFrom<i8> for usize {
-    fn saturating_from(value: i8) -> usize {
+    const fn saturating_from(value: i8) -> usize {
         if value < 0 { return 0; }
         value as usize
     }
 }
 
 impl SaturatingFrom<i16> for i8 {
-    fn saturating_from(value: i16) -> i8 {
+    const fn saturating_from(value: i16) -> i8 {
         if value < i8::MIN as i16 { return i8::MIN; }
         if value > i8::MAX as i16 { return i8::MAX; }
         value as i8
@@ -1018,19 +1018,19 @@ impl SaturatingFrom<i16> for i8 {
 }
 
 impl SaturatingFrom<i16> for i32 {
-    fn saturating_from(value: i16) -> i32 { value as i32 }
+    const fn saturating_from(value: i16) -> i32 { value as i32 }
 }
 
 impl SaturatingFrom<i16> for i64 {
-    fn saturating_from(value: i16) -> i64 { value as i64 }
+    const fn saturating_from(value: i16) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<i16> for isize {
-    fn saturating_from(value: i16) -> isize { value as isize }
+    const fn saturating_from(value: i16) -> isize { value as isize }
 }
 
 impl SaturatingFrom<i16> for u8 {
-    fn saturating_from(value: i16) -> u8 {
+    const fn saturating_from(value: i16) -> u8 {
         if value < 0 { return 0; }
         if value > u8::MAX as i16 { return u8::MAX; }
         value as u8
@@ -1038,35 +1038,35 @@ impl SaturatingFrom<i16> for u8 {
 }
 
 impl SaturatingFrom<i16> for u16 {
-    fn saturating_from(value: i16) -> u16 {
+    const fn saturating_from(value: i16) -> u16 {
         if value < 0 { return 0; }
         value as u16
     }
 }
 
 impl SaturatingFrom<i16> for u32 {
-    fn saturating_from(value: i16) -> u32 {
+    const fn saturating_from(value: i16) -> u32 {
         if value < 0 { return 0; }
         value as u32
     }
 }
 
 impl SaturatingFrom<i16> for u64 {
-    fn saturating_from(value: i16) -> u64 {
+    const fn saturating_from(value: i16) -> u64 {
         if value < 0 { return 0; }
         value as u64
     }
 }
 
 impl SaturatingFrom<i16> for usize {
-    fn saturating_from(value: i16) -> usize {
+    const fn saturating_from(value: i16) -> usize {
         if value < 0 { return 0; }
         value as usize
     }
 }
 
 impl SaturatingFrom<i32> for i8 {
-    fn saturating_from(value: i32) -> i8 {
+    const fn saturating_from(value: i32) -> i8 {
         if value < i8::MIN as i32 { return i8::MIN; }
         if value > i8::MAX as i32 { return i8::MAX; }
         value as i8
@@ -1074,7 +1074,7 @@ impl SaturatingFrom<i32> for i8 {
 }
 
 impl SaturatingFrom<i32> for i16 {
-    fn saturating_from(value: i32) -> i16 {
+    const fn saturating_from(value: i32) -> i16 {
         if value < i16::MIN as i32 { return i16::MIN; }
         if value > i16::MAX as i32 { return i16::MAX; }
         value as i16
@@ -1082,15 +1082,15 @@ impl SaturatingFrom<i32> for i16 {
 }
 
 impl SaturatingFrom<i32> for i64 {
-    fn saturating_from(value: i32) -> i64 { value as i64 }
+    const fn saturating_from(value: i32) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<i32> for isize {
-    fn saturating_from(value: i32) -> isize { value as isize }
+    const fn saturating_from(value: i32) -> isize { value as isize }
 }
 
 impl SaturatingFrom<i32> for u8 {
-    fn saturating_from(value: i32) -> u8 {
+    const fn saturating_from(value: i32) -> u8 {
         if value < 0 { return 0; }
         if value > u8::MAX as i32 { return u8::MAX; }
         value as u8
@@ -1098,7 +1098,7 @@ impl SaturatingFrom<i32> for u8 {
 }
 
 impl SaturatingFrom<i32> for u16 {
-    fn saturating_from(value: i32) -> u16 {
+    const fn saturating_from(value: i32) -> u16 {
         if value < 0 { return 0; }
         if value > u16::MAX as i32 { return u16::MAX; }
         value as u16
@@ -1106,28 +1106,28 @@ impl SaturatingFrom<i32> for u16 {
 }
 
 impl SaturatingFrom<i32> for u32 {
-    fn saturating_from(value: i32) -> u32 {
+    const fn saturating_from(value: i32) -> u32 {
         if value < 0 { return 0; }
         value as u32
     }
 }
 
 impl SaturatingFrom<i32> for u64 {
-    fn saturating_from(value: i32) -> u64 {
+    const fn saturating_from(value: i32) -> u64 {
         if value < 0 { return 0; }
         value as u64
     }
 }
 
 impl SaturatingFrom<i32> for usize {
-    fn saturating_from(value: i32) -> usize {
+    const fn saturating_from(value: i32) -> usize {
         if value < 0 { return 0; }
         value as usize
     }
 }
 
 impl SaturatingFrom<i64> for i8 {
-    fn saturating_from(value: i64) -> i8 {
+    const fn saturating_from(value: i64) -> i8 {
         if value < i8::MIN as i64 { return i8::MIN; }
         if value > i8::MAX as i64 { return i8::MAX; }
         value as i8
@@ -1135,7 +1135,7 @@ impl SaturatingFrom<i64> for i8 {
 }
 
 impl SaturatingFrom<i64> for i16 {
-    fn saturating_from(value: i64) -> i16 {
+    const fn saturating_from(value: i64) -> i16 {
         if value < i16::MIN as i64 { return i16::MIN; }
         if value > i16::MAX as i64 { return i16::MAX; }
         value as i16
@@ -1143,7 +1143,7 @@ impl SaturatingFrom<i64> for i16 {
 }
 
 impl SaturatingFrom<i64> for i32 {
-    fn saturating_from(value: i64) -> i32 {
+    const fn saturating_from(value: i64) -> i32 {
         if value < i32::MIN as i64 { return i32::MIN; }
         if value > i32::MAX as i64 { return i32::MAX; }
         value as i32
@@ -1151,11 +1151,11 @@ impl SaturatingFrom<i64> for i32 {
 }
 
 impl SaturatingFrom<i64> for isize {
-    fn saturating_from(value: i64) -> isize { value as isize }
+    const fn saturating_from(value: i64) -> isize { value as isize }
 }
 
 impl SaturatingFrom<i64> for u8 {
-    fn saturating_from(value: i64) -> u8 {
+    const fn saturating_from(value: i64) -> u8 {
         if value < 0 { return 0; }
         if value > u8::MAX as i64 { return u8::MAX; }
         value as u8
@@ -1163,7 +1163,7 @@ impl SaturatingFrom<i64> for u8 {
 }
 
 impl SaturatingFrom<i64> for u16 {
-    fn saturating_from(value: i64) -> u16 {
+    const fn saturating_from(value: i64) -> u16 {
         if value < 0 { return 0; }
         if value > u16::MAX as i64 { return u16::MAX; }
         value as u16
@@ -1171,7 +1171,7 @@ impl SaturatingFrom<i64> for u16 {
 }
 
 impl SaturatingFrom<i64> for u32 {
-    fn saturating_from(value: i64) -> u32 {
+    const fn saturating_from(value: i64) -> u32 {
         if value < 0 { return 0; }
         if value > u32::MAX as i64 { return u32::MAX; }
         value as u32
@@ -1179,21 +1179,21 @@ impl SaturatingFrom<i64> for u32 {
 }
 
 impl SaturatingFrom<i64> for u64 {
-    fn saturating_from(value: i64) -> u64 {
+    const fn saturating_from(value: i64) -> u64 {
         if value < 0 { return 0; }
         value as u64
     }
 }
 
 impl SaturatingFrom<i64> for usize {
-    fn saturating_from(value: i64) -> usize {
+    const fn saturating_from(value: i64) -> usize {
         if value < 0 { return 0; }
         value as usize
     }
 }
 
 impl SaturatingFrom<isize> for i8 {
-    fn saturating_from(value: isize) -> i8 {
+    const fn saturating_from(value: isize) -> i8 {
         if value < i8::MIN as isize { return i8::MIN; }
         if value > i8::MAX as isize { return i8::MAX; }
         value as i8
@@ -1201,7 +1201,7 @@ impl SaturatingFrom<isize> for i8 {
 }
 
 impl SaturatingFrom<isize> for i16 {
-    fn saturating_from(value: isize) -> i16 {
+    const fn saturating_from(value: isize) -> i16 {
         if value < i16::MIN as isize { return i16::MIN; }
         if value > i16::MAX as isize { return i16::MAX; }
         value as i16
@@ -1209,7 +1209,7 @@ impl SaturatingFrom<isize> for i16 {
 }
 
 impl SaturatingFrom<isize> for i32 {
-    fn saturating_from(value: isize) -> i32 {
+    const fn saturating_from(value: isize) -> i32 {
         if value < i32::MIN as isize { return i32::MIN; }
         if value > i32::MAX as isize { return i32::MAX; }
         value as i32
@@ -1217,11 +1217,11 @@ impl SaturatingFrom<isize> for i32 {
 }
 
 impl SaturatingFrom<isize> for i64 {
-    fn saturating_from(value: isize) -> i64 { value as i64 }
+    const fn saturating_from(value: isize) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<isize> for u8 {
-    fn saturating_from(value: isize) -> u8 {
+    const fn saturating_from(value: isize) -> u8 {
         if value < 0 { return 0; }
         if value > u8::MAX as isize { return u8::MAX; }
         value as u8
@@ -1229,7 +1229,7 @@ impl SaturatingFrom<isize> for u8 {
 }
 
 impl SaturatingFrom<isize> for u16 {
-    fn saturating_from(value: isize) -> u16 {
+    const fn saturating_from(value: isize) -> u16 {
         if value < 0 { return 0; }
         if value > u16::MAX as isize { return u16::MAX; }
         value as u16
@@ -1237,7 +1237,7 @@ impl SaturatingFrom<isize> for u16 {
 }
 
 impl SaturatingFrom<isize> for u32 {
-    fn saturating_from(value: isize) -> u32 {
+    const fn saturating_from(value: isize) -> u32 {
         if value < 0 { return 0; }
         if value > u32::MAX as isize { return u32::MAX; }
         value as u32
@@ -1245,285 +1245,285 @@ impl SaturatingFrom<isize> for u32 {
 }
 
 impl SaturatingFrom<isize> for u64 {
-    fn saturating_from(value: isize) -> u64 {
+    const fn saturating_from(value: isize) -> u64 {
         if value < 0 { return 0; }
         value as u64
     }
 }
 
 impl SaturatingFrom<isize> for usize {
-    fn saturating_from(value: isize) -> usize {
+    const fn saturating_from(value: isize) -> usize {
         if value < 0 { return 0; }
         value as usize
     }
 }
 
 impl SaturatingFrom<u8> for i8 {
-    fn saturating_from(value: u8) -> i8 {
+    const fn saturating_from(value: u8) -> i8 {
         if value > i8::MAX as u8 { return i8::MAX; }
         value as i8
     }
 }
 
 impl SaturatingFrom<u8> for i16 {
-    fn saturating_from(value: u8) -> i16 { value as i16 }
+    const fn saturating_from(value: u8) -> i16 { value as i16 }
 }
 
 impl SaturatingFrom<u8> for i32 {
-    fn saturating_from(value: u8) -> i32 { value as i32 }
+    const fn saturating_from(value: u8) -> i32 { value as i32 }
 }
 
 impl SaturatingFrom<u8> for i64 {
-    fn saturating_from(value: u8) -> i64 { value as i64 }
+    const fn saturating_from(value: u8) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<u8> for isize {
-    fn saturating_from(value: u8) -> isize {
+    const fn saturating_from(value: u8) -> isize {
         if value > isize::MAX as u8 { return isize::MAX; }
         value as isize
     }
 }
 
 impl SaturatingFrom<u8> for u16 {
-    fn saturating_from(value: u8) -> u16 { value as u16 }
+    const fn saturating_from(value: u8) -> u16 { value as u16 }
 }
 
 impl SaturatingFrom<u8> for u32 {
-    fn saturating_from(value: u8) -> u32 { value as u32 }
+    const fn saturating_from(value: u8) -> u32 { value as u32 }
 }
 
 impl SaturatingFrom<u8> for u64 {
-    fn saturating_from(value: u8) -> u64 { value as u64 }
+    const fn saturating_from(value: u8) -> u64 { value as u64 }
 }
 
 impl SaturatingFrom<u8> for usize {
-    fn saturating_from(value: u8) -> usize { value as usize }
+    const fn saturating_from(value: u8) -> usize { value as usize }
 }
 
 impl SaturatingFrom<u16> for i8 {
-    fn saturating_from(value: u16) -> i8 {
+    const fn saturating_from(value: u16) -> i8 {
         if value > i8::MAX as u16 { return i8::MAX; }
         value as i8
     }
 }
 
 impl SaturatingFrom<u16> for i16 {
-    fn saturating_from(value: u16) -> i16 {
+    const fn saturating_from(value: u16) -> i16 {
         if value > i16::MAX as u16 { return i16::MAX; }
         value as i16
     }
 }
 
 impl SaturatingFrom<u16> for i32 {
-    fn saturating_from(value: u16) -> i32 { value as i32 }
+    const fn saturating_from(value: u16) -> i32 { value as i32 }
 }
 
 impl SaturatingFrom<u16> for i64 {
-    fn saturating_from(value: u16) -> i64 { value as i64 }
+    const fn saturating_from(value: u16) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<u16> for isize {
-    fn saturating_from(value: u16) -> isize {
+    const fn saturating_from(value: u16) -> isize {
         if value > isize::MAX as u16 { return isize::MAX; }
         value as isize
     }
 }
 
 impl SaturatingFrom<u16> for u8 {
-    fn saturating_from(value: u16) -> u8 {
+    const fn saturating_from(value: u16) -> u8 {
         if value > u8::MAX as u16 { return u8::MAX; }
         value as u8
     }
 }
 
 impl SaturatingFrom<u16> for u32 {
-    fn saturating_from(value: u16) -> u32 { value as u32 }
+    const fn saturating_from(value: u16) -> u32 { value as u32 }
 }
 
 impl SaturatingFrom<u16> for u64 {
-    fn saturating_from(value: u16) -> u64 { value as u64 }
+    const fn saturating_from(value: u16) -> u64 { value as u64 }
 }
 
 impl SaturatingFrom<u16> for usize {
-    fn saturating_from(value: u16) -> usize { value as usize }
+    const fn saturating_from(value: u16) -> usize { value as usize }
 }
 
 impl SaturatingFrom<u32> for i8 {
-    fn saturating_from(value: u32) -> i8 {
+    const fn saturating_from(value: u32) -> i8 {
         if value > i8::MAX as u32 { return i8::MAX; }
         value as i8
     }
 }
 
 impl SaturatingFrom<u32> for i16 {
-    fn saturating_from(value: u32) -> i16 {
+    const fn saturating_from(value: u32) -> i16 {
         if value > i16::MAX as u32 { return i16::MAX; }
         value as i16
     }
 }
 
 impl SaturatingFrom<u32> for i32 {
-    fn saturating_from(value: u32) -> i32 {
+    const fn saturating_from(value: u32) -> i32 {
         if value > i32::MAX as u32 { return i32::MAX; }
         value as i32
     }
 }
 
 impl SaturatingFrom<u32> for i64 {
-    fn saturating_from(value: u32) -> i64 { value as i64 }
+    const fn saturating_from(value: u32) -> i64 { value as i64 }
 }
 
 impl SaturatingFrom<u32> for isize {
-    fn saturating_from(value: u32) -> isize {
+    const fn saturating_from(value: u32) -> isize {
         if value > isize::MAX as u32 { return isize::MAX; }
         value as isize
     }
 }
 
 impl SaturatingFrom<u32> for u8 {
-    fn saturating_from(value: u32) -> u8 {
+    const fn saturating_from(value: u32) -> u8 {
         if value > u8::MAX as u32 { return u8::MAX; }
         value as u8
     }
 }
 
 impl SaturatingFrom<u32> for u16 {
-    fn saturating_from(value: u32) -> u16 {
+    const fn saturating_from(value: u32) -> u16 {
         if value > u16::MAX as u32 { return u16::MAX; }
         value as u16
     }
 }
 
 impl SaturatingFrom<u32> for u64 {
-    fn saturating_from(value: u32) -> u64 { value as u64 }
+    const fn saturating_from(value: u32) -> u64 { value as u64 }
 }
 
 impl SaturatingFrom<u32> for usize {
-    fn saturating_from(value: u32) -> usize { value as usize }
+    const fn saturating_from(value: u32) -> usize { value as usize }
 }
 
 impl SaturatingFrom<u64> for i8 {
-    fn saturating_from(value: u64) -> i8 {
+    const fn saturating_from(value: u64) -> i8 {
         if value > i8::MAX as u64 { return i8::MAX; }
         value as i8
     }
 }
 
 impl SaturatingFrom<u64> for i16 {
-    fn saturating_from(value: u64) -> i16 {
+    const fn saturating_from(value: u64) -> i16 {
         if value > i16::MAX as u64 { return i16::MAX; }
         value as i16
     }
 }
 
 impl SaturatingFrom<u64> for i32 {
-    fn saturating_from(value: u64) -> i32 {
+    const fn saturating_from(value: u64) -> i32 {
         if value > i32::MAX as u64 { return i32::MAX; }
         value as i32
     }
 }
 
 impl SaturatingFrom<u64> for i64 {
-    fn saturating_from(value: u64) -> i64 {
+    const fn saturating_from(value: u64) -> i64 {
         if value > i64::MAX as u64 { return i64::MAX; }
         value as i64
     }
 }
 
 impl SaturatingFrom<u64> for isize {
-    fn saturating_from(value: u64) -> isize {
+    const fn saturating_from(value: u64) -> isize {
         if value > isize::MAX as u64 { return isize::MAX; }
         value as isize
     }
 }
 
 impl SaturatingFrom<u64> for u8 {
-    fn saturating_from(value: u64) -> u8 {
+    const fn saturating_from(value: u64) -> u8 {
         if value > u8::MAX as u64 { return u8::MAX; }
         value as u8
     }
 }
 
 impl SaturatingFrom<u64> for u16 {
-    fn saturating_from(value: u64) -> u16 {
+    const fn saturating_from(value: u64) -> u16 {
         if value > u16::MAX as u64 { return u16::MAX; }
         value as u16
     }
 }
 
 impl SaturatingFrom<u64> for u32 {
-    fn saturating_from(value: u64) -> u32 {
+    const fn saturating_from(value: u64) -> u32 {
         if value > u32::MAX as u64 { return u32::MAX; }
         value as u32
     }
 }
 
 impl SaturatingFrom<u64> for usize {
-    fn saturating_from(value: u64) -> usize { value as usize }
+    const fn saturating_from(value: u64) -> usize { value as usize }
 }
 
 impl SaturatingFrom<usize> for i8 {
-    fn saturating_from(value: usize) -> i8 {
+    const fn saturating_from(value: usize) -> i8 {
         if value > i8::MAX as usize { return i8::MAX; }
         value as i8
     }
 }
 
 impl SaturatingFrom<usize> for i16 {
-    fn saturating_from(value: usize) -> i16 {
+    const fn saturating_from(value: usize) -> i16 {
         if value > i16::MAX as usize { return i16::MAX; }
         value as i16
     }
 }
 
 impl SaturatingFrom<usize> for i32 {
-    fn saturating_from(value: usize) -> i32 {
+    const fn saturating_from(value: usize) -> i32 {
         if value > i32::MAX as usize { return i32::MAX; }
         value as i32
     }
 }
 
 impl SaturatingFrom<usize> for i64 {
-    fn saturating_from(value: usize) -> i64 {
+    const fn saturating_from(value: usize) -> i64 {
         if value > i64::MAX as usize { return i64::MAX; }
         value as i64
     }
 }
 
 impl SaturatingFrom<usize> for isize {
-    fn saturating_from(value: usize) -> isize {
+    const fn saturating_from(value: usize) -> isize {
         if value > isize::MAX as usize { return isize::MAX; }
         value as isize
     }
 }
 
 impl SaturatingFrom<usize> for u8 {
-    fn saturating_from(value: usize) -> u8 {
+    const fn saturating_from(value: usize) -> u8 {
         if value > u8::MAX as usize { return u8::MAX; }
         value as u8
     }
 }
 
 impl SaturatingFrom<usize> for u16 {
-    fn saturating_from(value: usize) -> u16 {
+    const fn saturating_from(value: usize) -> u16 {
         if value > u16::MAX as usize { return u16::MAX; }
         value as u16
     }
 }
 
 impl SaturatingFrom<usize> for u32 {
-    fn saturating_from(value: usize) -> u32 {
+    const fn saturating_from(value: usize) -> u32 {
         if value > u32::MAX as usize { return u32::MAX; }
         value as u32
     }
 }
 
 impl SaturatingFrom<usize> for u64 {
-    fn saturating_from(value: usize) -> u64 { value as u64 }
+    const fn saturating_from(value: usize) -> u64 { value as u64 }
 }
 
 impl SaturatingFrom<f64> for f32 {
-    fn saturating_from(value: f64) -> f32 {
+    const fn saturating_from(value: f64) -> f32 {
         if value > f32::MAX as f64 { return f32::MAX; }
         if value < f32::MIN as f64 { return f32::MIN; }
         value as f32
@@ -1533,361 +1533,361 @@ impl SaturatingFrom<f64> for f32 {
 // WrappingFrom (low bits, like `as`)
 
 impl WrappingFrom<i8> for i16 {
-    fn wrapping_from(value: i8) -> i16 { value as i16 }
+    const fn wrapping_from(value: i8) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<i8> for i32 {
-    fn wrapping_from(value: i8) -> i32 { value as i32 }
+    const fn wrapping_from(value: i8) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<i8> for i64 {
-    fn wrapping_from(value: i8) -> i64 { value as i64 }
+    const fn wrapping_from(value: i8) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<i8> for isize {
-    fn wrapping_from(value: i8) -> isize { value as isize }
+    const fn wrapping_from(value: i8) -> isize { value as isize }
 }
 
 impl WrappingFrom<i8> for u8 {
-    fn wrapping_from(value: i8) -> u8 { value as u8 }
+    const fn wrapping_from(value: i8) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<i8> for u16 {
-    fn wrapping_from(value: i8) -> u16 { value as u16 }
+    const fn wrapping_from(value: i8) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<i8> for u32 {
-    fn wrapping_from(value: i8) -> u32 { value as u32 }
+    const fn wrapping_from(value: i8) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<i8> for u64 {
-    fn wrapping_from(value: i8) -> u64 { value as u64 }
+    const fn wrapping_from(value: i8) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<i8> for usize {
-    fn wrapping_from(value: i8) -> usize { value as usize }
+    const fn wrapping_from(value: i8) -> usize { value as usize }
 }
 
 impl WrappingFrom<i16> for i8 {
-    fn wrapping_from(value: i16) -> i8 { value as i8 }
+    const fn wrapping_from(value: i16) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<i16> for i32 {
-    fn wrapping_from(value: i16) -> i32 { value as i32 }
+    const fn wrapping_from(value: i16) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<i16> for i64 {
-    fn wrapping_from(value: i16) -> i64 { value as i64 }
+    const fn wrapping_from(value: i16) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<i16> for isize {
-    fn wrapping_from(value: i16) -> isize { value as isize }
+    const fn wrapping_from(value: i16) -> isize { value as isize }
 }
 
 impl WrappingFrom<i16> for u8 {
-    fn wrapping_from(value: i16) -> u8 { value as u8 }
+    const fn wrapping_from(value: i16) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<i16> for u16 {
-    fn wrapping_from(value: i16) -> u16 { value as u16 }
+    const fn wrapping_from(value: i16) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<i16> for u32 {
-    fn wrapping_from(value: i16) -> u32 { value as u32 }
+    const fn wrapping_from(value: i16) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<i16> for u64 {
-    fn wrapping_from(value: i16) -> u64 { value as u64 }
+    const fn wrapping_from(value: i16) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<i16> for usize {
-    fn wrapping_from(value: i16) -> usize { value as usize }
+    const fn wrapping_from(value: i16) -> usize { value as usize }
 }
 
 impl WrappingFrom<i32> for i8 {
-    fn wrapping_from(value: i32) -> i8 { value as i8 }
+    const fn wrapping_from(value: i32) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<i32> for i16 {
-    fn wrapping_from(value: i32) -> i16 { value as i16 }
+    const fn wrapping_from(value: i32) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<i32> for i64 {
-    fn wrapping_from(value: i32) -> i64 { value as i64 }
+    const fn wrapping_from(value: i32) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<i32> for isize {
-    fn wrapping_from(value: i32) -> isize { value as isize }
+    const fn wrapping_from(value: i32) -> isize { value as isize }
 }
 
 impl WrappingFrom<i32> for u8 {
-    fn wrapping_from(value: i32) -> u8 { value as u8 }
+    const fn wrapping_from(value: i32) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<i32> for u16 {
-    fn wrapping_from(value: i32) -> u16 { value as u16 }
+    const fn wrapping_from(value: i32) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<i32> for u32 {
-    fn wrapping_from(value: i32) -> u32 { value as u32 }
+    const fn wrapping_from(value: i32) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<i32> for u64 {
-    fn wrapping_from(value: i32) -> u64 { value as u64 }
+    const fn wrapping_from(value: i32) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<i32> for usize {
-    fn wrapping_from(value: i32) -> usize { value as usize }
+    const fn wrapping_from(value: i32) -> usize { value as usize }
 }
 
 impl WrappingFrom<i64> for i8 {
-    fn wrapping_from(value: i64) -> i8 { value as i8 }
+    const fn wrapping_from(value: i64) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<i64> for i16 {
-    fn wrapping_from(value: i64) -> i16 { value as i16 }
+    const fn wrapping_from(value: i64) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<i64> for i32 {
-    fn wrapping_from(value: i64) -> i32 { value as i32 }
+    const fn wrapping_from(value: i64) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<i64> for isize {
-    fn wrapping_from(value: i64) -> isize { value as isize }
+    const fn wrapping_from(value: i64) -> isize { value as isize }
 }
 
 impl WrappingFrom<i64> for u8 {
-    fn wrapping_from(value: i64) -> u8 { value as u8 }
+    const fn wrapping_from(value: i64) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<i64> for u16 {
-    fn wrapping_from(value: i64) -> u16 { value as u16 }
+    const fn wrapping_from(value: i64) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<i64> for u32 {
-    fn wrapping_from(value: i64) -> u32 { value as u32 }
+    const fn wrapping_from(value: i64) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<i64> for u64 {
-    fn wrapping_from(value: i64) -> u64 { value as u64 }
+    const fn wrapping_from(value: i64) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<i64> for usize {
-    fn wrapping_from(value: i64) -> usize { value as usize }
+    const fn wrapping_from(value: i64) -> usize { value as usize }
 }
 
 impl WrappingFrom<isize> for i8 {
-    fn wrapping_from(value: isize) -> i8 { value as i8 }
+    const fn wrapping_from(value: isize) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<isize> for i16 {
-    fn wrapping_from(value: isize) -> i16 { value as i16 }
+    const fn wrapping_from(value: isize) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<isize> for i32 {
-    fn wrapping_from(value: isize) -> i32 { value as i32 }
+    const fn wrapping_from(value: isize) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<isize> for i64 {
-    fn wrapping_from(value: isize) -> i64 { value as i64 }
+    const fn wrapping_from(value: isize) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<isize> for u8 {
-    fn wrapping_from(value: isize) -> u8 { value as u8 }
+    const fn wrapping_from(value: isize) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<isize> for u16 {
-    fn wrapping_from(value: isize) -> u16 { value as u16 }
+    const fn wrapping_from(value: isize) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<isize> for u32 {
-    fn wrapping_from(value: isize) -> u32 { value as u32 }
+    const fn wrapping_from(value: isize) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<isize> for u64 {
-    fn wrapping_from(value: isize) -> u64 { value as u64 }
+    const fn wrapping_from(value: isize) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<isize> for usize {
-    fn wrapping_from(value: isize) -> usize { value as usize }
+    const fn wrapping_from(value: isize) -> usize { value as usize }
 }
 
 impl WrappingFrom<u8> for i8 {
-    fn wrapping_from(value: u8) -> i8 { value as i8 }
+    const fn wrapping_from(value: u8) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<u8> for i16 {
-    fn wrapping_from(value: u8) -> i16 { value as i16 }
+    const fn wrapping_from(value: u8) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<u8> for i32 {
-    fn wrapping_from(value: u8) -> i32 { value as i32 }
+    const fn wrapping_from(value: u8) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<u8> for i64 {
-    fn wrapping_from(value: u8) -> i64 { value as i64 }
+    const fn wrapping_from(value: u8) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<u8> for isize {
-    fn wrapping_from(value: u8) -> isize { value as isize }
+    const fn wrapping_from(value: u8) -> isize { value as isize }
 }
 
 impl WrappingFrom<u8> for u16 {
-    fn wrapping_from(value: u8) -> u16 { value as u16 }
+    const fn wrapping_from(value: u8) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<u8> for u32 {
-    fn wrapping_from(value: u8) -> u32 { value as u32 }
+    const fn wrapping_from(value: u8) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<u8> for u64 {
-    fn wrapping_from(value: u8) -> u64 { value as u64 }
+    const fn wrapping_from(value: u8) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<u8> for usize {
-    fn wrapping_from(value: u8) -> usize { value as usize }
+    const fn wrapping_from(value: u8) -> usize { value as usize }
 }
 
 impl WrappingFrom<u16> for i8 {
-    fn wrapping_from(value: u16) -> i8 { value as i8 }
+    const fn wrapping_from(value: u16) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<u16> for i16 {
-    fn wrapping_from(value: u16) -> i16 { value as i16 }
+    const fn wrapping_from(value: u16) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<u16> for i32 {
-    fn wrapping_from(value: u16) -> i32 { value as i32 }
+    const fn wrapping_from(value: u16) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<u16> for i64 {
-    fn wrapping_from(value: u16) -> i64 { value as i64 }
+    const fn wrapping_from(value: u16) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<u16> for isize {
-    fn wrapping_from(value: u16) -> isize { value as isize }
+    const fn wrapping_from(value: u16) -> isize { value as isize }
 }
 
 impl WrappingFrom<u16> for u8 {
-    fn wrapping_from(value: u16) -> u8 { value as u8 }
+    const fn wrapping_from(value: u16) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<u16> for u32 {
-    fn wrapping_from(value: u16) -> u32 { value as u32 }
+    const fn wrapping_from(value: u16) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<u16> for u64 {
-    fn wrapping_from(value: u16) -> u64 { value as u64 }
+    const fn wrapping_from(value: u16) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<u16> for usize {
-    fn wrapping_from(value: u16) -> usize { value as usize }
+    const fn wrapping_from(value: u16) -> usize { value as usize }
 }
 
 impl WrappingFrom<u32> for i8 {
-    fn wrapping_from(value: u32) -> i8 { value as i8 }
+    const fn wrapping_from(value: u32) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<u32> for i16 {
-    fn wrapping_from(value: u32) -> i16 { value as i16 }
+    const fn wrapping_from(value: u32) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<u32> for i32 {
-    fn wrapping_from(value: u32) -> i32 { value as i32 }
+    const fn wrapping_from(value: u32) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<u32> for i64 {
-    fn wrapping_from(value: u32) -> i64 { value as i64 }
+    const fn wrapping_from(value: u32) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<u32> for isize {
-    fn wrapping_from(value: u32) -> isize { value as isize }
+    const fn wrapping_from(value: u32) -> isize { value as isize }
 }
 
 impl WrappingFrom<u32> for u8 {
-    fn wrapping_from(value: u32) -> u8 { value as u8 }
+    const fn wrapping_from(value: u32) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<u32> for u16 {
-    fn wrapping_from(value: u32) -> u16 { value as u16 }
+    const fn wrapping_from(value: u32) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<u32> for u64 {
-    fn wrapping_from(value: u32) -> u64 { value as u64 }
+    const fn wrapping_from(value: u32) -> u64 { value as u64 }
 }
 
 impl WrappingFrom<u32> for usize {
-    fn wrapping_from(value: u32) -> usize { value as usize }
+    const fn wrapping_from(value: u32) -> usize { value as usize }
 }
 
 impl WrappingFrom<u64> for i8 {
-    fn wrapping_from(value: u64) -> i8 { value as i8 }
+    const fn wrapping_from(value: u64) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<u64> for i16 {
-    fn wrapping_from(value: u64) -> i16 { value as i16 }
+    const fn wrapping_from(value: u64) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<u64> for i32 {
-    fn wrapping_from(value: u64) -> i32 { value as i32 }
+    const fn wrapping_from(value: u64) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<u64> for i64 {
-    fn wrapping_from(value: u64) -> i64 { value as i64 }
+    const fn wrapping_from(value: u64) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<u64> for isize {
-    fn wrapping_from(value: u64) -> isize { value as isize }
+    const fn wrapping_from(value: u64) -> isize { value as isize }
 }
 
 impl WrappingFrom<u64> for u8 {
-    fn wrapping_from(value: u64) -> u8 { value as u8 }
+    const fn wrapping_from(value: u64) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<u64> for u16 {
-    fn wrapping_from(value: u64) -> u16 { value as u16 }
+    const fn wrapping_from(value: u64) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<u64> for u32 {
-    fn wrapping_from(value: u64) -> u32 { value as u32 }
+    const fn wrapping_from(value: u64) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<u64> for usize {
-    fn wrapping_from(value: u64) -> usize { value as usize }
+    const fn wrapping_from(value: u64) -> usize { value as usize }
 }
 
 impl WrappingFrom<usize> for i8 {
-    fn wrapping_from(value: usize) -> i8 { value as i8 }
+    const fn wrapping_from(value: usize) -> i8 { value as i8 }
 }
 
 impl WrappingFrom<usize> for i16 {
-    fn wrapping_from(value: usize) -> i16 { value as i16 }
+    const fn wrapping_from(value: usize) -> i16 { value as i16 }
 }
 
 impl WrappingFrom<usize> for i32 {
-    fn wrapping_from(value: usize) -> i32 { value as i32 }
+    const fn wrapping_from(value: usize) -> i32 { value as i32 }
 }
 
 impl WrappingFrom<usize> for i64 {
-    fn wrapping_from(value: usize) -> i64 { value as i64 }
+    const fn wrapping_from(value: usize) -> i64 { value as i64 }
 }
 
 impl WrappingFrom<usize> for isize {
-    fn wrapping_from(value: usize) -> isize { value as isize }
+    const fn wrapping_from(value: usize) -> isize { value as isize }
 }
 
 impl WrappingFrom<usize> for u8 {
-    fn wrapping_from(value: usize) -> u8 { value as u8 }
+    const fn wrapping_from(value: usize) -> u8 { value as u8 }
 }
 
 impl WrappingFrom<usize> for u16 {
-    fn wrapping_from(value: usize) -> u16 { value as u16 }
+    const fn wrapping_from(value: usize) -> u16 { value as u16 }
 }
 
 impl WrappingFrom<usize> for u32 {
-    fn wrapping_from(value: usize) -> u32 { value as u32 }
+    const fn wrapping_from(value: usize) -> u32 { value as u32 }
 }
 
 impl WrappingFrom<usize> for u64 {
-    fn wrapping_from(value: usize) -> u64 { value as u64 }
+    const fn wrapping_from(value: usize) -> u64 { value as u64 }
 }

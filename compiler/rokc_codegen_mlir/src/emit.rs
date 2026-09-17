@@ -17,7 +17,7 @@ use rokc_mir::{
     Target, Terminator,
 };
 
-use crate::abi::{ArgAbi, FnAbi, RetAbi};
+use crate::abi::{ArgAbi, FnAbi, RetAbi, rok_by_ref};
 
 /// The standard library's `List` (`buf_ref_facts`).
 const LIST: &str = "rok::core::collections::list::List";
@@ -129,9 +129,6 @@ pub struct Emitter {
     quiet: std::sync::Arc<HashSet<FunctionId>>,
     /// The `List` instances (`buf_ref_facts`).
     lists: std::sync::Arc<HashSet<u32>>,
-    /// Functions only this module calls, and only directly: they take
-    /// and return large aggregates by address (`rok_fn_types`).
-    local_abi: std::sync::Arc<HashSet<FunctionId>>,
     /// `reentrant_functions` of the module.
     reentrant: std::sync::Arc<HashSet<FunctionId>>,
     /// Emit codegen unit `.1` of a plan (`crate::units`), not the module.
@@ -296,7 +293,6 @@ impl Emitter {
             repl: None,
             data_layout: None,
             quiet: std::sync::Arc::default(),
-            local_abi: std::sync::Arc::default(),
             lists: std::sync::Arc::default(),
             reentrant: std::sync::Arc::default(),
             unit: None,
@@ -380,48 +376,6 @@ impl Emitter {
         } else {
             "internal"
         }
-    }
-
-    /// The functions of `module` only its own code calls, and only
-    /// directly (internal, never a value, no C entry, not an initializer
-    /// or `main`): their calling convention is this module's business
-    /// (`rok_fn_types`); every other rok function's is spec 8.6.6's.
-    fn local_abi_functions(
-        &self,
-        module: &MirModule,
-        fns: &HashMap<FunctionId, FnSig>,
-    ) -> HashSet<FunctionId> {
-        let mut out: HashSet<FunctionId> = module
-            .functions
-            .iter()
-            .filter(|f| {
-                f.facts.linkage == Linkage::Defined
-                    && f.facts.role == FnRole::Plain
-                    && fns[&f.id].c_entry.is_none()
-                    && self.private_copy(f)
-            })
-            .map(|f| f.id)
-            .collect();
-        for s in &module.statics {
-            if let Some(id) = s.init_fn {
-                out.remove(&id);
-            }
-        }
-        for st in module
-            .functions
-            .iter()
-            .flat_map(|f| &f.blocks)
-            .flat_map(|b| &b.stmts)
-        {
-            if let Statement::Assign {
-                rvalue: RValue::FnAddr { callee, .. },
-                ..
-            } = st
-            {
-                out.remove(callee);
-            }
-        }
-        out
     }
 
     /// The C lowering of a signature; `None` (and an error) where this
@@ -583,7 +537,6 @@ impl Emitter {
             self.pkgs.lazy_statics.clone_from(&core.lazy_statics);
             self.quiet = core.quiet.clone();
             self.reentrant = core.reentrant.clone();
-            self.local_abi = core.local_abi.clone();
         } else {
             // A prebuilt library's static is initialized by its `.a`: the
             // initializer need not be here.
@@ -599,7 +552,6 @@ impl Emitter {
                 .collect();
             self.quiet = std::sync::Arc::new(quiet_functions(module, &self.pkgs, &self.target));
             self.reentrant = std::sync::Arc::new(reentrant_functions(module));
-            self.local_abi = std::sync::Arc::new(self.local_abi_functions(module, &fns));
         }
 
         self.out.push_str("module");
@@ -886,7 +838,8 @@ impl Emitter {
                     if self.link().in_prebuilt(&s.name) || !self.glue {
                         let _ = writeln!(self.out, "  func.func private @{sym}.init()");
                     } else {
-                        self.emit_lazy_init(&s.name, &sym, &ty_str, &init, false);
+                        let by_addr = rok_by_ref(&s.ty, &self.target);
+                        self.emit_lazy_init(&s.name, &sym, &ty_str, &init, false, by_addr);
                     }
                 }
                 continue;
@@ -907,7 +860,8 @@ impl Emitter {
                         .lib
                         .as_deref()
                         .is_some_and(|l| Link::owns(l, &s.name));
-                self.emit_lazy_static(&s.name, &sym, &ty_str, &init, linkage, export);
+                let by_addr = rok_by_ref(&s.ty, &self.target);
+                self.emit_lazy_static(&s.name, &sym, &ty_str, &init, linkage, (export, by_addr));
                 continue;
             }
             if let ConstVal::Str(text) = &s.init {
@@ -951,7 +905,7 @@ impl Emitter {
         ty: &str,
         init: &str,
         linkage: &str,
-        export: bool,
+        (export, by_addr): (bool, bool),
     ) {
         let _ = write!(
             self.out,
@@ -962,13 +916,22 @@ impl Emitter {
   llvm.mlir.global {linkage} @{sym}.state(0 : i8) {{addr_space = 0 : i32}} : i8
 "
         );
-        self.emit_lazy_init(name, sym, ty, init, export);
+        self.emit_lazy_init(name, sym, ty, init, export, by_addr);
     }
 
     /// `@sym.init`: runs initializer `init` of static `name` once (see
     /// `emit_lazy_static`); `export`ed by a prebuilt library that owns
-    /// the static.
-    fn emit_lazy_init(&mut self, name: &str, sym: &str, ty: &str, init: &str, export: bool) {
+    /// the static. `by_addr`: `init` returns its value through a leading
+    /// pointer (spec 8.6.6), the static itself.
+    fn emit_lazy_init(
+        &mut self,
+        name: &str,
+        sym: &str,
+        ty: &str,
+        init: &str,
+        export: bool,
+        by_addr: bool,
+    ) {
         self.needs.insert("rok_static_init_begin");
         self.needs.insert("rok_static_init_end");
         let head = if export {
@@ -976,6 +939,18 @@ impl Emitter {
         } else {
             format!(
                 "func.func private @{sym}.init() attributes {{llvm.linkage = #llvm.linkage<internal>}}"
+            )
+        };
+        let call = if by_addr {
+            format!(
+                "    %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
+    func.call @{init}(%5) : (!llvm.ptr) -> ()"
+            )
+        } else {
+            format!(
+                "    %4 = func.call @{init}() : () -> {ty}
+    %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
+    llvm.store %4, %5 : {ty}, !llvm.ptr"
             )
         };
         let text = format!(
@@ -986,9 +961,7 @@ impl Emitter {
     %3 = arith.cmpi ne, %1, %2 : i32
     cf.cond_br %3, ^bb1, ^bb2
   ^bb1:
-    %4 = func.call @{init}() : () -> {ty}
-    %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
-    llvm.store %4, %5 : {ty}, !llvm.ptr
+{call}
     func.call @rok_static_init_end(%0) : (!llvm.ptr) -> ()
     func.return
   ^bb2:
@@ -1018,19 +991,8 @@ impl Emitter {
             .map(|(content, sym)| (content.clone(), sym.clone()))
             .collect();
         for (content, sym) in entries {
-            let bytes = content.as_bytes();
-            let mut escaped = String::new();
-            for &b in bytes {
-                if b == b'\\' || b == b'"' {
-                    escaped.push('\\');
-                    escaped.push(b as char);
-                } else if (0x20..0x7f).contains(&b) {
-                    escaped.push(b as char);
-                } else {
-                    let _ = write!(escaped, "\\{:02X}", b);
-                }
-            }
-            let len = bytes.len() + 1;
+            let escaped = mlir_bytes(content.as_bytes());
+            let len = content.len() + 1;
             let _ = writeln!(
                 self.out,
                 "  llvm.mlir.global internal unnamed_addr constant @{sym}(\"{escaped}\\00\") {{addr_space = 0 : i32}} : !llvm.array<{len} x i8>"
@@ -1063,7 +1025,7 @@ impl Emitter {
             // library's rok functions are defined without extension
             // attributes, so they are declared without them.
             let (params, ret) = if f.facts.linkage == Linkage::Prebuilt {
-                let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target, false);
+                let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target);
                 (params, ret.map_or_else(String::new, |r| format!(" -> {r}")))
             } else {
                 let params = sig
@@ -1087,8 +1049,7 @@ impl Emitter {
         }
         let private = !inline_copy && self.private_copy(f);
         let vis = if private { "private " } else { "" };
-        let local = self.local_abi.contains(&f.id);
-        let (params, ret) = rok_fn_types(&f.param_tys, &f.ret_ty, &self.target, local);
+        let (params, ret) = rok_fn_types(&f.param_tys, &f.ret_ty, &self.target);
         let params: Vec<String> = params
             .iter()
             .enumerate()
@@ -1147,8 +1108,6 @@ impl Emitter {
         let mut emit = FnEmit::new(f, &self.target, fns, str_globals, &self.pkgs, sources);
         emit.quiet = self.quiet.clone();
         emit.lists = self.lists.clone();
-        emit.local_fns = self.local_abi.clone();
-        emit.local_abi = self.local_abi.contains(&f.id);
         emit.entry_poll = self.reentrant.contains(&f.id);
         emit.overflow_checks = self.overflow_checks;
         emit.gc_type_base = self.gc_type_base();
@@ -1212,11 +1171,10 @@ impl Emitter {
         self.out.push('\n');
     }
 
-    /// A function another unit defines: its rok body (spec 8.6.6's
-    /// convention: a function units share is never local), and its C
-    /// entry, which a function value may take.
+    /// A function another unit defines: its rok body (spec 8.6.6), and
+    /// its C entry, which a function value may take.
     fn declare_unit_function(&mut self, sig: &FnSig) {
-        let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target, false);
+        let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target);
         let ret = ret.map_or_else(String::new, |r| format!(" -> {r}"));
         let _ = writeln!(
             self.out,
@@ -1280,11 +1238,42 @@ impl Emitter {
             );
         };
         let sret = usize::from(abi.ret == RetAbi::Sret);
+        // A by-address result (spec 8.6.6) goes straight to C's `sret`
+        // or to a slot.
+        let by_ref_ret = rok_by_ref(&sig.ret, &self.target);
+        let rty = mlir_type(&sig.ret, &self.target);
         let mut vals = Vec::new();
+        if by_ref_ret {
+            if sret == 1 {
+                vals.push("%arg0".to_owned());
+            } else {
+                let _ = writeln!(
+                    b,
+                    "    %rp = llvm.alloca %one x {rty} {{alignment = 16 : i64}} : (i32) -> !llvm.ptr"
+                );
+                vals.push("%rp".to_owned());
+            }
+        }
         for (i, t) in sig.params.iter().enumerate() {
             let a = format!("%arg{}", i + sret);
             let ty = mlir_type(t, &self.target);
-            match abi.args.get(i).unwrap_or(&ArgAbi::Direct) {
+            let arg = abi.args.get(i).unwrap_or(&ArgAbi::Direct);
+            if rok_by_ref(t, &self.target) {
+                // By address: C's own copy when it passed one.
+                if let ArgAbi::Indirect { .. } = arg {
+                    vals.push(a);
+                } else {
+                    slot(&mut b, &format!("%s{i}"), t);
+                    let c = match arg {
+                        ArgAbi::Coerce(c) => c.clone(),
+                        _ => ty.clone(),
+                    };
+                    let _ = writeln!(b, "    llvm.store {a}, %s{i} : {c}, !llvm.ptr");
+                    vals.push(format!("%s{i}"));
+                }
+                continue;
+            }
+            match arg {
                 ArgAbi::Direct => vals.push(a),
                 ArgAbi::Coerce(c) => {
                     slot(&mut b, &format!("%s{i}"), t);
@@ -1302,9 +1291,8 @@ impl Emitter {
                 }
             }
         }
-        let (tys, _) = rok_fn_types(&sig.params, &sig.ret, &self.target, false);
-        let rty = mlir_type(&sig.ret, &self.target);
-        let unit = sig.ret == MirTy::Unit;
+        let (tys, _) = rok_fn_types(&sig.params, &sig.ret, &self.target);
+        let unit = sig.ret == MirTy::Unit || by_ref_ret;
         // wasm32: the host may call an export before `_start` (or
         // without it): the runtime starts on the first call.
         if exported && self.target.family == "wasm" {
@@ -1326,8 +1314,13 @@ impl Emitter {
             tys.join(", "),
             if unit { "()" } else { &rty }
         );
+        if by_ref_ret && sret == 0 {
+            let _ = writeln!(b, "    %r = llvm.load %rp : !llvm.ptr -> {rty}");
+        }
         match &abi.ret {
-            _ if unit => b.push_str("    func.return\n"),
+            _ if sig.ret == MirTy::Unit || (by_ref_ret && sret == 1) => {
+                b.push_str("    func.return\n");
+            }
             RetAbi::Direct => {
                 let _ = writeln!(b, "    func.return %r : {rty}");
             }
@@ -1613,10 +1606,6 @@ struct FnEmit<'a> {
     quiet: std::sync::Arc<HashSet<FunctionId>>,
     /// Lent `Emitter::lists`.
     lists: std::sync::Arc<HashSet<u32>>,
-    /// Lent `Emitter::local_abi`.
-    local_fns: std::sync::Arc<HashSet<FunctionId>>,
-    /// This function is in `local_fns`.
-    local_abi: bool,
     /// In `Emitter::reentrant`: polls on entry.
     entry_poll: bool,
     /// This thread's address of each runtime TLS slot used, by offset,
@@ -1927,8 +1916,6 @@ impl<'a> FnEmit<'a> {
             dbg: None,
             dbg_vars: Vec::new(),
             quiet: std::sync::Arc::default(),
-            local_fns: std::sync::Arc::default(),
-            local_abi: false,
             lists: std::sync::Arc::default(),
             entry_poll: true,
             tls: HashMap::new(),
@@ -1994,9 +1981,8 @@ impl<'a> FnEmit<'a> {
         self.entry_alloca(&format!("!llvm.array<{size} x i8>"), 16)
     }
 
-    /// The arguments of a call by the rok convention (`rok_fn_types`;
-    /// `local`: the callee's by-ref one), and the address the result
-    /// comes back at when it is by-ref. A
+    /// The arguments of a call by the rok convention (`rok_fn_types`),
+    /// and the address the result comes back at when it is by-ref. A
     /// by-ref argument is the address of the value: the operand's own
     /// slot (the callee copies it before anything runs), else a temporary.
     fn rok_call_args(
@@ -2004,18 +1990,16 @@ impl<'a> FnEmit<'a> {
         args: &[Operand],
         tys: &[MirTy],
         ret: &MirTy,
-        local: bool,
     ) -> (Vec<String>, Option<String>) {
-        let by_ref = |t: &MirTy, target: &Target| local && by_ref(t, target);
         let mut vals = Vec::new();
-        let sret = by_ref(ret, self.target).then(|| {
+        let sret = rok_by_ref(ret, self.target).then(|| {
             let ty = mlir_type(ret, self.target);
             let align = self.target.size_align(ret).1.max(8);
             self.entry_alloca(&ty, align)
         });
         vals.extend(sret.clone());
         for (op, ty) in args.iter().zip(tys) {
-            if !by_ref(ty, self.target) {
+            if !rok_by_ref(ty, self.target) {
                 vals.push(self.materialize_operand(op, ty));
                 continue;
             }
@@ -2377,12 +2361,28 @@ impl<'a> FnEmit<'a> {
             }
         }
         self.emit_gc_frame();
-        let first = usize::from(self.local_abi && by_ref(&self.f.ret_ty, self.target));
+        let first = usize::from(rok_by_ref(&self.f.ret_ty, self.target));
         for (i, p) in self.f.params.iter().enumerate() {
             let local_ty = self.f.locals[p.0 as usize].ty.clone();
             let mut arg = format!("%arg{}", i + first);
-            if self.local_abi && by_ref(&local_ty, self.target) {
-                // A copy of the caller's value, taken before anything runs.
+            if rok_by_ref(&local_ty, self.target) {
+                // A copy of the caller's value, taken before anything runs;
+                // an array's slot to slot (see `Statement::Assign`).
+                let slot = self.slot_names[p.0 as usize].clone();
+                if let (MirTy::Array(..), Some(slot)) = (&local_ty, slot) {
+                    if !self.root_cells.contains_key(&p.0) {
+                        let pw = self.pw;
+                        let size = self.target.size_align(&local_ty).0;
+                        let n = self.fresh_value();
+                        let _ = write!(
+                            self.body,
+                            "    {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
+    \"llvm.intr.memcpy\"({slot}, {arg}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, !llvm.ptr, i{pw}) -> ()
+"
+                        );
+                        continue;
+                    }
+                }
                 let v = self.fresh_value();
                 let ty = mlir_type(&local_ty, self.target);
                 let _ = writeln!(self.body, "    {v} = llvm.load {arg} : !llvm.ptr -> {ty}");
@@ -2807,6 +2807,18 @@ impl<'a> FnEmit<'a> {
                 let slots = match (&ty, rvalue) {
                     (MirTy::Array(..), RValue::Use(Operand::Copy(src))) => {
                         self.slot_of(*target).zip(self.slot_of(*src))
+                    }
+                    (MirTy::Array(..), RValue::StaticLoad { name, .. }) => {
+                        self.slot_of(*target).map(|d| {
+                            self.ensure_static_init(name);
+                            let addr = self.fresh_value();
+                            let sym = self.pkgs.static_sym(name);
+                            let _ = writeln!(
+                                self.body,
+                                "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
+                            );
+                            (d, addr)
+                        })
                     }
                     _ => None,
                 };
@@ -3704,10 +3716,8 @@ impl<'a> FnEmit<'a> {
     ) -> String {
         let fn_ty = MirTy::Fn(arg_tys.to_vec(), Box::new(ret_ty.clone()));
         let callee_v = self.materialize_operand(callee, &fn_ty);
-        let (arg_vals, sret) = self.rok_call_args(args, arg_tys, ret_ty, false);
-        let arg_ty_list = rok_fn_types(arg_tys, ret_ty, self.target, false)
-            .0
-            .join(", ");
+        let (arg_vals, sret) = self.rok_call_args(args, arg_tys, ret_ty);
+        let arg_ty_list = rok_fn_types(arg_tys, ret_ty, self.target).0.join(", ");
         let arg_list = arg_vals.join(", ");
         let ret = if matches!(ret_ty, MirTy::Unit) {
             "()".to_owned()
@@ -4091,9 +4101,8 @@ impl<'a> FnEmit<'a> {
         }
         // Each argument at the callee's parameter type, so the operand
         // list matches the declaration.
-        let local = self.local_fns.contains(&callee);
-        let (arg_vals, sret) = self.rok_call_args(args, &sig.params, &sig.ret, local);
-        let (arg_tys, _) = rok_fn_types(&sig.params, &sig.ret, self.target, local);
+        let (arg_vals, sret) = self.rok_call_args(args, &sig.params, &sig.ret);
+        let (arg_tys, _) = rok_fn_types(&sig.params, &sig.ret, self.target);
         let (name, list, tys) = (&sig.name, arg_vals.join(", "), arg_tys.join(", "));
         if let Some(r) = sret {
             let ret = mlir_type(&sig.ret, self.target);
@@ -4460,7 +4469,7 @@ impl<'a> FnEmit<'a> {
         let s = self.fresh_value();
         self.str_literal_into(&s, msg);
         let at = if self.f.facts.track_caller {
-            let first = usize::from(self.local_abi && by_ref(&self.f.ret_ty, self.target));
+            let first = usize::from(rok_by_ref(&self.f.ret_ty, self.target));
             format!("%arg{}", self.f.params.len() - 1 + first)
         } else {
             let at = self.fresh_value();
@@ -4843,6 +4852,7 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "    {dst} = arith.constant {c} : {ty}");
             }
             ConstVal::Str(s) => self.str_literal_into(dst, s),
+            ConstVal::Bytes(_) => unreachable!("MIR lowering expands byte arrays"),
         }
     }
 
@@ -4943,9 +4953,7 @@ impl<'a> FnEmit<'a> {
                 self.emit_gc_frame_pop();
                 self.body.push_str("    func.return\n");
             }
-            Terminator::Return(Some(op))
-                if self.local_abi && by_ref(&self.f.ret_ty, self.target) =>
-            {
+            Terminator::Return(Some(op)) if rok_by_ref(&self.f.ret_ty, self.target) => {
                 let ret_ty = self.f.ret_ty.clone();
                 let val = self.materialize_operand(op, &ret_ty);
                 let ty = mlir_type(&ret_ty, self.target);
@@ -5300,39 +5308,19 @@ fn c_type(ty: &MirTy, target: &Target) -> String {
     mlir_type(ty, target)
 }
 
-/// Aggregates larger than this go between rok functions by address.
-const BY_REF_BYTES: u32 = 64;
-
-/// A `ty` argument or result passed by address to a local function
-/// (`rok_fn_types`): a large aggregate (as an LLVM value, one register
-/// or stack word per scalar inside).
-fn by_ref(ty: &MirTy, target: &Target) -> bool {
-    matches!(
-        ty,
-        MirTy::Array(..) | MirTy::Struct(..) | MirTy::Tuple(_) | MirTy::Union(..)
-    ) && target.size_align(ty).0 > BY_REF_BYTES
-}
-
-/// The MLIR parameter and result types of a rok function. With `local`
-/// (a function only this module calls, directly: `Emitter::local_abi`)
-/// a by-ref argument (`by_ref`) is a pointer to the caller's value,
-/// which the callee copies on entry, and a by-ref result is stored
-/// through a leading pointer argument; the function returns nothing.
-/// Otherwise the aggregates are values (spec 8.6.6).
-fn rok_fn_types(
-    params: &[MirTy],
-    ret: &MirTy,
-    target: &Target,
-    local: bool,
-) -> (Vec<String>, Option<String>) {
-    let by_ref = |t: &MirTy, target: &Target| local && by_ref(t, target);
-    let sret = by_ref(ret, target);
+/// The MLIR parameter and result types of a rok function (spec
+/// 8.6.6): a by-address argument (`abi::rok_by_ref`) is a pointer to the
+/// caller's value, which the callee copies on entry, and a by-address
+/// result is stored through a leading pointer argument; the function
+/// returns nothing.
+fn rok_fn_types(params: &[MirTy], ret: &MirTy, target: &Target) -> (Vec<String>, Option<String>) {
+    let sret = rok_by_ref(ret, target);
     let mut out = Vec::new();
     if sret {
         out.push("!llvm.ptr".to_owned());
     }
     out.extend(params.iter().map(|t| {
-        if by_ref(t, target) {
+        if rok_by_ref(t, target) {
             "!llvm.ptr".to_owned()
         } else {
             mlir_type(t, target)
@@ -5344,7 +5332,7 @@ fn rok_fn_types(
 
 /// `(args) -> ret` of a rok function value (`func.constant`).
 fn mlir_fn_signature(args: &[MirTy], ret: &MirTy, target: &Target) -> String {
-    let (params, ret) = rok_fn_types(args, ret, target, false);
+    let (params, ret) = rok_fn_types(args, ret, target);
     format!(
         "({}) -> {}",
         params.join(", "),
@@ -5567,7 +5555,7 @@ const fn const_ty(c: &ConstVal) -> MirTy {
         ConstVal::Bool(_) => MirTy::Prim(PrimTy::Bool),
         ConstVal::Str(_) => MirTy::Prim(PrimTy::Str),
         ConstVal::Char(_) => MirTy::Prim(PrimTy::Char),
-        ConstVal::Unit | ConstVal::None => MirTy::Unit,
+        ConstVal::Unit | ConstVal::None | ConstVal::Bytes(_) => MirTy::Unit,
     }
 }
 
@@ -5604,8 +5592,27 @@ fn format_float_decimal(v: f64) -> String {
 /// Render a scalar `ConstVal` as the attribute body of an
 /// `llvm.mlir.global`, typed at the static's declared type. `None` for
 /// shapes with no attribute form.
+/// `bytes` as the body of an MLIR string attribute.
+fn mlir_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b == b'\\' || b == b'"' {
+            escaped.push('\\');
+            escaped.push(b as char);
+        } else if (0x20..0x7f).contains(&b) {
+            escaped.push(b as char);
+        } else {
+            let _ = write!(escaped, "\\{b:02X}");
+        }
+    }
+    escaped
+}
+
 fn format_const_attr(v: &ConstVal, ty: &MirTy, target: &Target) -> Option<String> {
     let ty_str = mlir_type(ty, target);
+    if let (ConstVal::Bytes(b), MirTy::Array(..)) = (v, ty) {
+        return Some(format!("\"{}\"", mlir_bytes(b)));
+    }
     let MirTy::Prim(p) = ty else { return None };
     Some(match v {
         ConstVal::Int { value, .. } if p.is_int() => format!("{value} : {ty_str}"),

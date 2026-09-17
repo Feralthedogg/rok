@@ -1,0 +1,40 @@
+// spec: 006.11.1-include
+// expect-exit: 0
+// expect-stdout:
+// say "hi" \ end 14
+// 4 0 1 255 65
+// 4 255
+// from sub
+// 106
+
+// `include_str!` is the file's text as a `str`, `include_bytes!` its
+// bytes as a `[u8; N]`, read at compile time; the path is relative to
+// the file holding the call (`sub/inner.rok` reads `sub/note.txt`).
+#[path("sub/inner.rok")]
+mod inner;
+
+const TEXT: str = include_str!("res/text.txt");
+static BLOB: [u8; 4] = include_bytes!("res/blob.bin");
+
+const fn sum(b: [u8; 4]) -> i32 {
+    let n = 0;
+    for x in b {
+        n += x as i32;
+    }
+    n
+}
+
+const SUM: i32 = sum(include_bytes!("res/blob.bin")) - 215;
+
+fn first_last(s: Slice<u8>) -> str {
+    f"{s.len()} {s[2]}"
+}
+
+fn main() -> i32 {
+    println(f"{TEXT} {TEXT.len()}");
+    println(f"{BLOB.len()} {BLOB[0]} {BLOB[1]} {BLOB[2]} {BLOB[3]}");
+    println(first_last(include_bytes!("res/blob.bin")));
+    println(inner::note());
+    println(f"{SUM}");
+    0
+}

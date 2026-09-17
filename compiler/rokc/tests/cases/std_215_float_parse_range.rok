@@ -1,0 +1,28 @@
+// expect-exit: 0
+// expect-stdout:
+// "1e400": number out of range
+// "-1e400": number out of range
+// "1.2.3": invalid float literal
+// "1e39": number out of range
+// inf -inf 1e-400=0 true
+
+// stdlib 2.15.7: digits past the type's range are a parse error, as an
+// out-of-range literal is (1.6.4); `inf` itself parses.
+fn f64_of(s: str) -> f64 {
+    try s.parse::<f64>() catch e: ParseError {
+        println(f"\"{s}\": {e.reason}");
+        0.0
+    }
+}
+
+fn main() {
+    f64_of("1e400");
+    f64_of("-1e400");
+    f64_of("1.2.3");
+    try "1e39".parse::<f32>() catch e: ParseError {
+        println(f"\"1e39\": {e.reason}");
+        0.0f32
+    };
+    let big = try "3e38".parse::<f32>() catch _ { 0.0f32 };
+    println(f"{f64_of("inf")} {f64_of("-inf")} 1e-400={f64_of("1e-400")} {big == 3e38f32}");
+}

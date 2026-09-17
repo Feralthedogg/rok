@@ -1,0 +1,115 @@
+name: llvm-prefix
+description: >
+  The pinned LLVM + MLIR + lld prefix of llvm/build.sh (Windows:
+  llvm/build.ps1), restored from the actions cache and named by
+  ROK_LLVM_PREFIX. With build, a missing prefix is built, stripped and
+  saved instead; without, a missing prefix fails the job. Windows: the
+  MSVC environment is exported for every later step.
+
+inputs:
+  root:
+    description: The implementation checkout, relative to the workspace, with a trailing slash.
+    default: ""
+  build:
+    description: Build and save the prefix when the cache has none.
+    default: "false"
+
+outputs:
+  prefix:
+    value: ${{ steps.where.outputs.prefix }}
+
+runs:
+  using: composite
+  steps:
+    # cl / lib for rokc_llvm's shim, the whole developer environment for
+    # build.ps1. VCINSTALLDIR / VSINSTALLDIR stay unset: rustc then finds
+    # MSVC's link.exe itself, never Git's /usr/bin/link.
+    - name: MSVC environment
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * `
+          -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'no Visual Studio with the MSVC x64 tools' }
+        cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >nul && set" | ForEach-Object {
+          if ($_ -match '^([^=]+)=(.*)$' -and $Matches[1] -notin 'VCINSTALLDIR', 'VSINSTALLDIR' -and
+              [Environment]::GetEnvironmentVariable($Matches[1]) -ne $Matches[2]) {
+            "$($Matches[1])=$($Matches[2])"
+          }
+        } | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+    - id: where
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+      run: |
+        v=$(sed -n 's/^VERSION=//p' "${ROOT}llvm/build.sh")
+        if [ "$RUNNER_OS" = Windows ]; then
+          p="$LOCALAPPDATA\\rok\\llvm-$v"
+        else
+          p=$HOME/.cache/rok/llvm-$v
+        fi
+        echo "prefix=$p" >>"$GITHUB_OUTPUT"
+        echo "key=llvm-$v-$RUNNER_OS-$RUNNER_ARCH" >>"$GITHUB_OUTPUT"
+        echo "ROK_LLVM_PREFIX=$p" >>"$GITHUB_ENV"
+
+    - id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.where.outputs.prefix }}
+        key: ${{ steps.where.outputs.key }}-${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root)) }}
+        lookup-only: ${{ inputs.build }}
+        fail-on-cache-miss: ${{ inputs.build != 'true' }}
+
+    # The build tree needs ~15 GB more than a runner's free disk.
+    - name: Free disk (Linux)
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift
+        df -h "$HOME"
+
+    # clang reads llvm/rok.profdata.xz (indexed format 12: clang 19+);
+    # Ubuntu 24.04's default clang is 18 and its c++ is gcc.
+    - name: Build (Unix)
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash
+      env:
+        ROOT: ${{ inputs.root }}
+      run: |
+        if [ "$RUNNER_OS" = Linux ]; then
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang-19
+          export CC=clang-19 CXX=clang++-19
+        fi
+        "${ROOT}llvm/build.sh" "$ROK_LLVM_PREFIX" 2>&1 | tee "$RUNNER_TEMP/llvm-build.log"
+        if grep -q 'without PGO' "$RUNNER_TEMP/llvm-build.log"; then
+          echo "::error::the LLVM prefix was built without llvm/rok.profdata.xz"
+          exit 1
+        fi
+
+    - name: Build (Windows)
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        ROOT: ${{ inputs.root }}
+      run: '& "${env:ROOT}llvm/build.ps1" $env:ROK_LLVM_PREFIX'
+
+    # What rokc_llvm's build.rs does not read: shared libraries, the
+    # object libraries, opt-viewer; on Windows also bin/, where lld is five
+    # copies, not links (targets/build.sh needs bin/ld.lld on Unix only).
+    - name: Strip
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cd "$ROK_LLVM_PREFIX"
+        rm -rf lib/objects-Release share/opt-viewer lib/*.dylib lib/*.so lib/*.so.*
+        if [ "$RUNNER_OS" = Windows ]; then rm -rf bin; fi
+        du -sh .
+
+    - name: Save
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.where.outputs.prefix }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}

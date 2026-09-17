@@ -1,0 +1,220 @@
+// ECDSA verification (FIPS 186-5) on P-256 and P-384. Points are
+// projective (X : Y : Z) with the complete addition formula of Renes,
+// Costello and Batina (2016, algorithm 4, a = -3), which also doubles
+// and handles the identity (0 : 1 : 0), so there are no special cases.
+// Verification sees public data only: the scalar multiplication
+// indexes its table by scalar bits.
+
+use sup::{view, Bytes};
+use sup::sha2::HashAlgorithm;
+use sup::bignum::{Nat, Modulus};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EcCurve {
+    P256,
+    P384,
+}
+
+/// A curve's field (`fp`, Montgomery form) and group order (`fn`).
+struct Curve {
+    fp: Modulus;
+    fq: Modulus;
+    size: usize;
+    b: List<u32>;
+    gx: List<u32>;
+    gy: List<u32>;
+}
+
+fn curve_of(c: EcCurve) -> Curve {
+    let (p, q, b, gx, gy) = match c {
+        EcCurve::P256 => (
+            "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+            "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+            "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
+            "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
+            "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
+        ),
+        EcCurve::P384 => (
+            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+            "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef",
+            "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
+            "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f",
+        ),
+    };
+    let fp = Modulus::new(Nat::from_hex(p));
+    Curve {
+        size: fp.n * 4,
+        b: fp.to_mont(Nat::from_hex(b)),
+        gx: fp.to_mont(Nat::from_hex(gx)),
+        gy: fp.to_mont(Nat::from_hex(gy)),
+        fq: Modulus::new(Nat::from_hex(q)),
+        fp,
+    }
+}
+
+/// A projective point, coordinates in Montgomery form.
+struct Point {
+    x: List<u32>;
+    y: List<u32>;
+    z: List<u32>;
+}
+
+impl Curve {
+    fn identity(self) -> Point {
+        Point { x: Nat::zero(self.fp.n), y: self.fp.one(), z: Nat::zero(self.fp.n) }
+    }
+
+    /// `p + q`, complete (any inputs, doubling included).
+    fn add(self, p: Point, q: Point) -> Point {
+        let f = self.fp;
+        let t0 = f.mul(p.x, q.x);
+        let t1 = f.mul(p.y, q.y);
+        let t2 = f.mul(p.z, q.z);
+        let t3 = f.add(p.x, p.y);
+        let t4 = f.add(q.x, q.y);
+        t3 = f.mul(t3, t4);
+        t4 = f.add(t0, t1);
+        t3 = f.sub(t3, t4);
+        t4 = f.add(p.y, p.z);
+        let x3 = f.add(q.y, q.z);
+        t4 = f.mul(t4, x3);
+        x3 = f.add(t1, t2);
+        t4 = f.sub(t4, x3);
+        x3 = f.add(p.x, p.z);
+        let y3 = f.add(q.x, q.z);
+        x3 = f.mul(x3, y3);
+        y3 = f.add(t0, t2);
+        y3 = f.sub(x3, y3);
+        let z3 = f.mul(self.b, t2);
+        x3 = f.sub(y3, z3);
+        z3 = f.add(x3, x3);
+        x3 = f.add(x3, z3);
+        z3 = f.sub(t1, x3);
+        x3 = f.add(t1, x3);
+        y3 = f.mul(self.b, y3);
+        t1 = f.add(t2, t2);
+        t2 = f.add(t1, t2);
+        y3 = f.sub(y3, t2);
+        y3 = f.sub(y3, t0);
+        t1 = f.add(y3, y3);
+        y3 = f.add(t1, y3);
+        t1 = f.add(t0, t0);
+        t0 = f.add(t1, t0);
+        t0 = f.sub(t0, t2);
+        t1 = f.mul(t4, y3);
+        t2 = f.mul(t0, y3);
+        y3 = f.mul(x3, z3);
+        y3 = f.add(y3, t2);
+        x3 = f.mul(t3, x3);
+        x3 = f.sub(x3, t1);
+        z3 = f.mul(t4, z3);
+        t1 = f.mul(t3, t0);
+        z3 = f.add(z3, t1);
+        Point { x: x3, y: y3, z: z3 }
+    }
+
+    /// Whether affine `(x, y)` (Montgomery form) is on `y^2 = x^3 - 3x + b`.
+    fn on_curve(self, x: List<u32>, y: List<u32>) -> bool {
+        let f = self.fp;
+        let lhs = f.mul(y, y);
+        let x3 = f.mul(f.mul(x, x), x);
+        let tx = f.add(f.add(x, x), x);
+        let rhs = f.add(f.sub(x3, tx), self.b);
+        Nat::eq(lhs, rhs)
+    }
+
+    /// `u1 G + u2 Q` (Shamir's trick), `u1`, `u2` plain scalars.
+    fn mul2(self, u1: List<u32>, q: Point, u2: List<u32>) -> Point {
+        let g = Point { x: self.gx, y: self.gy, z: self.fp.one() };
+        let table = [self.identity(), g, q, self.add(g, q)];
+        let r = self.identity();
+        let i = 32 * u1.len();
+        while i > 0 {
+            i -= 1;
+            r = self.add(r, r);
+            let k = ((u1[i / 32] >> (i % 32) as u32) & 1u32) | (((u2[i / 32] >> (i % 32) as u32) & 1u32) << 1);
+            r = self.add(r, table[k as usize]);
+        }
+        r
+    }
+}
+
+/// A DER INTEGER at `s[at..]` as a positive value of at most `max`
+/// bytes: its magnitude and the index past it. Strict DER: minimal
+/// length, no negative numbers.
+fn der_uint(s: Slice<u8>, at: usize, max: usize) -> (Slice<u8>, usize) | none {
+    if at + 2 > s.len() || s[at] != 0x02u8 { return none; }
+    let len = s[at + 1] as usize;
+    if len >= 0x80 || len == 0 || at + 2 + len > s.len() { return none; }
+    let v = s[at + 2:at + 2 + len];
+    if v[0] >= 0x80u8 { return none; }
+    if v[0] == 0u8 && len > 1 && v[1] < 0x80u8 { return none; }
+    let mag = if v[0] == 0u8 { v[1:len] } else { v };
+    if mag.len() > max { return none; }
+    (mag, at + 2 + len)
+}
+
+/// `(r, s)` from a DER `SEQUENCE { INTEGER, INTEGER }`, nothing after.
+fn parse_sig(sig: Slice<u8>, size: usize) -> (Slice<u8>, Slice<u8>) | none {
+    if sig.len() < 2 || sig[0] != 0x30u8 { return none; }
+    let at = 2usize;
+    let len = sig[1] as usize;
+    if len == 0x81 {
+        if sig.len() < 3 || sig[2] < 0x80u8 { return none; }
+        len = sig[2] as usize;
+        at = 3;
+    } else if len >= 0x80 {
+        return none;
+    }
+    if at + len != sig.len() { return none; }
+    let t1: (Slice<u8>, usize) = der_uint(sig, at, size) else { return none; };
+    let (r, next) = t1;
+    let t2: (Slice<u8>, usize) = der_uint(sig, next, size) else { return none; };
+    let (s, end) = t2;
+    if end != sig.len() { return none; }
+    (r, s)
+}
+
+pub struct Ecdsa;
+
+impl Ecdsa {
+    /// Whether `signature` (DER) is a signature of `msg`, hashed with
+    /// `hash`, under `public_key` (SEC1 uncompressed point).
+    pub fn verify(curve: EcCurve, hash: HashAlgorithm, public_key: Bytes, msg: Bytes, signature: Bytes) -> bool {
+        let c = curve_of(curve);
+        let size = c.size;
+        let n = c.fp.n;
+        let pk = view(public_key);
+        if pk.len() != 1 + 2 * size || pk[0] != 0x04u8 { return false; }
+        let qx: List<u32> = Nat::from_be(pk[1:1 + size], n) else { return false; };
+        let qy: List<u32> = Nat::from_be(pk[1 + size:1 + 2 * size], n) else { return false; };
+        if !Nat::lt(qx, c.fp.m) || !Nat::lt(qy, c.fp.m) { return false; }
+        let qxm = c.fp.to_mont(qx);
+        let qym = c.fp.to_mont(qy);
+        if !c.on_curve(qxm, qym) { return false; }
+
+        let t3: (Slice<u8>, Slice<u8>) = parse_sig(view(signature), size) else { return false; };
+
+        let (rb, sb) = t3;
+        let r: List<u32> = Nat::from_be(rb, n) else { return false; };
+        let s: List<u32> = Nat::from_be(sb, n) else { return false; };
+        let q = c.fq;
+        if Nat::is_zero(r) || Nat::is_zero(s) || !Nat::lt(r, q.m) || !Nat::lt(s, q.m) { return false; }
+
+        // e: the hash's leftmost bits as wide as the order, below 2n.
+        let h = hash.digest(msg);
+        let hb = if h.len() > size { h[0:size] } else { h[0:h.len()] };
+        let e0: List<u32> = Nat::from_be(hb, n) else { return false; };
+        let e = q.reduce_once(e0);
+
+        let w = q.inv_prime(q.to_mont(s));
+        let u1 = q.from_mont(q.mul(q.to_mont(e), w));
+        let u2 = q.from_mont(q.mul(q.to_mont(r), w));
+        let pt = c.mul2(u1, Point { x: qxm, y: qym, z: c.fp.one() }, u2);
+        if Nat::is_zero(pt.z) { return false; }
+        let x = c.fp.from_mont(c.fp.mul(pt.x, c.fp.inv_prime(pt.z)));
+        // x < p < 2n.
+        Nat::eq(q.reduce_once(x), r)
+    }
+}

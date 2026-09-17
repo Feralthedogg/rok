@@ -372,15 +372,20 @@ pub unsafe extern "C" fn rok_str_parse_int(
 }
 
 /// `s` as an `f64` (`inf`, `NaN` and exponents included) into `out[0]`,
-/// a `GcBuf<f64>`; returns 0 ok, 2 invalid.
+/// a `GcBuf<f64>`; returns 0 ok, 2 invalid, 3 out of range.
 ///
 /// # Safety
 /// `out` is a live `GcBuf<f64>` of at least one element.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_str_parse_float(s: RokStr, out: *mut u8) -> i32 {
-    let Ok(v) = text(&s).parse::<f64>() else {
+    let t = text(&s);
+    let Ok(v) = t.parse::<f64>() else {
         return 2;
     };
+    // Digits that round past f64's range (`inf` itself has none).
+    if v.is_infinite() && t.bytes().any(|b| b.is_ascii_digit()) {
+        return 3;
+    }
     // SAFETY: caller contract; elements start after the header.
     unsafe { ptr::copy_nonoverlapping(v.to_ne_bytes().as_ptr(), out.add(HEADER_SIZE), 8) };
     0
@@ -536,6 +541,8 @@ pub mod tests {
         assert_eq!(float(b"1e-3"), (0, 1e-3));
         assert_eq!(float(b"inf"), (0, f64::INFINITY));
         assert_eq!(float(b"1.2.3").0, 2);
+        assert_eq!(float(b"1e400").0, 3);
+        assert_eq!(float(b"-1e400").0, 3);
     }
 
     // Run from `gc_alloc_initializes_header_and_alignment`: the GC heap is

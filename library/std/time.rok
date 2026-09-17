@@ -20,7 +20,7 @@ impl SystemTime {
     pub fn now() -> SystemTime { SystemTime { ns: unsafe { rok_time_realtime_ns() } } }
 
     /// `self - earlier`; throws when `earlier` is later, carrying how much.
-    pub fn duration_since(self, earlier: SystemTime) throws (SystemTimeError) -> Duration {
+    pub const fn duration_since(self, earlier: SystemTime) throws (SystemTimeError) -> Duration {
         if earlier.ns > self.ns {
             throw SystemTimeError { duration: Duration::ns(earlier.ns) - Duration::ns(self.ns) };
         }
@@ -29,30 +29,30 @@ impl SystemTime {
 
     pub fn elapsed(self) throws (SystemTimeError) -> Duration { try SystemTime::now().duration_since(self) }
 
-    pub fn checked_add(self, dur: Duration) -> SystemTime | none {
+    pub const fn checked_add(self, dur: Duration) -> SystemTime | none {
         SystemTime { ns: self.ns.checked_add(dur.as_ns())? }
     }
-    pub fn checked_sub(self, dur: Duration) -> SystemTime | none {
+    pub const fn checked_sub(self, dur: Duration) -> SystemTime | none {
         SystemTime { ns: self.ns.checked_sub(dur.as_ns())? }
     }
 
-    pub fn from_unix(secs: i64, nanos: u32) -> SystemTime {
+    pub const fn from_unix(secs: i64, nanos: u32) -> SystemTime {
         SystemTime { ns: (Duration::sec(secs) + Duration::ns(nanos as i64)).as_ns() }
     }
     /// Whole seconds since the epoch; throws before it.
-    pub fn unix_seconds(self) throws (SystemTimeError) -> i64 { (try self.duration_since(UNIX_EPOCH)).as_secs() }
+    pub const fn unix_seconds(self) throws (SystemTimeError) -> i64 { (try self.duration_since(UNIX_EPOCH)).as_secs() }
     /// Nanoseconds since the epoch (`i64`: no `i128` yet); throws before it.
-    pub fn unix_nanos(self) throws (SystemTimeError) -> i64 { (try self.duration_since(UNIX_EPOCH)).as_ns() }
+    pub const fn unix_nanos(self) throws (SystemTimeError) -> i64 { (try self.duration_since(UNIX_EPOCH)).as_ns() }
 }
 
 impl Add<Duration> for SystemTime {
     type Output = SystemTime;
-    fn add(self, rhs: Duration) -> SystemTime { SystemTime { ns: (Duration::ns(self.ns) + rhs).as_ns() } }
+    const fn add(self, rhs: Duration) -> SystemTime { SystemTime { ns: (Duration::ns(self.ns) + rhs).as_ns() } }
 }
 
 impl Sub<Duration> for SystemTime {
     type Output = SystemTime;
-    fn sub(self, rhs: Duration) -> SystemTime { SystemTime { ns: (Duration::ns(self.ns) - rhs).as_ns() } }
+    const fn sub(self, rhs: Duration) -> SystemTime { SystemTime { ns: (Duration::ns(self.ns) - rhs).as_ns() } }
 }
 
 /// `SystemTime::duration_since` with `earlier` later than `self`.
@@ -79,5 +79,5 @@ pub struct BootTime {
 impl BootTime {
     pub fn now() -> BootTime { BootTime { ns: unsafe { rok_time_boot_ns() } } }
     pub fn elapsed(self) -> Duration { BootTime::now().duration_since(self) }
-    pub fn duration_since(self, earlier: BootTime) -> Duration { Duration::ns(self.ns) - Duration::ns(earlier.ns) }
+    pub const fn duration_since(self, earlier: BootTime) -> Duration { Duration::ns(self.ns) - Duration::ns(earlier.ns) }
 }

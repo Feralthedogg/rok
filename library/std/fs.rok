@@ -55,23 +55,23 @@ pub struct OpenOptions {
 
 impl OpenOptions {
     /// Nothing set (`mode` 0o666): pick at least `read` or `write`.
-    pub fn new() -> OpenOptions {
+    pub const fn new() -> OpenOptions {
         OpenOptions {
             read: false, write: false, append: false, truncate: false,
             create: false, create_new: false, mode: 0o666u32,
         }
     }
-    pub fn default() -> OpenOptions { OpenOptions::new() }
+    pub const fn default() -> OpenOptions { OpenOptions::new() }
 
-    pub fn read(self, on: bool) -> OpenOptions { self.read = on; self }
-    pub fn write(self, on: bool) -> OpenOptions { self.write = on; self }
-    pub fn append(self, on: bool) -> OpenOptions { self.append = on; self }
-    pub fn truncate(self, on: bool) -> OpenOptions { self.truncate = on; self }
-    pub fn create(self, on: bool) -> OpenOptions { self.create = on; self }
-    pub fn create_new(self, on: bool) -> OpenOptions { self.create_new = on; self }
-    pub fn mode(self, mode: u32) -> OpenOptions { self.mode = mode; self }
+    pub const fn read(self, on: bool) -> OpenOptions { self.read = on; self }
+    pub const fn write(self, on: bool) -> OpenOptions { self.write = on; self }
+    pub const fn append(self, on: bool) -> OpenOptions { self.append = on; self }
+    pub const fn truncate(self, on: bool) -> OpenOptions { self.truncate = on; self }
+    pub const fn create(self, on: bool) -> OpenOptions { self.create = on; self }
+    pub const fn create_new(self, on: bool) -> OpenOptions { self.create_new = on; self }
+    pub const fn mode(self, mode: u32) -> OpenOptions { self.mode = mode; self }
 
-    fn bits(self) -> i32 {
+    const fn bits(self) -> i32 {
         let b = 0;
         if self.read { b |= O_READ; }
         if self.write { b |= O_WRITE; }
@@ -91,11 +91,11 @@ pub struct Permissions {
 }
 
 impl Permissions {
-    pub fn from_mode(mode: u32) -> Permissions { Permissions { mode: mode & 0o7777u32 } }
-    pub fn mode(self) -> u32 { self.mode }
+    pub const fn from_mode(mode: u32) -> Permissions { Permissions { mode: mode & 0o7777u32 } }
+    pub const fn mode(self) -> u32 { self.mode }
     /// No write bit for anyone.
-    pub fn readonly(self) -> bool { (self.mode & 0o222u32) == 0u32 }
-    pub fn set_readonly(self, on: bool) -> Permissions {
+    pub const fn readonly(self) -> bool { (self.mode & 0o222u32) == 0u32 }
+    pub const fn set_readonly(self, on: bool) -> Permissions {
         if on { return Permissions { mode: self.mode & 0o7555u32 }; }
         Permissions { mode: self.mode | 0o200u32 }
     }
@@ -114,21 +114,21 @@ pub struct Metadata {
 }
 
 impl Metadata {
-    pub fn len(self) -> u64 { self.len }
-    pub fn is_file(self) -> bool { self.kind == 1 }
-    pub fn is_dir(self) -> bool { self.kind == 2 }
-    pub fn is_symlink(self) -> bool { self.kind == 3 }
-    pub fn permissions(self) -> Permissions { Permissions { mode: self.mode } }
+    pub const fn len(self) -> u64 { self.len }
+    pub const fn is_file(self) -> bool { self.kind == 1 }
+    pub const fn is_dir(self) -> bool { self.kind == 2 }
+    pub const fn is_symlink(self) -> bool { self.kind == 3 }
+    pub const fn permissions(self) -> Permissions { Permissions { mode: self.mode } }
     /// Last modification, Unix seconds (+ `mtime_nanos` within it).
-    pub fn mtime(self) -> i64 { self.mtime }
-    pub fn mtime_nanos(self) -> i64 { self.mtime_ns }
-    pub fn atime(self) -> i64 { self.atime }
-    pub fn ctime(self) -> i64 { self.ctime }
+    pub const fn mtime(self) -> i64 { self.mtime }
+    pub const fn mtime_nanos(self) -> i64 { self.mtime_ns }
+    pub const fn atime(self) -> i64 { self.atime }
+    pub const fn ctime(self) -> i64 { self.ctime }
     /// Last modification as a `SystemTime` (3.3.3). Never throws on
     /// Unix; `throws` keeps room for platforms without the field.
-    pub fn modified(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.mtime, self.mtime_ns as u32) }
+    pub const fn modified(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.mtime, self.mtime_ns as u32) }
     /// Last access as a `SystemTime`.
-    pub fn accessed(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.atime, self.atime_ns as u32) }
+    pub const fn accessed(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.atime, self.atime_ns as u32) }
 }
 
 /// `stat` through the runtime: `fd >= 0` → `fstat(fd)`.
@@ -159,7 +159,7 @@ pub struct File {
     path: str;
 }
 
-fn file_of(fd: i32, path: str) -> File {
+const fn file_of(fd: i32, path: str) -> File {
     unsafe {
         let cell: GcBuf<i32> = buf_new(1);
         cell[0] = fd;
@@ -177,10 +177,10 @@ impl File {
     }
 
     /// Take ownership of an open descriptor; `name` labels its errors.
-    pub fn from_fd(fd: i32, name: str) -> File { file_of(fd, name) }
+    pub const fn from_fd(fd: i32, name: str) -> File { file_of(fd, name) }
 
     /// The OS file descriptor (`-1` once closed).
-    pub fn fd(self) -> i32 {
+    pub const fn fd(self) -> i32 {
         unsafe {
             self.fd[0]
         }
@@ -236,7 +236,7 @@ impl File {
     }
 
     /// Nothing to flush: writes go straight to the OS.
-    pub fn flush(self) throws (IoError) {}
+    pub const fn flush(self) throws (IoError) {}
 
     pub fn sync_all(self) throws (IoError) {
         try check(unsafe { rok_os_fsync(try self.live(), 0) } as i64, self.path);
@@ -318,8 +318,8 @@ pub struct Mmap {
 }
 
 impl Mmap {
-    pub fn len(self) -> usize { if self.live() { self.len } else { 0 } }
-    pub fn is_empty(self) -> bool { self.len() == 0 }
+    pub const fn len(self) -> usize { if self.live() { self.len } else { 0 } }
+    pub const fn is_empty(self) -> bool { self.len() == 0 }
 
     /// Byte `i`, or `none` past the end.
     pub fn get(self, i: usize) -> u8 | none {
@@ -351,7 +351,7 @@ impl Mmap {
         }
     }
 
-    fn live(self) -> bool { unsafe { self.addr[0] != 0 } }
+    const fn live(self) -> bool { unsafe { self.addr[0] != 0 } }
 
     fn copy_into(self, at: usize, out: List<u8>) {
         let (dst, to, n) = region(out);
@@ -569,7 +569,7 @@ impl Writer for File {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.write(buf) }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.write_all(buf); }
     fn write_str(ref self, s: str) throws (IoError) { try self.write_str(s); }
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }
 
 impl Seek for File {
@@ -598,7 +598,7 @@ pub struct Dir {
     path: str;
 }
 
-fn dir_of(fd: i32, path: str) -> Dir {
+const fn dir_of(fd: i32, path: str) -> Dir {
     unsafe {
         let cell: GcBuf<i32> = buf_new(1);
         cell[0] = fd;
@@ -607,7 +607,7 @@ fn dir_of(fd: i32, path: str) -> Dir {
 }
 
 impl Dir {
-    pub fn root() -> Dir { dir_of(-1, "") }
+    pub const fn root() -> Dir { dir_of(-1, "") }
 
     pub fn cwd() throws (IoError) -> Dir { try Dir::root().open_dir(".") }
 
@@ -620,7 +620,7 @@ impl Dir {
         try Dir::root().open_dir(env::temp_dir())
     }
 
-    fn fd(self) -> i32 {
+    const fn fd(self) -> i32 {
         unsafe {
             self.fd[0]
         }
@@ -837,13 +837,13 @@ pub struct DirEntry {
 
 impl DirEntry {
     /// The listed directory's path joined with the name.
-    pub fn path(self) -> Path { self.path }
-    pub fn file_name(self) -> str { self.name }
+    pub const fn path(self) -> Path { self.path }
+    pub const fn file_name(self) -> str { self.name }
     /// Metadata of the entry itself (a symlink is not followed).
-    pub fn metadata(self) -> Metadata { self.meta }
-    pub fn is_dir(self) -> bool { self.meta.is_dir() }
-    pub fn is_file(self) -> bool { self.meta.is_file() }
-    pub fn is_symlink(self) -> bool { self.meta.is_symlink() }
+    pub const fn metadata(self) -> Metadata { self.meta }
+    pub const fn is_dir(self) -> bool { self.meta.is_dir() }
+    pub const fn is_file(self) -> bool { self.meta.is_file() }
+    pub const fn is_symlink(self) -> bool { self.meta.is_symlink() }
 }
 
 /// The entries of one directory, in the order the OS returns them

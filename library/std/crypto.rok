@@ -1,0 +1,26 @@
+// rok::std::crypto — the OS random source. The algorithms are
+// `rok::core::crypto` (pure computation); only randomness needs the OS.
+
+/// Cryptographically secure random bytes from the OS (`getrandom` on
+/// Linux, `getentropy` on macOS, `BCryptGenRandom` on Windows,
+/// `random_get` on WASI). A failing source is not recoverable: it
+/// panics.
+pub mod random {
+    use rok::core::collections::raw::GcBuf;
+
+    /// Overwrite every byte of `buf` with random bytes.
+    pub fn fill(buf: List<u8>) {
+        if buf.len() == 0 { return; }
+        let (b, off, len) = unsafe { buf[0:buf.len()].raw_parts() };
+        let r = unsafe { rok_os_random(b, off, len) };
+        if r != 0 { panic(f"OS random source failed (error {-r})"); }
+    }
+
+    /// `n` random bytes.
+    pub fn bytes(n: usize) -> List<u8> {
+        let out: List<u8> = List::with_capacity(n);
+        for _ in 0..n { out.push(0u8); }
+        fill(out);
+        out
+    }
+}

@@ -668,3 +668,12 @@ unsafe extern "C" {
     #[link_name = "_crt_atexit"]
     pub fn crt_atexit(f: extern "C" fn()) -> i32;
 }
+
+// Randomness (bcrypt) and loading modules outside the import set.
+pub const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 2;
+
+unsafe extern "system" {
+    pub fn BCryptGenRandom(alg: *mut c_void, buf: *mut u8, len: u32, flags: u32) -> NTSTATUS;
+    pub fn LoadLibraryW(name: *const u16) -> HANDLE;
+    pub fn GetProcAddress(module: HANDLE, name: *const u8) -> *mut c_void;
+}

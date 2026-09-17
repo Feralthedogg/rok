@@ -1,0 +1,411 @@
+// GF(2^255 - 19) and the edwards25519 group, shared by X25519 and
+// Ed25519. Field elements: ten signed limbs of 26 / 25 bits alternately
+// (radix 2^25.5), products in i64, so 32-bit targets need no 128-bit
+// multiply. All field and group operations run in constant time;
+// callers choose where variable time is allowed (public data only).
+
+/// A field element: limb `i` holds bits `ceil(25.5 i)..`.
+pub(pkg) type Fe25519 = [i64; 10];
+
+const D_BYTES: [u8; 32] = [
+    0xa3u8, 0x78u8, 0x59u8, 0x13u8, 0xcau8, 0x4du8, 0xebu8, 0x75u8, 0xabu8, 0xd8u8, 0x41u8, 0x41u8, 0x4du8, 0x0au8, 0x70u8, 0x00u8,
+    0x98u8, 0xe8u8, 0x79u8, 0x77u8, 0x79u8, 0x40u8, 0xc7u8, 0x8cu8, 0x73u8, 0xfeu8, 0x6fu8, 0x2bu8, 0xeeu8, 0x6cu8, 0x03u8, 0x52u8,
+];
+
+const D2_BYTES: [u8; 32] = [
+    0x59u8, 0xf1u8, 0xb2u8, 0x26u8, 0x94u8, 0x9bu8, 0xd6u8, 0xebu8, 0x56u8, 0xb1u8, 0x83u8, 0x82u8, 0x9au8, 0x14u8, 0xe0u8, 0x00u8,
+    0x30u8, 0xd1u8, 0xf3u8, 0xeeu8, 0xf2u8, 0x80u8, 0x8eu8, 0x19u8, 0xe7u8, 0xfcu8, 0xdfu8, 0x56u8, 0xdcu8, 0xd9u8, 0x06u8, 0x24u8,
+];
+
+const SQRTM1_BYTES: [u8; 32] = [
+    0xb0u8, 0xa0u8, 0x0eu8, 0x4au8, 0x27u8, 0x1bu8, 0xeeu8, 0xc4u8, 0x78u8, 0xe4u8, 0x2fu8, 0xadu8, 0x06u8, 0x18u8, 0x43u8, 0x2fu8,
+    0xa7u8, 0xd7u8, 0xfbu8, 0x3du8, 0x99u8, 0x00u8, 0x4du8, 0x2bu8, 0x0bu8, 0xdfu8, 0xc1u8, 0x4fu8, 0x80u8, 0x24u8, 0x83u8, 0x2bu8,
+];
+
+/// The base point's encoding (y = 4/5, x even).
+const BASE_BYTES: [u8; 32] = [
+    0x58u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8,
+    0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8, 0x66u8,
+];
+
+/// p = 2^255 - 19, little-endian.
+const P_BYTES: [u8; 32] = [
+    0xedu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8,
+    0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0x7fu8,
+];
+
+fn width(i: usize) -> u64 { if i % 2 == 0 { 26u64 } else { 25u64 } }
+
+pub(pkg) fn f25519_zero() -> Fe25519 { [0i64; 10] }
+
+pub(pkg) fn f25519_one() -> Fe25519 {
+    let h = f25519_zero();
+    h[0] = 1i64;
+    h
+}
+
+pub(pkg) fn f25519_small(v: i64) -> Fe25519 {
+    let h = f25519_zero();
+    h[0] = v;
+    h
+}
+
+/// Limbs back to |h_i| <= 2^25 (2^24 for odd), rounding carries.
+fn carry(h: Fe25519) -> Fe25519 {
+    for i in 0usize..11 {
+        let k = i % 10;
+        let w = width(k);
+        let c = (h[k] + (1i64 << (w - 1u64) as i64)) >> w as i64;
+        h[k] -= c << w as i64;
+        if k == 9 { h[0] += c * 19i64; } else { h[k + 1] += c; }
+    }
+    h
+}
+
+pub(pkg) fn f25519_add(f: Fe25519, g: Fe25519) -> Fe25519 {
+    let h = f25519_zero();
+    for i in 0usize..10 { h[i] = f[i] + g[i]; }
+    carry(h)
+}
+
+pub(pkg) fn f25519_sub(f: Fe25519, g: Fe25519) -> Fe25519 {
+    let h = f25519_zero();
+    for i in 0usize..10 { h[i] = f[i] - g[i]; }
+    carry(h)
+}
+
+pub(pkg) fn f25519_neg(f: Fe25519) -> Fe25519 { f25519_sub(f25519_zero(), f) }
+
+pub(pkg) fn f25519_mul(f: Fe25519, g: Fe25519) -> Fe25519 {
+    let h = f25519_zero();
+    for i in 0usize..10 {
+        let fi = f[i];
+        let fi2 = if i % 2 == 1 { fi * 2i64 } else { fi };
+        for j in 0usize..10 {
+            // Two odd limbs overlap by one bit: count it twice.
+            let p = if j % 2 == 1 { fi2 * g[j] } else { fi * g[j] };
+            if i + j >= 10 { h[i + j - 10] += p * 19i64; } else { h[i + j] += p; }
+        }
+    }
+    carry(h)
+}
+
+pub(pkg) fn f25519_sq(f: Fe25519) -> Fe25519 { f25519_mul(f, f) }
+
+fn f25519_sq_n(f: Fe25519, n: usize) -> Fe25519 {
+    let h = f;
+    for _ in 0usize..n { h = f25519_sq(h); }
+    h
+}
+
+/// `(z^11, z^(2^250 - 1))`, the shared prefix of the inversion and
+/// square root chains.
+fn chain(z: Fe25519) -> (Fe25519, Fe25519) {
+    let t0 = f25519_sq(z);
+    let t1 = f25519_mul(z, f25519_sq_n(t0, 2));
+    let z11 = f25519_mul(t0, t1);
+    let t31 = f25519_mul(t1, f25519_sq(z11));
+    let e10 = f25519_mul(f25519_sq_n(t31, 5), t31);
+    let e20 = f25519_mul(f25519_sq_n(e10, 10), e10);
+    let e40 = f25519_mul(f25519_sq_n(e20, 20), e20);
+    let e50 = f25519_mul(f25519_sq_n(e40, 10), e10);
+    let e100 = f25519_mul(f25519_sq_n(e50, 50), e50);
+    let e200 = f25519_mul(f25519_sq_n(e100, 100), e100);
+    let e250 = f25519_mul(f25519_sq_n(e200, 50), e50);
+    (z11, e250)
+}
+
+/// `z^(p - 2)` (0 for 0).
+pub(pkg) fn f25519_invert(z: Fe25519) -> Fe25519 {
+    let (z11, e250) = chain(z);
+    f25519_mul(f25519_sq_n(e250, 5), z11)
+}
+
+/// `z^((p - 5) / 8)`.
+fn f25519_pow22523(z: Fe25519) -> Fe25519 {
+    let (_, e250) = chain(z);
+    f25519_mul(f25519_sq_n(e250, 2), z)
+}
+
+/// Swap `f` and `g` when `b` is 1, without branching on `b`.
+pub(pkg) fn f25519_cswap(ref f: Fe25519, ref g: Fe25519, b: i64) {
+    let m = -b;
+    for i in 0usize..10 {
+        let t = m & (f[i] ^ g[i]);
+        f[i] ^= t;
+        g[i] ^= t;
+    }
+}
+
+/// `g` when `b` is 1, else `f`, without branching on `b`.
+pub(pkg) fn f25519_select(f: Fe25519, g: Fe25519, b: i64) -> Fe25519 {
+    let m = -b;
+    let h = f;
+    for i in 0usize..10 { h[i] ^= m & (f[i] ^ g[i]); }
+    h
+}
+
+/// The canonical 32-byte little-endian encoding.
+pub(pkg) fn f25519_to_bytes(f: Fe25519) -> [u8; 32] {
+    let h = carry(f);
+    let q = (19i64 * h[9] + (1i64 << 24)) >> 25;
+    for i in 0usize..10 {
+        q = (h[i] + q) >> width(i) as i64;
+    }
+    h[0] += 19i64 * q;
+    for i in 0usize..10 {
+        let w = width(i);
+        let c = h[i] >> w as i64;
+        h[i] -= c << w as i64;
+        if i < 9 { h[i + 1] += c; }
+    }
+    let out: [u8; 32] = [0u8; 32];
+    let acc = 0u64;
+    let n = 0u64;
+    let k = 0usize;
+    for i in 0usize..10 {
+        acc |= (h[i] as u64) << n;
+        n += width(i);
+        while n >= 8u64 {
+            out[k] = acc as u8;
+            k += 1;
+            acc >>= 8u64;
+            n -= 8u64;
+        }
+    }
+    out[31] = acc as u8;
+    out
+}
+
+/// A field element from 32 bytes; bit 255 is ignored, values >= p
+/// are taken mod p.
+pub(pkg) fn f25519_from_bytes(b: Slice<u8>) -> Fe25519 {
+    let h = f25519_zero();
+    let acc = 0u64;
+    let n = 0u64;
+    let k = 0usize;
+    for i in 0usize..10 {
+        let w = width(i);
+        while n < w {
+            let byte = if k == 31 { b[31] & 0x7fu8 } else { b[k] };
+            acc |= (byte as u64) << n;
+            k += 1;
+            n += 8u64;
+        }
+        h[i] = (acc & ((1u64 << w) - 1u64)) as i64;
+        acc >>= w;
+        n -= w;
+    }
+    h
+}
+
+fn f25519_const(b: [u8; 32]) -> Fe25519 { f25519_from_bytes(b[0:32]) }
+
+/// Low bit of the canonical form.
+pub(pkg) fn f25519_is_negative(f: Fe25519) -> i64 { (f25519_to_bytes(f)[0] & 1u8) as i64 }
+
+/// 1 when `f` is 0 mod p, else 0; constant time.
+pub(pkg) fn f25519_is_zero(f: Fe25519) -> i64 {
+    let b = f25519_to_bytes(f);
+    let d = 0u32;
+    for i in 0usize..32 { d |= b[i] as u32; }
+    (((d as u64).wrapping_sub(1u64)) >> 63u64) as i64
+}
+
+/// Whether 32 bytes encode a value below p, ignoring bit 255.
+fn canonical(b: Slice<u8>) -> bool {
+    let i = 31;
+    while i >= 0 {
+        let x = if i == 31 { b[31] & 0x7fu8 } else { b[i as usize] };
+        if x != P_BYTES[i as usize] { return x < P_BYTES[i as usize]; }
+        i -= 1;
+    }
+    false
+}
+
+// ---- edwards25519: -x^2 + y^2 = 1 + d x^2 y^2, extended coordinates ----
+
+/// A point `(X : Y : Z : T)`, `x = X/Z`, `y = Y/Z`, `xy = T/Z`.
+pub(pkg) struct EdPoint {
+    x: Fe25519;
+    y: Fe25519;
+    z: Fe25519;
+    t: Fe25519;
+}
+
+pub(pkg) fn ge_identity() -> EdPoint {
+    EdPoint { x: f25519_zero(), y: f25519_one(), z: f25519_one(), t: f25519_zero() }
+}
+
+/// `p + q` (complete: any inputs, doubling included).
+pub(pkg) fn ge_add(p: EdPoint, q: EdPoint) -> EdPoint {
+    let a = f25519_mul(f25519_sub(p.y, p.x), f25519_sub(q.y, q.x));
+    let b = f25519_mul(f25519_add(p.y, p.x), f25519_add(q.y, q.x));
+    let c = f25519_mul(f25519_mul(p.t, f25519_const(D2_BYTES)), q.t);
+    let zz = f25519_mul(p.z, q.z);
+    let d = f25519_add(zz, zz);
+    let e = f25519_sub(b, a);
+    let f = f25519_sub(d, c);
+    let g = f25519_add(d, c);
+    let h = f25519_add(b, a);
+    EdPoint { x: f25519_mul(e, f), y: f25519_mul(g, h), z: f25519_mul(f, g), t: f25519_mul(e, h) }
+}
+
+pub(pkg) fn ge_double(p: EdPoint) -> EdPoint {
+    let a = f25519_sq(p.x);
+    let b = f25519_sq(p.y);
+    let zz = f25519_sq(p.z);
+    let c = f25519_add(zz, zz);
+    let h = f25519_add(a, b);
+    let e = f25519_sub(h, f25519_sq(f25519_add(p.x, p.y)));
+    let g = f25519_sub(a, b);
+    let f = f25519_add(c, g);
+    EdPoint { x: f25519_mul(e, f), y: f25519_mul(g, h), z: f25519_mul(f, g), t: f25519_mul(e, h) }
+}
+
+pub(pkg) fn ge_negate(p: EdPoint) -> EdPoint {
+    EdPoint { x: f25519_neg(p.x), y: p.y, z: p.z, t: f25519_neg(p.t) }
+}
+
+fn ge_select(p: EdPoint, q: EdPoint, b: i64) -> EdPoint {
+    EdPoint { x: f25519_select(p.x, q.x, b), y: f25519_select(p.y, q.y, b), z: f25519_select(p.z, q.z, b), t: f25519_select(p.t, q.t, b) }
+}
+
+pub(pkg) fn ge_encode(p: EdPoint) -> List<u8> {
+    let zi = f25519_invert(p.z);
+    let x = f25519_mul(p.x, zi);
+    let y = f25519_to_bytes(f25519_mul(p.y, zi));
+    y[31] |= (f25519_is_negative(x) as u8) << 7u8;
+    y[0:32].to_list()
+}
+
+/// The point a 32-byte encoding names; `none` for a non-canonical y,
+/// a y off the curve, or x = 0 with the sign bit set (RFC 8032 5.1.3).
+/// Variable time: for public points.
+pub(pkg) fn ge_decode(b: Slice<u8>) -> EdPoint | none {
+    if b.len() != 32 || !canonical(b) { return none; }
+    let y = f25519_from_bytes(b);
+    let sign = ((b[31] >> 7u8) & 1u8) as i64;
+    let yy = f25519_sq(y);
+    let u = f25519_sub(yy, f25519_one());
+    let v = f25519_add(f25519_mul(yy, f25519_const(D_BYTES)), f25519_one());
+    let v3 = f25519_mul(f25519_sq(v), v);
+    let x = f25519_mul(f25519_mul(u, v3), f25519_pow22523(f25519_mul(u, f25519_mul(f25519_sq(v3), v))));
+    let vxx = f25519_mul(v, f25519_sq(x));
+    if f25519_is_zero(f25519_sub(vxx, u)) == 0i64 {
+        if f25519_is_zero(f25519_add(vxx, u)) == 0i64 { return none; }
+        x = f25519_mul(x, f25519_const(SQRTM1_BYTES));
+    }
+    if f25519_is_zero(x) == 1i64 && sign == 1i64 { return none; }
+    if f25519_is_negative(x) != sign { x = f25519_neg(x); }
+    EdPoint { x, y, z: f25519_one(), t: f25519_mul(x, y) }
+}
+
+pub(pkg) fn ge_base() -> EdPoint {
+    match ge_decode(BASE_BYTES[0:32]) {
+        p: EdPoint => p,
+        none => ge_identity(),
+    }
+}
+
+/// `[k]p` for a 32-byte little-endian scalar, constant time: 4-bit
+/// fixed windows, each table entry read by a full masked scan.
+pub(pkg) fn ge_mul_ct(k: [u8; 32], p: EdPoint) -> EdPoint {
+    let table: List<EdPoint> = List::with_capacity(16);
+    table.push(ge_identity());
+    for i in 1usize..16 { table.push(ge_add(table[i - 1], p)); }
+    let r = ge_identity();
+    let i = 64usize;
+    while i > 0 {
+        i -= 1;
+        r = ge_double(ge_double(ge_double(ge_double(r))));
+        let nib = ((k[i / 2] >> ((i % 2) * 4) as u8) & 15u8) as i64;
+        let e = ge_identity();
+        for j in 0usize..16 {
+            // 1 exactly when j == nib.
+            let eq = ((((j as i64) ^ nib) - 1i64) >> 63) & 1i64;
+            e = ge_select(e, table[j], eq);
+        }
+        r = ge_add(r, e);
+    }
+    r
+}
+
+// ---- scalars mod L = 2^252 + 27742317777372353535851937790883648493 ----
+
+const L_WORDS: [u32; 8] = [
+    0x5cf5d3edu32, 0x5812631au32, 0xa2f79cd6u32, 0x14def9deu32,
+    0x00000000u32, 0x00000000u32, 0x00000000u32, 0x10000000u32,
+];
+
+/// Little-endian bytes (any length) mod L, as 32 bytes. Constant time
+/// in the value: one shift-in and masked subtraction per bit.
+pub(pkg) fn sc25519_reduce(b: Slice<u8>) -> [u8; 32] {
+    let r: [u32; 8] = [0u32; 8];
+    let i = b.len() * 8;
+    while i > 0 {
+        i -= 1;
+        let bit = ((b[i / 8] >> (i % 8) as u8) & 1u8) as u32;
+        // r = 2r + bit (r < L < 2^253, so no overflow).
+        let c = bit;
+        for j in 0usize..8 {
+            let v = r[j];
+            r[j] = (v << 1u32) | c;
+            c = v >> 31u32;
+        }
+        // r -= L when r >= L.
+        let d: [u32; 8] = [0u32; 8];
+        let borrow = 0u64;
+        for j in 0usize..8 {
+            let s = (r[j] as u64).wrapping_sub(L_WORDS[j] as u64).wrapping_sub(borrow);
+            d[j] = s as u32;
+            borrow = (s >> 63u64) & 1u64;
+        }
+        let m = (borrow as u32).wrapping_sub(1u32);
+        for j in 0usize..8 { r[j] = (d[j] & m) | (r[j] & ~m); }
+    }
+    let out: [u8; 32] = [0u8; 32];
+    for j in 0usize..32 { out[j] = (r[j / 4] >> (8 * (j % 4)) as u32) as u8; }
+    out
+}
+
+/// `(a * b + c) mod L` for 32-byte scalars, constant time.
+pub(pkg) fn sc25519_muladd(a: [u8; 32], b: [u8; 32], c: [u8; 32]) -> [u8; 32] {
+    let x: [u64; 8] = [0u64; 8];
+    let y: [u64; 8] = [0u64; 8];
+    for j in 0usize..32 {
+        x[j / 4] |= (a[j] as u64) << (8 * (j % 4)) as u64;
+        y[j / 4] |= (b[j] as u64) << (8 * (j % 4)) as u64;
+    }
+    let p: [u64; 17] = [0u64; 17];
+    for j in 0usize..32 { p[j / 4] |= (c[j] as u64) << (8 * (j % 4)) as u64; }
+    for i in 0usize..8 {
+        let carry = 0u64;
+        for j in 0usize..8 {
+            // < 2^64: (2^32 - 1)^2 + 2 (2^32 - 1).
+            let t = x[i] * y[j] + p[i + j] + carry;
+            p[i + j] = t & 0xffffffffu64;
+            carry = t >> 32u64;
+        }
+        for k in i + 8..17 {
+            let t = p[k] + carry;
+            p[k] = t & 0xffffffffu64;
+            carry = t >> 32u64;
+        }
+    }
+    let bytes: [u8; 64] = [0u8; 64];
+    for j in 0usize..64 { bytes[j] = (p[j / 4] >> (8 * (j % 4)) as u64) as u8; }
+    sc25519_reduce(bytes[0:64])
+}
+
+/// Whether a 32-byte scalar is below L (variable time).
+pub(pkg) fn sc25519_is_canonical(b: Slice<u8>) -> bool {
+    let i = 7;
+    while i >= 0 {
+        let w = (b[4 * i as usize] as u32) | ((b[4 * i as usize + 1] as u32) << 8u32)
+            | ((b[4 * i as usize + 2] as u32) << 16u32) | ((b[4 * i as usize + 3] as u32) << 24u32);
+        if w != L_WORDS[i as usize] { return w < L_WORDS[i as usize]; }
+        i -= 1;
+    }
+    false
+}

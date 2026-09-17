@@ -1,0 +1,24 @@
+// expect-exit: 0
+// expect-stdout:
+// 4 2 9 7 b 5 2
+// 11 11 12 12 7 5
+
+// 5.8.6: `pub use p::*` / `p::**` re-export what they reach, from a
+// file module too; a re-export under `p` is reached as well.
+mod re;
+pub mod other;
+pub mod deep;
+pub struct V { pub a: i32; }
+pub fn f() -> i32 { 4 }
+pub enum E { A, B }
+pub trait T { fn t(self) -> i32; }
+impl T for i32 { fn t(self) -> i32 { self + 1 } }
+fn hidden() -> i32 { 0 }
+
+fn main() {
+    let e = match re::E::B { re::E::A => "a", re::E::B => "b" };
+    let v: re::V = re::V { a: 1 };
+    println(f"{re::f()} {re::V { a: 2 }.a} {re::g()} {re::h()} {e} {re::all::d()} {v.a.t()}");
+    println(f"{re::LIMIT} {re::all::LIMIT} {re::all::COUNT} {re::deep::COUNT} {re::d::inner::h()} {re::deep::inner::d()}");
+    let _ = hidden();
+}

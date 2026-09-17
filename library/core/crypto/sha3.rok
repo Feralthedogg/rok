@@ -1,0 +1,186 @@
+// SHA-3 (FIPS 202): SHA3-256, SHA3-512 and the SHAKE128 / SHAKE256
+// extendable-output functions, all over Keccak-f[1600].
+
+use sup::{view, Bytes};
+
+const RC: [u64; 24] = [
+    0x0000000000000001u64, 0x0000000000008082u64, 0x800000000000808au64, 0x8000000080008000u64,
+    0x000000000000808bu64, 0x0000000080000001u64, 0x8000000080008081u64, 0x8000000000008009u64,
+    0x000000000000008au64, 0x0000000000000088u64, 0x0000000080008009u64, 0x000000008000000au64,
+    0x000000008000808bu64, 0x800000000000008bu64, 0x8000000000008089u64, 0x8000000000008003u64,
+    0x8000000000008002u64, 0x8000000000000080u64, 0x000000000000800au64, 0x800000008000000au64,
+    0x8000000080008081u64, 0x8000000000008080u64, 0x0000000080000001u64, 0x8000000080008008u64,
+];
+
+// Rho rotations and the pi lane order, walked along the pi cycle.
+const ROT: [u32; 24] = [1u32, 3u32, 6u32, 10u32, 15u32, 21u32, 28u32, 36u32, 45u32, 55u32, 2u32, 14u32,
+    27u32, 41u32, 56u32, 8u32, 25u32, 43u32, 62u32, 18u32, 39u32, 61u32, 20u32, 44u32];
+const PI: [usize; 24] = [10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1];
+
+/// A Keccak sponge: `rate` bytes per block, domain byte `pad`.
+struct Keccak {
+    st: [u64; 25];
+    rate: usize;
+    pos: usize;
+    pad: u8;
+    squeezing: bool;
+}
+
+impl Keccak {
+    fn new(rate: usize, pad: u8) -> Keccak {
+        Keccak { st: [0u64; 25], rate, pos: 0, pad, squeezing: false }
+    }
+
+    fn absorb(ref self, data: Bytes) {
+        if self.squeezing { panic("Keccak: update after squeeze"); }
+        let st = self.st;
+        let p = self.pos;
+        for b in view(data) {
+            st[p / 8] = st[p / 8] ^ ((b as u64) << ((8 * (p % 8)) as u64));
+            p += 1;
+            if p == self.rate {
+                st = keccak_f(st);
+                p = 0;
+            }
+        }
+        self.st = st;
+        self.pos = p;
+    }
+
+    fn squeeze(ref self, n: usize) -> List<u8> {
+        let st = self.st;
+        let p = self.pos;
+        if !self.squeezing {
+            st[p / 8] = st[p / 8] ^ ((self.pad as u64) << ((8 * (p % 8)) as u64));
+            st[(self.rate - 1) / 8] = st[(self.rate - 1) / 8] ^ 0x8000000000000000u64;
+            st = keccak_f(st);
+            p = 0;
+            self.squeezing = true;
+        }
+        let out: List<u8> = List::with_capacity(n);
+        for _ in 0..n {
+            if p == self.rate {
+                st = keccak_f(st);
+                p = 0;
+            }
+            out.push((st[p / 8] >> ((8 * (p % 8)) as u64)) as u8);
+            p += 1;
+        }
+        self.st = st;
+        self.pos = p;
+        out
+    }
+}
+
+/// Keccak-f[1600].
+fn keccak_f(a: [u64; 25]) -> [u64; 25] {
+    for r in 0..24 {
+        let c0 = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
+        let c1 = a[1] ^ a[6] ^ a[11] ^ a[16] ^ a[21];
+        let c2 = a[2] ^ a[7] ^ a[12] ^ a[17] ^ a[22];
+        let c3 = a[3] ^ a[8] ^ a[13] ^ a[18] ^ a[23];
+        let c4 = a[4] ^ a[9] ^ a[14] ^ a[19] ^ a[24];
+        let d0 = c4 ^ c1.rotate_left(1u32);
+        let d1 = c0 ^ c2.rotate_left(1u32);
+        let d2 = c1 ^ c3.rotate_left(1u32);
+        let d3 = c2 ^ c4.rotate_left(1u32);
+        let d4 = c3 ^ c0.rotate_left(1u32);
+        for j in 0usize..5 {
+            a[5 * j] = a[5 * j] ^ d0;
+            a[5 * j + 1] = a[5 * j + 1] ^ d1;
+            a[5 * j + 2] = a[5 * j + 2] ^ d2;
+            a[5 * j + 3] = a[5 * j + 3] ^ d3;
+            a[5 * j + 4] = a[5 * j + 4] ^ d4;
+        }
+        let t = a[1];
+        for i in 0..24 {
+            let j = PI[i];
+            let x = a[j];
+            a[j] = t.rotate_left(ROT[i]);
+            t = x;
+        }
+        for j in 0usize..5 {
+            let b0 = a[5 * j];
+            let b1 = a[5 * j + 1];
+            let b2 = a[5 * j + 2];
+            let b3 = a[5 * j + 3];
+            let b4 = a[5 * j + 4];
+            a[5 * j] = b0 ^ (~b1 & b2);
+            a[5 * j + 1] = b1 ^ (~b2 & b3);
+            a[5 * j + 2] = b2 ^ (~b3 & b4);
+            a[5 * j + 3] = b3 ^ (~b4 & b0);
+            a[5 * j + 4] = b4 ^ (~b0 & b1);
+        }
+        a[0] = a[0] ^ RC[r];
+    }
+    a
+}
+
+/// SHA3-256: 32-byte digests.
+pub struct Sha3_256 {
+    k: Keccak;
+}
+
+impl Sha3_256 {
+    pub const OUTPUT_LEN: usize = 32;
+
+    pub fn new() -> Sha3_256 { Sha3_256 { k: Keccak::new(136, 0x06u8) } }
+
+    pub fn digest(data: Bytes) -> List<u8> {
+        let h = Sha3_256::new();
+        h.update(data);
+        h.finish()
+    }
+
+    pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
+
+    pub fn finish(self) -> List<u8> { self.k.squeeze(32) }
+}
+
+/// SHA3-512: 64-byte digests.
+pub struct Sha3_512 {
+    k: Keccak;
+}
+
+impl Sha3_512 {
+    pub const OUTPUT_LEN: usize = 64;
+
+    pub fn new() -> Sha3_512 { Sha3_512 { k: Keccak::new(72, 0x06u8) } }
+
+    pub fn digest(data: Bytes) -> List<u8> {
+        let h = Sha3_512::new();
+        h.update(data);
+        h.finish()
+    }
+
+    pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
+
+    pub fn finish(self) -> List<u8> { self.k.squeeze(64) }
+}
+
+/// SHAKE128: `update` the input, then `squeeze` output in any pieces.
+/// `update` after the first `squeeze` is not allowed.
+pub struct Shake128 {
+    k: Keccak;
+}
+
+impl Shake128 {
+    pub fn new() -> Shake128 { Shake128 { k: Keccak::new(168, 0x1fu8) } }
+
+    pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
+
+    pub fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
+}
+
+/// SHAKE256, like `Shake128`.
+pub struct Shake256 {
+    k: Keccak;
+}
+
+impl Shake256 {
+    pub fn new() -> Shake256 { Shake256 { k: Keccak::new(136, 0x1fu8) } }
+
+    pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
+
+    pub fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
+}

@@ -28,6 +28,7 @@ const STT_NOTYPE: u8 = 0;
 const STT_OBJECT: u8 = 1;
 const STT_FUNC: u8 = 2;
 const STT_SECTION: u8 = 3;
+const STT_TLS: u8 = 6;
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
 
@@ -144,6 +145,17 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     let mut index = vec![0usize; obj.syms.len()];
     for (k, &i) in order.iter().enumerate() {
         index[i] = 1 + nsect_syms + k;
+    }
+    // A thread-local (the runtime's, undefined here) is STT_TLS: GNU ld
+    // rejects a TLS definition for a reference of another type.
+    let mut tls = vec![false; obj.syms.len()];
+    for r in pieces.iter().flat_map(|p| &p.relocs) {
+        if matches!(
+            r.kind,
+            RelKind::X86Tls | RelKind::TlvPage21 | RelKind::TlvPageOff12
+        ) {
+            tls[r.sym as usize] = true;
+        }
     }
     // The section symbol of `sym`'s piece and the object address `at`
     // as an offset in it.
@@ -307,7 +319,7 @@ pub fn write(obj: &Obj) -> Vec<u8> {
                     STT_OBJECT
                 },
             ),
-            _ => (0, 0, 0, STT_NOTYPE),
+            _ => (0, 0, 0, if tls[i] { STT_TLS } else { STT_NOTYPE }),
         };
         let bind = if local(i) {
             STB_LOCAL

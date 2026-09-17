@@ -1440,7 +1440,7 @@ impl Printer {
             }
             ExprKind::Await(x) => {
                 self.s("await ");
-                self.expr(x);
+                self.operand(x);
             }
             ExprKind::InModule(_, x) => self.expr(x),
             ExprKind::Yield(v) => {
@@ -1581,6 +1581,9 @@ impl Printer {
                     hashes.push('#');
                 }
                 let _ = write!(self.out, "r{hashes}\"{s}\"{hashes}");
+            }
+            Literal::ByteStr(s) => {
+                let _ = write!(self.out, "b\"{s}\"");
             }
             Literal::FStr(s) => {
                 let _ = write!(self.out, "f\"{s}\"");

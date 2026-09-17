@@ -38,14 +38,14 @@ pub enum Sign {
 
 // The packed spec's align / sign bytes (`'\0'`: absent).
 
-fn align_of_byte(a: char) -> Alignment | none {
+const fn align_of_byte(a: char) -> Alignment | none {
     if a == '<' { return Alignment::Left; }
     if a == '>' { return Alignment::Right; }
     if a == '^' { return Alignment::Center; }
     if a == '=' { Alignment::Equal } else { none }
 }
 
-fn align_byte(a: Alignment | none) -> char {
+const fn align_byte(a: Alignment | none) -> char {
     let k: Alignment = a else { return '\0'; };
     match k {
         Alignment::Left => '<',
@@ -55,13 +55,13 @@ fn align_byte(a: Alignment | none) -> char {
     }
 }
 
-fn sign_of_byte(s: char) -> Sign | none {
+const fn sign_of_byte(s: char) -> Sign | none {
     if s == '+' { return Sign::Plus; }
     if s == '-' { return Sign::Minus; }
     if s == ' ' { Sign::Space } else { none }
 }
 
-fn sign_byte(s: Sign | none) -> char {
+const fn sign_byte(s: Sign | none) -> char {
     let k: Sign = s else { return '\0'; };
     match k {
         Sign::Plus => '+',
@@ -98,7 +98,7 @@ pub struct FormatSpec {
 
 impl FormatSpec {
     /// The empty spec.
-    pub fn new() -> FormatSpec {
+    pub const fn new() -> FormatSpec {
         FormatSpec {
             fill: ' ', align: none, sign: none, alt: false, zero: false,
             width: none, precision: none, ty: '\0',
@@ -141,7 +141,7 @@ const PLAIN_FLAGS: u64 = 32;
 const PLAIN_COUNTS: u64 = 0xFFFFFFFFFFFFFFFF;
 
 /// A packed count: all ones when absent.
-fn count_bits(v: usize | none) -> u64 {
+const fn count_bits(v: usize | none) -> u64 {
     match v {
         n: usize => if n < 0xFFFFFFFF { n as u64 } else { 0xFFFFFFFEu64 },
         none => 0xFFFFFFFFu64,
@@ -194,26 +194,26 @@ impl Formatter {
         self.t = unsafe { rok_fmt_integral(self.t, self.flags, self.counts, nonneg, prefix, buf) };
     }
 
-    pub fn fill(self) -> char { char::from_u32((self.flags & 0xFFFFFFFFu64) as u32) ?? ' ' }
+    pub const fn fill(self) -> char { char::from_u32((self.flags & 0xFFFFFFFFu64) as u32) ?? ' ' }
 
     /// `none` when the spec names no alignment: numbers then align
     /// right, other values left.
-    pub fn align(self) -> Alignment | none { align_of_byte(self.byte(32u64)) }
+    pub const fn align(self) -> Alignment | none { align_of_byte(self.byte(32u64)) }
 
-    pub fn sign(self) -> Sign | none { sign_of_byte(self.byte(40u64)) }
+    pub const fn sign(self) -> Sign | none { sign_of_byte(self.byte(40u64)) }
 
-    pub fn alternate(self) -> bool { ((self.flags >> 56u64) & 1u64) != 0u64 }
-    pub fn pad_zero(self) -> bool { ((self.flags >> 57u64) & 1u64) != 0u64 }
-    pub fn width(self) -> usize | none { count_of(self.counts) }
-    pub fn precision(self) -> usize | none { count_of(self.counts >> 32u64) }
+    pub const fn alternate(self) -> bool { ((self.flags >> 56u64) & 1u64) != 0u64 }
+    pub const fn pad_zero(self) -> bool { ((self.flags >> 57u64) & 1u64) != 0u64 }
+    pub const fn width(self) -> usize | none { count_of(self.counts) }
+    pub const fn precision(self) -> usize | none { count_of(self.counts >> 32u64) }
 
     /// The spec's type letter (`'\0'` for none or `s d g`).
-    pub(pkg) fn ty(self) -> char { self.byte(48u64) }
+    pub(pkg) const fn ty(self) -> char { self.byte(48u64) }
 
-    fn byte(self, at: u64) -> char { (((self.flags >> at) & 0xFFu64) as u8) as char }
+    const fn byte(self, at: u64) -> char { (((self.flags >> at) & 0xFFu64) as u8) as char }
 }
 
-fn count_of(v: u64) -> usize | none {
+const fn count_of(v: u64) -> usize | none {
     let n = v & 0xFFFFFFFFu64;
     if n == 0xFFFFFFFFu64 { none } else { n as usize }
 }

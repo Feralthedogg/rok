@@ -139,6 +139,7 @@ impl<'src> Lexer<'src> {
                         | TokenKind::FloatLit(_)
                         | TokenKind::StrLit(_)
                         | TokenKind::RawStrLit(_)
+                        | TokenKind::ByteStrLit(_)
                         | TokenKind::FStrEnd(_)
                         | TokenKind::CharLit(_)
                         | TokenKind::CCharLit(_)
@@ -281,6 +282,7 @@ impl<'src> Lexer<'src> {
                 TokenKind::FStrStart(triple)
             }
             b'c' if next == Some(b'\'') => self.lex_char_lit(true),
+            b'b' if next == Some(b'"') => self.lex_byte_str_lit(),
             d if d.is_ascii_digit() => self.lex_number(),
             _ if !self.ext_ops.is_empty() && self.peek_ext_op().is_some() => {
                 let op = self.peek_ext_op().unwrap_or_default();
@@ -878,6 +880,31 @@ impl<'src> Lexer<'src> {
         TokenKind::StrLit(body)
     }
 
+    /// `b"..."`: the escapes of `c'x'` (any value up to `\xFF`), and
+    /// only ASCII written directly.
+    fn lex_byte_str_lit(&mut self) -> TokenKind {
+        let lit_start = self.pos;
+        self.advance(2);
+        let start = self.pos;
+        let Some(end) = self.scan_quoted(b'"') else {
+            self.error_from(lit_start, "unterminated byte string literal");
+            return TokenKind::ByteStrLit(String::new());
+        };
+        let body = self.src[start..end].to_owned();
+        match unescape(&body, EscapeMode::CChar) {
+            Err((_, msg)) => self.error_from(lit_start, msg),
+            Ok(_) if !body.is_ascii() => self.error_from(
+                lit_start,
+                "a byte string holds ASCII only; write other bytes as `\\xHH`",
+            ),
+            Ok(v) if v.chars().any(|c| c as u32 > 0xFF) => {
+                self.error_from(lit_start, "a byte string escape must be at most `\\xFF`");
+            }
+            Ok(_) => {}
+        }
+        TokenKind::ByteStrLit(body)
+    }
+
     /// Inside a hole (spec 1.7.3): what ends or splits the hole (`}` /
     /// `:` at bracket depth 0). `None` lexes `b` as ordinary code
     /// (brackets counted).
@@ -1290,6 +1317,22 @@ mod tests {
             err(bad);
         }
         assert_eq!(ok("\"a\\\n   b\"")[0], T::StrLit("a\\\n   b".into()));
+    }
+
+    #[test]
+    fn byte_strings() {
+        assert_eq!(
+            ok(r#"b"a\xFF\n" b"" b"#),
+            [
+                T::ByteStrLit(r"a\xFF\n".into()),
+                T::ByteStrLit(String::new()),
+                T::Ident("b".into()),
+                T::Eof
+            ]
+        );
+        for bad in [r#"b"é""#, r#"b"\u{100}""#, r#"b"\q""#, "b\"ab"] {
+            err(bad);
+        }
     }
 
     #[test]

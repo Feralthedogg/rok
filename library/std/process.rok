@@ -30,7 +30,7 @@ use rok::std::env;
 use rok::std::thread;
 
 /// Abnormal termination (`SIGABRT`); nothing is cleaned up.
-pub fn abort() -> ! { unsafe { rok_os_abort() }; }
+pub const fn abort() -> ! { unsafe { rok_os_abort() }; }
 
 /// This process's id.
 pub fn id() -> u32 { unsafe { rok_os_getpid() } }
@@ -104,7 +104,7 @@ pub enum Stdio {
     File(File),
 }
 
-fn stdio_mode(s: Stdio) -> i32 {
+const fn stdio_mode(s: Stdio) -> i32 {
     match s {
         Stdio::Inherit => -1,
         Stdio::Null => -2,
@@ -119,14 +119,14 @@ pub struct ChildStdin {
 }
 
 impl ChildStdin {
-    pub fn fd(self) -> RawFd { self.file.fd() }
+    pub const fn fd(self) -> RawFd { self.file.fd() }
     /// Close the pipe: the child reads end of input.
     pub fn close(self) throws (IoError) { try self.file.close(); }
 }
 
 impl Writer for ChildStdin {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.write(buf) }
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }
 
 /// A child's stdout: the read end of its pipe.
@@ -135,7 +135,7 @@ pub struct ChildStdout {
 }
 
 impl ChildStdout {
-    pub fn fd(self) -> RawFd { self.file.fd() }
+    pub const fn fd(self) -> RawFd { self.file.fd() }
     pub fn close(self) throws (IoError) { try self.file.close(); }
 }
 
@@ -149,7 +149,7 @@ pub struct ChildStderr {
 }
 
 impl ChildStderr {
-    pub fn fd(self) -> RawFd { self.file.fd() }
+    pub const fn fd(self) -> RawFd { self.file.fd() }
     pub fn close(self) throws (IoError) { try self.file.close(); }
 }
 
@@ -174,7 +174,7 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn new<P: AsPath>(program: P) -> Command {
+    pub const fn new<P: AsPath>(program: P) -> Command {
         Command {
             program: program.as_path(),
             args: List::new(),
@@ -189,17 +189,17 @@ impl Command {
         }
     }
 
-    pub fn arg(self, arg: str) -> Command {
+    pub const fn arg(self, arg: str) -> Command {
         self.args.push(arg);
         self
     }
 
-    pub fn args<I: IntoIterator<Item = str>>(self, args: I) -> Command {
+    pub const fn args<I: IntoIterator<Item = str>>(self, args: I) -> Command {
         for a in args { self.args.push(a); }
         self
     }
 
-    pub fn env(self, key: str, value: str) -> Command {
+    pub const fn env(self, key: str, value: str) -> Command {
         self.envs.insert(key, value);
         self
     }
@@ -212,26 +212,26 @@ impl Command {
     }
 
     /// Start from an empty environment (then `env` adds to it).
-    pub fn env_clear(self) -> Command {
+    pub const fn env_clear(self) -> Command {
         self.env_clear = true;
         self.envs = Dict::new();
         self
     }
 
-    pub fn current_dir<P: AsPath>(self, dir: P) -> Command {
+    pub const fn current_dir<P: AsPath>(self, dir: P) -> Command {
         self.cwd = dir.as_path();
         self
     }
 
-    pub fn stdin(self, cfg: Stdio) -> Command { self.stdin = cfg; self }
-    pub fn stdout(self, cfg: Stdio) -> Command { self.stdout = cfg; self }
-    pub fn stderr(self, cfg: Stdio) -> Command { self.stderr = cfg; self }
+    pub const fn stdin(self, cfg: Stdio) -> Command { self.stdin = cfg; self }
+    pub const fn stdout(self, cfg: Stdio) -> Command { self.stdout = cfg; self }
+    pub const fn stderr(self, cfg: Stdio) -> Command { self.stderr = cfg; self }
 
     /// Put the child in process group `pgid` (0: a new group it leads).
-    pub fn process_group(self, pgid: i32) -> Command { self.process_group = pgid; self }
+    pub const fn process_group(self, pgid: i32) -> Command { self.process_group = pgid; self }
 
     /// Kill the child when its `Child` is dropped by `using`.
-    pub fn kill_on_drop(self, on: bool) -> Command { self.kill_on_drop = on; self }
+    pub const fn kill_on_drop(self, on: bool) -> Command { self.kill_on_drop = on; self }
 
     /// Start the child.
     pub fn spawn(self) throws (IoError) -> Child {
@@ -355,7 +355,7 @@ pub struct Child {
 }
 
 impl Child {
-    pub fn id(self) -> u32 { self.pid as u32 }
+    pub const fn id(self) -> u32 { self.pid as u32 }
 
     /// `SIGKILL`.
     pub fn kill(self) throws (IoError) { try self.signal(9); }
@@ -435,17 +435,17 @@ pub struct ExitStatus {
 }
 
 impl ExitStatus {
-    pub fn success(self) -> bool { self.raw == 0 }
+    pub const fn success(self) -> bool { self.raw == 0 }
 
     /// The exit code; `none` if a signal ended it.
-    pub fn code(self) -> i32 | none {
+    pub const fn code(self) -> i32 | none {
         if WINDOWS { return self.raw; }
         if (self.raw & 0x7f) != 0 { return none; }
         (self.raw >> 8) & 0xff
     }
 
     /// The signal that ended it, if any (never on Windows).
-    pub fn signal(self) -> i32 | none {
+    pub const fn signal(self) -> i32 | none {
         if WINDOWS { return none; }
         let s = self.raw & 0x7f;
         if s == 0 || s == 0x7f { return none; }

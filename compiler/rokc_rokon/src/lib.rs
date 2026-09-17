@@ -498,6 +498,9 @@ impl Conv<'_> {
             Literal::CChar(_) => {
                 return Err(self.err(e, "`c'..'` literals are not allowed in ROKON (write `'a'`)"));
             }
+            Literal::ByteStr(_) => {
+                return Err(self.err(e, "`b\"..\"` literals are not allowed in ROKON"));
+            }
         })
     }
 }

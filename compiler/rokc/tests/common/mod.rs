@@ -86,17 +86,17 @@ pub fn scratch(name: &str) -> PathBuf {
 }
 
 /// Scratch directories of runs that ended (killed, failed, or never
-/// cleaned) are removed once they are a day old.
+/// cleaned) are removed once they are three hours old.
 fn prune_scratch() {
     let Ok(entries) = std::fs::read_dir(env::temp_dir()) else {
         return;
     };
-    let day = std::time::Duration::from_secs(24 * 3600);
+    let stale = std::time::Duration::from_secs(3 * 3600);
     for e in entries.flatten() {
         let old = e
             .metadata()
             .and_then(|m| m.modified())
-            .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > day));
+            .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > stale));
         if old && e.file_name().to_string_lossy().starts_with("rokc-test-") {
             let _ = std::fs::remove_dir_all(e.path());
         }

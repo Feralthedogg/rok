@@ -16,42 +16,42 @@ pub trait Iterator {
     // ---- lazy adapters ----
 
     /// Apply `f` to each item.
-    fn map<U>(self, f: fn(Item) -> U) -> Map<Self, U> {
+    const fn map<U>(self, f: fn(Item) -> U) -> Map<Self, U> {
         Map { it: self, f: f }
     }
 
     /// Keep the items `pred` accepts.
-    fn filter(self, pred: fn(Item) -> bool) -> Filter<Self> {
+    const fn filter(self, pred: fn(Item) -> bool) -> Filter<Self> {
         Filter { it: self, pred: pred }
     }
 
     /// `(index, item)` pairs.
-    fn enumerate(self) -> Enumerate<Self> {
+    const fn enumerate(self) -> Enumerate<Self> {
         Enumerate { it: self, i: 0 }
     }
 
     /// Pairs of this iterator's and `other`'s items, until either ends.
-    fn zip<J: Iterator>(self, other: J) -> Zip<Self, J> {
+    const fn zip<J: Iterator>(self, other: J) -> Zip<Self, J> {
         Zip { a: self, b: other }
     }
 
     /// This iterator's items, then `other`'s (with the same item type).
-    fn chain<J: Iterator<Item = Item>>(self, other: J) -> Chain<Self, J> {
+    const fn chain<J: Iterator<Item = Item>>(self, other: J) -> Chain<Self, J> {
         Chain { a: self, b: other, first: true }
     }
 
     /// At most the first `n` items.
-    fn take(self, n: usize) -> Take<Self> {
+    const fn take(self, n: usize) -> Take<Self> {
         Take { it: self, left: n }
     }
 
     /// All but the first `n` items.
-    fn skip(self, n: usize) -> Skip<Self> {
+    const fn skip(self, n: usize) -> Skip<Self> {
         Skip { it: self, n: n }
     }
 
     /// Every `step`th item, starting with the first (`step` > 0).
-    fn step_by(self, step: usize) -> StepBy<Self> {
+    const fn step_by(self, step: usize) -> StepBy<Self> {
         if step == 0 {
             panic("Iterator::step_by: step must be positive");
         }
@@ -59,28 +59,28 @@ pub trait Iterator {
     }
 
     /// The items back to front (`DoubleEndedIterator` only, 2.7.9).
-    fn rev(self) -> Rev<Self> {
+    const fn rev(self) -> Rev<Self> {
         Rev { it: self }
     }
 
     /// The items of each item (each item is `IntoIterator`).
-    fn flatten(self) -> Flatten<Self> where Item: IntoIterator {
+    const fn flatten(self) -> Flatten<Self> where Item: IntoIterator {
         Flatten { it: self, cur: none }
     }
 
     /// The items of each `f(item)` (an `IntoIterator`).
-    fn flat_map<U: IntoIterator>(self, f: fn(Item) -> U) -> FlatMap<Self, U> {
+    const fn flat_map<U: IntoIterator>(self, f: fn(Item) -> U) -> FlatMap<Self, U> {
         FlatMap { it: self, f: f, cur: none }
     }
 
     /// An iterator that can look at its next item without taking it.
-    fn peekable(self) -> Peekable<Self> {
+    const fn peekable(self) -> Peekable<Self> {
         Peekable { it: self, peeked: none, has: false }
     }
 
     // ---- eager consumers ----
 
-    fn count(self) -> usize {
+    const fn count(self) -> usize {
         let n: usize = 0;
         for _ in self {
             n += 1;
@@ -89,7 +89,7 @@ pub trait Iterator {
     }
 
     /// The items added up; `0` for none.
-    fn sum(self) -> Item where Item: Add<Output = Item> + Zero {
+    const fn sum(self) -> Item where Item: Add<Output = Item> + Zero {
         let acc = Item::zero();
         for x in self {
             acc += x;
@@ -98,7 +98,7 @@ pub trait Iterator {
     }
 
     /// The items multiplied; `1` for none.
-    fn product(self) -> Item where Item: Mul<Output = Item> + One {
+    const fn product(self) -> Item where Item: Mul<Output = Item> + One {
         let acc = Item::one();
         for x in self {
             acc *= x;
@@ -106,7 +106,7 @@ pub trait Iterator {
         acc
     }
 
-    fn fold<B>(self, init: B, f: fn(B, Item) -> B) -> B {
+    const fn fold<B>(self, init: B, f: fn(B, Item) -> B) -> B {
         let acc = init;
         for x in self {
             acc = f(acc, x);
@@ -115,7 +115,7 @@ pub trait Iterator {
     }
 
     /// The items combined left to right with `f`; `none` for none.
-    fn reduce(self, f: fn(Item, Item) -> Item) -> Item | none {
+    const fn reduce(self, f: fn(Item, Item) -> Item) -> Item | none {
         let acc: Item | none = none;
         for x in self {
             acc = if let a: Item = acc { f(a, x) } else { x };
@@ -123,7 +123,7 @@ pub trait Iterator {
         acc
     }
 
-    fn any(self, pred: fn(Item) -> bool) -> bool {
+    const fn any(self, pred: fn(Item) -> bool) -> bool {
         for x in self {
             if pred(x) {
                 return true;
@@ -132,7 +132,7 @@ pub trait Iterator {
         false
     }
 
-    fn all(self, pred: fn(Item) -> bool) -> bool {
+    const fn all(self, pred: fn(Item) -> bool) -> bool {
         for x in self {
             if !pred(x) {
                 return false;
@@ -141,7 +141,7 @@ pub trait Iterator {
         true
     }
 
-    fn find(self, pred: fn(Item) -> bool) -> Item | none {
+    const fn find(self, pred: fn(Item) -> bool) -> Item | none {
         for x in self {
             if pred(x) {
                 return x;
@@ -150,7 +150,7 @@ pub trait Iterator {
         none
     }
 
-    fn position(self, pred: fn(Item) -> bool) -> usize | none {
+    const fn position(self, pred: fn(Item) -> bool) -> usize | none {
         let i: usize = 0;
         for x in self {
             if pred(x) {
@@ -161,7 +161,7 @@ pub trait Iterator {
         none
     }
 
-    fn min(self) -> Item | none where Item: Ord {
+    const fn min(self) -> Item | none where Item: Ord {
         let best: Item | none = none;
         for x in self {
             match best {
@@ -178,7 +178,7 @@ pub trait Iterator {
         best
     }
 
-    fn max(self) -> Item | none where Item: Ord {
+    const fn max(self) -> Item | none where Item: Ord {
         let best: Item | none = none;
         for x in self {
             match best {
@@ -196,7 +196,7 @@ pub trait Iterator {
     }
 
     /// The item with the smallest `key` (the first of equals).
-    fn min_by_key<K: Ord>(self, key: fn(Item) -> K) -> Item | none {
+    const fn min_by_key<K: Ord>(self, key: fn(Item) -> K) -> Item | none {
         let best: Item | none = none;
         let best_key: K | none = none;
         for x in self {
@@ -218,7 +218,7 @@ pub trait Iterator {
     }
 
     /// The item with the largest `key` (the last of equals).
-    fn max_by_key<K: Ord>(self, key: fn(Item) -> K) -> Item | none {
+    const fn max_by_key<K: Ord>(self, key: fn(Item) -> K) -> Item | none {
         let best: Item | none = none;
         let best_key: K | none = none;
         for x in self {
@@ -239,7 +239,7 @@ pub trait Iterator {
         best
     }
 
-    fn last(self) -> Item | none {
+    const fn last(self) -> Item | none {
         let last: Item | none = none;
         for x in self {
             last = x;
@@ -248,14 +248,14 @@ pub trait Iterator {
     }
 
     /// The `n`th remaining item (0-based), consuming the ones before it.
-    fn nth(ref self, n: usize) -> Item | none {
+    const fn nth(ref self, n: usize) -> Item | none {
         for i in 0..n {
             self.next()?;
         }
         self.next()
     }
 
-    fn for_each(self, f: fn(Item)) {
+    const fn for_each(self, f: fn(Item)) {
         for x in self {
             f(x);
         }
@@ -263,7 +263,7 @@ pub trait Iterator {
 
     /// Gather the items into a `FromIterator` collection (the slot's
     /// type picks it: `let v: List<i32> = it.collect();`).
-    fn collect<C: FromIterator<Item>>(self) -> C {
+    const fn collect<C: FromIterator<Item>>(self) -> C {
         C::from_iter(self)
     }
 }
@@ -273,12 +273,12 @@ pub trait DoubleEndedIterator: Iterator {
     fn next_back(ref self) -> Item | none;
 
     /// `fold` from the back.
-    fn rfold<B>(self, init: B, f: fn(B, Self::Item) -> B) -> B {
+    const fn rfold<B>(self, init: B, f: fn(B, Self::Item) -> B) -> B {
         Rev { it: self }.fold(init, f)
     }
 
     /// The last item `pred` accepts, searching from the back.
-    fn rfind(self, pred: fn(Self::Item) -> bool) -> Self::Item | none {
+    const fn rfind(self, pred: fn(Self::Item) -> bool) -> Self::Item | none {
         Rev { it: self }.find(pred)
     }
 }
@@ -299,7 +299,7 @@ pub trait IntoIterator {
 impl<I: Iterator> IntoIterator for I {
     type IntoIter = I;
     type Item = I::Item;
-    fn into_iter(self) -> I {
+    const fn into_iter(self) -> I {
         self
     }
 }
@@ -316,22 +316,22 @@ pub struct Map<I, U> {
 
 impl<I: Iterator, U> Iterator for Map<I, U> {
     type Item = U;
-    fn next(ref self) -> U | none {
+    const fn next(ref self) -> U | none {
         (self.f)(self.it.next()?)
     }
 
     /// As many as the inner iterator: O(1) over an `ExactSizeIterator` (2.7.10).
-    fn count(self) -> usize { self.it.count() }
+    const fn count(self) -> usize { self.it.count() }
 }
 
 impl<I: DoubleEndedIterator, U> DoubleEndedIterator for Map<I, U> {
-    fn next_back(ref self) -> U | none {
+    const fn next_back(ref self) -> U | none {
         (self.f)(self.it.next_back()?)
     }
 }
 
 impl<I: ExactSizeIterator, U> ExactSizeIterator for Map<I, U> {
-    fn len(self) -> usize { self.it.len() }
+    const fn len(self) -> usize { self.it.len() }
 }
 
 pub struct Filter<I> {
@@ -341,7 +341,7 @@ pub struct Filter<I> {
 
 impl<I: Iterator> Iterator for Filter<I> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         while let x: I::Item = self.it.next() {
             if (self.pred)(x) {
                 return x;
@@ -352,7 +352,7 @@ impl<I: Iterator> Iterator for Filter<I> {
 }
 
 impl<I: DoubleEndedIterator> DoubleEndedIterator for Filter<I> {
-    fn next_back(ref self) -> I::Item | none {
+    const fn next_back(ref self) -> I::Item | none {
         while let x: I::Item = self.it.next_back() {
             if (self.pred)(x) {
                 return x;
@@ -369,7 +369,7 @@ pub struct Enumerate<I> {
 
 impl<I: Iterator> Iterator for Enumerate<I> {
     type Item = (usize, I::Item);
-    fn next(ref self) -> (usize, I::Item) | none {
+    const fn next(ref self) -> (usize, I::Item) | none {
         let x = self.it.next()?;
         let at = self.i;
         self.i = at + 1;
@@ -377,7 +377,7 @@ impl<I: Iterator> Iterator for Enumerate<I> {
     }
 
     /// As many as the inner iterator: O(1) over an `ExactSizeIterator` (2.7.10).
-    fn count(self) -> usize { self.it.count() }
+    const fn count(self) -> usize { self.it.count() }
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for Enumerate<I> {
@@ -385,7 +385,7 @@ impl<I: ExactSizeIterator> ExactSizeIterator for Enumerate<I> {
 }
 
 impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Enumerate<I> {
-    fn next_back(ref self) -> (usize, I::Item) | none {
+    const fn next_back(ref self) -> (usize, I::Item) | none {
         let n = self.it.len();
         let x = self.it.next_back()?;
         (self.i + n - 1, x)
@@ -399,19 +399,19 @@ pub struct Zip<I, J> {
 
 impl<I: Iterator, J: Iterator> Iterator for Zip<I, J> {
     type Item = (I::Item, J::Item);
-    fn next(ref self) -> (I::Item, J::Item) | none {
+    const fn next(ref self) -> (I::Item, J::Item) | none {
         let x = self.a.next()?;
         (x, self.b.next()?)
     }
 }
 
 impl<I: ExactSizeIterator, J: ExactSizeIterator> ExactSizeIterator for Zip<I, J> {
-    fn len(self) -> usize { self.a.len().min(self.b.len()) }
+    const fn len(self) -> usize { self.a.len().min(self.b.len()) }
 }
 
 /// From the back, the longer side's extra tail is dropped first.
 impl<I: DoubleEndedIterator + ExactSizeIterator, J: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Zip<I, J> {
-    fn next_back(ref self) -> (I::Item, J::Item) | none {
+    const fn next_back(ref self) -> (I::Item, J::Item) | none {
         let (n, m) = (self.a.len(), self.b.len());
         for _ in m..n {
             self.a.next_back();
@@ -432,7 +432,7 @@ pub struct Chain<I, J> {
 
 impl<I: Iterator, J: Iterator> Iterator for Chain<I, J> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         if self.first {
             if let x: I::Item = self.a.next() {
                 return x;
@@ -444,7 +444,7 @@ impl<I: Iterator, J: Iterator> Iterator for Chain<I, J> {
 }
 
 impl<I: DoubleEndedIterator, J: DoubleEndedIterator> DoubleEndedIterator for Chain<I, J> {
-    fn next_back(ref self) -> I::Item | none {
+    const fn next_back(ref self) -> I::Item | none {
         self.b.next_back() ?? self.a.next_back()
     }
 }
@@ -457,7 +457,7 @@ pub struct StepBy<I> {
 
 impl<I: Iterator> Iterator for StepBy<I> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         if self.first {
             self.first = false;
             return self.it.next();
@@ -467,7 +467,7 @@ impl<I: Iterator> Iterator for StepBy<I> {
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for StepBy<I> {
-    fn len(self) -> usize {
+    const fn len(self) -> usize {
         let n = self.it.len();
         if !self.first {
             return n / self.step;
@@ -479,7 +479,7 @@ impl<I: ExactSizeIterator> ExactSizeIterator for StepBy<I> {
 /// The back item is the last one the front would reach: the tail past
 /// it is dropped first.
 impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for StepBy<I> {
-    fn next_back(ref self) -> I::Item | none {
+    const fn next_back(ref self) -> I::Item | none {
         let n = self.it.len();
         if n == 0 {
             return none;
@@ -501,12 +501,12 @@ pub struct Rev<I> {
 
 impl<I: DoubleEndedIterator> Iterator for Rev<I> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         self.it.next_back()
     }
 
     /// As many as the inner iterator: O(1) over an `ExactSizeIterator` (2.7.10).
-    fn count(self) -> usize { self.it.count() }
+    const fn count(self) -> usize { self.it.count() }
 }
 
 impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
@@ -516,7 +516,7 @@ impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
 }
 
 impl<I: DoubleEndedIterator + ExactSizeIterator> ExactSizeIterator for Rev<I> {
-    fn len(self) -> usize { self.it.len() }
+    const fn len(self) -> usize { self.it.len() }
 }
 
 /// `flatten`: `cur` is the inner iterator being drained.
@@ -527,7 +527,7 @@ pub struct Flatten<I> {
 
 impl<I: Iterator> Iterator for Flatten<I> {
     type Item = <I::Item as IntoIterator>::Item;
-    fn next(ref self) -> <I::Item as IntoIterator>::Item | none {
+    const fn next(ref self) -> <I::Item as IntoIterator>::Item | none {
         while true {
             if let inner: <I::Item as IntoIterator>::IntoIter = self.cur {
                 if let x: <I::Item as IntoIterator>::Item = inner.next() {
@@ -553,7 +553,7 @@ pub struct FlatMap<I, U> {
 
 impl<I: Iterator, U: IntoIterator> Iterator for FlatMap<I, U> {
     type Item = U::Item;
-    fn next(ref self) -> U::Item | none {
+    const fn next(ref self) -> U::Item | none {
         while true {
             if let inner: U::IntoIter = self.cur {
                 if let x: U::Item = inner.next() {
@@ -577,7 +577,7 @@ pub struct Peekable<I> {
 
 impl<I: Iterator> Peekable<I> {
     /// The next item, left in place for the following `next`.
-    pub fn peek(ref self) -> I::Item | none {
+    pub const fn peek(ref self) -> I::Item | none {
         if !self.has {
             self.peeked = self.it.next();
             self.has = true;
@@ -588,7 +588,7 @@ impl<I: Iterator> Peekable<I> {
 
 impl<I: Iterator> Iterator for Peekable<I> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         if self.has {
             self.has = false;
             return self.peeked;
@@ -604,7 +604,7 @@ pub struct Take<I> {
 
 impl<I: Iterator> Iterator for Take<I> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         if self.left == 0 {
             return none;
         }
@@ -614,11 +614,11 @@ impl<I: Iterator> Iterator for Take<I> {
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for Take<I> {
-    fn len(self) -> usize { self.it.len().min(self.left) }
+    const fn len(self) -> usize { self.it.len().min(self.left) }
 }
 
 impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Take<I> {
-    fn next_back(ref self) -> I::Item | none {
+    const fn next_back(ref self) -> I::Item | none {
         if self.left == 0 {
             return none;
         }
@@ -637,7 +637,7 @@ pub struct Skip<I> {
 
 impl<I: Iterator> Iterator for Skip<I> {
     type Item = I::Item;
-    fn next(ref self) -> I::Item | none {
+    const fn next(ref self) -> I::Item | none {
         while self.n > 0 {
             self.n -= 1;
             self.it.next()?;
@@ -647,11 +647,11 @@ impl<I: Iterator> Iterator for Skip<I> {
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for Skip<I> {
-    fn len(self) -> usize { self.it.len().saturating_sub(self.n) }
+    const fn len(self) -> usize { self.it.len().saturating_sub(self.n) }
 }
 
 impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Skip<I> {
-    fn next_back(ref self) -> I::Item | none {
+    const fn next_back(ref self) -> I::Item | none {
         if self.it.len() <= self.n {
             return none;
         }
@@ -673,7 +673,7 @@ pub struct GenIter<T> {
 
 impl<T> Iterator for GenIter<T> {
     type Item = T;
-    fn next(ref self) -> T | none {
+    const fn next(ref self) -> T | none {
         (self.resume)()
     }
 }
@@ -686,7 +686,7 @@ pub struct TryGenIter<T, E> {
 }
 
 impl<T, E> TryGenIter<T, E> {
-    pub fn next(ref self) throws (E) -> T | none {
+    pub const fn next(ref self) throws (E) -> T | none {
         try (self.resume)()
     }
 }

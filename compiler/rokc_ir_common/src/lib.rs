@@ -145,11 +145,23 @@ pub enum PrimOp {
 pub enum ConstVal {
     Unit,
     Bool(bool),
-    Int { value: i128, ty: PrimTy },
-    UInt { value: u128, ty: PrimTy },
-    Float { bits: u64, ty: PrimTy },
+    Int {
+        value: i128,
+        ty: PrimTy,
+    },
+    UInt {
+        value: u128,
+        ty: PrimTy,
+    },
+    Float {
+        bits: u64,
+        ty: PrimTy,
+    },
     Char(u32),
     Str(String),
+    /// A `[u8; N]` (`b".."`, `include_bytes!`). MIR lowering expands it
+    /// to its elements; it reaches codegen only as a static's value.
+    Bytes(Vec<u8>),
     None,
 }
 
@@ -324,6 +336,7 @@ rokc_core::codec_enum!(ConstVal {
     Float { bits, ty },
     Char(x0),
     Str(x0),
+    Bytes(x0),
     None,
 });
 rokc_core::codec_enum!(Abi {

@@ -33,11 +33,11 @@ impl<A: Hash> Hash for (A,) {
 
 // 2-tuples
 impl<A: Clone, B: Clone> Clone for (A, B) {
-    fn clone(self) -> (A, B) { (self.0.clone(), self.1.clone()) }
+    const fn clone(self) -> (A, B) { (self.0.clone(), self.1.clone()) }
 }
 impl<A: Copy, B: Copy> Copy for (A, B) {}
 impl<A: Default, B: Default> Default for (A, B) {
-    fn default() -> (A, B) { (rok::core::marker::default_of(), rok::core::marker::default_of()) }
+    const fn default() -> (A, B) { (rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug> Debug for (A, B) {
     fn fmt(self, ref f: Formatter) throws (FmtError) {
@@ -49,12 +49,12 @@ impl<A: Debug, B: Debug> Debug for (A, B) {
     }
 }
 impl<A: PartialEq, B: PartialEq> PartialEq for (A, B) {
-    fn eq(self, rhs: (A, B)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) }
-    fn ne(self, rhs: (A, B)) -> bool { !self.eq(rhs) }
+    const fn eq(self, rhs: (A, B)) -> bool { self.0.eq(rhs.0) && self.1.eq(rhs.1) }
+    const fn ne(self, rhs: (A, B)) -> bool { !self.eq(rhs) }
 }
 impl<A: Eq, B: Eq> Eq for (A, B) {}
 impl<A: Hash, B: Hash> Hash for (A, B) {
-    fn hash(self) -> u64 {
+    const fn hash(self) -> u64 {
         let h = 2u64;
         h = ((h << 5) | (h >> 59)) ^ self.0.hash();
         h = ((h << 5) | (h >> 59)) ^ self.1.hash();
@@ -550,13 +550,13 @@ impl<A: Ord> Ord for (A,) {
     }
 }
 impl<A: PartialEq + PartialOrd, B: PartialEq + PartialOrd> PartialOrd for (A, B) {
-    fn lt(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 < rhs.0; } self.1 < rhs.1 }
-    fn gt(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 > rhs.0; } self.1 > rhs.1 }
-    fn le(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 <= rhs.0; } self.1 <= rhs.1 }
-    fn ge(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 >= rhs.0; } self.1 >= rhs.1 }
+    const fn lt(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 < rhs.0; } self.1 < rhs.1 }
+    const fn gt(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 > rhs.0; } self.1 > rhs.1 }
+    const fn le(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 <= rhs.0; } self.1 <= rhs.1 }
+    const fn ge(self, rhs: (A, B)) -> bool { if self.0 != rhs.0 { return self.0 >= rhs.0; } self.1 >= rhs.1 }
 }
 impl<A: Ord, B: Ord> Ord for (A, B) {
-    fn cmp(self, rhs: (A, B)) -> rok::core::cmp::Ordering {
+    const fn cmp(self, rhs: (A, B)) -> rok::core::cmp::Ordering {
         let c0 = self.0.cmp(rhs.0);
         if !c0.is_eq() { return c0; }
         self.1.cmp(rhs.1)

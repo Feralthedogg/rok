@@ -1232,6 +1232,24 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     tree1
 }
 
+/// A dependency on the package itself (here a test-only one) is an
+/// error: `pkg::` is how a package names its own items.
+#[test]
+fn self_dependency_is_rejected() {
+    let root = scratch("self_dep");
+    let home = root.join("home");
+    let lib = root.join("me");
+    write(&lib.join("lib.rok"), "pub fn f() -> i32 { 1 }\n");
+    write(
+        &lib.join("rok.rokon"),
+        "Package {\n    name: \"me\",\n    dev_deps: { \"me\": Dep::path(\".\") },\n}\n",
+    );
+    fails(
+        &rok(&home, &lib, &["check"]),
+        "dependency `me` (required by the root package) is the package being built",
+    );
+}
+
 /// A stand-in for the registry API on `http://127.0.0.1:<port>` (the
 /// port): token `rks_ok` is account `alice`, who may publish;
 /// `rks_reader` is `bob`, who may not; others get 401. Each name and
@@ -1585,6 +1603,7 @@ fn stones_publish_add_update_yank() {
 }
 
 /// `cmd` in `dir`, which must succeed.
+#[cfg(unix)]
 fn sh(dir: &Path, cmd: &str, args: &[&str]) {
     let out = Command::new(cmd)
         .current_dir(dir)
@@ -1598,6 +1617,7 @@ fn sh(dir: &Path, cmd: &str, args: &[&str]) {
     );
 }
 
+#[cfg(unix)]
 fn sha256_of(path: &Path) -> String {
     rokc_core::hash::hex(&rokc_core::hash::sha256(&fs::read(path).unwrap()))
 }
@@ -1825,6 +1845,7 @@ fn native_packages() {
 
 /// `native_packages`' app beyond `run`: a deleted runtime copy, `deps`,
 /// checks and the REPL.
+#[cfg(unix)]
 fn native_in_tools(home: &Path, root: &Path, app: &Path, ext: &str) {
     // A deleted copy comes back on the next build.
     let copy = app.join(format!("target/debug/libyy.{ext}"));
@@ -1875,6 +1896,7 @@ fn native_in_tools(home: &Path, root: &Path, app: &Path, ext: &str) {
 
 /// `yank --native` hides a version from resolution; `--undo` brings it
 /// back (to `line`).
+#[cfg(unix)]
 fn native_yank(home: &Path, root: &Path, index: &Path, line: &str) {
     let reg = index.display().to_string();
     let yank = ["yank", "--native", "--vers", "1.0.0", "--index", &reg, "yy"];
@@ -1885,4 +1907,289 @@ fn native_yank(home: &Path, root: &Path, index: &Path, line: &str) {
     ok(&rok(home, root, &[&yank[..], &["--undo"]].concat()));
     assert_eq!(read(&index.join("native/2/yy")), line);
     fails(&rok(home, root, &yank[..6]), "usage: rok yank");
+}
+
+/// `rok deps` as `name[features]` per package, in build order.
+fn enabled(home: &Path, cwd: &Path, args: &[&str]) -> String {
+    let mut all = vec!["deps"];
+    all.extend(args);
+    let out = ok(&rok(home, cwd, &all));
+    let mut parts: Vec<(String, Vec<String>)> = Vec::new();
+    for l in out.lines() {
+        if let Some(v) = l.strip_prefix("--extern-feature=") {
+            let (n, f) = v.split_once('=').unwrap();
+            let last = parts.last_mut().unwrap();
+            assert_eq!(last.0, n, "{out}");
+            last.1.push(f.to_owned());
+        } else if let Some((n, _)) = l.split_once('=') {
+            parts.push((n.to_owned(), Vec::new()));
+        }
+    }
+    let shown: Vec<String> = parts
+        .iter()
+        .map(|(n, f)| format!("{n}[{}]", f.join(",")))
+        .collect();
+    shown.join(" ")
+}
+
+const TLS: &str = "#[cfg(feature = \"fast\")]\npub fn speed() -> i32 { return 2; }\n\
+                   #[cfg(not(feature = \"fast\"))]\npub fn speed() -> i32 { return 1; }\n";
+const HTTP: &str = "#[cfg(feature = \"tls\")]\npub fn port() -> i32 { return 443; }\n\
+                    #[cfg(not(feature = \"tls\"))]\npub fn port() -> i32 { return 80; }\n";
+const APP_FEATURES: &str = "Package {
+    name: \"app\",
+    deps: {
+        \"http\": Dep::path(\"../http\"),
+        \"cli\": Dep::path(\"../cli\"),
+        \"extra\": Dep::path(\"../extra\", optional: true),
+    },
+    dev_deps: { \"tls\": Dep::path(\"../tls\", features: [\"fast\"]) },
+    features: {
+        \"default\": [\"web\"],
+        \"web\": [\"http/tls\"],
+        \"full\": [\"web\", \"http/fast\"],
+        \"opt\": [\"dep:extra\"],
+    },
+}
+";
+
+/// Features: the root's default and `--features` / `--all-features` /
+/// `--no-default-features`, optional dependencies enabled by `dep:` and
+/// `<dep>/<f>`, `<dep>?/<f>`, one set per package for the whole graph,
+/// dev dependencies' only in a test build, errors, `cfg(feature)` in the
+/// code, and rebuilds when a package's features change.
+#[test]
+fn features_pick_packages_and_cfg() {
+    let root = scratch("features");
+    let home = root.join("home");
+    let pkg = |name: &str, manifest: &str, lib: &str| {
+        write(&root.join(name).join("rok.rokon"), manifest);
+        write(&root.join(name).join("lib.rok"), lib);
+    };
+    pkg(
+        "tls",
+        "Package { name: \"tls\", features: { \"default\": [\"ring\"], \"ring\": [], \"fast\": [] } }\n",
+        TLS,
+    );
+    pkg(
+        "json",
+        "Package { name: \"json\", features: { \"pretty\": [], \"compact\": [] } }\n",
+        ONE,
+    );
+    pkg(
+        "http",
+        "Package {\n    name: \"http\",\n    deps: {\n        \"tls\": Dep::path(\"../tls\", \
+         optional: true),\n        \"json\": Dep::path(\"../json\"),\n    },\n    features: { \
+         \"tls\": [\"dep:tls\"], \"fast\": [\"tls?/fast\"], \"pretty\": [\"json/pretty\"] },\n}\n",
+        HTTP,
+    );
+    let cli = "Package {\n    name: \"cli\",\n    deps: {\n        \"http\": \
+               Dep::path(\"../http\", features: [\"pretty\"]),\n        \"json\": \
+               Dep::path(\"../json\", features: [\"compact\"]),\n    },\n}\n";
+    pkg("cli", cli, ONE);
+    pkg("extra", "Package { name: \"extra\" }\n", ONE);
+    let app = root.join("app");
+    write(&app.join("rok.rokon"), APP_FEATURES);
+    write(
+        &app.join("main.rok"),
+        "let web = cfg!(feature = \"web\");\nprintln(f\"{http::port()} {web}\");\n",
+    );
+    let e = |args: &[&str]| enabled(&home, &app, args);
+    // `default` is `web`: `http/tls` enables the optional `tls` (with its
+    // own default). `json` has what `http` and `cli` ask, once.
+    assert_eq!(
+        e(&[]),
+        "tls[default,ring] json[compact,pretty] http[pretty,tls] cli[]"
+    );
+    assert_eq!(
+        e(&["--no-default-features"]),
+        "json[compact,pretty] http[pretty] cli[]"
+    );
+    // `tls?/fast` waits for something else to enable `tls`.
+    assert_eq!(
+        e(&["--no-default-features", "--features", "http/fast"]),
+        "json[compact,pretty] http[fast,pretty] cli[]"
+    );
+    assert_eq!(
+        e(&["--features=full"]),
+        "tls[default,fast,ring] json[compact,pretty] http[fast,pretty,tls] cli[]"
+    );
+    // `dep:extra`.
+    assert_eq!(
+        e(&["--no-default-features", "--features", "opt,http/tls"]),
+        "tls[default,ring] json[compact,pretty] http[pretty,tls] cli[] extra[]"
+    );
+    assert_eq!(
+        e(&["--all-features"]),
+        "tls[default,fast,ring] json[compact,pretty] http[fast,pretty,tls] cli[] extra[]"
+    );
+    // A dev dependency's features count in a test build only.
+    assert_eq!(
+        e(&["--dev", "--no-default-features"]),
+        "tls[default,fast,ring] json[compact,pretty] http[pretty] cli[]"
+    );
+    fails(
+        &rok(&home, &app, &["deps", "--features", "nope"]),
+        "the root package has no feature `nope` (required by --features)",
+    );
+    fails(
+        &rok(&home, &app, &["deps", "--features", "http/nope"]),
+        "package `http` has no feature `nope` (required by --features)",
+    );
+    fails(
+        &rok(&home, &app, &["deps", "--features", "zip/x"]),
+        "the root package has no dependency `zip`",
+    );
+    write(
+        &root.join("cli/rok.rokon"),
+        &cli.replace("[\"compact\"]", "[\"bogus\"]"),
+    );
+    fails(
+        &rok(&home, &app, &["deps"]),
+        "package `json` has no feature `bogus` (required by package `cli`)",
+    );
+    write(&root.join("cli/rok.rokon"), cli);
+    write(
+        &app.join("rok.rokon"),
+        &APP_FEATURES
+            .replace("\"web\", \"http/fast\"", "\"web\", \"loop\"")
+            .replace("\"opt\": [", "\"loop\": [\"full\"],\n        \"opt\": ["),
+    );
+    let out = rok(&home, &app, &["deps"]);
+    fails(&out, "feature cycle: full -> loop -> full");
+    assert!(
+        text(&out.stderr).contains("rok.rokon:13:"),
+        "{}",
+        text(&out.stderr)
+    );
+    write(&app.join("rok.rokon"), APP_FEATURES);
+
+    // `rok add --optional`: the dependency and a feature enabling it.
+    ok(&rok(
+        &home,
+        &app,
+        &[
+            "add",
+            "extra2",
+            "--path",
+            "../extra",
+            "--optional",
+            "--features",
+            "a,b",
+            "--no-default-features",
+        ],
+    ));
+    let m = read(&app.join("rok.rokon"));
+    assert!(
+        m.contains(
+            "\"extra2\": Dep::path(\n            \"../extra\",\n            optional: true,\n            \
+             features: [\"a\", \"b\"],\n            default_features: false,\n        ),"
+        ) && m.contains("\"extra2\": [\"dep:extra2\"],"),
+        "{m}"
+    );
+    write(&app.join("rok.rokon"), APP_FEATURES);
+
+    if !llvm() {
+        return;
+    }
+    // The code sees its package's features; a change rebuilds, the same
+    // features again do not.
+    let run = |args: &[&str]| {
+        let out = rok(&home, &app, &[&["run"], args].concat());
+        (ok(&out), text(&out.stderr))
+    };
+    let (out, err) = run(&[]);
+    assert_eq!(out, "443 true\n", "{err}");
+    let (out, err) = run(&["--no-default-features"]);
+    assert_eq!(out, "80 false\n");
+    assert!(err.contains("Compiling http "), "{err}");
+    let (out, err) = run(&["--no-default-features"]);
+    assert_eq!(out, "80 false\n");
+    assert!(!err.contains("Compiling"), "{err}");
+}
+
+/// Features in a registry index: `publish` writes them, resolution reads
+/// them; `rok add --features --no-default-features` writes the
+/// dependency so; the lock holds optional stones whatever is enabled.
+#[test]
+fn stone_features_round_trip() {
+    let root = scratch("stone-features");
+    let home = root.join("home");
+    let index = root.join("index");
+    commit(
+        &index,
+        &[("config.rokon", "Config { api: \"https://rokstones.io\" }\n")],
+    );
+    for kv in [
+        ["user.name", "t"],
+        ["user.email", "t@t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        git(&index, &["config", kv[0], kv[1]]);
+    }
+    let reg = index.display().to_string();
+    write(
+        &home.join("config.rokon"),
+        &format!("Config {{ registry: \"{reg}\" }}\n"),
+    );
+    let num = root.join("num");
+    stone_meta(
+        &num,
+        "num",
+        "1.0.0",
+        "",
+        "features: { \"big\": [] }, ",
+        &[("lib.rok", ONE)],
+    );
+    ok(&rok(&home, &num, &["publish", "--index", &reg, "--commit"]));
+    let codec = root.join("codec");
+    stone_meta(
+        &codec,
+        "codec",
+        "1.0.0",
+        "\"num\": Dep::version(\"^1.0\", optional: true, features: [\"big\"], default_features: \
+         false)",
+        "features: { \"default\": [\"std\"], \"std\": [], \"num\": [\"dep:num\"] }, ",
+        &[("lib.rok", ONE)],
+    );
+    let line = ok(&rok(
+        &home,
+        &codec,
+        &["publish", "--index", &reg, "--commit"],
+    ));
+    assert!(
+        line.contains(
+            "deps: [{ name: \"num\", req: \"^1.0\", kind: \"normal\", optional: true, features: \
+             [\"big\"], default_features: false }], features: { \"default\": [\"std\"], \"std\": \
+             [], \"num\": [\"dep:num\"] }, source: Dep::git("
+        ),
+        "{line}"
+    );
+    assert_eq!(read(&index.join("co/de/codec")), line);
+
+    let app = root.join("app");
+    write(&app.join("main.rok"), "println(1);\n");
+    write(&app.join("rok.rokon"), APP0);
+    ok(&rok(
+        &home,
+        &app,
+        &["add", "codec", "--features", "num", "--no-default-features"],
+    ));
+    let m = read(&app.join("rok.rokon"));
+    assert!(
+        m.contains(
+            "\"codec\": Dep::version(\"^1.0.0\", features: [\"num\"], default_features: false),"
+        ),
+        "{m}"
+    );
+    assert_eq!(enabled(&home, &app, &[]), "num[big] codec[num]");
+    let lock = read(&app.join("rok.lock"));
+    assert_eq!(locked_stones(&lock), ["codec@1.0.0", "num@1.0.0"]);
+    write(
+        &app.join("rok.rokon"),
+        &APP0.replace("// deps go here", "\"codec\": \"^1.0\","),
+    );
+    assert_eq!(enabled(&home, &app, &[]), "codec[default,std]");
+    // `num` stays pinned: the lock covers every optional stone.
+    assert_eq!(read(&app.join("rok.lock")), lock);
 }

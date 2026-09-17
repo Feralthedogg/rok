@@ -1,0 +1,17 @@
+// expect-error: 12:13: glob re-export of `a::x` as `b::x` conflicts with `b::x`
+// expect-error: 16:29: cannot find function `c::hid` in this scope
+
+// 5.8.6: a glob re-export clashing with a name of the module is an
+// error; 5.8.12: an item the module can't see is not re-exported.
+mod a {
+    pub fn x() -> i32 { 1 }
+}
+mod n { fn hid() -> i32 { 3 } pub fn shown() -> i32 { 4 } }
+mod b {
+    pub fn x() -> i32 { 2 }
+    pub use sup::a::*;
+}
+mod c { pub use sup::n::*; }
+fn main() {
+    println(f"{c::shown()} {c::hid()}");
+}

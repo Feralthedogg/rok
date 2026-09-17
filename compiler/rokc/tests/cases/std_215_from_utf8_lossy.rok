@@ -1,0 +1,38 @@
+// spec: std 215-string §2.15.2
+// expect-exit: 0
+// expect-stdout:
+// hello 5
+// a�b 5
+// �X� 7
+// ��� 9
+// x�y 5
+// �����A 16
+// é� 5
+// GET
+// 3
+
+// `str::from_utf8_lossy`: valid input as is; each maximal subpart of an
+// ill-formed sequence becomes one U+FFFD (Unicode 3.9, WHATWG).
+fn show(b: Slice<u8>) {
+    let s = str::from_utf8_lossy(b);
+    println(f"{s} {s.len()}");
+}
+
+fn main() -> i32 {
+    show(b"hello");
+    show(b"a\xFFb");
+    // A cut-short 3-byte sequence is one subpart; a lone `\x80` another.
+    show(b"\xE2\x82X\x80");
+    // `\xED\xA0` would be a surrogate: `\xED`, `\xA0`, `\x80` each one.
+    show(b"\xED\xA0\x80");
+    // `\xC0` never starts a sequence.
+    show(b"x\xC0y");
+    // F5 / F0 90 80 (cut short) / C1 / 80 / 80, then A.
+    show(b"\xF5\xF0\x90\x80\xC1\x80\x80A");
+    show(b"\xC3\xA9\xE2\x82");
+    let l: List<u8> = [71, 69, 84];
+    println(str::from_utf8_lossy(l));
+    let out = rok::std::io::AsBytes::byte_slice(b"abc");
+    println(f"{out.len()}");
+    0
+}

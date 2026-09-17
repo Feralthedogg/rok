@@ -1,0 +1,2 @@
+pub fn g() -> i32 { 9 }
+pub use sup::deep::inner::h;

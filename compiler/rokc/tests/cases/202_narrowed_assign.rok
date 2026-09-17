@@ -5,13 +5,21 @@
 // 9
 // 7 i32
 // 3 x
+// none 0 1
+// kept none
+// 8
 
 // Spec 2.2.6: inside `x is T` an assignment of a `T` keeps the narrowing;
 // one of another member of the declared type writes the declared slot and
-// ends the narrowing for the rest of that scope, so `x` reads as the
-// declared type afterwards.
+// ends the narrowing on the paths after it. A path that skips it keeps the
+// narrowing; where paths join, and at the head of a loop whose body ends
+// it, `x` has the declared type.
 fn show(v: i32 | str) -> str {
     match v { n: i32 => f"{n} i32", s: str => f"{s} str" }
+}
+
+fn text(v: i32 | none) -> str {
+    match v { n: i32 => f"{n}", none => "none" }
 }
 
 fn main() -> i32 {
@@ -36,9 +44,32 @@ fn main() -> i32 {
     let n = 0;
     while a is i32 {
         n += a;
-        a = a + 1;
-        if n > 1 { a = "x"; }
+        if n > 1 { a = "x"; } else { a = a + 1; }
     }
     match a { s: str => println(f"{n} {s}"), _ => println("?") }
+    // The loop head sees the value the last iteration stored.
+    let x: i32 | none = none;
+    let seen = "";
+    if x is none {
+        for i in 0..3 {
+            seen = if seen == "" { text(x) } else { f"{seen} {text(x)}" };
+            x = i;
+        }
+    }
+    println(seen);
+    // Only the branch that assigns ends the narrowing.
+    let y: i32 | none = none;
+    if y is none {
+        let kept = "";
+        if false { y = 1; } else { kept = if y is none { "kept" } else { "lost" }; }
+        let joined: i32 | none = y;
+        println(f"{kept} {text(joined)}");
+    }
+    let z: i32 | none = 3;
+    if z is i32 {
+        match z { 3 => { z = none; }, _ => {} }
+        z = 8;
+        println(text(z));
+    }
     return 0;
 }

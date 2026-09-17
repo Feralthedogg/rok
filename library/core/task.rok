@@ -203,7 +203,7 @@ struct Queue {
     len: Atomic<usize>;
 }
 
-fn queue_new() -> Queue {
+const fn queue_new() -> Queue {
     Queue { items: Mutex::new(Deque::new()), len: Atomic::new(0usize) }
 }
 
@@ -328,7 +328,7 @@ fn new_worker(pool: Pool, index: usize, guest: bool, orphan: bool) -> Worker {
     }
 }
 
-fn seed_new(index: usize) -> GcBuf<u64> {
+const fn seed_new(index: usize) -> GcBuf<u64> {
     unsafe {
         let s: GcBuf<u64> = buf_new(1);
         s[0] = (index as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15u64);
@@ -337,7 +337,7 @@ fn seed_new(index: usize) -> GcBuf<u64> {
 }
 
 /// The next pseudo-random number of `w`'s xorshift.
-fn next_rand(w: Worker) -> u64 {
+const fn next_rand(w: Worker) -> u64 {
     unsafe {
         let x = w.seed[0];
         x ^= x << 13;
@@ -399,7 +399,7 @@ impl Pool {
     }
 
     /// Number of pool threads.
-    pub fn workers(self) -> usize {
+    pub const fn workers(self) -> usize {
         self.workers.len()
     }
 
@@ -490,7 +490,7 @@ unsafe impl Send for Spares {}
 unsafe impl Sync for Spares {}
 
 impl Spares {
-    fn new() -> Spares {
+    const fn new() -> Spares {
         unsafe { Spares { lock: Mutex::new(0), idle: List::new(), extra: buf_new(1) } }
     }
 
@@ -552,7 +552,7 @@ impl Spares {
     }
 
     /// Remove the idle spare waiting on `word` (under `lock`).
-    fn drop_idle(self, word: GcBuf<i32>) {
+    const fn drop_idle(self, word: GcBuf<i32>) {
         for i in 0..self.idle.len() {
             if buf_same(self.idle[i].word, word) {
                 self.idle.remove(i);
@@ -990,7 +990,7 @@ fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
 
 /// The poll function of a task running `fut`, storing its output in
 /// `slot`.
-fn poll_fn<F: Future>(fut: F, slot: GcBuf<F::Output>) -> fn(Context) -> bool {
+const fn poll_fn<F: Future>(fut: F, slot: GcBuf<F::Output>) -> fn(Context) -> bool {
     unsafe {
         let cell: GcBuf<F> = buf_new(1);
         cell[0] = fut;
@@ -1144,7 +1144,7 @@ unsafe impl Send for RunOnce {}
 
 impl Future for RunOnce {
     type Output = bool;
-    fn poll(ref self, ref ctx: Context) -> Poll<bool> {
+    const fn poll(ref self, ref ctx: Context) -> Poll<bool> {
         Poll::Ready((self.f)())
     }
 }
@@ -1207,7 +1207,7 @@ impl<T> Task<T> {
     pub fn is_finished(self) -> bool { is_done(self.task) }
 
     /// This task's id (what `task::id()` returns inside it).
-    pub fn id(self) -> TaskId { TaskId { id: self.task.id } }
+    pub const fn id(self) -> TaskId { TaskId { id: self.task.id } }
 
     /// Ask the task to stop (2.18.4): it is woken, its current `await`
     /// leaves the body (running the `finally` / `using` cleanups on the
@@ -1224,7 +1224,7 @@ impl<T> Task<T> {
 
     /// Await the result, throwing `CancellationError` for a cancelled
     /// task.
-    pub fn join(self) -> Join<T> {
+    pub const fn join(self) -> Join<T> {
         Join { task: self }
     }
 }
@@ -1273,18 +1273,18 @@ pub struct TaskId {
 static NEXT_TASK_ID: Atomic<u64> = Atomic::new(1);
 
 impl TaskId {
-    pub fn as_u64(self) -> u64 { self.id }
+    pub const fn as_u64(self) -> u64 { self.id }
 }
 
 impl PartialEq for TaskId {
-    fn eq(self, rhs: TaskId) -> bool { self.id == rhs.id }
-    fn ne(self, rhs: TaskId) -> bool { self.id != rhs.id }
+    const fn eq(self, rhs: TaskId) -> bool { self.id == rhs.id }
+    const fn ne(self, rhs: TaskId) -> bool { self.id != rhs.id }
 }
 
 impl Eq for TaskId {}
 
 impl Hash for TaskId {
-    fn hash(self) -> u64 { self.id.hash() }
+    const fn hash(self) -> u64 { self.id.hash() }
 }
 
 impl Display for TaskId {
@@ -1386,7 +1386,7 @@ impl<T> Future for Race<T> {
 /// Once one completes, every other one that has started is polled once
 /// more as cancelled (its `await` leaves through `finally` / `using`, as
 /// for `Task::cancel`) and dropped. Panics on an empty list.
-pub fn select<F: Future>(futs: List<F>) -> SelectFuture<F> {
+pub const fn select<F: Future>(futs: List<F>) -> SelectFuture<F> {
     unsafe {
         if futs.len() == 0 {
             panic("task::select of no futures");
@@ -1456,7 +1456,7 @@ impl<F: Future> SelectFuture<F> {
 
 /// A stand-in task for `select`'s children: never scheduled; its wakes
 /// go to `parent` until it is done.
-fn proxy_task(parent: Waker) -> TaskRef {
+const fn proxy_task(parent: Waker) -> TaskRef {
     unsafe {
         let state: GcBuf<i32> = buf_new(5);
         state[3] = 1;
@@ -1485,7 +1485,7 @@ fn finish_cancelled(t: TaskRef) {
 }
 
 /// Index of the first task to finish (`buffer_unordered`).
-pub(pkg) fn first_done<T>(tasks: List<Task<T>>) -> FirstDone<T> {
+pub(pkg) const fn first_done<T>(tasks: List<Task<T>>) -> FirstDone<T> {
     FirstDone { tasks: tasks }
 }
 
@@ -1648,7 +1648,7 @@ pub fn park(key: usize, waker: Waker) {
 }
 
 /// Is `t` in `key`'s list? (Under `p.lock`.)
-fn parked_on(p: Parking, key: usize, t: TaskRef) -> bool {
+const fn parked_on(p: Parking, key: usize, t: TaskRef) -> bool {
     if let l: List<Waker> = p.waiting.get(key) {
         for w in l {
             if buf_same(w.task.state, t.state) { return true; }
@@ -1720,7 +1720,7 @@ pub fn unpark(key: usize) {
 
 /// The parking key of `fd`'s read (`write == 0`) or write readiness:
 /// odd, so never a GC address (8-aligned) at any pointer width.
-fn io_key(fd: i32, write: i32) -> usize {
+const fn io_key(fd: i32, write: i32) -> usize {
     (fd as usize) * 4 + (write as usize) * 2 + 1
 }
 
@@ -1825,12 +1825,12 @@ fn solo_wait(next: i64) {
 /// Completes once `fd` may be readable (`await task::readable(fd)`
 /// after a read hit `WouldBlock`); it may also complete spuriously, so
 /// retry the operation in a loop.
-pub fn readable(fd: i32) -> IoReady {
+pub const fn readable(fd: i32) -> IoReady {
     IoReady { fd: fd, write: 0, armed: false }
 }
 
 /// `readable` for writes.
-pub fn writable(fd: i32) -> IoReady {
+pub const fn writable(fd: i32) -> IoReady {
     IoReady { fd: fd, write: 1, armed: false }
 }
 
@@ -1966,7 +1966,7 @@ unsafe impl Send for BlockingPool {}
 unsafe impl Sync for BlockingPool {}
 
 impl BlockingPool {
-    fn new() -> BlockingPool {
+    const fn new() -> BlockingPool {
         unsafe {
             BlockingPool {
                 lock: Mutex::new(0),
@@ -2021,7 +2021,7 @@ impl BlockingPool {
     }
 
     /// Drop thread `id` from `ids` (under `lock`).
-    fn forget(self, id: u64) {
+    const fn forget(self, id: u64) {
         for i in 0..self.ids.len() {
             if self.ids[i] == id {
                 self.ids.remove(i);

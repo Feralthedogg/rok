@@ -45,20 +45,20 @@ pub struct RangeFull;
 
 // Clone / Copy / PartialEq / Eq from the bounds (stdlib 2.13, 2.5.7).
 impl<T: Clone> Clone for Range<T> {
-    fn clone(self) -> Range<T> { Range { start: self.start.clone(), end: self.end.clone() } }
+    const fn clone(self) -> Range<T> { Range { start: self.start.clone(), end: self.end.clone() } }
 }
 
 impl<T: Copy> Copy for Range<T> {}
 
 impl<T: PartialEq> PartialEq for Range<T> {
-    fn eq(self, rhs: Range<T>) -> bool { self.start == rhs.start && self.end == rhs.end }
+    const fn eq(self, rhs: Range<T>) -> bool { self.start == rhs.start && self.end == rhs.end }
 }
 
 impl<T: Eq> Eq for Range<T> {}
 
 impl<T: Step> Iterator for Range<T> {
     type Item = T;
-    fn next(ref self) -> T | none {
+    const fn next(ref self) -> T | none {
         if self.start < self.end {
             let cur = self.start;
             self.start = self.start.forward_checked(1) ?? self.end;
@@ -68,11 +68,11 @@ impl<T: Step> Iterator for Range<T> {
     }
 
     /// `ExactSizeIterator`: O(1) (2.7.10).
-    fn count(self) -> usize { self.len() }
+    const fn count(self) -> usize { self.len() }
 }
 
 impl<T: Step> DoubleEndedIterator for Range<T> {
-    fn next_back(ref self) -> T | none {
+    const fn next_back(ref self) -> T | none {
         if self.start < self.end {
             let p = self.end.backward_checked(1)?;
             self.end = p;
@@ -83,7 +83,7 @@ impl<T: Step> DoubleEndedIterator for Range<T> {
 }
 
 impl<T: Step> ExactSizeIterator for Range<T> {
-    fn len(self) -> usize {
+    const fn len(self) -> usize {
         if !(self.start < self.end) {
             return 0;
         }
@@ -93,7 +93,7 @@ impl<T: Step> ExactSizeIterator for Range<T> {
 
 impl<T: Step> Iterator for RangeInclusive<T> {
     type Item = T;
-    fn next(ref self) -> T | none {
+    const fn next(ref self) -> T | none {
         if self.exhausted || self.start > self.end {
             return none;
         }
@@ -111,11 +111,11 @@ impl<T: Step> Iterator for RangeInclusive<T> {
     }
 
     /// `ExactSizeIterator`: O(1) (2.7.10).
-    fn count(self) -> usize { self.len() }
+    const fn count(self) -> usize { self.len() }
 }
 
 impl<T: Step> DoubleEndedIterator for RangeInclusive<T> {
-    fn next_back(ref self) -> T | none {
+    const fn next_back(ref self) -> T | none {
         if self.exhausted || self.start > self.end {
             return none;
         }
@@ -134,7 +134,7 @@ impl<T: Step> DoubleEndedIterator for RangeInclusive<T> {
 }
 
 impl<T: Step> ExactSizeIterator for RangeInclusive<T> {
-    fn len(self) -> usize {
+    const fn len(self) -> usize {
         if self.exhausted || self.start > self.end {
             return 0;
         }
@@ -146,7 +146,7 @@ impl<T: Step> ExactSizeIterator for RangeInclusive<T> {
 impl<T: Step> Iterator for RangeFrom<T> {
     type Item = T;
     /// Stops (without yielding it) at the type's maximum (2.7.4).
-    fn next(ref self) -> T | none {
+    const fn next(ref self) -> T | none {
         let cur = self.start;
         self.start = self.start.forward_checked(1)?;
         cur
@@ -158,7 +158,7 @@ impl<T: Step> Iterator for RangeFrom<T> {
 // step would fit (signed types walking up from below zero).
 
 impl Step for i8 {
-    fn forward_checked(self, count: usize) -> i8 | none {
+    const fn forward_checked(self, count: usize) -> i8 | none {
         if count > 127i8 as usize {
             return none;
         }
@@ -168,7 +168,7 @@ impl Step for i8 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> i8 | none {
+    const fn backward_checked(self, count: usize) -> i8 | none {
         if count > 127i8 as usize {
             return none;
         }
@@ -178,7 +178,7 @@ impl Step for i8 {
         }
         self - k
     }
-    fn steps_between(start: i8, end: i8) -> usize | none {
+    const fn steps_between(start: i8, end: i8) -> usize | none {
         if start > end {
             return none;
         }
@@ -190,7 +190,7 @@ impl Step for i8 {
 }
 
 impl Step for i16 {
-    fn forward_checked(self, count: usize) -> i16 | none {
+    const fn forward_checked(self, count: usize) -> i16 | none {
         if count > 32767i16 as usize {
             return none;
         }
@@ -200,7 +200,7 @@ impl Step for i16 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> i16 | none {
+    const fn backward_checked(self, count: usize) -> i16 | none {
         if count > 32767i16 as usize {
             return none;
         }
@@ -210,7 +210,7 @@ impl Step for i16 {
         }
         self - k
     }
-    fn steps_between(start: i16, end: i16) -> usize | none {
+    const fn steps_between(start: i16, end: i16) -> usize | none {
         if start > end {
             return none;
         }
@@ -222,7 +222,7 @@ impl Step for i16 {
 }
 
 impl Step for i32 {
-    fn forward_checked(self, count: usize) -> i32 | none {
+    const fn forward_checked(self, count: usize) -> i32 | none {
         if count > 2147483647i32 as usize {
             return none;
         }
@@ -232,7 +232,7 @@ impl Step for i32 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> i32 | none {
+    const fn backward_checked(self, count: usize) -> i32 | none {
         if count > 2147483647i32 as usize {
             return none;
         }
@@ -242,7 +242,7 @@ impl Step for i32 {
         }
         self - k
     }
-    fn steps_between(start: i32, end: i32) -> usize | none {
+    const fn steps_between(start: i32, end: i32) -> usize | none {
         if start > end {
             return none;
         }
@@ -254,7 +254,7 @@ impl Step for i32 {
 }
 
 impl Step for i64 {
-    fn forward_checked(self, count: usize) -> i64 | none {
+    const fn forward_checked(self, count: usize) -> i64 | none {
         if count > 9223372036854775807i64 as usize {
             return none;
         }
@@ -264,7 +264,7 @@ impl Step for i64 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> i64 | none {
+    const fn backward_checked(self, count: usize) -> i64 | none {
         if count > 9223372036854775807i64 as usize {
             return none;
         }
@@ -274,7 +274,7 @@ impl Step for i64 {
         }
         self - k
     }
-    fn steps_between(start: i64, end: i64) -> usize | none {
+    const fn steps_between(start: i64, end: i64) -> usize | none {
         if start > end {
             return none;
         }
@@ -286,7 +286,7 @@ impl Step for i64 {
 }
 
 impl Step for isize {
-    fn forward_checked(self, count: usize) -> isize | none {
+    const fn forward_checked(self, count: usize) -> isize | none {
         if count > isize::MAX as usize {
             return none;
         }
@@ -296,7 +296,7 @@ impl Step for isize {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> isize | none {
+    const fn backward_checked(self, count: usize) -> isize | none {
         if count > isize::MAX as usize {
             return none;
         }
@@ -306,7 +306,7 @@ impl Step for isize {
         }
         self - k
     }
-    fn steps_between(start: isize, end: isize) -> usize | none {
+    const fn steps_between(start: isize, end: isize) -> usize | none {
         if start > end {
             return none;
         }
@@ -318,7 +318,7 @@ impl Step for isize {
 }
 
 impl Step for u8 {
-    fn forward_checked(self, count: usize) -> u8 | none {
+    const fn forward_checked(self, count: usize) -> u8 | none {
         if count > 255u8 as usize {
             return none;
         }
@@ -328,7 +328,7 @@ impl Step for u8 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> u8 | none {
+    const fn backward_checked(self, count: usize) -> u8 | none {
         if count > 255u8 as usize {
             return none;
         }
@@ -338,7 +338,7 @@ impl Step for u8 {
         }
         self - k
     }
-    fn steps_between(start: u8, end: u8) -> usize | none {
+    const fn steps_between(start: u8, end: u8) -> usize | none {
         if start > end {
             return none;
         }
@@ -347,7 +347,7 @@ impl Step for u8 {
 }
 
 impl Step for u16 {
-    fn forward_checked(self, count: usize) -> u16 | none {
+    const fn forward_checked(self, count: usize) -> u16 | none {
         if count > 65535u16 as usize {
             return none;
         }
@@ -357,7 +357,7 @@ impl Step for u16 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> u16 | none {
+    const fn backward_checked(self, count: usize) -> u16 | none {
         if count > 65535u16 as usize {
             return none;
         }
@@ -367,7 +367,7 @@ impl Step for u16 {
         }
         self - k
     }
-    fn steps_between(start: u16, end: u16) -> usize | none {
+    const fn steps_between(start: u16, end: u16) -> usize | none {
         if start > end {
             return none;
         }
@@ -376,7 +376,7 @@ impl Step for u16 {
 }
 
 impl Step for u32 {
-    fn forward_checked(self, count: usize) -> u32 | none {
+    const fn forward_checked(self, count: usize) -> u32 | none {
         if count > 4294967295u32 as usize {
             return none;
         }
@@ -386,7 +386,7 @@ impl Step for u32 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> u32 | none {
+    const fn backward_checked(self, count: usize) -> u32 | none {
         if count > 4294967295u32 as usize {
             return none;
         }
@@ -396,7 +396,7 @@ impl Step for u32 {
         }
         self - k
     }
-    fn steps_between(start: u32, end: u32) -> usize | none {
+    const fn steps_between(start: u32, end: u32) -> usize | none {
         if start > end {
             return none;
         }
@@ -405,7 +405,7 @@ impl Step for u32 {
 }
 
 impl Step for u64 {
-    fn forward_checked(self, count: usize) -> u64 | none {
+    const fn forward_checked(self, count: usize) -> u64 | none {
         if count > 18446744073709551615u64 as usize {
             return none;
         }
@@ -415,7 +415,7 @@ impl Step for u64 {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> u64 | none {
+    const fn backward_checked(self, count: usize) -> u64 | none {
         if count > 18446744073709551615u64 as usize {
             return none;
         }
@@ -425,7 +425,7 @@ impl Step for u64 {
         }
         self - k
     }
-    fn steps_between(start: u64, end: u64) -> usize | none {
+    const fn steps_between(start: u64, end: u64) -> usize | none {
         if start > end {
             return none;
         }
@@ -434,7 +434,7 @@ impl Step for u64 {
 }
 
 impl Step for usize {
-    fn forward_checked(self, count: usize) -> usize | none {
+    const fn forward_checked(self, count: usize) -> usize | none {
         if count > usize::MAX {
             return none;
         }
@@ -444,7 +444,7 @@ impl Step for usize {
         }
         self + k
     }
-    fn backward_checked(self, count: usize) -> usize | none {
+    const fn backward_checked(self, count: usize) -> usize | none {
         if count > usize::MAX {
             return none;
         }
@@ -454,7 +454,7 @@ impl Step for usize {
         }
         self - k
     }
-    fn steps_between(start: usize, end: usize) -> usize | none {
+    const fn steps_between(start: usize, end: usize) -> usize | none {
         if start > end {
             return none;
         }
@@ -464,7 +464,7 @@ impl Step for usize {
 
 /// By scalar value, skipping the surrogates `0xD800..=0xDFFF` (2.7.3).
 impl Step for char {
-    fn forward_checked(self, count: usize) -> char | none {
+    const fn forward_checked(self, count: usize) -> char | none {
         let n = self as u32 as usize;
         let t = n.checked_add(count)?;
         let u = if n < 0xD800 && t >= 0xD800 { t.checked_add(0x800)? } else { t };
@@ -473,13 +473,13 @@ impl Step for char {
         }
         char::from_u32(u as u32)
     }
-    fn backward_checked(self, count: usize) -> char | none {
+    const fn backward_checked(self, count: usize) -> char | none {
         let n = self as u32 as usize;
         let t = n.checked_sub(count)?;
         let u = if n >= 0xE000 && t < 0xE000 { t.checked_sub(0x800)? } else { t };
         char::from_u32(u as u32)
     }
-    fn steps_between(start: char, end: char) -> usize | none {
+    const fn steps_between(start: char, end: char) -> usize | none {
         let (s, e) = (start as u32, end as u32);
         if s > e {
             return none;
@@ -492,31 +492,31 @@ impl Step for char {
 // Range literals (refs-lang 6.5.1).
 
 #[literal(expr ".." expr)]
-pub fn range_literal<T>(start: T, end: T) -> Range<T> {
+pub const fn range_literal<T>(start: T, end: T) -> Range<T> {
     return Range { start: start, end: end };
 }
 
 #[literal(expr "..=" expr)]
-pub fn range_inclusive_literal<T>(start: T, end: T) -> RangeInclusive<T> {
+pub const fn range_inclusive_literal<T>(start: T, end: T) -> RangeInclusive<T> {
     return RangeInclusive { start: start, end: end };
 }
 
 #[literal(expr "..")]
-pub fn range_from_literal<T>(start: T) -> RangeFrom<T> {
+pub const fn range_from_literal<T>(start: T) -> RangeFrom<T> {
     return RangeFrom { start: start };
 }
 
 #[literal(".." expr)]
-pub fn range_to_literal<T>(end: T) -> RangeTo<T> {
+pub const fn range_to_literal<T>(end: T) -> RangeTo<T> {
     return RangeTo { end: end };
 }
 
 #[literal("..=" expr)]
-pub fn range_to_inclusive_literal<T>(end: T) -> RangeToInclusive<T> {
+pub const fn range_to_inclusive_literal<T>(end: T) -> RangeToInclusive<T> {
     return RangeToInclusive { end: end };
 }
 
 #[literal("..")]
-pub fn range_full_literal() -> RangeFull {
+pub const fn range_full_literal() -> RangeFull {
     return RangeFull;
 }

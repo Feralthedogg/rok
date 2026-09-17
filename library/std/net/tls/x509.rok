@@ -1,0 +1,549 @@
+// X.509 certificates (RFC 5280): parsing, path building and validation
+// for TLS server authentication, and host name matching (RFC 6125).
+//
+// Validation: signatures along the path, validity times (anchors too),
+// basicConstraints (cA, pathLenConstraint), keyUsage (keyCertSign on
+// CAs, digitalSignature on the leaf), extendedKeyUsage (serverAuth or
+// anyExtendedKeyUsage wherever present), DNS / IP nameConstraints, and
+// no unknown critical extension. Names are compared as encoded bytes.
+// The leaf's name is checked against its subjectAltName only (no
+// common-name fallback). No revocation checking.
+
+use sup::TlsError;
+use sup::der::{Der, SEQUENCE, SET, INTEGER, BIT_STRING, OCTET_STRING, NULL, OID, BOOLEAN, UTC_TIME, GENERALIZED_TIME};
+use sup::der;
+use rok::core::crypto::sha2::HashAlgorithm;
+use rok::core::crypto::rsa::RsaPublicKey;
+use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
+use rok::core::crypto::ed25519::Ed25519;
+
+/// A subject public key.
+pub(pkg) enum PubKey {
+    /// PKCS #1 `RSAPublicKey` DER, made a key only to verify (setup is
+    /// costly and most anchors are never used).
+    Rsa(List<u8>),
+    Ec(EcCurve, List<u8>),
+    EdDsa(List<u8>),
+    Other(str),
+}
+
+/// A signature algorithm (certificates and CertificateVerify).
+pub(pkg) enum SigAlg {
+    RsaPkcs1(HashAlgorithm),
+    RsaPss(HashAlgorithm),
+    Ecdsa(HashAlgorithm),
+    EdDsa,
+    Other(str),
+}
+
+fn rsa_key(der: List<u8>) -> RsaPublicKey | none {
+    try RsaPublicKey::from_pkcs1_der(der) catch _ { none }
+}
+
+/// Whether `sig` over `msg` verifies under `key` with `alg`.
+pub(pkg) fn verify_sig(key: PubKey, alg: SigAlg, msg: Slice<u8>, sig: Slice<u8>) -> bool {
+    match alg {
+        SigAlg::RsaPkcs1(h) => match key {
+            PubKey::Rsa(der) => match rsa_key(der) {
+                k: RsaPublicKey => k.verify_pkcs1v15(h, msg, sig),
+                none => false,
+            },
+            _ => false,
+        },
+        SigAlg::RsaPss(h) => match key {
+            PubKey::Rsa(der) => match rsa_key(der) {
+                k: RsaPublicKey => k.verify_pss(h, msg, sig),
+                none => false,
+            },
+            _ => false,
+        },
+        SigAlg::Ecdsa(h) => match key {
+            PubKey::Ec(curve, point) => Ecdsa::verify(curve, h, point, msg, sig),
+            _ => false,
+        },
+        SigAlg::EdDsa => match key {
+            PubKey::EdDsa(pk) => Ed25519::verify(pk, msg, sig),
+            _ => false,
+        },
+        SigAlg::Other(_) => false,
+    }
+}
+
+// keyUsage bits (bit 0 is the BIT STRING's first, most significant bit).
+pub(pkg) const KU_DIGITAL_SIGNATURE: i32 = 0x80;
+pub(pkg) const KU_KEY_CERT_SIGN: i32 = 0x04;
+
+const OID_RSA: str = "1.2.840.113549.1.1.1";
+const OID_RSA_PSS: str = "1.2.840.113549.1.1.10";
+const OID_MGF1: str = "1.2.840.113549.1.1.8";
+const OID_EC: str = "1.2.840.10045.2.1";
+const OID_P256: str = "1.2.840.10045.3.1.7";
+const OID_P384: str = "1.3.132.0.34";
+const OID_ED25519: str = "1.3.101.112";
+const EKU_SERVER_AUTH: str = "1.3.6.1.5.5.7.3.1";
+const EKU_ANY: str = "2.5.29.37.0";
+
+/// A parsed certificate. Views point into `der`.
+pub(pkg) struct CertInfo {
+    pub(pkg) tbs: Slice<u8>;
+    pub(pkg) sig_alg: SigAlg;
+    pub(pkg) signature: Slice<u8>;
+    pub(pkg) issuer: Slice<u8>;
+    pub(pkg) subject: Slice<u8>;
+    pub(pkg) not_before: i64;
+    pub(pkg) not_after: i64;
+    pub(pkg) key: PubKey;
+    pub(pkg) is_ca: bool;
+    /// -1: no pathLenConstraint.
+    pub(pkg) path_len: i64;
+    /// -1: no keyUsage extension.
+    pub(pkg) key_usage: i32;
+    /// none: no extendedKeyUsage extension.
+    pub(pkg) eku: List<str> | none;
+    pub(pkg) dns_names: List<str>;
+    pub(pkg) ip_addrs: List<List<u8>>;
+    pub(pkg) permitted_dns: List<str>;
+    pub(pkg) excluded_dns: List<str>;
+    pub(pkg) permitted_ip: List<List<u8>>;
+    pub(pkg) excluded_ip: List<List<u8>>;
+}
+
+fn hash_of_oid(oid: str) -> HashAlgorithm | none {
+    if oid == "2.16.840.1.101.3.4.2.1" { return HashAlgorithm::Sha256; }
+    if oid == "2.16.840.1.101.3.4.2.2" { return HashAlgorithm::Sha384; }
+    if oid == "2.16.840.1.101.3.4.2.3" { return HashAlgorithm::Sha512; }
+    none
+}
+
+/// `AlgorithmIdentifier` of a hash: its function (parameters absent or
+/// NULL).
+fn hash_alg(b: Slice<u8>) throws (TlsError) -> HashAlgorithm | none {
+    let d = Der::new(b);
+    let oid = try der::oid_text(try d.expect(OID));
+    let _ = try d.optional(NULL);
+    try d.finish();
+    hash_of_oid(oid)
+}
+
+/// RSASSA-PSS-params: only an explicit SHA-2 hash, MGF1 with the same
+/// hash and a salt as long as the hash are accepted.
+fn pss_params(b: Slice<u8>) throws (TlsError) -> SigAlg {
+    let d = Der::new(b);
+    let hash: HashAlgorithm | none = none;
+    let mgf_hash: HashAlgorithm | none = none;
+    let salt = 20i64;
+    let h0 = try d.optional(0xa0u8);
+    if h0 is Slice<u8> { hash = try hash_alg(try Der::new(h0).expect(SEQUENCE)); }
+    let m1 = try d.optional(0xa1u8);
+    if m1 is Slice<u8> {
+        let md = try Der::new(m1).enter(SEQUENCE);
+        if (try der::oid_text(try md.expect(OID))) != OID_MGF1 { return SigAlg::Other("RSA-PSS with a non-MGF1 mask"); }
+        mgf_hash = try hash_alg(try md.expect(SEQUENCE));
+        try md.finish();
+    }
+    let s2 = try d.optional(0xa2u8);
+    if s2 is Slice<u8> { salt = try der::small_int(try Der::new(s2).expect(INTEGER)); }
+    let t3 = try d.optional(0xa3u8);
+    if t3 is Slice<u8> {
+        if (try der::small_int(try Der::new(t3).expect(INTEGER))) != 1 { return SigAlg::Other("RSA-PSS trailer"); }
+    }
+    try d.finish();
+    match hash {
+        h: HashAlgorithm => {
+            if mgf_hash != h || salt != h.output_len() as i64 { return SigAlg::Other("RSA-PSS parameters"); }
+            SigAlg::RsaPss(h)
+        },
+        none => SigAlg::Other("RSA-PSS with SHA-1"),
+    }
+}
+
+/// A signature `AlgorithmIdentifier`.
+pub(pkg) fn sig_alg(b: Slice<u8>) throws (TlsError) -> SigAlg {
+    let d = Der::new(b);
+    let oid = try der::oid_text(try d.expect(OID));
+    let rest = d;
+    if oid == "1.2.840.113549.1.1.11" || oid == "1.2.840.113549.1.1.12" || oid == "1.2.840.113549.1.1.13" {
+        // RSA PKCS #1 v1.5: parameters NULL (or absent).
+        let _ = try rest.optional(NULL);
+        try rest.finish();
+        let h = if oid == "1.2.840.113549.1.1.11" { HashAlgorithm::Sha256 } else if oid == "1.2.840.113549.1.1.12" { HashAlgorithm::Sha384 } else { HashAlgorithm::Sha512 };
+        return SigAlg::RsaPkcs1(h);
+    }
+    if oid == OID_RSA_PSS {
+        return try pss_params(try rest.expect(SEQUENCE));
+    }
+    if oid == "1.2.840.10045.4.3.2" || oid == "1.2.840.10045.4.3.3" || oid == "1.2.840.10045.4.3.4" {
+        try rest.finish();
+        let h = if oid == "1.2.840.10045.4.3.2" { HashAlgorithm::Sha256 } else if oid == "1.2.840.10045.4.3.3" { HashAlgorithm::Sha384 } else { HashAlgorithm::Sha512 };
+        return SigAlg::Ecdsa(h);
+    }
+    if oid == OID_ED25519 {
+        try rest.finish();
+        return SigAlg::EdDsa;
+    }
+    SigAlg::Other(oid)
+}
+
+/// A `SubjectPublicKeyInfo`.
+pub(pkg) fn public_key(b: Slice<u8>) throws (TlsError) -> PubKey {
+    let d = Der::new(b);
+    let alg = try d.enter(SEQUENCE);
+    let bits = try der::bit_string_bytes(try d.expect(BIT_STRING));
+    try d.finish();
+    let oid = try der::oid_text(try alg.expect(OID));
+    if oid == OID_RSA {
+        let _ = try alg.optional(NULL);
+        try alg.finish();
+        return PubKey::Rsa(bits.to_list());
+    }
+    if oid == OID_EC {
+        let curve = try der::oid_text(try alg.expect(OID));
+        try alg.finish();
+        if curve == OID_P256 && bits.len() == 65 && bits[0] == 4u8 { return PubKey::Ec(EcCurve::P256, bits.to_list()); }
+        if curve == OID_P384 && bits.len() == 97 && bits[0] == 4u8 { return PubKey::Ec(EcCurve::P384, bits.to_list()); }
+        return PubKey::Other(f"EC key on {curve}");
+    }
+    if oid == OID_ED25519 {
+        try alg.finish();
+        if bits.len() == 32 { return PubKey::EdDsa(bits.to_list()); }
+    }
+    PubKey::Other(oid)
+}
+
+/// `GeneralSubtrees` of a nameConstraints field into DNS / IP lists.
+fn subtrees(b: Slice<u8>, ref dns: List<str>, ref ip: List<List<u8>>) throws (TlsError) {
+    let d = Der::new(b);
+    while !d.done() {
+        let st = try d.enter(SEQUENCE);
+        let (tag, name, _) = try st.next();
+        // minimum / maximum: absent in practice (RFC 5280 4.2.1.10).
+        if !st.done() { throw TlsError::certificate("name constraint with minimum / maximum"); }
+        if tag == 0x82u8 {
+            dns.push(try str::from_utf8(name) catch _ { throw der::bad("dNSName"); });
+        } else if tag == 0x87u8 {
+            if name.len() != 8 && name.len() != 32 { throw der::bad("iPAddress constraint"); }
+            ip.push(name.to_list());
+        } else {
+            // A form not checked here (directoryName, ...): unsupported
+            // when the extension is critical, as it must be.
+            throw TlsError::certificate(f"unsupported name constraint form {tag:#x}");
+        }
+    }
+}
+
+/// Parse a DER certificate.
+pub(pkg) fn parse(der_bytes: Slice<u8>) throws (TlsError) -> CertInfo {
+    let top = Der::new(der_bytes);
+    let cert = try top.enter(SEQUENCE);
+    try top.finish();
+    let (tbs_tag, tbs_body, tbs_all) = try cert.next();
+    if tbs_tag != SEQUENCE { throw der::bad("tbsCertificate"); }
+    let outer_alg = try cert.expect(SEQUENCE);
+    let signature = try der::bit_string_bytes(try cert.expect(BIT_STRING));
+    try cert.finish();
+
+    let t = Der::new(tbs_body);
+    let version = 0i64;
+    let v = try t.optional(0xa0u8);
+    if v is Slice<u8> { version = try der::small_int(try Der::new(v).expect(INTEGER)); }
+    if version > 2 { throw der::bad("version"); }
+    let serial = try t.expect(INTEGER);
+    if serial.len() == 0 { throw der::bad("serial"); }
+    let inner_alg = try t.expect(SEQUENCE);
+    if !(inner_alg == outer_alg) { throw TlsError::certificate("signature algorithm mismatch"); }
+    let (itag, _, issuer) = try t.next();
+    if itag != SEQUENCE { throw der::bad("issuer"); }
+    let validity = try t.enter(SEQUENCE);
+    let (nb_tag, nb, _) = try validity.next();
+    let (na_tag, na, _) = try validity.next();
+    try validity.finish();
+    let (stag, _, subject) = try t.next();
+    if stag != SEQUENCE { throw der::bad("subject"); }
+    let (ktag, kbody, _) = try t.next();
+    if ktag != SEQUENCE { throw der::bad("subjectPublicKeyInfo"); }
+    let _ = try t.optional(0x81u8);
+    let _ = try t.optional(0x82u8);
+    let info = CertInfo {
+        tbs: tbs_all,
+        sig_alg: try sig_alg(outer_alg),
+        signature,
+        issuer,
+        subject,
+        not_before: try der::time(nb_tag, nb),
+        not_after: try der::time(na_tag, na),
+        key: try public_key(kbody),
+        is_ca: false,
+        path_len: -1i64,
+        key_usage: -1,
+        eku: none,
+        dns_names: [],
+        ip_addrs: [],
+        permitted_dns: [],
+        excluded_dns: [],
+        permitted_ip: [],
+        excluded_ip: [],
+    };
+    let exts = try t.optional(0xa3u8);
+    try t.finish();
+    if exts is Slice<u8> {
+        if version != 2 { throw der::bad("extensions before v3"); }
+        let list = try Der::new(exts).enter(SEQUENCE);
+        let seen: List<str> = [];
+        while !list.done() {
+            let e = try list.enter(SEQUENCE);
+            let oid = try der::oid_text(try e.expect(OID));
+            let critical = false;
+            let c = try e.optional(BOOLEAN);
+            if c is Slice<u8> {
+                critical = try der::boolean(c);
+                if !critical { throw der::bad("explicit default critical"); }
+            }
+            let value = try e.expect(OCTET_STRING);
+            try e.finish();
+            for s in seen {
+                if s == oid { throw TlsError::certificate(f"duplicate extension {oid}"); }
+            }
+            seen.push(oid);
+            try extension(ref info, oid, critical, value);
+        }
+    }
+    info
+}
+
+/// Apply extension `oid` to `info`.
+fn extension(ref info: CertInfo, oid: str, critical: bool, value: Slice<u8>) throws (TlsError) {
+    let d = Der::new(value);
+    if oid == "2.5.29.19" {
+        // basicConstraints
+        let bc = try d.enter(SEQUENCE);
+        try d.finish();
+        let ca = try bc.optional(BOOLEAN);
+        if ca is Slice<u8> {
+            info.is_ca = try der::boolean(ca);
+            if !info.is_ca { throw der::bad("explicit default cA"); }
+        }
+        let pl = try bc.optional(INTEGER);
+        if pl is Slice<u8> { info.path_len = try der::small_int(pl); }
+        try bc.finish();
+    } else if oid == "2.5.29.15" {
+        // keyUsage: the first byte holds bits 0..7.
+        let bits = try d.expect(BIT_STRING);
+        try d.finish();
+        if bits.len() < 2 || bits[0] > 7u8 { throw der::bad("keyUsage"); }
+        info.key_usage = bits[1] as i32;
+    } else if oid == "2.5.29.37" {
+        let seq = try d.enter(SEQUENCE);
+        try d.finish();
+        let usages: List<str> = [];
+        while !seq.done() { usages.push(try der::oid_text(try seq.expect(OID))); }
+        if usages.len() == 0 { throw der::bad("empty extendedKeyUsage"); }
+        info.eku = usages;
+    } else if oid == "2.5.29.17" {
+        // subjectAltName
+        let seq = try d.enter(SEQUENCE);
+        try d.finish();
+        while !seq.done() {
+            let (tag, name, _) = try seq.next();
+            if tag == 0x82u8 {
+                info.dns_names.push(try str::from_utf8(name) catch _ { throw der::bad("dNSName"); });
+            } else if tag == 0x87u8 {
+                if name.len() != 4 && name.len() != 16 { throw der::bad("iPAddress"); }
+                info.ip_addrs.push(name.to_list());
+            }
+        }
+    } else if oid == "2.5.29.30" {
+        // nameConstraints
+        let seq = try d.enter(SEQUENCE);
+        try d.finish();
+        let p = try seq.optional(0xa0u8);
+        if p is Slice<u8> { try subtrees(p, ref info.permitted_dns, ref info.permitted_ip); }
+        let x = try seq.optional(0xa1u8);
+        if x is Slice<u8> { try subtrees(x, ref info.excluded_dns, ref info.excluded_ip); }
+        try seq.finish();
+    } else if critical {
+        // Certificate policies and the rest: not processed, so a critical
+        // one fails validation (RFC 5280 4.2).
+        throw TlsError::certificate(f"unsupported critical extension {oid}");
+    }
+}
+
+// ---- names ----
+
+fn lower(s: str) -> str { s.to_lowercase() }
+
+/// Whether DNS name `pattern` from a certificate matches `host`
+/// (RFC 6125 6.4): ASCII case-insensitive; a wildcard is the whole
+/// leftmost label, matches exactly one label, and needs two labels after
+/// it.
+pub(pkg) fn dns_match(pattern: str, host: str) -> bool {
+    let p = lower(pattern);
+    let h = lower(host);
+    if h.ends_with(".") { h = h[0:h.len() - 1]; }
+    if p.len() == 0 || h.len() == 0 { return false; }
+    if !p.starts_with("*.") { return p == h; }
+    let suffix = p[1:p.len()];
+    if suffix.find("*") is usize { return false; }
+    let dots = 0;
+    for c in suffix.bytes() {
+        if c == 0x2eu8 { dots += 1; }
+    }
+    if dots < 2 { return false; }
+    let first = h.find(".");
+    match first {
+        i: usize => i > 0 && h[i:h.len()] == suffix,
+        none => false,
+    }
+}
+
+/// Whether `name` lies in the DNS subtree `base` (RFC 5280 4.2.1.10:
+/// `base` itself or a subdomain; a leading `.` means subdomains only).
+fn in_subtree(name: str, base: str) -> bool {
+    let n = lower(name);
+    let b = lower(base);
+    if b.len() == 0 { return true; }
+    if b.starts_with(".") { return n.ends_with(b); }
+    n == b || n.ends_with("." + b)
+}
+
+fn ip_in(ip: List<u8>, net: List<u8>) -> bool {
+    let n = ip.len();
+    if net.len() != 2 * n { return false; }
+    for i in 0..n {
+        if (ip[i] & net[n + i]) != (net[i] & net[n + i]) { return false; }
+    }
+    true
+}
+
+/// `*.rest` as `rest`.
+fn unwild(n: str) -> str {
+    if n.starts_with("*.") { return n[2:n.len()]; }
+    n
+}
+
+/// Whether CA `ca`'s name constraints allow `leaf`'s names (DNS names
+/// and IP addresses, and `host` itself).
+fn names_allowed(ca: CertInfo, leaf: CertInfo) -> bool {
+    for name in leaf.dns_names {
+        for x in ca.excluded_dns {
+            if in_subtree(unwild(name), x) { return false; }
+        }
+        if ca.permitted_dns.len() > 0 {
+            let ok = false;
+            for p in ca.permitted_dns {
+                if in_subtree(unwild(name), p) { ok = true; }
+            }
+            if !ok { return false; }
+        }
+    }
+    for ip in leaf.ip_addrs {
+        for x in ca.excluded_ip {
+            if ip_in(ip, x) { return false; }
+        }
+        if ca.permitted_ip.len() > 0 {
+            let ok = false;
+            for p in ca.permitted_ip {
+                if ip_in(ip, p) { ok = true; }
+            }
+            if !ok { return false; }
+        }
+    }
+    true
+}
+
+fn eku_server_ok(c: CertInfo) -> bool {
+    match c.eku {
+        l: List<str> => {
+            for u in l {
+                if u == EKU_SERVER_AUTH || u == EKU_ANY { return true; }
+            }
+            false
+        },
+        none => true,
+    }
+}
+
+/// Whether `leaf` names `host` (a DNS name or an IP address's bytes).
+pub(pkg) fn names_host(leaf: CertInfo, host: str, ip: List<u8> | none) -> bool {
+    match ip {
+        a: List<u8> => {
+            for x in leaf.ip_addrs {
+                if x == a { return true; }
+            }
+            false
+        },
+        none => {
+            for n in leaf.dns_names {
+                if dns_match(n, host) { return true; }
+            }
+            false
+        },
+    }
+}
+
+/// Validate `chain[0]` (the leaf; the rest are intermediates in any
+/// order) up to one of `roots` at Unix time `now`, for server `host`.
+pub(pkg) fn verify_server(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, host: str, ip: List<u8> | none) throws (TlsError) {
+    if chain.len() == 0 { throw TlsError::certificate("no certificate"); }
+    let leaf = chain[0];
+    if now < leaf.not_before || now > leaf.not_after { throw TlsError::certificate("certificate expired or not yet valid"); }
+    if !eku_server_ok(leaf) { throw TlsError::certificate("certificate not valid for server authentication"); }
+    if leaf.key_usage >= 0 && leaf.key_usage & KU_DIGITAL_SIGNATURE == 0 {
+        throw TlsError::certificate("certificate key usage does not allow signing");
+    }
+    if !names_host(leaf, host, ip) { throw TlsError::certificate(f"certificate is not valid for {host}"); }
+    let path: List<CertInfo> = [leaf];
+    let why = build(path, chain, roots, now);
+    if why != "" { throw TlsError::certificate(why); }
+}
+
+/// Extend `path` (ending in a certificate to find the issuer of) to a
+/// root: "" on success, else the reason the last attempt failed.
+fn build(path: List<CertInfo>, pool: List<CertInfo>, roots: List<CertInfo>, now: i64) -> str {
+    let cur = path[path.len() - 1];
+    let why = "certificate signed by an unknown authority";
+    for r in roots {
+        if r.subject == cur.issuer {
+            let w = check_issuer(path, r, true, now);
+            if w == "" { return ""; }
+            why = w;
+        }
+    }
+    if path.len() >= 10 { return "certificate chain too long"; }
+    for i in 1..pool.len() {
+        let c = pool[i];
+        if !(c.subject == cur.issuer) { continue; }
+        let loops = false;
+        for p in path {
+            if p.tbs == c.tbs { loops = true; }
+        }
+        if loops { continue; }
+        let w = check_issuer(path, c, false, now);
+        if w != "" {
+            why = w;
+            continue;
+        }
+        path.push(c);
+        let w2 = build(path, pool, roots, now);
+        if w2 == "" { return ""; }
+        why = w2;
+        let _ = path.pop();
+    }
+    why
+}
+
+/// Whether CA `ca` may issue the last certificate of `path`: "" or the
+/// reason it may not.
+fn check_issuer(path: List<CertInfo>, ca: CertInfo, anchor: bool, now: i64) -> str {
+    let cur = path[path.len() - 1];
+    // An anchor is trusted as configured (a v1 root has no
+    // basicConstraints).
+    if !ca.is_ca && !anchor { return "issuer is not a CA"; }
+    if ca.key_usage >= 0 && ca.key_usage & KU_KEY_CERT_SIGN == 0 { return "issuer may not sign certificates"; }
+    if now < ca.not_before || now > ca.not_after { return "issuer certificate expired or not yet valid"; }
+    if !eku_server_ok(ca) { return "issuer not valid for server authentication"; }
+    // Intermediates below `ca` in the path (the leaf excluded).
+    if ca.path_len >= 0 && (path.len() as i64) - 1 > ca.path_len { return "path length constraint exceeded"; }
+    if !names_allowed(ca, path[0]) { return "name constraints violated"; }
+    if !verify_sig(ca.key, cur.sig_alg, cur.tbs, cur.signature) { return "bad certificate signature"; }
+    ""
+}

@@ -169,6 +169,9 @@ fn parse_int_and_float() {
         let st = unsafe { rok_str_parse_float(rs(&s), o.0.as_mut_ptr()) };
         let got = f64::from_ne_bytes(o.0[HEADER_SIZE..].try_into().unwrap());
         match s.parse::<f64>() {
+            Ok(v) if v.is_infinite() && s.bytes().any(|b| b.is_ascii_digit()) => {
+                assert_eq!(st, 3, "{s:?}");
+            }
             Ok(v) => assert!(
                 st == 0 && (got.to_bits() == v.to_bits() || got.is_nan() && v.is_nan()),
                 "{s:?}"

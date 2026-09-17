@@ -639,16 +639,64 @@ fn unnarrow(ctx: &mut LowerCtx<'_>, name: &str, local: LocalId, value: &Expr) ->
     }
     let target = chain.pop().expect("narrowed local has an origin");
     for rebound in chain {
-        if let Some(scope) = ctx
+        if let Some(i) = ctx
             .scopes
-            .iter_mut()
-            .rev()
-            .find(|s| s.get(name) == Some(&rebound))
+            .iter()
+            .rposition(|s| s.get(name) == Some(&rebound))
         {
-            scope.remove(name);
+            ctx.scopes[i].remove(name);
+            ctx.unnarrowed.push((name.to_owned(), rebound, i));
         }
     }
     target
+}
+
+/// The narrowings ended since `mark`, put back: the next branch does not
+/// run after this one. `rejoin_unnarrowings` ends them again where the
+/// branches join (spec 2.2.6).
+pub(super) fn branch_unnarrowings(
+    ctx: &mut LowerCtx<'_>,
+    mark: usize,
+) -> Vec<(String, LocalId, usize)> {
+    let ended = ctx.unnarrowed.split_off(mark);
+    for (name, local, i) in &ended {
+        if let Some(scope) = ctx.scopes.get_mut(*i) {
+            scope.insert(name.clone(), *local);
+        }
+    }
+    ended
+}
+
+pub(super) fn rejoin_unnarrowings(ctx: &mut LowerCtx<'_>, ended: Vec<(String, LocalId, usize)>) {
+    for (name, local, i) in ended {
+        if let Some(scope) = ctx.scopes.get_mut(i) {
+            if scope.get(&name) == Some(&local) {
+                scope.remove(&name);
+                ctx.unnarrowed.push((name, local, i));
+            }
+        }
+    }
+}
+
+/// A loop whose body ends a narrowing made outside it is lowered again
+/// with that narrowing ended from its entry: the loop head joins the
+/// entry with the back edge (spec 2.2.6).
+fn lower_loop(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
+    let mark = ctx.probe_mark();
+    let log = ctx.unnarrowed.len();
+    let e = lower_expr_inner(ctx, expr);
+    let outer: Vec<_> = ctx.unnarrowed[log..]
+        .iter()
+        .filter(|u| (u.1.0 as usize) < mark.locals)
+        .cloned()
+        .collect();
+    if outer.is_empty() {
+        return e;
+    }
+    ctx.rollback(&mark);
+    ctx.unnarrowed.truncate(log);
+    ctx.unnarrowed.extend(outer);
+    lower_expr_inner(ctx, expr)
 }
 
 /// `target = value;` for a local / static, a struct-field chain rooted
@@ -688,6 +736,13 @@ pub(super) fn lower_assign(
             }
             let segs = [name.as_str()];
             if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
+                let full = ctx
+                    .env
+                    .names
+                    .value_reexports
+                    .get(&full)
+                    .cloned()
+                    .unwrap_or(full);
                 ctx.check_item_visible(&full, "static");
                 if !ctx.env.mut_statics.contains(&full) {
                     ctx.emit_error(
@@ -1165,7 +1220,12 @@ pub(super) fn check_index_ty(ctx: &LowerCtx<'_>, idx: &HirExpr) {
 }
 
 pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
-    let e = ctx.at_span(expr.span, |ctx| lower_expr_inner(ctx, expr));
+    let e = ctx.at_span(expr.span, |ctx| match expr.kind {
+        ExprKind::While { .. } | ExprKind::For { .. } | ExprKind::Loop { .. } => {
+            lower_loop(ctx, expr)
+        }
+        _ => lower_expr_inner(ctx, expr),
+    });
     if e.ty != HirTy::Never || hir_expr_diverges(&e) {
         return e;
     }
@@ -1287,6 +1347,7 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         )
     };
     match &expr.kind {
+        ExprKind::Literal(AstLit::ByteStr(body)) => lower_byte_str(ctx, body, span),
         ExprKind::Literal(lit) => super::bignum::literal(ctx, lit, false, span)
             .unwrap_or_else(|| lower_literal(ctx, lit, false, span)),
         ExprKind::Path(p) => lower_path(ctx, p, span),
@@ -1926,6 +1987,24 @@ fn struct_decl_fields(def: &AstStructDef) -> Vec<(String, &Ty)> {
     }
 }
 
+/// Whether bare `segs` names a struct outside core while the implicit
+/// `rok::core::**` also brings in a core variant of that name (`struct
+/// Sha256` vs `HashAlgorithm::Sha256`): the program's struct wins.
+/// Otherwise the variant a struct-literal path names, if any.
+fn init_variant(ctx: &LowerCtx<'_>, segs: &[&str], hint: Option<&HirTy>) -> EnumRes {
+    let shadowed = segs.len() == 1
+        && ctx
+            .canon_type(segs)
+            .is_some_and(|t| !t.starts_with("rok::core::"))
+        && ctx
+            .enum_path(segs)
+            .is_some_and(|(e, _)| e.starts_with("rok::core::"));
+    if shadowed {
+        return EnumRes::NotEnum;
+    }
+    resolve_enum_variant(ctx, segs, hint, None)
+}
+
 /// `S { a: v, .. }`; with `spread`, `S { a: v, ..base }` (spec 2.3.4):
 /// the fields not written are read from `base`, a value of the same
 /// struct type. The written values run first, then `base`.
@@ -1942,7 +2021,7 @@ pub(super) fn lower_struct_init(
     // initialiser (spec 2.4). Pack fields into the variant's tuple
     // payload according to declaration order.
     let mut hint = ctx.current_expected().cloned();
-    match resolve_enum_variant(ctx, &segs, hint.as_ref(), None) {
+    match init_variant(ctx, &segs, hint.as_ref()) {
         EnumRes::Error => return poison(span),
         EnumRes::Found(..) if spread.is_some() => {
             return ctx.error_expr(
@@ -2530,7 +2609,9 @@ pub(super) fn lower_if(
         .current_expected()
         .cloned()
         .filter(|t| *t != HirTy::Unknown);
+    let ended = ctx.unnarrowed.len();
     let mut then_h = lower_narrowed_block(ctx, cond, then_block);
+    let ended = branch_unnarrowings(ctx, ended);
     let build = |cond_h: HirExpr, then_h: HirBlock, else_h: Option<HirExpr>, ty: HirTy| HirExpr {
         kind: HirExprKind::If {
             cond: Box::new(cond_h),
@@ -2542,9 +2623,11 @@ pub(super) fn lower_if(
     };
     let Some(else_e) = else_branch else {
         // No else: the if is a statement; any then-value is discarded.
+        rejoin_unnarrowings(ctx, ended);
         return build(cond_h, then_h, None, HirTy::Unit);
     };
     let mut else_h = lower_expr(ctx, else_e);
+    rejoin_unnarrowings(ctx, ended);
     // An unsuffixed integer literal branch takes the other branch's
     // integer type: `if c { 1 } else { n }` with `n: usize`.
     let int_ty = |h: &HirTy| match h {
@@ -3282,6 +3365,62 @@ fn is_str_dict(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
 const DICT: &str = "rok::core::collections::dict::Dict";
 const LIST: &str = "rok::core::collections::list::List";
 const SLICE: &str = "rok::core::collections::slice::Slice";
+
+/// `b"..."`: a `[u8; N]` of its bytes; where a `Slice<u8>` is expected
+/// (alone, or in a sum without an array member), a view of that array.
+fn lower_byte_str(ctx: &mut LowerCtx<'_>, body: &str, span: rokc_diagnostic::Span) -> HirExpr {
+    #[allow(clippy::cast_possible_truncation)] // the lexer allows up to `\xFF`
+    let bytes: Vec<u8> = rokc_ast::escape::unescape(body, rokc_ast::escape::EscapeMode::CChar)
+        .unwrap_or_default()
+        .chars()
+        .map(|c| c as u8)
+        .collect();
+    let Ok(n) = u32::try_from(bytes.len()) else {
+        return ctx.error_expr(span, "byte string is too long".to_owned());
+    };
+    let arr = HirExpr {
+        ty: HirTy::Array(Box::new(HirTy::Prim(PrimTy::U8)), n),
+        kind: HirExprKind::Const(ConstVal::Bytes(bytes)),
+        span,
+    };
+    let is_byte_slice = |t: &HirTy| {
+        matches!(t, HirTy::Struct(id) if {
+            let d = ctx.struct_def(*id);
+            enum_base_name(&d.name) == SLICE && d.generic_args == [HirTy::Prim(PrimTy::U8)]
+        })
+    };
+    let view = match ctx.current_expected() {
+        Some(t) if is_byte_slice(t) => true,
+        Some(HirTy::Sum(vs)) => {
+            vs.iter().any(is_byte_slice) && !vs.iter().any(|v| matches!(v, HirTy::Array(..)))
+        }
+        _ => false,
+    };
+    if !view {
+        return arr;
+    }
+    let name = format!("#bs{}", ctx.locals.len());
+    let local = ctx.declare(Some(name.clone()), arr.ty.clone());
+    let slice = Expr {
+        kind: ExprKind::Slice {
+            target: Box::new(super::throws::path_expr(&name, span)),
+            start: None,
+            end: None,
+            step: None,
+        },
+        span,
+    };
+    let trailing = lower_expected(ctx, &slice, HirTy::Unknown);
+    HirExpr {
+        ty: trailing.ty.clone(),
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts: vec![HirStmt::Let { local, init: arr }],
+            trailing: Some(trailing),
+            label: None,
+        })),
+        span,
+    }
+}
 
 /// A `List` / `Slice`: what `..x` spreads with a run-time length.
 fn spreads_at_run_time(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
@@ -9517,6 +9656,13 @@ pub(super) fn lower_path(
     if let Some(full) =
         assoc.or_else(|| ctx.resolve_in(&segs, &ctx.env.consts, &ctx.env.const_leaves))
     {
+        let full = ctx
+            .env
+            .names
+            .value_reexports
+            .get(&full)
+            .cloned()
+            .unwrap_or(full);
         ctx.check_item_visible(&full, "const");
         let (ty, value) = ctx.env.consts[&full].clone();
         // An impl const `m::T::N` resolves its type and value in `m`.
@@ -9553,6 +9699,13 @@ pub(super) fn lower_path(
     }
     // Module-level `static` — a load through the global address.
     if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
+        let full = ctx
+            .env
+            .names
+            .value_reexports
+            .get(&full)
+            .cloned()
+            .unwrap_or(full);
         ctx.check_item_visible(&full, "static");
         let ty = ctx.env.statics[&full].clone();
         return HirExpr {
@@ -9839,6 +9992,8 @@ pub(super) fn lower_literal(
             Some(c) => konst(ConstVal::Char(c), HirTy::Prim(PrimTy::CChar)),
             None => ctx.error_expr(span, format!("unsupported character literal `c'{s}'`")),
         },
+        // Reached only under a unary minus (`lower_byte_str` otherwise).
+        AstLit::ByteStr(_) => ctx.error_expr(span, "cannot negate a byte string".to_owned()),
         AstLit::FStr(_) => ctx.error_expr(
             span,
             "f-string literals are not supported yet (stage-1 limitation)".to_owned(),

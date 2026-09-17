@@ -145,7 +145,8 @@ component_ld() {
 	cp "$cache/$n/wasm-component-ld$(exe)" "$1/"
 }
 
-# A Debian package's data.tar.xz, verified, unpacked under $1.
+# A Debian package's data.tar.xz (the .deb is an ar archive), verified,
+# unpacked under $1.
 deb() {
 	into=$1 pkg=$2 darch=$3
 	[ -f "$into/.$pkg" ] && return
@@ -156,7 +157,7 @@ deb() {
 	name=${pkg}_${version}_$darch.deb
 	fetch "glibc-$GLIBC/$name" "$url/$name" "$(echo "$DEB_SHA256" | sed -n "s/^${pkg}_$darch //p")"
 	mkdir -p "$into"
-	tar -xOf "$cache/glibc-$GLIBC/$name" data.tar.xz | tar -xJf - -C "$into"
+	"$ar" p "$cache/glibc-$GLIBC/$name" data.tar.xz | tar -xJf - -C "$into"
 	touch "$into/.$pkg"
 }
 

@@ -20,15 +20,19 @@ pub(super) fn lower_match(
         .cloned()
         .filter(|t| *t != HirTy::Unknown);
     let mut arm_h: Vec<HirMatchArm> = Vec::with_capacity(arms.len());
+    let mut ended = Vec::new();
     for arm in arms {
+        let mark = ctx.unnarrowed.len();
         ctx.push_scope();
         let pat = lower_pattern(ctx, &arm.pat, &scrut_ty);
         let guard = arm.guard.as_ref().map(|g| lower_cond(ctx, g));
         let cells = ctx.take_cells(arm.body.span);
         let body = super::expr::with_lets(cells, lower_expr(ctx, &arm.body));
         ctx.pop_scope();
+        ended.extend(super::expr::branch_unnarrowings(ctx, mark));
         arm_h.push(HirMatchArm { pat, guard, body });
     }
+    super::expr::rejoin_unnarrowings(ctx, ended);
     // `let x: T = v else { ... };` is parsed as a two-arm match whose
     // second arm is the else block (parser desugar).
     let is_let_else = matches!(

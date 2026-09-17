@@ -10,12 +10,12 @@ pub struct OrderedSet<T> {
 impl<T> !Sync for OrderedSet<T> {}
 
 impl<T: Hash> OrderedSet<T> {
-    pub fn new() -> OrderedSet<T> {
+    pub const fn new() -> OrderedSet<T> {
         OrderedSet { d: OrderedDict::new() }
     }
 
     /// The items inserted in order (later duplicates dropped).
-    pub fn from(items: List<T>) -> OrderedSet<T> {
+    pub const fn from(items: List<T>) -> OrderedSet<T> {
         let s: OrderedSet<T> = OrderedSet { d: OrderedDict::with_capacity(items.len()) };
         for x in items {
             s.insert(x);
@@ -23,7 +23,7 @@ impl<T: Hash> OrderedSet<T> {
         s
     }
 
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         self.d.len()
     }
 
@@ -32,30 +32,30 @@ impl<T: Hash> OrderedSet<T> {
     }
 
     /// `true` when `x` was not there yet.
-    pub fn insert(self, x: T) -> bool {
+    pub const fn insert(self, x: T) -> bool {
         self.d.insert(x, true) is none
     }
 
     /// `true` when `x` was there.
-    pub fn remove(self, x: T) -> bool {
+    pub const fn remove(self, x: T) -> bool {
         !(self.d.remove(x) is none)
     }
 
-    pub fn contains(self, x: T) -> bool {
+    pub const fn contains(self, x: T) -> bool {
         self.d.contains_key(x)
     }
 
     /// The members in insertion order, lazily.
-    pub fn iter(self) -> ListIter<T> {
+    pub const fn iter(self) -> ListIter<T> {
         self.d.keys()
     }
 
-    pub fn to_list(self) -> List<T> {
+    pub const fn to_list(self) -> List<T> {
         self.iter().collect()
     }
 
     /// `self`'s members, then `other`'s new ones.
-    pub fn union(self, other: OrderedSet<T>) -> OrderedSet<T> {
+    pub const fn union(self, other: OrderedSet<T>) -> OrderedSet<T> {
         let out = OrderedSet::from(self.to_list());
         for x in other {
             out.insert(x);
@@ -63,11 +63,11 @@ impl<T: Hash> OrderedSet<T> {
         out
     }
 
-    pub fn intersection(self, other: OrderedSet<T>) -> OrderedSet<T> {
+    pub const fn intersection(self, other: OrderedSet<T>) -> OrderedSet<T> {
         self.iter().filter(|x: T| other.contains(x)).collect()
     }
 
-    pub fn difference(self, other: OrderedSet<T>) -> OrderedSet<T> {
+    pub const fn difference(self, other: OrderedSet<T>) -> OrderedSet<T> {
         self.iter().filter(|x: T| !other.contains(x)).collect()
     }
 
@@ -75,7 +75,7 @@ impl<T: Hash> OrderedSet<T> {
         self.difference(other).union(other.difference(self))
     }
 
-    pub fn is_subset(self, other: OrderedSet<T>) -> bool {
+    pub const fn is_subset(self, other: OrderedSet<T>) -> bool {
         self.iter().all(|x: T| other.contains(x))
     }
 
@@ -106,13 +106,13 @@ impl<T: Hash + Clone> Clone for OrderedSet<T> {
 impl<T: Hash> IntoIterator for OrderedSet<T> {
     type IntoIter = ListIter<T>;
     type Item = T;
-    fn into_iter(self) -> ListIter<T> {
+    const fn into_iter(self) -> ListIter<T> {
         self.iter()
     }
 }
 
 impl<T: Hash> FromIterator<T> for OrderedSet<T> {
-    fn from_iter<I>(it: I) -> OrderedSet<T> {
+    const fn from_iter<I>(it: I) -> OrderedSet<T> {
         let out: OrderedSet<T> = OrderedSet::new();
         for x in it {
             out.insert(x);

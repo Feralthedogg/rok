@@ -25,6 +25,9 @@ pub enum Assoc {
     None,
 }
 
+/// Binding power of the prefix unary operators and `await` (spec 3.2.3
+/// level 12, right-assoc).
+pub const PREFIX_PREC: u32 = 12;
 /// Binding power of `as` / `is` (spec 3.2.3 level 11, left-assoc).
 pub const CAST_PREC: u32 = 11;
 /// Binding power of `??` (level 1, right-assoc).
@@ -43,7 +46,9 @@ pub fn fixed_prec(symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
         s => s,
     };
     match fixity {
-        Fixity::Prefix => matches!(symbol, "-" | "!" | "~" | "√").then_some((12, Assoc::Right)),
+        Fixity::Prefix => {
+            matches!(symbol, "-" | "!" | "~" | "√").then_some((PREFIX_PREC, Assoc::Right))
+        }
         // Level 13: the postfix row (`?`, member access). `?` itself is
         // language syntax; it is here only as a `like` target (spec 6.7.1).
         Fixity::Postfix => (symbol == "?").then_some((13, Assoc::Left)),

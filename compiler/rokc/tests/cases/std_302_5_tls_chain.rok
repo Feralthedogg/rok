@@ -1,0 +1,169 @@
+// needs: threads net
+// expect-exit: 0
+// expect-stdout:
+// good: ok www.rok.test
+// extra unrelated certificate: ok www.rok.test
+// missing intermediate: certificate signed by an unknown authority
+// outside the name constraint: name constraints violated
+// expired: certificate expired or not yet valid
+// clientAuth only: certificate not valid for server authentication
+// issued by a leaf: issuer is not a CA
+// wrong host: certificate is not valid for rok.test
+// key from PEM: true
+// bad key: unsupported private key algorithm 1.2.840.10045.2.1 (Ed25519 only)
+// system roots: true
+
+// Stdlib 3.2.5: certificate path validation of net::tls (RFC 5280):
+// intermediates in any order, pathLenConstraint, DNS name constraints,
+// validity, extendedKeyUsage serverAuth, issuers that are not CAs, name
+// mismatch; PKCS #8 keys; the OS trust store loads.
+use rok::std::net::{tcp_listen, tcp_connect};
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, CipherSuite};
+use rok::std::net::tls;
+use rok::std::thread;
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBUzCCAQWgAwIBAgIUHuDQmdyLUvVYGHs5rDw1vYU8bIIwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAWMRQwEgYDVQQDDAtyb2sgdGVzdCBDQTAqMAUGAytlcAMhAPEMYwkJArdk
+aV3E4nOSir4hNCOt5rCjhq6U1sYe6lTWo2MwYTAdBgNVHQ4EFgQUqTSORZgmA5IP
+oVjCUMKRtKdC4BkwHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwDwYD
+VR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQwBQYDK2VwA0EAp7tJ5xbNuoRw
+zTq/y0kOz917MctSi+O2E5DLqAoAjtPGehC8163+j0KTLVeOwoTW1dtCRoWHyyYj
+gDBrha3fDQ==
+-----END CERTIFICATE-----
+";
+
+const INT: str = "-----BEGIN CERTIFICATE-----
+MIIBfjCCATCgAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJgwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3NDkwMFoYDzIxMjYwOTIxMDc0
+OTAwWjAgMR4wHAYDVQQDDBVyb2sgdGVzdCBpbnRlcm1lZGlhdGUwKjAFBgMrZXAD
+IQBES7Tg5pTwgoyUHikx3vmeFw/coFMMzxxGFS3FOYPWFqOBgzCBgDASBgNVHRMB
+Af8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwICBDAaBgNVHR4BAf8EEDAOoAwwCoII
+cm9rLnRlc3QwHQYDVR0OBBYEFHrE357suoqvkrSyFknNIE8hKPLqMB8GA1UdIwQY
+MBaAFKk0jkWYJgOSD6FYwlDCkbSnQuAZMAUGAytlcANBAOhH1bPigHnIPCn7YBA5
+56qP4O9WjMJK2P5aRIdRr8Jfo/+QziVOfdFtvo4Q1jbUc8QIVCSUJ9JTyXBHNNki
+1wQ=
+-----END CERTIFICATE-----
+";
+
+const GOOD: str = "-----BEGIN CERTIFICATE-----
+MIIBbjCCASCgAwIBAgIUJRchA7T4oJcQm+f1qi+WqdmIixowBQYDK2VwMCAxHjAc
+BgNVBAMMFXJvayB0ZXN0IGludGVybWVkaWF0ZTAgFw0yNjEwMTUwNzQ5MDBaGA8y
+MTI2MDkyMTA3NDkwMFowDzENMAsGA1UEAwwEZ29vZDAqMAUGAytlcAMhALGfuPPg
+9I7UmnfMjzt98LpJR/uoFUu5RBiH1z8IoQVvo3sweTAXBgNVHREEEDAOggx3d3cu
+cm9rLnRlc3QwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCQYDVR0TBAIwADAdBgNVHQ4E
+FgQUFYdbp/Ve5Hx/YWIFgctn8PfrerwwHwYDVR0jBBgwFoAUesTfnuy6iq+StLIW
+Sc0gTyEo8uowBQYDK2VwA0EA7F9Ul2rXaxIiSIcqh2a/aAGn1yRCAeEfgCqYhDHg
+qcVk6zYX1BXzsyHM/WwP9Q2iiwEm3yneb5jwglA3VD8SBA==
+-----END CERTIFICATE-----
+";
+
+const OUTSIDE: str = "-----BEGIN CERTIFICATE-----
+MIIBcTCCASOgAwIBAgIUJRchA7T4oJcQm+f1qi+WqdmIixswBQYDK2VwMCAxHjAc
+BgNVBAMMFXJvayB0ZXN0IGludGVybWVkaWF0ZTAgFw0yNjEwMTUwNzQ5MDBaGA8y
+MTI2MDkyMTA3NDkwMFowEjEQMA4GA1UEAwwHb3V0c2lkZTAqMAUGAytlcAMhALGf
+uPPg9I7UmnfMjzt98LpJR/uoFUu5RBiH1z8IoQVvo3sweTAXBgNVHREEEDAOggxl
+dmlsLmV4YW1wbGUwEwYDVR0lBAwwCgYIKwYBBQUHAwEwCQYDVR0TBAIwADAdBgNV
+HQ4EFgQUFYdbp/Ve5Hx/YWIFgctn8PfrerwwHwYDVR0jBBgwFoAUesTfnuy6iq+S
+tLIWSc0gTyEo8uowBQYDK2VwA0EAGls967WTChrPiuuYXww+eCahtnlNxqvSM+EB
+4RsEMY56EvSXEPpxdosOJRo7/4/uEtnh+0QNJRGyBsfevTiRAw==
+-----END CERTIFICATE-----
+";
+
+const EXPIRED: str = "-----BEGIN CERTIFICATE-----
+MIIBbzCCASGgAwIBAgIUJRchA7T4oJcQm+f1qi+WqdmIixwwBQYDK2VwMCAxHjAc
+BgNVBAMMFXJvayB0ZXN0IGludGVybWVkaWF0ZTAeFw0yMDAxMDEwMDAwMDBaFw0y
+MTAxMDEwMDAwMDBaMBIxEDAOBgNVBAMMB2V4cGlyZWQwKjAFBgMrZXADIQCxn7jz
+4PSO1Jp3zI87ffC6SUf7qBVLuUQYh9c/CKEFb6N7MHkwFwYDVR0RBBAwDoIMd3d3
+LnJvay50ZXN0MBMGA1UdJQQMMAoGCCsGAQUFBwMBMAkGA1UdEwQCMAAwHQYDVR0O
+BBYEFBWHW6f1XuR8f2FiBYHLZ/D363q8MB8GA1UdIwQYMBaAFHrE357suoqvkrSy
+FknNIE8hKPLqMAUGAytlcANBAPOrcpywXvZ2IGO7P1GRkSAltqtWRU/rcm0ip0Y5
+5jLl4BB/oaFPb2NKvSF+Ux4Y2+YyTp/MuWy/bTU7onZKTAw=
+-----END CERTIFICATE-----
+";
+
+const CLIENTONLY: str = "-----BEGIN CERTIFICATE-----
+MIIBdDCCASagAwIBAgIUJRchA7T4oJcQm+f1qi+WqdmIix0wBQYDK2VwMCAxHjAc
+BgNVBAMMFXJvayB0ZXN0IGludGVybWVkaWF0ZTAgFw0yNjEwMTUwNzQ5MDBaGA8y
+MTI2MDkyMTA3NDkwMFowFTETMBEGA1UEAwwKY2xpZW50b25seTAqMAUGAytlcAMh
+ALGfuPPg9I7UmnfMjzt98LpJR/uoFUu5RBiH1z8IoQVvo3sweTAXBgNVHREEEDAO
+ggx3d3cucm9rLnRlc3QwEwYDVR0lBAwwCgYIKwYBBQUHAwIwCQYDVR0TBAIwADAd
+BgNVHQ4EFgQUFYdbp/Ve5Hx/YWIFgctn8PfrerwwHwYDVR0jBBgwFoAUesTfnuy6
+iq+StLIWSc0gTyEo8uowBQYDK2VwA0EAH80xfN8SdE+JJO81nSr9l1iU1vv2Ij5z
+zSl5wcNukyLATAyGg+vpGyUhRinjx89Wt5SUlUgFt+6b3jEeQ9ZEAQ==
+-----END CERTIFICATE-----
+";
+
+const DEEP: str = "-----BEGIN CERTIFICATE-----
+MIIBPDCB76ADAgECAhRQLW+7f5QEQGdZIjkeNWtxF3Os6TAFBgMrZXAwDzENMAsG
+A1UEAwwEZ29vZDAgFw0yNjEwMTUwNzQ5MDBaGA8yMTI2MDkyMTA3NDkwMFowDzEN
+MAsGA1UEAwwEZGVlcDAqMAUGAytlcAMhALGfuPPg9I7UmnfMjzt98LpJR/uoFUu5
+RBiH1z8IoQVvo1swWTAYBgNVHREEETAPgg1kZWVwLnJvay50ZXN0MBMGA1UdJQQM
+MAoGCCsGAQUFBwMBMAkGA1UdEwQCMAAwHQYDVR0OBBYEFBWHW6f1XuR8f2FiBYHL
+Z/D363q8MAUGAytlcANBAKmmqBGJPBHtz3C1hh5gEmp5NZ4malCyg+zgCGmHmCbA
+fpdEBZXVoEist7OKhyCK0U4vMNYDskaAJSAFu9H6ZwE=
+-----END CERTIFICATE-----
+";
+
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIIE3h746HdSTHO9jeE86fGvRMVU2OSXB4KdeUu0PigMs
+-----END PRIVATE KEY-----
+";
+
+const EC_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcgH7+8UZOnSmYIn9
+1ftUi+QOk+yiBJQf//N6N0MgirqhRANCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZE
+FaEpq/6UIdEL3wPK3Oj3v+97CWRf3SsIe8X0/ZpoW+ppyMMO58QOQHyV
+-----END PRIVATE KEY-----
+";
+
+fn certs(pems: List<str>) -> List<Certificate> {
+    let out: List<Certificate> = [];
+    for p in pems {
+        for c in try Certificate::from_pem(p) catch _ { [] } { out.push(c); }
+    }
+    out
+}
+
+/// Serve one connection with `chain`; then try `name` against it.
+fn attempt(label: str, chain: str, name: str) {
+    let l = try tcp_listen("127.0.0.1:0") catch _ { return; };
+    let port = (try l.local_addr() catch _ { return; }).port();
+    let t = thread::spawn(|| {
+        let (s, _) = try l.accept() catch _ { return; };
+        let key = try PrivateKey::from_pem(KEY) catch _ { return; };
+        let certs = try Certificate::from_pem(chain) catch _ { return; };
+        let srv = try Server::new(s, ServerConfig::new(certs, key)) catch _ { return; };
+        try srv.write_all("x") catch _ {};
+        srv.close();
+    });
+    let cfg = ClientConfig { root_certs: certs([CA]), cipher_suites: CipherSuite::all(), alpn_protocols: [], enable_pq: false };
+    let s = try tcp_connect(f"127.0.0.1:{port}") catch _ { return; };
+    let c = try Client::with_config(s, name, cfg) catch e {
+        println(f"{label}: {e.msg}");
+        try t.join() catch _ {};
+        return;
+    };
+    println(f"{label}: ok {c.peer_certificates()[0].dns_names()[0]}");
+    c.close();
+    try t.join() catch _ {};
+}
+
+fn main() {
+    attempt("good", GOOD + INT, "www.rok.test");
+    attempt("extra unrelated certificate", GOOD + OUTSIDE + INT, "www.rok.test");
+    attempt("missing intermediate", GOOD, "www.rok.test");
+    attempt("outside the name constraint", OUTSIDE + INT, "evil.example");
+    attempt("expired", EXPIRED + INT, "www.rok.test");
+    attempt("clientAuth only", CLIENTONLY + INT, "www.rok.test");
+    attempt("issued by a leaf", DEEP + GOOD + INT, "deep.rok.test");
+    attempt("wrong host", GOOD + INT, "rok.test");
+    let k = try PrivateKey::from_pem(KEY) catch _ { return; };
+    println(f"key from PEM: {k is PrivateKey}");
+    try PrivateKey::from_pem(EC_KEY) catch e { println(f"bad key: {e.msg}"); };
+    let roots = try tls::system_roots() catch _ { [] };
+    println(f"system roots: {roots.len() > 0}");
+}
+
+// spec: std 302-net §3.2.5

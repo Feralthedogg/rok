@@ -53,6 +53,9 @@ packages:
                                add a stone (default: ^ the newest version)
   add <name> --path <dir>      add a dependency (--dev: to dev_deps)
   add <name> --git <url> [--rev <r> | --tag <t> | --branch <b>]
+                               (each also: --features <f,..>,
+                               --no-default-features, --optional: enabled
+                               by a new feature of its name)
   add --native <name>[@<req>] [--registry <url>]
                                add a native package (prebuilt C library)
   remove [--native] <name>     remove a dependency
@@ -60,10 +63,12 @@ packages:
                                rewrite rok.lock
   search [--native] <query>    stones (native packages) whose name contains
                                <query>
-  deps                         print the resolved dependencies (name=lib.rok),
-                               each after its own; native packages as
-                               `# native <name> <vers>` and their rokc
-                               arguments, one per line
+  deps [--dev] [feature options]
+                               print the resolved dependencies (name=lib.rok),
+                               each after its own and followed by its
+                               features (`--extern-feature=<name>=<f>`);
+                               native packages as `# native <name> <vers>`
+                               and their rokc arguments, one per line
   clean [path]                 remove target/
 
 stones (the index is a git repository; sources are not uploaded):
@@ -101,6 +106,12 @@ compiler commands (rokc, with the dependencies; see `rokc help`):
   (or script) whose dependencies and `lints` apply. A .rok file inside a
   project (the nearest directory above it with main.rok, lib.rok or
   rok.rokon) uses that project's.
+
+  feature options (rok.rokon's `features`; before any `--`):
+  --features <f,..>            the package's features, or `<dep>/<f>` of a
+                               dependency (repeatable)
+  --all-features               every feature of the package
+  --no-default-features        not its `default` feature
 
 jupyter:
   jupyter install              install the `rok` Jupyter kernel (with --env:
@@ -456,7 +467,7 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
         let file = format!("{} (//! rokon block)", start.display());
         if let Some(block) = manifest::script_block(&src) {
             let manifest = manifest::parse(&block, &file)?;
-            if manifest.dev_deps.len() + manifest.lints.len() > 0
+            if manifest.dev_deps.len() + manifest.lints.len() + manifest.features.len() > 0
                 || manifest.lints_from.is_some()
                 || manifest.toolchain.is_some()
                 || manifest.name.is_some()
@@ -484,17 +495,57 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
     env_target(&ambient_env())
 }
 
-const fn options(g: &Global) -> Options {
+fn options(g: &Global) -> Options {
     Options {
         offline: g.offline,
         locked: g.locked,
-        update: None,
         quiet: g.quiet,
+        ..Options::default()
     }
+}
+
+/// `args` without the feature options before `--`, which go to `o`.
+fn feature_flags(args: &[String], o: &mut Options) -> Result<Vec<String>, String> {
+    let mut rest = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--" => {
+                rest.push(a.clone());
+                rest.extend(it.by_ref().cloned());
+            }
+            "--all-features" => o.all_features = true,
+            "--no-default-features" => o.no_default_features = true,
+            "--features" => {
+                let v = it.next().ok_or("`--features` needs a value")?;
+                o.features.extend(split_features(v));
+            }
+            _ => match a.strip_prefix("--features=") {
+                Some(v) => o.features.extend(split_features(v)),
+                None => rest.push(a.clone()),
+            },
+        }
+    }
+    Ok(rest)
+}
+
+/// `a,b c` -> `a`, `b`, `c`.
+fn split_features(v: &str) -> impl Iterator<Item = String> {
+    v.split([',', ' '])
+        .filter(|f| !f.is_empty())
+        .map(str::to_owned)
 }
 
 /// Run `rokc <pre> <cmd> [--extern..] [lint levels] [--target-dir] <post>`.
 fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
+    let mut opts = options(g);
+    opts.dev = matches!(cmd, "test" | "bench");
+    let resolves = !matches!(cmd, "fmt" | "clean" | "demangle" | "profdata");
+    let post = &if resolves {
+        feature_flags(post, &mut opts)?
+    } else {
+        post.to_vec()
+    };
     // The path, when given, is the first argument after the command.
     let path = post
         .first()
@@ -531,8 +582,8 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
             extra.push(format!("--name={name}"));
         }
     }
-    if !matches!(cmd, "fmt" | "clean" | "demangle" | "profdata") {
-        let graph = match resolve::resolve(&home(), &t.ctx, &options(g)) {
+    if resolves {
+        let graph = match resolve::resolve(&home(), &t.ctx, &opts) {
             Ok(r) => r,
             // The language server still starts (without dependencies).
             Err(e) if cmd == "lsp" => {
@@ -540,24 +591,22 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
                 resolve::Graph {
                     packages: Vec::new(),
                     natives: Vec::new(),
+                    features: Vec::new(),
                 }
             }
             Err(e) => return Err(e),
         };
-        let dev_too = matches!(cmd, "test" | "bench");
-        for p in graph.packages.iter().filter(|p| dev_too || !p.dev) {
-            extra.push("--extern".to_owned());
-            extra.push(format!(
-                "{}={}",
-                manifest::code_name(&p.name),
-                p.root.display()
-            ));
+        for p in &graph.packages {
+            extra.extend(extern_args(p));
+        }
+        // The package's own features.
+        for f in &graph.features {
+            extra.push(format!("--cfg=feature={f}"));
         }
         // Native packages: what a link (or the REPL's session) needs, for
         // the build's target. Checks link nothing.
         if matches!(cmd, "build" | "run" | "test" | "bench" | "repl" | "jupyter") {
-            let natives: Vec<&native::Resolved> =
-                graph.natives.iter().filter(|n| dev_too || !n.dev).collect();
+            let natives: Vec<&native::Resolved> = graph.natives.iter().collect();
             if !natives.is_empty() {
                 let target = rokc_target::TargetSpec::resolve(target_arg(post))?;
                 extra.extend(native::rokc_args(
@@ -589,6 +638,18 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
         c.env("ROK_ENV", e);
     }
     Ok(exec(c, &rokc))
+}
+
+/// `--extern=<name>=<lib.rok>` and its `--extern-feature=<name>=<f>`s.
+fn extern_args(p: &Resolved) -> Vec<String> {
+    let name = manifest::code_name(&p.name);
+    let mut out = vec![format!("--extern={name}={}", p.root.display())];
+    out.extend(
+        p.features
+            .iter()
+            .map(|f| format!("--extern-feature={name}={f}")),
+    );
+    out
 }
 
 /// `--target <t>` / `--target=<t>` among rokc's arguments.
@@ -838,6 +899,7 @@ pub fn parse_dep_args(args: &[String]) -> Result<(Dep, bool), String> {
     let mut name = None;
     let (mut path, mut git, mut reference, mut dev) = (None, None, GitRef::Default, false);
     let mut registry = None;
+    let (mut features, mut optional, mut default_features) = (Vec::new(), false, true);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let (flag, inline) = match a.split_once('=') {
@@ -861,13 +923,25 @@ pub fn parse_dep_args(args: &[String]) -> Result<(Dep, bool), String> {
             "--branch" => reference = GitRef::Branch(value()?),
             "--dev" => dev = true,
             "--registry" => registry = Some(value()?),
+            "--features" => {
+                for f in split_features(&value()?) {
+                    manifest::check_feature(&f)?;
+                    features.push(f);
+                }
+            }
+            "--no-default-features" => default_features = false,
+            "--optional" => optional = true,
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             n if name.is_none() => name = Some(n.to_owned()),
             n => return Err(format!("unexpected argument `{n}`")),
         }
     }
     let usage = "usage: rok add <name>[@<req>] [--registry <url>] | <name> --path <dir> | \
-                 <name> --git <url> [--rev|--tag|--branch <r>]  [--dev]";
+                 <name> --git <url> [--rev|--tag|--branch <r>]  [--dev] [--features <f,..>] \
+                 [--no-default-features] [--optional]";
+    if optional && dev {
+        return Err("a dev dependency cannot be --optional".into());
+    }
     let name = name.ok_or(usage)?;
     let (name, req) = match name.split_once('@') {
         Some((n, r)) => (n.to_owned(), Some(r.to_owned())),
@@ -890,7 +964,15 @@ pub fn parse_dep_args(args: &[String]) -> Result<(Dep, bool), String> {
         (_, None) => return Err("--rev / --tag / --branch go with --git".into()),
         _ => return Err(usage.into()),
     };
-    Ok((Dep { name, source }, dev))
+    Ok((
+        Dep {
+            optional,
+            features,
+            default_features,
+            ..Dep::new(name, source)
+        },
+        dev,
+    ))
 }
 
 /// The manifest `rok add` / `remove` edit: the environment's, or the
@@ -1026,12 +1108,11 @@ fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
     }
     let old = std::fs::read_to_string(&path).ok();
     let section = if dev { "dev_deps" } else { "deps" };
-    let text = manifest::set_dep(
+    let text = manifest::add_dep(
         old.as_deref().unwrap_or(manifest::EMPTY),
         &path.display().to_string(),
         section,
-        &dep.name,
-        &dep.source.to_rok(),
+        &dep,
     )?;
     write_and_resolve(g, &path, old.as_deref(), &text)?;
     if !g.quiet {
@@ -1096,6 +1177,7 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
     }
     let mut opts = options(g);
     opts.update = Some(names.to_vec());
+    opts.dev = true;
     let r = resolve::resolve(&home(), &t.ctx, &opts)?;
     if !g.quiet {
         if let Some(p) = &t.ctx.lock_path {
@@ -1112,18 +1194,23 @@ fn cmd_update(g: &Global, names: &[String]) -> Result<i32, String> {
 /// `# native <name> <vers>` line and its rokc arguments, one per line
 /// (the REPL's `:add` reads it all).
 fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
+    let mut opts = options(g);
+    let args = feature_flags(args, &mut opts)?;
     let path = args
         .iter()
         .find(|a| !a.starts_with('-'))
         .map(String::as_str);
     let t = target_for(g, path)?;
-    let dev = args.iter().any(|a| a == "--dev");
-    let graph = resolve::resolve(&home(), &t.ctx, &options(g))?;
-    let deps: &[Resolved] = &graph.packages;
-    for p in deps.iter().filter(|p| dev || !p.dev) {
-        println!("{}={}", manifest::code_name(&p.name), p.root.display());
+    opts.dev = args.iter().any(|a| a == "--dev");
+    let graph = resolve::resolve(&home(), &t.ctx, &opts)?;
+    for p in &graph.packages {
+        let mut lines = extern_args(p).into_iter();
+        // The first line is `name=<lib.rok>`.
+        let first = lines.next().unwrap_or_default();
+        println!("{}", first.trim_start_matches("--extern="));
+        lines.for_each(|l| println!("{l}"));
     }
-    for n in graph.natives.iter().filter(|n| dev || !n.dev) {
+    for n in &graph.natives {
         println!("# native {} {}", n.entry.name, n.entry.vers);
         for a in native::rokc_args(
             &home(),

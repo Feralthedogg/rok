@@ -1,0 +1,81 @@
+// spec: 008.06.6-rok-to-rok-calling-convention
+// expect-exit: 0
+// expect-stdout:
+// 45 9 0
+// 100 0 1 1
+// 0 1 4 9 16 25 36 49 64 81
+// 55 9 1
+// 45 45
+// 145 1
+// 90 0 9
+// 126
+
+// Aggregates over 64 bytes go between rok functions by address (a
+// pointer to the caller's value, copied by the callee) and come back
+// through a leading result pointer: direct calls, exported functions,
+// function values, closures, generic instances, a lazy static's
+// initializer and the C entry of an `extern "C" fn`.
+
+struct Big { a: [i64; 10]; tag: u8; }
+
+pub fn sum(b: Big) -> i64 {
+    let t = 0i64;
+    for x in b.a { t += x; }
+    t
+}
+
+// The callee's copy: writing it leaves the caller's value alone.
+fn bump(b: Big) -> Big {
+    let c = b;
+    c.a[0] = 100;
+    b.a[1] = 99;
+    c
+}
+
+fn squares() -> [i64; 10] {
+    let a: [i64; 10] = [0; 10];
+    for i in 0..10 { a[i] = (i * i) as i64; }
+    a
+}
+
+fn first_last<T>(xs: [T; 10]) -> (T, T) { (xs[0], xs[9]) }
+
+static TABLE: [i64; 12] = squares_plus();
+
+fn squares_plus() -> [i64; 12] {
+    let a: [i64; 12] = [1; 12];
+    for i in 0..10 { a[i] = (i + 1) as i64; }
+    a
+}
+
+extern "C" fn c_sum(b: Big) -> Big {
+    let c = b;
+    c.a[9] = sum(b) * 2;
+    c
+}
+
+fn apply(f: fn(Big) -> i64, b: Big) -> i64 { f(b) }
+
+fn main() -> i32 {
+    let b = Big { a: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9], tag: 9 };
+    println(f"{sum(b)} {b.tag} {b.a[0]}");
+    let c = bump(b);
+    println(f"{c.a[0]} {b.a[0]} {b.a[1]} {c.a[1]}");
+    let s = squares();
+    println(f"{s[0]} {s[1]} {s[2]} {s[3]} {s[4]} {s[5]} {s[6]} {s[7]} {s[8]} {s[9]}");
+    let total = 0i64;
+    for x in TABLE { total += x; }
+    println(f"{total - 2} {first_last(s).1 / 9} {first_last(s).0 + 1}");
+    let f: fn(Big) -> i64 = sum;
+    let k = 0i64;
+    let g = |x: Big| sum(x) + k;
+    println(f"{apply(f, b)} {g(b)}");
+    let q = |x: Big| -> Big { bump(x) };
+    let r = q(b);
+    println(f"{sum(r)} {r.a[1]}");
+    let h: extern "C" fn(Big) -> Big = c_sum;
+    let e = h(b);
+    println(f"{e.a[9]} {e.a[0]} {e.tag}");
+    println(f"{sum(c_sum(b))}");
+    return 0;
+}

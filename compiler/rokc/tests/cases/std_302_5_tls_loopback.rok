@@ -1,0 +1,195 @@
+// needs: threads net
+// expect-exit: 0
+// expect-stdout:
+// default: alpn http/1.1 peer 1 certs -> localhost|http/1.1|ping
+// after key update -> localhost|http/1.1|again
+// chacha x25519: alpn none -> localhost|none|hi
+// aes256: -> localhost|none|hi
+// ip: -> none|none|hi
+// wildcard: -> a.rok.test|none|hi
+// big: 300000 bytes back, intact true
+// wrong name: Certificate certificate is not valid for example.com
+// unknown root: Certificate certificate signed by an unknown authority
+// no common alpn: PeerAlert peer sent alert 120
+// os roots: Certificate certificate signed by an unknown authority
+// traits -> localhost|none|via traits
+// server saw 12 connections
+
+// Stdlib 3.2.5: TLS 1.3 client and server over loopback TCP: X25519 and
+// the X25519MLKEM768 hybrid, each cipher suite, ALPN, SNI, KeyUpdate,
+// close_notify, multi-record transfers, and certificate validation
+// failures (name mismatch, unknown root).
+use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
+use rok::std::net::tls;
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, CipherSuite};
+use rok::std::thread;
+use rok::std::io::{IoError, Reader, Writer};
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBUzCCAQWgAwIBAgIUHuDQmdyLUvVYGHs5rDw1vYU8bIIwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAWMRQwEgYDVQQDDAtyb2sgdGVzdCBDQTAqMAUGAytlcAMhAPEMYwkJArdk
+aV3E4nOSir4hNCOt5rCjhq6U1sYe6lTWo2MwYTAdBgNVHQ4EFgQUqTSORZgmA5IP
+oVjCUMKRtKdC4BkwHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwDwYD
+VR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQwBQYDK2VwA0EAp7tJ5xbNuoRw
+zTq/y0kOz917MctSi+O2E5DLqAoAjtPGehC8163+j0KTLVeOwoTW1dtCRoWHyyYj
+gDBrha3fDQ==
+-----END CERTIFICATE-----
+";
+
+const LEAF: str = "-----BEGIN CERTIFICATE-----
+MIIBijCCATygAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJQwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwKjAFBgMrZXADIQCxn7jz4PSO1Jp3
+zI87ffC6SUf7qBVLuUQYh9c/CKEFb6OBmzCBmDAmBgNVHREEHzAdgglsb2NhbGhv
+c3SCCioucm9rLnRlc3SHBH8AAAEwEwYDVR0lBAwwCgYIKwYBBQUHAwEwDgYDVR0P
+AQH/BAQDAgeAMAkGA1UdEwQCMAAwHQYDVR0OBBYEFBWHW6f1XuR8f2FiBYHLZ/D3
+63q8MB8GA1UdIwQYMBaAFKk0jkWYJgOSD6FYwlDCkbSnQuAZMAUGAytlcANBAAwQ
+nHuW47Ft/jf3ibpvPd7VEtmqzofipBQmU+QbhVq0u/VUn1gmHS3Ha3Owwyfxsrh4
+qj5swNq5VMMsT5xcDQU=
+-----END CERTIFICATE-----
+";
+
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIIE3h746HdSTHO9jeE86fGvRMVU2OSXB4KdeUu0PigMs
+-----END PRIVATE KEY-----
+";
+
+fn text(b: List<u8> | none) -> str {
+    match b {
+        l: List<u8> => try str::from_utf8(l) catch _ { "?" },
+        none => "none",
+    }
+}
+
+/// Serve `n` connections: each reply is `sni|alpn|request`, until the
+/// client's close_notify; a request "big" echoes the next 300000 bytes.
+fn serve(l: TcpListener, n: i32) {
+    let chain = [try Certificate::from_pem(LEAF) catch _ { return; }][0];
+    let cfg = ServerConfig::new(chain, try PrivateKey::from_pem(KEY) catch _ { return; });
+    cfg.alpn_protocols = ["http/1.1".as_bytes().to_list(), "h2".as_bytes().to_list()];
+    let seen = 0;
+    for _ in 0..n {
+        let (s, _) = try l.accept() catch _ { return; };
+        seen += 1;
+        let srv = try Server::new(s, cfg) catch _ { continue; };
+        let buf: List<u8> = [];
+        for _ in 0..16384 { buf.push(0u8); }
+        loop {
+            let k = try srv.read(buf) catch _ { break; };
+            if k == 0 { break; }
+            let req = try str::from_utf8(buf[0:k]) catch _ { "?" };
+            if req == "big" {
+                let got: List<u8> = [];
+                while got.len() < 300000 {
+                    let m = try srv.read(buf) catch _ { break; };
+                    if m == 0 { break; }
+                    for i in 0..m { got.push(buf[i]); }
+                }
+                try srv.write_all(got) catch _ { break; };
+                continue;
+            }
+            let sni = match srv.server_name() { s: str => s, none => "none" };
+            if req == "count" {
+                try srv.write_all(f"{seen}") catch _ {};
+                continue;
+            }
+            try reply(srv, f"{sni}|{text(srv.negotiated_alpn())}|{req}") catch _ { break; };
+        }
+        srv.close();
+    }
+}
+
+fn ask(c: Client, req: str) -> str {
+    try c.write_all(req) catch e { return f"write: {e}"; };
+    let buf: List<u8> = [];
+    for _ in 0..256 { buf.push(0u8); }
+    let k = try c.read(buf) catch e { return f"read: {e}"; };
+    try str::from_utf8(buf[0:k]) catch _ { "?" }
+}
+
+/// A request and its reply through `Writer` / `Reader`.
+fn via_traits<T: Reader + Writer>(c: T) -> str {
+    try c.write_str("via traits") catch e { return f"write: {e}"; };
+    let buf: List<u8> = [];
+    for _ in 0..64 { buf.push(0u8); }
+    let k = try c.read(buf) catch e { return f"read: {e}"; };
+    try str::from_utf8(buf[0:k]) catch _ { "?" }
+}
+
+/// `msg` through `Writer`.
+fn reply<W: Writer>(w: W, msg: str) throws (IoError) { try w.write_all(msg.as_bytes().to_list()); }
+
+fn connect(port: u16, name: str, cfg: ClientConfig) throws (tls::TlsError) -> Client {
+    let s = try tcp_connect(f"127.0.0.1:{port}") catch e { throw tls::TlsError { kind: tls::TlsErrorKind::Io, msg: f"{e}", alert: 0u8 }; };
+    try Client::with_config(s, name, cfg)
+}
+
+fn main() throws (tls::TlsError) {
+    let l = try tcp_listen("127.0.0.1:0") catch _ { return; };
+    let port = (try l.local_addr() catch _ { return; }).port();
+    let t = thread::spawn(|| serve(l, 12));
+    let roots = try Certificate::from_pem(CA);
+
+    let cfg = ClientConfig { root_certs: roots, cipher_suites: CipherSuite::all(), alpn_protocols: ["h2".as_bytes().to_list(), "http/1.1".as_bytes().to_list()], enable_pq: true };
+    let c = try connect(port, "localhost", cfg);
+    println(f"default: alpn {text(c.negotiated_alpn())} peer {c.peer_certificates().len()} certs -> {ask(c, "ping")}");
+    try c.key_update() catch _ {};
+    println(f"after key update -> {ask(c, "again")}");
+    try c.close_notify() catch _ {};
+    c.close();
+
+    let plain = ClientConfig { root_certs: roots, cipher_suites: [CipherSuite::ChaCha20Poly1305Sha256], alpn_protocols: [], enable_pq: false };
+    let c2 = try connect(port, "localhost", plain);
+    println(f"chacha x25519: alpn {text(c2.negotiated_alpn())} -> {ask(c2, "hi")}");
+    c2.close();
+
+    let a256 = ClientConfig { root_certs: roots, cipher_suites: [CipherSuite::Aes256GcmSha384], alpn_protocols: [], enable_pq: true };
+    let c3 = try connect(port, "localhost", a256);
+    println(f"aes256: -> {ask(c3, "hi")}");
+    c3.close();
+
+    let c4 = try connect(port, "127.0.0.1", plain);
+    println(f"ip: -> {ask(c4, "hi")}");
+    c4.close();
+
+    let c5 = try connect(port, "a.rok.test", plain);
+    println(f"wildcard: -> {ask(c5, "hi")}");
+    c5.close();
+
+    let c6 = try connect(port, "localhost", plain);
+    let data: List<u8> = [];
+    for i in 0..300000 { data.push((i % 251) as u8); }
+    try c6.write_all("big") catch _ {};
+    try c6.write_all(data) catch _ {};
+    let back: List<u8> = [];
+    let buf: List<u8> = [];
+    for _ in 0..20000 { buf.push(0u8); }
+    while back.len() < 300000 {
+        let k = try c6.read(buf) catch e { println(f"big read: {e}"); break; };
+        if k == 0 { break; }
+        for i in 0..k { back.push(buf[i]); }
+    }
+    println(f"big: {back.len()} bytes back, intact {back == data}");
+    c6.close();
+
+    try connect(port, "example.com", plain) catch e { println(f"wrong name: {e.kind:?} {e.msg}"); };
+    let none_cfg = ClientConfig { root_certs: [], cipher_suites: CipherSuite::all(), alpn_protocols: [], enable_pq: true };
+    try connect(port, "localhost", none_cfg) catch e { println(f"unknown root: {e.kind:?} {e.msg}"); };
+    let odd = ClientConfig { root_certs: roots, cipher_suites: CipherSuite::all(), alpn_protocols: ["spdy/1".as_bytes().to_list()], enable_pq: true };
+    try connect(port, "localhost", odd) catch e { println(f"no common alpn: {e.kind:?} {e.msg}"); };
+
+    // `Client::new` trusts the OS store, which lacks the test CA.
+    let s8 = try tcp_connect(f"127.0.0.1:{port}") catch _ { return; };
+    try Client::new(s8, "localhost") catch e { println(f"os roots: {e.kind:?} {e.msg}"); };
+    let c9 = try connect(port, "localhost", plain);
+    println(f"traits -> {via_traits(c9)}");
+    c9.close();
+
+    let c7 = try connect(port, "localhost", plain);
+    println(f"server saw {ask(c7, "count")} connections");
+    c7.close();
+    try t.join() catch _ {};
+}
+
+// spec: std 302-net §3.2.5

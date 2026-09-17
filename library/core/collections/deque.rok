@@ -14,12 +14,12 @@ pub struct Deque<T> {
 impl<T> !Sync for Deque<T> {}
 
 impl<T> Deque<T> {
-    pub fn new() -> Deque<T> {
+    pub const fn new() -> Deque<T> {
         Deque::with_capacity(8)
     }
 
     #[track_caller]
-    pub fn with_capacity(cap: usize) -> Deque<T> {
+    pub const fn with_capacity(cap: usize) -> Deque<T> {
         unsafe {
             let meta: GcBuf<usize> = buf_new(3);
             let c = cap.max(1);
@@ -30,7 +30,7 @@ impl<T> Deque<T> {
         }
     }
 
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         unsafe {
             self.meta[1]
         }
@@ -49,14 +49,14 @@ impl<T> Deque<T> {
     }
 
     /// Ring position of element `i`.
-    fn slot(self, i: usize) -> usize {
+    const fn slot(self, i: usize) -> usize {
         unsafe {
             (self.meta[0] + i) % self.meta[2]
         }
     }
 
     /// Double the ring when full; the elements move to `0..len`.
-    fn grow(self) {
+    const fn grow(self) {
         unsafe {
             let n = self.meta[1];
             let cap = self.meta[2];
@@ -75,7 +75,7 @@ impl<T> Deque<T> {
         }
     }
 
-    pub fn push_back(self, x: T) {
+    pub const fn push_back(self, x: T) {
         unsafe {
             self.grow();
             let n = self.meta[1];
@@ -84,7 +84,7 @@ impl<T> Deque<T> {
         }
     }
 
-    pub fn push_front(self, x: T) {
+    pub const fn push_front(self, x: T) {
         unsafe {
             self.grow();
             let cap = self.meta[2];
@@ -95,7 +95,7 @@ impl<T> Deque<T> {
         }
     }
 
-    pub fn pop_front(self) -> T | none {
+    pub const fn pop_front(self) -> T | none {
         unsafe {
             let n = self.meta[1];
             if n == 0 {
@@ -111,7 +111,7 @@ impl<T> Deque<T> {
         }
     }
 
-    pub fn pop_back(self) -> T | none {
+    pub const fn pop_back(self) -> T | none {
         unsafe {
             let n = self.meta[1];
             if n == 0 {
@@ -127,7 +127,7 @@ impl<T> Deque<T> {
     }
 
     /// Element `i` from the front, or `none` out of bounds.
-    pub fn get(self, i: usize) -> T | none {
+    pub const fn get(self, i: usize) -> T | none {
         unsafe {
             if i >= self.meta[1] {
                 return none;
@@ -137,7 +137,7 @@ impl<T> Deque<T> {
     }
 
     /// Overwrite element `i` from the front; throws out of bounds.
-    pub fn set(self, i: usize, x: T) throws (IndexError) {
+    pub const fn set(self, i: usize, x: T) throws (IndexError) {
         unsafe {
             if i >= self.meta[1] {
                 throw IndexError { index: i as i64, len: self.meta[1] };
@@ -171,7 +171,7 @@ impl<T> Deque<T> {
         }
     }
 
-    pub fn iter(self) -> DequeIter<T> {
+    pub const fn iter(self) -> DequeIter<T> {
         unsafe {
             let pos: GcBuf<usize> = buf_new(1);
             DequeIter { deque: self, pos }
@@ -187,7 +187,7 @@ pub struct DequeIter<T> {
 
 impl<T> Iterator for DequeIter<T> {
     type Item = T;
-    fn next(ref self) -> T | none {
+    const fn next(ref self) -> T | none {
         unsafe {
             let i = self.pos[0];
             if i >= self.deque.len() {
@@ -202,7 +202,7 @@ impl<T> Iterator for DequeIter<T> {
 impl<T> IntoIterator for Deque<T> {
     type IntoIter = DequeIter<T>;
     type Item = T;
-    fn into_iter(self) -> DequeIter<T> {
+    const fn into_iter(self) -> DequeIter<T> {
         self.iter()
     }
 }
@@ -215,7 +215,7 @@ impl<T> Default for Deque<T> {
 impl<T> Index<usize> for Deque<T> {
     type Output = T;
     #[track_caller]
-    fn index(self, i: usize) -> T {
+    const fn index(self, i: usize) -> T {
         unsafe {
             if i >= self.len() {
                 return panic("Deque index out of bounds");

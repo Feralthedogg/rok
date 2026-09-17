@@ -35,7 +35,7 @@ fn wake(word: GcBuf<i32>) {
     unsafe { rok_sync_wake(word, 0) };
 }
 
-fn word(v: i32) -> GcBuf<i32> {
+const fn word(v: i32) -> GcBuf<i32> {
     unsafe {
         let w: GcBuf<i32> = buf_new(1);
         w[0] = v;
@@ -60,7 +60,7 @@ fn unpark_parked(w: GcBuf<i32>) {
     }
 }
 
-fn two_words() -> GcBuf<i32> {
+const fn two_words() -> GcBuf<i32> {
     unsafe {
         buf_new(2)
     }
@@ -94,7 +94,7 @@ impl<T> AtomicPrimitive for rok::bare::ptr::Ptr<T> {}
 
 /// Pointers compare by address.
 impl<T> PartialEq for rok::bare::ptr::Ptr<T> {
-    fn eq(self, rhs: rok::bare::ptr::Ptr<T>) -> bool { self.addr() == rhs.addr() }
+    const fn eq(self, rhs: rok::bare::ptr::Ptr<T>) -> bool { self.addr() == rhs.addr() }
 }
 
 /// A lock-free cell (2.16.2). Send + Sync.
@@ -272,7 +272,7 @@ pub struct Mutex<T> {
 unsafe impl<T: Send> Sync for Mutex<T> {}
 
 impl<T> Mutex<T> {
-    pub fn new(value: T) -> Mutex<T> {
+    pub const fn new(value: T) -> Mutex<T> {
         unsafe {
             let v: GcBuf<T> = buf_new(1);
             v[0] = value;
@@ -351,7 +351,7 @@ impl<T> Mutex<T> {
 
     /// `await m.lock_async()` inside async code: suspends the task (not
     /// the thread) until the lock is ours.
-    pub fn lock_async(self) -> LockFuture<T> {
+    pub const fn lock_async(self) -> LockFuture<T> {
         LockFuture { mutex: self }
     }
 }
@@ -400,20 +400,20 @@ pub struct MutexGuard<T> {
 
 impl<T> MutexGuard<T> {
     /// The protected value (a copy of the handle for GC types).
-    pub fn get(self) -> T {
+    pub const fn get(self) -> T {
         unsafe {
             self.mutex.value[0]
         }
     }
     /// Replace the protected value (instead of spec `deref_mut`: rok has
     /// no `ref` returns).
-    pub fn set(self, value: T) {
+    pub const fn set(self, value: T) {
         unsafe {
             self.mutex.value[0] = value;
         }
     }
     /// Replace the protected value with `f(value)`.
-    pub fn update(self, f: fn(T) -> T) {
+    pub const fn update(self, f: fn(T) -> T) {
         unsafe {
             self.mutex.value[0] = f(self.mutex.value[0]);
         }
@@ -437,7 +437,7 @@ pub struct RwLock<T> {
 unsafe impl<T: Send> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
-    pub fn new(value: T) -> RwLock<T> {
+    pub const fn new(value: T) -> RwLock<T> {
         unsafe {
             let v: GcBuf<T> = buf_new(1);
             v[0] = value;
@@ -494,13 +494,13 @@ impl<T> RwLock<T> {
 
     /// `await l.read_async()`: suspends the task (not the thread) while
     /// a writer holds the lock.
-    pub fn read_async(self) -> ReadFuture<T> {
+    pub const fn read_async(self) -> ReadFuture<T> {
         ReadFuture { lock: self }
     }
 
     /// `await l.write_async()`: suspends the task until no reader or
     /// writer holds the lock.
-    pub fn write_async(self) -> WriteFuture<T> {
+    pub const fn write_async(self) -> WriteFuture<T> {
         WriteFuture { lock: self }
     }
 }
@@ -556,7 +556,7 @@ pub struct RwLockReadGuard<T> {
 }
 
 impl<T> RwLockReadGuard<T> {
-    pub fn get(self) -> T {
+    pub const fn get(self) -> T {
         unsafe {
             self.lock.value[0]
         }
@@ -582,12 +582,12 @@ pub struct RwLockWriteGuard<T> {
 }
 
 impl<T> RwLockWriteGuard<T> {
-    pub fn get(self) -> T {
+    pub const fn get(self) -> T {
         unsafe {
             self.lock.value[0]
         }
     }
-    pub fn set(self, value: T) {
+    pub const fn set(self, value: T) {
         unsafe {
             self.lock.value[0] = value;
         }
@@ -667,7 +667,7 @@ impl Condvar {
     /// takes the lock back if it is free (its `using` guard unlocks it);
     /// if another task holds it, the guard's unlock is owed instead and
     /// does nothing (the worker never blocks).
-    pub fn wait_async<T>(self, guard: MutexGuard<T>) -> CondvarWait<T> {
+    pub const fn wait_async<T>(self, guard: MutexGuard<T>) -> CondvarWait<T> {
         unsafe {
             let st: GcBuf<i32> = buf_new(2);
             CondvarWait { cv: self, mutex: guard.mutex, noted: guard.noted, st: st }
@@ -762,25 +762,25 @@ impl<T> !Send for Cell<T> {}
 impl<T> !Sync for Cell<T> {}
 
 impl<T> Cell<T> {
-    pub fn new(value: T) -> Cell<T> {
+    pub const fn new(value: T) -> Cell<T> {
         unsafe {
             let v: GcBuf<T> = buf_new(1);
             v[0] = value;
             Cell { value: v }
         }
     }
-    pub fn get(self) -> T where T: Copy {
+    pub const fn get(self) -> T where T: Copy {
         unsafe {
             self.value[0]
         }
     }
     // Copies share the one buffer, so a copy sees the update too.
-    pub fn set(ref self, value: T) {
+    pub const fn set(ref self, value: T) {
         unsafe {
             self.value[0] = value;
         }
     }
-    pub fn replace(ref self, value: T) -> T {
+    pub const fn replace(ref self, value: T) -> T {
         unsafe {
             let old = self.value[0];
             self.value[0] = value;
@@ -791,7 +791,7 @@ impl<T> Cell<T> {
 
 impl<T: Default> Cell<T> {
     /// The value, leaving `T::default()` in its place.
-    pub fn take(ref self) -> T {
+    pub const fn take(ref self) -> T {
         self.replace(T::default())
     }
 }

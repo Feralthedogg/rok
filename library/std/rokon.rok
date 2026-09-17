@@ -68,7 +68,7 @@ impl Debug for Value {
 /// (order ignored); `{}` as a struct equals `{}` as a dict. Floats compare by identity (NaN equals NaN, -0.0
 /// differs from 0.0) so `==` stays reflexive for keys.
 impl PartialEq for Value {
-    fn eq(self, rhs: Value) -> bool {
+    const fn eq(self, rhs: Value) -> bool {
         match (norm(self), norm(rhs)) {
             (Value::None, Value::None) => true,
             (Value::Bool(a), Value::Bool(b)) => a == b,
@@ -98,13 +98,13 @@ impl PartialEq for Value {
             _ => false,
         }
     }
-    fn ne(self, rhs: Value) -> bool { !self.eq(rhs) }
+    const fn ne(self, rhs: Value) -> bool { !self.eq(rhs) }
 }
 
 impl Eq for Value {}
 
 impl Hash for Value {
-    fn hash(self) -> u64 {
+    const fn hash(self) -> u64 {
         match norm(self) {
             Value::None => 0u64,
             Value::Bool(b) => mix(1u64, b.hash()),
@@ -123,17 +123,17 @@ impl Hash for Value {
 }
 
 /// `{}` reads back as an empty `Dict`, so an empty unnamed `Struct` is one.
-fn norm(v: Value) -> Value {
+const fn norm(v: Value) -> Value {
     if let Value::Struct { name, fields } = v {
         if name is none && fields.is_empty() { return Value::Dict(OrderedDict::new()); }
     }
     v
 }
 
-fn mix(h: u64, x: u64) -> u64 { ((h << 5u64) | (h >> 59u64)) ^ x }
+const fn mix(h: u64, x: u64) -> u64 { ((h << 5u64) | (h >> 59u64)) ^ x }
 
 /// Order-independent, matching `OrderedDict` equality.
-fn entries_hash<K: Hash>(d: OrderedDict<K, Value>) -> u64 {
+const fn entries_hash<K: Hash>(d: OrderedDict<K, Value>) -> u64 {
     let h = d.len() as u64;
     for (k, v) in d.entries() {
         let vh = v.hash();
@@ -156,16 +156,16 @@ pub struct RokonError {
 }
 
 impl RokonError {
-    pub fn new(msg: str) -> RokonError {
+    pub const fn new(msg: str) -> RokonError {
         RokonError { msg: msg, line: 0u32, col: 0u32, path: "", on_key: false }
     }
 
     /// `self` one level down: `seg` (`.name`, `[3]`) goes in front of the path.
-    pub fn within(self, seg: str) -> RokonError {
+    pub const fn within(self, seg: str) -> RokonError {
         RokonError { msg: self.msg, line: self.line, col: self.col, path: seg + self.path, on_key: self.on_key }
     }
 
-    fn at_key(self) -> RokonError {
+    const fn at_key(self) -> RokonError {
         RokonError { msg: self.msg, line: self.line, col: self.col, path: self.path, on_key: true }
     }
 }
@@ -200,7 +200,7 @@ pub trait FromRokon {
 
     /// A struct field of this type that the document leaves out: an error,
     /// except `T | none` (`none`).
-    fn from_missing() throws (RokonError) -> Self {
+    const fn from_missing() throws (RokonError) -> Self {
         throw RokonError::new("missing");
     }
 }
@@ -223,7 +223,7 @@ pub fn from_str<T: FromRokon>(s: str) throws (RokonError) -> T {
 }
 
 /// `x` as a `Value` (`encode::<T>(x)` keeps a `T | none` field whole).
-pub fn encode<T: ToRokon>(x: T) -> Value { x.to_rokon() }
+pub const fn encode<T: ToRokon>(x: T) -> Value { x.to_rokon() }
 
 /// `v` as a `T`, errors placed under `seg`.
 pub fn decode<T: FromRokon>(v: Value, seg: str) throws (RokonError) -> T {
@@ -308,7 +308,7 @@ impl Fields {
         f
     }
 
-    pub fn has(self, name: str) -> bool { self.vals.contains_key(name) }
+    pub const fn has(self, name: str) -> bool { self.vals.contains_key(name) }
 
     /// Field `name` as a `T`: its value, or `T::from_missing()` when absent.
     pub fn get<T: FromRokon>(self, name: str) throws (RokonError) -> T {
@@ -478,16 +478,7 @@ pub @derive {
                                 [@for_variant_fields { @field.name.as_str(), }]);
                             return @Self.name::@variant.name {
                                 @for_variant_fields {
-                                    @apply_if(@field.has_default) {
-                                        @field.name: if fs.has(@field.name.as_str()) {
-                                            try fs.get::<@field.type>(@field.name.as_str())
-                                        } else {
-                                            @field.default
-                                        },
-                                    }
-                                    @apply_if(!@field.has_default) {
-                                        @field.name: try fs.get::<@field.type>(@field.name.as_str()),
-                                    }
+                                    @field.name: try fs.get::<@field.type>(@field.name.as_str()),
                                 }
                             };
                         }
@@ -502,15 +493,15 @@ pub @derive {
 // ---- impls for the standard types ----
 
 impl ToRokon for Value {
-    fn to_rokon(self) -> Value { self }
+    const fn to_rokon(self) -> Value { self }
 }
 
 impl FromRokon for Value {
-    fn from_rokon(v: Value) throws (RokonError) -> Value { v }
+    const fn from_rokon(v: Value) throws (RokonError) -> Value { v }
 }
 
 impl ToRokon for bool {
-    fn to_rokon(self) -> Value { Value::Bool(self) }
+    const fn to_rokon(self) -> Value { Value::Bool(self) }
 }
 
 impl FromRokon for bool {
@@ -523,7 +514,7 @@ impl FromRokon for bool {
 }
 
 impl ToRokon for char {
-    fn to_rokon(self) -> Value { Value::Char(self) }
+    const fn to_rokon(self) -> Value { Value::Char(self) }
 }
 
 impl FromRokon for char {
@@ -536,7 +527,7 @@ impl FromRokon for char {
 }
 
 impl ToRokon for str {
-    fn to_rokon(self) -> Value { Value::Str(self) }
+    const fn to_rokon(self) -> Value { Value::Str(self) }
 }
 
 impl FromRokon for str {
@@ -549,7 +540,7 @@ impl FromRokon for str {
 }
 
 impl ToRokon for Int {
-    fn to_rokon(self) -> Value { Value::Int(self) }
+    const fn to_rokon(self) -> Value { Value::Int(self) }
 }
 
 impl FromRokon for Int {
@@ -567,16 +558,16 @@ fn out_of_range<T>(n: int) -> RokonError {
     RokonError::new(f"integer {n} is out of range for {T::type_name()}")
 }
 
-impl ToRokon for i8 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for i16 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for i32 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for i64 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for isize { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u8 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u16 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u32 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u64 { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for usize { fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i8 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i16 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i32 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for i64 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for isize { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u8 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u16 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u32 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for u64 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+impl ToRokon for usize { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
 
 impl FromRokon for i8 {
     fn from_rokon(v: Value) throws (RokonError) -> i8 {
@@ -640,7 +631,7 @@ impl FromRokon for usize {
 }
 
 impl ToRokon for Float {
-    fn to_rokon(self) -> Value { Value::Float(self) }
+    const fn to_rokon(self) -> Value { Value::Float(self) }
 }
 
 impl FromRokon for Float {
@@ -657,7 +648,7 @@ fn float_of<T>(v: Value) throws (RokonError) -> float {
 }
 
 impl ToRokon for f64 {
-    fn to_rokon(self) -> Value { Value::Float(Float::from_f64(self)) }
+    const fn to_rokon(self) -> Value { Value::Float(Float::from_f64(self)) }
 }
 
 impl FromRokon for f64 {
@@ -677,7 +668,7 @@ impl FromRokon for f32 {
 }
 
 impl<T: ToRokon> ToRokon for T | none {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         match self {
             none => Value::None,
             x: T => x.to_rokon(),
@@ -693,7 +684,7 @@ impl<T: FromRokon> FromRokon for T | none {
         }
     }
 
-    fn from_missing() throws (RokonError) -> T | none { none }
+    const fn from_missing() throws (RokonError) -> T | none { none }
 }
 
 /// The items of a list (or a tuple) value.
@@ -706,7 +697,7 @@ fn items_of<T>(v: Value) throws (RokonError) -> List<Value> {
 }
 
 impl<T: ToRokon> ToRokon for List<T> {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         let out: List<Value> = List::with_capacity(self.len());
         for x in self { out.push(x.to_rokon()); }
         Value::List(out)
@@ -727,7 +718,7 @@ impl<T: FromRokon> FromRokon for List<T> {
 }
 
 impl<T: ToRokon + Hash> ToRokon for Set<T> {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         let out: List<Value> = List::with_capacity(self.len());
         for x in self { out.push(x.to_rokon()); }
         Value::List(out)
@@ -743,7 +734,7 @@ impl<T: FromRokon + Hash> FromRokon for Set<T> {
 }
 
 impl<T: ToRokon + Hash> ToRokon for OrderedSet<T> {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         let out: List<Value> = List::with_capacity(self.len());
         for x in self { out.push(x.to_rokon()); }
         Value::List(out)
@@ -759,7 +750,7 @@ impl<T: FromRokon + Hash> FromRokon for OrderedSet<T> {
 }
 
 impl<T: ToRokon, const N: usize> ToRokon for [T; N] {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         let out: List<Value> = List::with_capacity(N);
         for i in 0..N { out.push(self[i].to_rokon()); }
         Value::List(out)
@@ -779,7 +770,7 @@ impl<T: FromRokon, const N: usize> FromRokon for [T; N] {
         out
     }
 
-    fn from_missing() throws (RokonError) -> [T; N] {
+    const fn from_missing() throws (RokonError) -> [T; N] {
         throw RokonError::new("missing");
     }
 }
@@ -800,7 +791,7 @@ fn entry_of<K: FromRokon, V: FromRokon>(k: Value, v: Value) throws (RokonError) 
 }
 
 impl<K: ToRokon + Hash, V: ToRokon> ToRokon for Dict<K, V> {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         let out: OrderedDict<Value, Value> = OrderedDict::new();
         for (k, v) in self.entries() { out.insert(k.to_rokon(), v.to_rokon()); }
         Value::Dict(out)
@@ -819,7 +810,7 @@ impl<K: FromRokon + Hash, V: FromRokon> FromRokon for Dict<K, V> {
 }
 
 impl<K: ToRokon + Hash, V: ToRokon> ToRokon for OrderedDict<K, V> {
-    fn to_rokon(self) -> Value {
+    const fn to_rokon(self) -> Value {
         let out: OrderedDict<Value, Value> = OrderedDict::new();
         for (k, v) in self.entries() { out.insert(k.to_rokon(), v.to_rokon()); }
         Value::Dict(out)
@@ -864,7 +855,7 @@ impl<A: FromRokon, B: FromRokon> FromRokon for (A, B) {
     }
 }
 impl<A: ToRokon, B: ToRokon, C: ToRokon> ToRokon for (A, B, C) {
-    fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon()]) }
+    const fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon()]) }
 }
 impl<A: FromRokon, B: FromRokon, C: FromRokon> FromRokon for (A, B, C) {
     fn from_rokon(v: Value) throws (RokonError) -> (A, B, C) {

@@ -1,0 +1,19 @@
+// expect-exit: 0
+// expect-stdout:
+// 1 2
+// Sha384
+
+// A program's own struct shadows a core enum variant of the same name
+// that the implicit `use rok::core::**;` brings in bare
+// (`rok::core::crypto::sha2::HashAlgorithm::Sha256`).
+struct Sha256 { x: i32; }
+struct P256 { y: i32; }
+
+fn main() {
+    let s = Sha256 { x: 1 };
+    let p = P256 { y: 2 };
+    println(f"{s.x} {p.y}");
+    println(f"{rok::core::crypto::sha2::HashAlgorithm::Sha384:?}");
+}
+
+// spec: 002.03-struct

@@ -146,6 +146,71 @@ fn unchanged_package_is_fresh() {
     assert_eq!(built(&["run"]), (true, "2\n".to_owned()));
 }
 
+/// A file `include_str!` / `include_bytes!` reads is an input: editing
+/// it rebuilds the package, parses the including file and lowers its
+/// body again, and recompiles its unit alone.
+#[test]
+fn included_file_is_a_build_input() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("include-input");
+    let app = dir.join("app");
+    fs::create_dir_all(app.join("res")).unwrap();
+    fs::write(
+        app.join("main.rok"),
+        "mod a;\nmod b;\n\nfn main() {\n    println(f\"{a::text()} {a::BYTES.len()} {b::two()}\");\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        app.join("a.rok"),
+        "pub const BYTES: [u8; 2] = include_bytes!(\"res/b.bin\");\n\n\
+         pub fn text() -> str {\n    include_str!(\"res/t.txt\")\n}\n",
+    )
+    .unwrap();
+    fs::write(app.join("b.rok"), "pub fn two() -> i64 {\n    2\n}\n").unwrap();
+    fs::write(app.join("res/t.txt"), "one").unwrap();
+    fs::write(app.join("res/b.bin"), [0u8, 255]).unwrap();
+    // (rebuilt, files parsed afresh, units compiled, output).
+    let build = || {
+        let out = rokc(Some(&env), &app, &["build", "-vv"]);
+        assert_exit(&out, 0);
+        let stderr = text(&out.stderr);
+        let parsed = stderr
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("Reused: "))
+            .map(|l| {
+                let n: Vec<usize> = l
+                    .split(|c: char| !c.is_ascii_digit())
+                    .filter_map(|w| w.parse().ok())
+                    .collect();
+                n[1] - n[0]
+            });
+        let mut units: Vec<String> = stderr
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Compiled unit "))
+            .map(str::to_owned)
+            .collect();
+        units.sort();
+        let run = rokc(Some(&env), &app, &["run", "-q"]);
+        assert_exit(&run, 0);
+        (parsed, units, text(&run.stdout))
+    };
+    assert_eq!(build().2, "one 2 2\n");
+    let (parsed, units, out) = build();
+    assert_eq!((parsed, units.len(), out.as_str()), (None, 0, "one 2 2\n"));
+    fs::write(app.join("res/t.txt"), "two").unwrap();
+    assert_eq!(
+        build(),
+        (Some(1), vec!["a".to_owned()], "two 2 2\n".to_owned())
+    );
+    fs::write(app.join("res/b.bin"), b"").unwrap();
+    let out = rokc(Some(&env), &app, &["build"]);
+    assert!(
+        text(&out.stderr).contains("expects `[u8; 2]`, found `[u8; 0]`"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 /// 902.16: a package builds by codegen units (one per module); an edit
 /// recompiles the units it changed, those of a function's callers when
 /// its signature changes, and the executable is the one a clean build
@@ -1458,6 +1523,53 @@ fn prebuilt_dependency_sums_keep_their_tags() {
     assert_eq!(text(&out.stdout), "list 3\ndict 1\nzebra 4\ndict 0\n");
 }
 
+/// Aggregates over 64 bytes cross a prebuilt dependency by address
+/// (spec 8.6.6), both ways and through function values, whichever
+/// backend built each side (`-O0`: native, `-O2`: LLVM).
+#[test]
+fn prebuilt_dependency_passes_large_aggregates_by_address() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("prebuilt-big");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::write(
+        dir.join("dep/lib.rok"),
+        "pub struct Big { pub a: [i64; 12]; pub tag: u8; }\n\
+         pub fn make(k: i64) -> Big {\n\
+             let b = Big { a: [0; 12], tag: 7 };\n\
+             for i in 0..12 { b.a[i] = k * i as i64; }\n\
+             return b;\n\
+         }\n\
+         pub fn total(b: Big) -> i64 { let t = 0i64; for x in b.a { t += x; } return t + b.tag as i64; }\n\
+         pub fn twice(f: fn(Big) -> Big, b: Big) -> Big { return f(f(b)); }\n\
+         pub fn summer() -> fn(Big) -> i64 { return total; }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "fn inc(b: dep::Big) -> dep::Big { let c = b; c.a[11] += 1; c.tag += 1; return c; }\n\
+         let b = dep::make(2);\n\
+         let c = dep::twice(inc, b);\n\
+         let s = dep::summer();\n\
+         println(f\"{dep::total(b)} {c.a[11]} {c.tag} {s(c)} {b.a[11]}\");\n",
+    )
+    .unwrap();
+    for (dep_opt, app_opt) in [("-O2", "-O0"), ("-O0", "-O2")] {
+        let out = rokc(Some(&env), &dir, &["build", dep_opt, "dep"]);
+        assert_exit(&out, 0);
+        let profile = if dep_opt == "-O2" { "release" } else { "debug" };
+        let rokhir = dir.join(format!("dep/target/{profile}/dep.rokhir"));
+        let ext = format!("dep={}", rokhir.display());
+        let out = rokc(
+            Some(&env),
+            &dir,
+            &["run", "-q", app_opt, "app", "--extern", &ext],
+        );
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "139 24 9 143 22\n", "dep {dep_opt}");
+    }
+}
+
 #[test]
 fn prebuilt_dependency_is_linked_and_instantiated() {
     let Some(env) = setup() else { return };
@@ -1558,7 +1670,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "ROKHIR version: 1\n",
+        "ROKHIR version: 2\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
@@ -1712,6 +1824,37 @@ fn dependency_trait_is_not_the_current_package() {
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dz=dz"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "7\n");
+}
+
+/// Spec 6.9.8: `pkg::` in a meta block names the block's own package
+/// wherever it expands, not the use site's.
+#[test]
+fn meta_block_pkg_names_its_package() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("meta_pkg");
+    fs::create_dir_all(dir.join("dl")).unwrap();
+    fs::write(
+        dir.join("dl/lib.rok"),
+        "pub trait Named { fn nm(self) -> str; }\n\
+         pub fn tag(s: str) -> str { f\"<{s}>\" }\n\
+         #[impl_derive(Named)]\n\
+         pub @derive {\n    impl pkg::Named for @Self {\n        \
+         fn nm(self) -> str { pkg::tag(@Self.as_str()) }\n    }\n}\n\
+         #[derive(Named)]\npub struct Inner {}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::write(
+        dir.join("app/main.rok"),
+        "use dl::Named;\n\
+         fn tag(s: str) -> str { \"wrong\" }\n\
+         #[derive(Named)]\nstruct Outer {}\n\
+         println(Outer {}.nm());\nprintln(dl::Inner {}.nm());\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dl=dl"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "<Outer>\n<Inner>\n");
 }
 
 /// Spec 2.9.5: a user impl overlapping a dependency's bounded blanket

@@ -1,0 +1,505 @@
+// rok::std::net::tls — TLS 1.3 (stdlib spec 3.2.5), implemented here in
+// rok on `rok::core::crypto`: no OS or external TLS library.
+//
+// `Client` / `Server` wrap a `TcpStream`; after the handshake they read
+// and write application data like the stream itself. Server
+// certificates are validated against `ClientConfig::root_certs` (by
+// default the OS trust store: the macOS keychain anchors, the Windows
+// ROOT store, the Linux CA bundle files; none on wasm). Key exchange is
+// X25519, or the X25519MLKEM768 hybrid when `enable_pq` is on. A server
+// signs with Ed25519. A connection is used by one thread at a time.
+
+pub(pkg) mod der;
+pub(pkg) mod pem;
+pub(pkg) mod x509;
+pub(pkg) mod conn;
+
+use rok::core::collections::raw::{GcBuf, buf_new};
+use rok::std::net::TcpStream;
+use rok::std::io::{IoError, IoErrorKind, AsBytes, Reader, Writer, byte_buf};
+use rok::std::fs;
+use rok::std::env;
+use rok::std::net::tls::x509::CertInfo;
+use rok::std::net::tls::conn::{Conn, new_conn};
+use rok::std::net::tls::der::{Der, SEQUENCE, INTEGER, OCTET_STRING, OID};
+
+/// What failed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TlsErrorKind {
+    /// The underlying stream failed or closed.
+    Io,
+    /// The peer's certificate is malformed or not trusted for the name.
+    Certificate,
+    /// The peer broke the protocol (or offered nothing in common).
+    Protocol,
+    /// The peer sent a fatal alert.
+    PeerAlert,
+}
+
+/// A failed handshake or connection. `alert` is the TLS alert sent to
+/// the peer (or received, for `PeerAlert`).
+pub struct TlsError {
+    pub kind: TlsErrorKind;
+    pub msg: str;
+    pub alert: u8;
+}
+
+impl TlsError {
+    pub(pkg) fn certificate(msg: str) -> TlsError {
+        TlsError { kind: TlsErrorKind::Certificate, msg, alert: 42u8 }
+    }
+}
+
+impl Display for TlsError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"tls: {self.msg}") }
+}
+
+impl Debug for TlsError {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TlsError({self.kind:?}, {self.msg:?}, alert {self.alert})") }
+}
+
+impl Error for TlsError {}
+
+/// A TLS 1.3 cipher suite.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CipherSuite {
+    Aes128GcmSha256,
+    Aes256GcmSha384,
+    ChaCha20Poly1305Sha256,
+}
+
+impl CipherSuite {
+    /// All three, in the default preference order.
+    pub fn all() -> List<CipherSuite> {
+        [CipherSuite::Aes128GcmSha256, CipherSuite::Aes256GcmSha384, CipherSuite::ChaCha20Poly1305Sha256]
+    }
+}
+
+/// An X.509 certificate (DER), parsed.
+pub struct Certificate {
+    pub(pkg) der: List<u8>;
+    pub(pkg) info: CertInfo;
+}
+
+impl Certificate {
+    pub fn from_der(der: List<u8> | Slice<u8>) throws (TlsError) -> Certificate {
+        let d: List<u8> = match der {
+            l: List<u8> => l,
+            s: Slice<u8> => s.to_list(),
+        };
+        Certificate { der: d, info: try x509::parse(d[0:d.len()]) }
+    }
+
+    /// Every `CERTIFICATE` block of PEM text.
+    pub fn from_pem(text: str) throws (TlsError) -> List<Certificate> {
+        let out: List<Certificate> = [];
+        for b in try pem::blocks(text, "CERTIFICATE") { out.push(try Certificate::from_der(b)); }
+        out
+    }
+
+    /// The DER encoding.
+    pub fn der(self) -> List<u8> { self.der }
+
+    /// The subjectAltName DNS names.
+    pub fn dns_names(self) -> List<str> { self.info.dns_names }
+
+    /// The validity period, Unix seconds.
+    pub fn not_before(self) -> i64 { self.info.not_before }
+    pub fn not_after(self) -> i64 { self.info.not_after }
+}
+
+/// A server's private key: Ed25519 (PKCS #8, RFC 8410).
+pub struct PrivateKey {
+    pub(pkg) seed: List<u8>;
+}
+
+impl PrivateKey {
+    /// A PKCS #8 `PrivateKeyInfo` / `OneAsymmetricKey`.
+    pub fn from_der(der: List<u8> | Slice<u8>) throws (TlsError) -> PrivateKey {
+        let s: Slice<u8> = match der {
+            l: List<u8> => l[0:l.len()],
+            v: Slice<u8> => v,
+        };
+        let top = Der::new(s);
+        let k = try top.enter(SEQUENCE);
+        try top.finish();
+        let version = try der::small_int(try k.expect(INTEGER));
+        if version > 1 { throw TlsError::certificate("unsupported PKCS #8 version"); }
+        let alg = try k.enter(SEQUENCE);
+        let oid = try der::oid_text(try alg.expect(OID));
+        if oid != "1.3.101.112" { throw TlsError::certificate(f"unsupported private key algorithm {oid} (Ed25519 only)"); }
+        try alg.finish();
+        let inner = Der::new(try k.expect(OCTET_STRING));
+        let seed = try inner.expect(OCTET_STRING);
+        try inner.finish();
+        if seed.len() != 32 { throw TlsError::certificate("bad Ed25519 private key"); }
+        PrivateKey { seed: seed.to_list() }
+    }
+
+    /// The first `PRIVATE KEY` block of PEM text.
+    pub fn from_pem(text: str) throws (TlsError) -> PrivateKey {
+        let blocks = try pem::blocks(text, "PRIVATE KEY");
+        if blocks.len() == 0 { throw TlsError::certificate("no PRIVATE KEY block"); }
+        try PrivateKey::from_der(blocks[0])
+    }
+}
+
+pub struct ClientConfig {
+    /// Trust anchors for the server's certificate.
+    pub root_certs: List<Certificate>;
+    /// In preference order; TLS 1.3 suites only.
+    pub cipher_suites: List<CipherSuite>;
+    /// ALPN protocols offered, in preference order (`"h2"`, ...).
+    pub alpn_protocols: List<List<u8>>;
+    /// Offer the X25519MLKEM768 hybrid key exchange first.
+    pub enable_pq: bool;
+}
+
+impl ClientConfig {
+    /// The OS trust store, all suites, no ALPN, post-quantum on.
+    pub fn new() -> ClientConfig {
+        ClientConfig {
+            root_certs: try system_roots() catch _ { [] },
+            cipher_suites: CipherSuite::all(),
+            alpn_protocols: [],
+            enable_pq: true,
+        }
+    }
+}
+
+pub struct ServerConfig {
+    /// The server's certificate first, then intermediates.
+    pub cert_chain: List<Certificate>;
+    pub private_key: PrivateKey;
+    pub cipher_suites: List<CipherSuite>;
+    pub alpn_protocols: List<List<u8>>;
+}
+
+impl ServerConfig {
+    pub fn new(cert_chain: List<Certificate>, private_key: PrivateKey) -> ServerConfig {
+        ServerConfig { cert_chain, private_key, cipher_suites: CipherSuite::all(), alpn_protocols: [] }
+    }
+}
+
+// ---- the trust store ----
+
+/// CA bundle files, first found wins (Debian / Ubuntu / Arch, Fedora /
+/// RHEL, openSUSE, RHEL's extracted bundle, Alpine / BSDs).
+const BUNDLES: [str; 5] = [
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/ca-bundle.pem",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    "/etc/ssl/cert.pem",
+];
+
+/// Parse the certificates a store holds, skipping ones this parser
+/// rejects (stores carry odd legacy roots).
+fn parse_all(ders: List<List<u8>>) -> List<Certificate> {
+    let out: List<Certificate> = [];
+    for d in ders {
+        let c = try Certificate::from_der(d) catch _ { continue; };
+        out.push(c);
+    }
+    out
+}
+
+fn load_roots() throws (TlsError) -> List<Certificate> {
+    // `SSL_CERT_FILE` overrides the OS store (as OpenSSL and Go do).
+    let path = try env::var("SSL_CERT_FILE") catch _ { "" };
+    if path != "" {
+        let text = try fs::read_to_str(path) catch e { throw TlsError::certificate(f"SSL_CERT_FILE: {e}"); };
+        return parse_all(try pem::blocks(text, "CERTIFICATE"));
+    }
+    let n = unsafe { rok_os_trust_roots(buf_new(1), 0, 0) };
+    if n >= 0 {
+        let buf = byte_buf(n as usize);
+        let (b, off, len) = unsafe { buf[0:buf.len()].raw_parts() };
+        let m = unsafe { rok_os_trust_roots(b, off, len) };
+        if m < 0 || m as usize > buf.len() { throw TlsError::certificate("cannot read the OS trust store"); }
+        let ders: List<List<u8>> = [];
+        let at = 0usize;
+        while at + 4 <= m as usize {
+            let l = ((buf[at] as usize) << 24) | ((buf[at + 1] as usize) << 16) | ((buf[at + 2] as usize) << 8) | (buf[at + 3] as usize);
+            if at + 4 + l > m as usize { break; }
+            ders.push(buf[at + 4:at + 4 + l].to_list());
+            at += 4 + l;
+        }
+        return parse_all(ders);
+    }
+    for f in BUNDLES {
+        let text = try fs::read_to_str(f) catch _ { continue; };
+        return parse_all(try pem::blocks(text, "CERTIFICATE"));
+    }
+    throw TlsError::certificate("no OS trust store found (pass ClientConfig::root_certs)");
+}
+
+/// The OS's trusted root certificates, read on each call (reuse a
+/// `ClientConfig` to read them once).
+pub fn system_roots() throws (TlsError) -> List<Certificate> { try load_roots() }
+
+// ---- connections ----
+
+/// `s` as an IP address's bytes, if it is one.
+fn ip_bytes(s: str) -> List<u8> | none {
+    let h = if s.starts_with("[") && s.ends_with("]") { s[1:s.len() - 1] } else { s };
+    let v4: rok::std::net::Ipv4Addr | none = try h.parse::<rok::std::net::Ipv4Addr>() catch _ { none };
+    match v4 {
+        a: rok::std::net::Ipv4Addr => return [a.octets[0], a.octets[1], a.octets[2], a.octets[3]],
+        none => {},
+    }
+    let v6: rok::std::net::Ipv6Addr | none = try h.parse::<rok::std::net::Ipv6Addr>() catch _ { none };
+    match v6 {
+        a: rok::std::net::Ipv6Addr => {
+            let out: List<u8> = [];
+            for x in a.segments {
+                out.push((x >> 8) as u8);
+                out.push(x as u8);
+            }
+            out
+        },
+        none => none,
+    }
+}
+
+fn io_err(e: TlsError) -> IoError {
+    let kind = if e.kind == TlsErrorKind::Io { IoErrorKind::UnexpectedEof } else { IoErrorKind::InvalidData };
+    IoError::with_kind(kind, f"tls: {e.msg}")
+}
+
+/// One side of a connection; `Client` and `Server` are views of it.
+struct Shared {
+    c: GcBuf<Conn>;
+}
+
+impl Shared {
+    fn new(c: Conn) -> Shared {
+        unsafe {
+            let b: GcBuf<Conn> = buf_new(1);
+            b[0] = c;
+            Shared { c: b }
+        }
+    }
+
+    fn check(self) throws (IoError) {
+        unsafe {
+            match self.c[0].failed {
+                m: str => throw IoError::with_kind(IoErrorKind::InvalidData, f"tls: connection failed: {m}"),
+                none => {},
+            }
+        }
+    }
+
+    fn read(self, buf: List<u8>) throws (IoError) -> usize {
+        try self.check();
+        unsafe {
+            let c = self.c[0];
+            let r = try c.read_app(buf) catch e {
+                c.fail(e);
+                self.c[0] = c;
+                throw io_err(e);
+            };
+            self.c[0] = c;
+            r
+        }
+    }
+
+    fn read_to_end(self) throws (IoError) -> List<u8> {
+        let out: List<u8> = [];
+        let buf = byte_buf(16384);
+        loop {
+            let n = try self.read(buf);
+            if n == 0 { return out; }
+            for i in 0..n { out.push(buf[i]); }
+        }
+    }
+
+    fn write(self, data: Slice<u8>) throws (IoError) {
+        try self.check();
+        unsafe {
+            let c = self.c[0];
+            try c.write_app(data) catch e {
+                c.fail(e);
+                self.c[0] = c;
+                throw io_err(e);
+            };
+            self.c[0] = c;
+        }
+    }
+
+    fn close_notify(self) throws (IoError) {
+        try self.check();
+        unsafe {
+            let c = self.c[0];
+            try c.close_notify() catch e {
+                self.c[0] = c;
+                throw io_err(e);
+            };
+            self.c[0] = c;
+        }
+    }
+
+    fn key_update(self) throws (IoError) {
+        try self.check();
+        unsafe {
+            let c = self.c[0];
+            try c.key_update(true) catch e {
+                c.fail(e);
+                self.c[0] = c;
+                throw io_err(e);
+            };
+            self.c[0] = c;
+        }
+    }
+
+    fn close(self) {
+        unsafe {
+            let c = self.c[0];
+            if c.failed is none && c.done { try c.close_notify() catch _ {}; }
+            c.sock.close();
+            self.c[0] = c;
+        }
+    }
+
+    fn conn(self) -> Conn { unsafe { self.c[0] } }
+}
+
+/// A TLS client connection. Copies share the connection.
+pub struct Client {
+    s: Shared;
+}
+
+impl !Sync for Client {}
+
+impl Client {
+    /// Handshake as `server_name` with `ClientConfig::new()`.
+    pub fn new(stream: TcpStream, server_name: str) throws (TlsError) -> Client {
+        try Client::with_config(stream, server_name, ClientConfig::new())
+    }
+
+    /// Handshake as `server_name` (a DNS name, or an IP address checked
+    /// against the certificate's IP addresses; no SNI is sent for one).
+    pub fn with_config(stream: TcpStream, server_name: str, cfg: ClientConfig) throws (TlsError) -> Client {
+        let c = new_conn(stream, true);
+        let ip = ip_bytes(server_name);
+        try c.client_handshake(server_name, ip, cfg.root_certs, cfg.cipher_suites, cfg.alpn_protocols, cfg.enable_pq) catch e {
+            c.fail(e);
+            throw e;
+        };
+        Client { s: Shared::new(c) }
+    }
+
+    /// Read up to `buf.len()` bytes of application data into `buf`; 0
+    /// once the server sent close_notify.
+    pub fn read(self, buf: List<u8>) throws (IoError) -> usize { try self.s.read(buf) }
+
+    /// Everything until the server's close_notify.
+    pub fn read_to_end(self) throws (IoError) -> List<u8> { try self.s.read_to_end() }
+
+    /// Write all of `buf` (TLS records are written whole).
+    pub fn write<B: AsBytes>(self, buf: B) throws (IoError) -> usize {
+        let b = buf.byte_slice();
+        try self.s.write(b);
+        b.len()
+    }
+
+    pub fn write_all<B: AsBytes>(self, buf: B) throws (IoError) { try self.s.write(buf.byte_slice()); }
+
+    /// Nothing to flush: records go straight to the socket.
+    pub fn flush(self) throws (IoError) {}
+
+    /// Tell the server no more data follows (the read side stays open).
+    pub fn close_notify(self) throws (IoError) { try self.s.close_notify(); }
+
+    /// Switch to the next write key and ask the peer to do the same.
+    pub fn key_update(self) throws (IoError) { try self.s.key_update(); }
+
+    /// close_notify (if the connection is healthy), then close the socket.
+    pub fn close(self) { self.s.close(); }
+
+    pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
+
+    /// The server's certificate chain as sent, leaf first.
+    pub fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
+}
+
+impl Reader for Client {
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.s.read(buf) }
+    fn read_to_end(ref self) throws (IoError) -> List<u8> { try self.s.read_to_end() }
+}
+
+impl Writer for Client {
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize {
+        try self.s.write(buf[0:buf.len()]);
+        buf.len()
+    }
+    fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.s.write(buf[0:buf.len()]); }
+    fn write_str(ref self, s: str) throws (IoError) { try self.s.write(s.as_bytes()); }
+    fn flush(ref self) throws (IoError) {}
+}
+
+impl Drop for Client {
+    fn drop(ref self) { self.s.close(); }
+}
+
+/// A TLS server connection. Copies share the connection.
+pub struct Server {
+    s: Shared;
+}
+
+impl !Sync for Server {}
+
+impl Server {
+    /// Handshake with the client on `stream`.
+    pub fn new(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
+        if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
+        let c = new_conn(stream, false);
+        try c.server_handshake(cfg.cert_chain, cfg.private_key, cfg.cipher_suites, cfg.alpn_protocols) catch e {
+            c.fail(e);
+            throw e;
+        };
+        Server { s: Shared::new(c) }
+    }
+
+    pub fn read(self, buf: List<u8>) throws (IoError) -> usize { try self.s.read(buf) }
+    pub fn read_to_end(self) throws (IoError) -> List<u8> { try self.s.read_to_end() }
+
+    pub fn write<B: AsBytes>(self, buf: B) throws (IoError) -> usize {
+        let b = buf.byte_slice();
+        try self.s.write(b);
+        b.len()
+    }
+
+    pub fn write_all<B: AsBytes>(self, buf: B) throws (IoError) { try self.s.write(buf.byte_slice()); }
+    pub fn flush(self) throws (IoError) {}
+    pub fn close_notify(self) throws (IoError) { try self.s.close_notify(); }
+    pub fn key_update(self) throws (IoError) { try self.s.key_update(); }
+    pub fn close(self) { self.s.close(); }
+    pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
+
+    /// The client's certificates: none (client authentication is not
+    /// supported).
+    pub fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
+
+    /// The server name the client asked for (SNI).
+    pub fn server_name(self) -> str | none { self.s.conn().sni }
+}
+
+impl Reader for Server {
+    fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.s.read(buf) }
+    fn read_to_end(ref self) throws (IoError) -> List<u8> { try self.s.read_to_end() }
+}
+
+impl Writer for Server {
+    fn write(ref self, buf: List<u8>) throws (IoError) -> usize {
+        try self.s.write(buf[0:buf.len()]);
+        buf.len()
+    }
+    fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.s.write(buf[0:buf.len()]); }
+    fn write_str(ref self, s: str) throws (IoError) { try self.s.write(s.as_bytes()); }
+    fn flush(ref self) throws (IoError) {}
+}
+
+impl Drop for Server {
+    fn drop(ref self) { self.s.close(); }
+}

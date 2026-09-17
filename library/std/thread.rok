@@ -26,12 +26,12 @@ pub struct ThreadId {
 }
 
 impl ThreadId {
-    pub fn as_u64(self) -> u64 { self.id }
+    pub const fn as_u64(self) -> u64 { self.id }
 }
 
 impl PartialEq for ThreadId {
-    fn eq(self, rhs: ThreadId) -> bool { self.id == rhs.id }
-    fn ne(self, rhs: ThreadId) -> bool { self.id != rhs.id }
+    const fn eq(self, rhs: ThreadId) -> bool { self.id == rhs.id }
+    const fn ne(self, rhs: ThreadId) -> bool { self.id != rhs.id }
 }
 
 /// What the library keeps per thread.
@@ -49,7 +49,7 @@ struct Rec {
 unsafe impl Send for Rec {}
 unsafe impl Sync for Rec {}
 
-fn new_rec(id: u64, name: str | none) -> Rec {
+const fn new_rec(id: u64, name: str | none) -> Rec {
     Rec { id: id, name: name, park: Atomic::new(0), locals: Dict::new() }
 }
 
@@ -75,8 +75,8 @@ pub struct Thread {
 }
 
 impl Thread {
-    pub fn id(self) -> ThreadId { ThreadId { id: self.rec.id } }
-    pub fn name(self) -> str | none { self.rec.name }
+    pub const fn id(self) -> ThreadId { ThreadId { id: self.rec.id } }
+    pub const fn name(self) -> str | none { self.rec.name }
     /// Wake the thread from `park` (or make its next `park` return at
     /// once). No-op once the thread has ended.
     pub fn unpark(self) {
@@ -128,7 +128,7 @@ impl<T> JoinHandle<T> {
         }
     }
 
-    pub fn thread(self) -> Thread { self.thread }
+    pub const fn thread(self) -> Thread { self.thread }
 
     /// Let the thread run on its own; its OS resources are released when
     /// it ends. The handle must not be joined afterwards.
@@ -154,14 +154,14 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn new() -> Builder { Builder { name: none, stack_size: none } }
+    pub const fn new() -> Builder { Builder { name: none, stack_size: none } }
 
-    pub fn name(self, name: str) -> Builder {
+    pub const fn name(self, name: str) -> Builder {
         Builder { name: name, stack_size: self.stack_size }
     }
 
     /// Stack bytes for the new thread (default 8 MiB).
-    pub fn stack_size(self, size: usize) -> Builder {
+    pub const fn stack_size(self, size: usize) -> Builder {
         Builder { name: self.name, stack_size: size }
     }
 
@@ -213,7 +213,7 @@ pub fn sleep(dur: Duration) {
 }
 
 /// Always `false`: a panic ends the process before anything can ask.
-pub fn panicking() -> bool { false }
+pub const fn panicking() -> bool { false }
 
 /// Block until this thread is `unpark`ed (an earlier `unpark` makes it
 /// return at once). May also return spuriously: re-check the condition.

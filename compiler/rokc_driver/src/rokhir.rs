@@ -6,6 +6,7 @@
 //! producer str                      "rokc <version> (<compiler id>)"
 //! meta     str name | str hash | str source dir
 //!          varint gc type offset | varint gc type count
+//!          varint n | n × str feature
 //! body     varint n | n × (str path | str text)   (at body_offset)
 //! ```
 //!
@@ -26,7 +27,7 @@ use crate::SourceFile;
 use rokc_diagnostic::SourceMap;
 
 /// Bumped on any change to the layout or to what the body holds.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const MAGIC: &[u8; 4] = b"ROKH";
 
 #[derive(Clone, Debug, Default)]
@@ -43,6 +44,9 @@ pub struct Rokhir {
     /// are this library's.
     pub type_offset: u32,
     pub type_count: u32,
+    /// The `feature` cfg values it was built with: downstream parses
+    /// the body with these, not its own.
+    pub features: Vec<String>,
     /// `(path relative to src_dir, interface text)`.
     pub files: Vec<(String, String)>,
 }
@@ -142,6 +146,10 @@ impl Rokhir {
         put_str(&mut meta, &self.src_dir.display().to_string());
         put_varint(&mut meta, u64::from(self.type_offset));
         put_varint(&mut meta, u64::from(self.type_count));
+        put_varint(&mut meta, self.features.len() as u64);
+        for f in &self.features {
+            put_str(&mut meta, f);
+        }
         let mut out = MAGIC.to_vec();
         out.extend(VERSION.to_le_bytes());
         out.extend(0u32.to_le_bytes());
@@ -176,8 +184,12 @@ impl Rokhir {
             src_dir: PathBuf::from(r.str()?),
             type_offset: u32::try_from(r.varint()?).map_err(|_| "bad type offset")?,
             type_count: u32::try_from(r.varint()?).map_err(|_| "bad type count")?,
+            features: Vec::new(),
             files: Vec::new(),
         };
+        for _ in 0..r.varint()? {
+            out.features.push(r.str()?);
+        }
         r.pos = body;
         for _ in 0..r.varint()? {
             out.files.push((r.str()?, r.str()?));
@@ -215,13 +227,15 @@ impl Rokhir {
     #[must_use]
     pub fn text(&self) -> String {
         let mut s = format!(
-            "rokhir {VERSION}\nproducer: {}\npackage: {} (hash: {})\nsource: {}\ngc types: {}..{}\n",
+            "rokhir {VERSION}\nproducer: {}\npackage: {} (hash: {})\nsource: {}\ngc types: \
+             {}..{}\nfeatures: {}\n",
             self.producer,
             self.name,
             self.hash,
             self.src_dir.display(),
             self.type_offset,
-            self.type_end()
+            self.type_end(),
+            self.features.join(", ")
         );
         for (path, text) in &self.files {
             s.push_str(&format!("\n--- {path}\n{text}"));
@@ -522,6 +536,7 @@ mod tests {
             src_dir: "/x/dep".into(),
             type_offset: 3,
             type_count: 4,
+            features: vec!["json".into(), "tls".into()],
             files: vec![("lib.rok".into(), "pub fn f() -> i32;\n".into())],
         };
         let mut b = r.encode();

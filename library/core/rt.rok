@@ -140,6 +140,8 @@ extern "rok" {
     fn rok_os_pidfd_signal(fd: i32, sig: i32) -> i32;
     fn rok_os_poll_read(fd1: i32, fd2: i32) -> i32;
     fn rok_os_abort() -> !;
+    fn rok_os_random(buf: GcBuf<u8>, off: usize, len: usize) -> i32;
+    fn rok_os_trust_roots(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
 
     // Clocks.
 

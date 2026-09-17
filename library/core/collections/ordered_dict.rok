@@ -19,17 +19,17 @@ pub struct OrderedDict<K, V> {
 impl<K, V> !Sync for OrderedDict<K, V> {}
 
 impl<K: Hash, V> OrderedDict<K, V> {
-    pub fn new() -> OrderedDict<K, V> {
+    pub const fn new() -> OrderedDict<K, V> {
         OrderedDict::with_capacity(4)
     }
 
-    pub fn with_capacity(cap: usize) -> OrderedDict<K, V> {
+    pub const fn with_capacity(cap: usize) -> OrderedDict<K, V> {
         OrderedDict { index: Dict::with_capacity(cap), keys: List::with_capacity(cap), vals: List::with_capacity(cap) }
     }
 
     /// The pairs inserted in order (a later duplicate key replaces the
     /// value in the first one's place).
-    pub fn from(pairs: List<(K, V)>) -> OrderedDict<K, V> {
+    pub const fn from(pairs: List<(K, V)>) -> OrderedDict<K, V> {
         let d: OrderedDict<K, V> = OrderedDict::with_capacity(pairs.len());
         for (k, v) in pairs {
             d.insert(k, v);
@@ -37,16 +37,16 @@ impl<K: Hash, V> OrderedDict<K, V> {
         d
     }
 
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         self.index.len()
     }
 
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.index.len() == 0
     }
 
     /// Insert or replace; the old value, or `none`.
-    pub fn insert(self, k: K, v: V) -> V | none {
+    pub const fn insert(self, k: K, v: V) -> V | none {
         if let at: usize = self.index.get(k) {
             let old = self.vals[at];
             self.vals[at] = v;
@@ -58,16 +58,16 @@ impl<K: Hash, V> OrderedDict<K, V> {
         none
     }
 
-    pub fn get(self, k: K) -> V | none {
+    pub const fn get(self, k: K) -> V | none {
         let at = self.index.get(k)?;
         self.vals[at]
     }
 
-    pub fn contains_key(self, k: K) -> bool {
+    pub const fn contains_key(self, k: K) -> bool {
         self.index.contains_key(k)
     }
 
-    pub fn remove(self, k: K) -> V | none {
+    pub const fn remove(self, k: K) -> V | none {
         let at = self.index.remove(k)?;
         let v = self.vals[at];
         if 2 * self.index.len() < self.keys.len() {
@@ -76,7 +76,7 @@ impl<K: Hash, V> OrderedDict<K, V> {
         v
     }
 
-    pub fn clear(self) {
+    pub const fn clear(self) {
         for k in self.keys {
             self.index.remove(k);
         }
@@ -85,25 +85,25 @@ impl<K: Hash, V> OrderedDict<K, V> {
     }
 
     /// The keys in insertion order, lazily.
-    pub fn keys(self) -> ListIter<K> {
+    pub const fn keys(self) -> ListIter<K> {
         self.compact();
         self.keys.iter()
     }
 
     /// The values in insertion order, lazily.
-    pub fn values(self) -> ListIter<V> {
+    pub const fn values(self) -> ListIter<V> {
         self.compact();
         self.vals.iter()
     }
 
     /// `(key, value)` pairs in insertion order, lazily.
-    pub fn entries(self) -> Zip<ListIter<K>, ListIter<V>> {
+    pub const fn entries(self) -> Zip<ListIter<K>, ListIter<V>> {
         self.compact();
         self.keys.iter().zip(self.vals.iter())
     }
 
     /// Move the live entries down over the holes, in order.
-    fn compact(self) {
+    const fn compact(self) {
         let n = self.keys.len();
         if self.index.len() == n {
             return;
@@ -134,7 +134,7 @@ impl<K: Hash, V> Default for OrderedDict<K, V> {
 }
 
 impl<K: Hash + Clone, V: Clone> Clone for OrderedDict<K, V> {
-    fn clone(self) -> OrderedDict<K, V> {
+    const fn clone(self) -> OrderedDict<K, V> {
         let r: OrderedDict<K, V> = OrderedDict::with_capacity(self.len());
         for (k, v) in self {
             r.insert(k.clone(), v.clone());
@@ -147,13 +147,13 @@ impl<K: Hash + Clone, V: Clone> Clone for OrderedDict<K, V> {
 impl<K: Hash, V> IntoIterator for OrderedDict<K, V> {
     type IntoIter = Zip<ListIter<K>, ListIter<V>>;
     type Item = (K, V);
-    fn into_iter(self) -> Zip<ListIter<K>, ListIter<V>> {
+    const fn into_iter(self) -> Zip<ListIter<K>, ListIter<V>> {
         self.entries()
     }
 }
 
 impl<K: Hash, V> FromIterator<(K, V)> for OrderedDict<K, V> {
-    fn from_iter<I>(it: I) -> OrderedDict<K, V> {
+    const fn from_iter<I>(it: I) -> OrderedDict<K, V> {
         let out: OrderedDict<K, V> = OrderedDict::new();
         for (k, v) in it {
             out.insert(k, v);
@@ -165,7 +165,7 @@ impl<K: Hash, V> FromIterator<(K, V)> for OrderedDict<K, V> {
 /// `d[k]`; panics when the key is absent.
 impl<K: Hash, V> Index<K> for OrderedDict<K, V> {
     type Output = V;
-    fn index(self, k: K) -> V {
+    const fn index(self, k: K) -> V {
         self.vals[self.index[k]]
     }
 }
@@ -173,14 +173,14 @@ impl<K: Hash, V> Index<K> for OrderedDict<K, V> {
 /// `d[k] = v` inserts or replaces.
 impl<K: Hash, V> IndexSet<K> for OrderedDict<K, V> {
     type Value = V;
-    fn index_set(self, k: K, v: V) {
+    const fn index_set(self, k: K, v: V) {
         self.insert(k, v);
     }
 }
 
 /// Same keys, equal values (order does not matter, as for `Dict`).
 impl<K: Hash, V: PartialEq> PartialEq for OrderedDict<K, V> {
-    fn eq(self, rhs: OrderedDict<K, V>) -> bool {
+    const fn eq(self, rhs: OrderedDict<K, V>) -> bool {
         if self.len() != rhs.len() { return false; }
         for (k, v) in self {
             if !rhs.contains_key(k) || rhs[k] != v { return false; }

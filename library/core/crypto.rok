@@ -1,0 +1,42 @@
+// Cryptographic algorithms: pure computation, no OS (randomness is
+// `rok::std::crypto::random`). Secret data is handled in constant time:
+// no branch or memory index depends on it.
+
+pub mod sha2;
+pub mod hmac;
+pub mod sha3;
+pub(pkg) mod aes;
+pub(pkg) mod chacha;
+pub mod aead;
+pub(pkg) mod bignum;
+pub(pkg) mod curve25519;
+pub mod x25519;
+pub mod ed25519;
+pub mod ecdsa;
+pub mod rsa;
+pub mod mlkem;
+
+/// Byte input: a list, a view or a string's UTF-8 bytes.
+pub type Bytes = List<u8> | Slice<u8> | str;
+
+/// `b` as a view.
+pub(pkg) fn view(b: Bytes) -> Slice<u8> {
+    match b {
+        l: List<u8> => l[0:l.len()],
+        s: Slice<u8> => s,
+        t: str => t.as_bytes(),
+    }
+}
+
+/// Whether `a` and `b` are equal, in time that depends only on their
+/// lengths.
+pub fn constant_time_eq(a: Bytes, b: Bytes) -> bool {
+    let x = view(a);
+    let y = view(b);
+    if x.len() != y.len() { return false; }
+    let d = 0u8;
+    for i in 0..x.len() {
+        d = d | (x[i] ^ y[i]);
+    }
+    d == 0u8
+}

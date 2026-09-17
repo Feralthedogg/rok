@@ -97,6 +97,215 @@ pub fn build_use_table(
     (table, reexports, diags)
 }
 
+/// `reexports` plus one re-export per item each `pub use p::*` /
+/// `p::**` reaches (spec 5.8.6), re-exports under `p` included. A
+/// re-exported module (5.8.8) re-exports what is under it the same way,
+/// so paths through it resolve. An item the re-exporting module can't
+/// see is left out, and one narrower than the re-export keeps its own
+/// reach (5.8.12). A name that already means something else in the
+/// module is an error.
+#[must_use]
+pub fn glob_reexports(
+    raw: &[(String, Visibility, UseTree)],
+    items: &[rokc_ast::Item],
+    table: &UseTable,
+    reexports: &[ReExport],
+) -> (Vec<ReExport>, Vec<RokDiagnostic>) {
+    use rokc_ast::Item;
+    struct Glob {
+        module: String,
+        vis: Visibility,
+        prefix: String,
+        deep: bool,
+        span: Span,
+        /// The modules it reads through: a module re-exported into
+        /// itself is a cycle, not expanded.
+        chain: Vec<String>,
+    }
+    let mut globs = Vec::new();
+    for (module, vis, tree) in raw.iter().filter(|(_, v, _)| *v != Visibility::Private) {
+        let earlier = table.get(module).map_or(&[][..], Vec::as_slice);
+        let mut leaves = Vec::new();
+        flatten_tree(tree, None, module, earlier, &mut leaves);
+        for (entry, span) in leaves {
+            let (prefix, deep) = match entry {
+                UseEntry::Glob { prefix } => (prefix, false),
+                UseEntry::GlobDeep { prefix } => (prefix, true),
+                UseEntry::Single { .. } => continue,
+            };
+            globs.push(Glob {
+                chain: vec![module.clone(), prefix.clone()],
+                module: module.clone(),
+                vis: *vis,
+                prefix,
+                deep,
+                span,
+            });
+        }
+    }
+    let mut out = reexports.to_vec();
+    let mut diags = Vec::new();
+    let mods: HashMap<&str, Visibility> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Mod(m) => Some((m.name.as_str(), m.vis)),
+            _ => None,
+        })
+        .collect();
+    if globs.is_empty() && !out.iter().any(|r| mods.contains_key(r.full_path.as_str())) {
+        return (out, diags);
+    }
+    let own: HashMap<&str, Visibility> = items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some((f.name.as_str(), f.vis)),
+            Item::Struct(s) => Some((s.name.as_str(), s.vis)),
+            Item::Union(u) => Some((u.name.as_str(), u.vis)),
+            Item::Trait(t) => Some((t.name.as_str(), t.vis)),
+            Item::Const(c) => Some((c.name.as_str(), c.vis)),
+            Item::Static(s) => Some((s.name.as_str(), s.vis)),
+            Item::TypeAlias(a) => Some((a.name.as_str(), a.vis)),
+            Item::Enum(e) => Some((e.name.as_str(), e.vis)),
+            Item::Mod(m) => Some((m.name.as_str(), m.vis)),
+            _ => None,
+        })
+        .collect();
+    let key = |module: &str, name: &str| {
+        if module.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{module}::{name}")
+        }
+    };
+    // Re-exports chain to an item: two paths to it are one name.
+    let end = |out: &[ReExport], mut path: String| {
+        for _ in 0..out.len() {
+            match out
+                .iter()
+                .find(|r| key(&r.module_path, &r.short_name) == path)
+            {
+                Some(r) => path.clone_from(&r.full_path),
+                None => break,
+            }
+        }
+        path
+    };
+    // The modules each re-export was read through; a named one starts
+    // at its module.
+    let mut chains: HashMap<String, Vec<String>> = out
+        .iter()
+        .map(|r| {
+            (
+                key(&r.module_path, &r.short_name),
+                vec![r.module_path.clone()],
+            )
+        })
+        .collect();
+    let mut expanded: HashSet<String> = HashSet::new();
+    let mut reported = HashSet::new();
+    // To a fixed point: a glob may reach what another glob re-exported.
+    loop {
+        let mut added = false;
+        // A re-exported module reads as `pub use <module>::*` inside
+        // the alias.
+        for r in &out {
+            let alias = key(&r.module_path, &r.short_name);
+            let target = end(&out, r.full_path.clone());
+            if !mods.contains_key(target.as_str()) || !expanded.insert(alias.clone()) {
+                continue;
+            }
+            let mut chain = chains.get(&alias).cloned().unwrap_or_default();
+            if chain.contains(&target) {
+                continue;
+            }
+            chain.push(target.clone());
+            globs.push(Glob {
+                module: alias,
+                vis: r.vis,
+                prefix: target,
+                deep: false,
+                span: Span::default(),
+                chain,
+            });
+        }
+        for g in &globs {
+            let (module, vis, prefix, deep, span) =
+                (&g.module, &g.vis, &g.prefix, &g.deep, &g.span);
+            let under = |path: &str| {
+                let parent = path.rsplit_once("::").map_or("", |(m, _)| m);
+                // `pkg::**` of the package being built stays in it.
+                let below = if prefix.is_empty() {
+                    let first = parent.split("::").next().unwrap_or("");
+                    !parent.is_empty() && first != "rok" && !crate::lower::is_dependency(first)
+                } else {
+                    parent.starts_with(&format!("{prefix}::"))
+                };
+                parent == prefix || (*deep && below)
+            };
+            let reached: Vec<(String, Visibility)> = own
+                .iter()
+                .map(|(n, v)| ((*n).to_owned(), *v))
+                .chain(
+                    out.iter()
+                        .map(|r| (key(&r.module_path, &r.short_name), r.vis)),
+                )
+                .filter(|(n, _)| under(n))
+                .collect();
+            for (path, item_vis) in reached {
+                let (parent, short) = path.rsplit_once("::").unwrap_or(("", &path));
+                let alias = key(module, short);
+                if alias == path || !crate::lower::visible_from(module, parent, item_vis) {
+                    continue;
+                }
+                let target = end(&out, path.clone());
+                let clash = if own.contains_key(alias.as_str()) {
+                    Some(alias.clone())
+                } else {
+                    out.iter()
+                        .find(|r| r.module_path == **module && r.short_name == short)
+                        .map(|r| end(&out, r.full_path.clone()))
+                        .filter(|t| *t != target)
+                };
+                match clash {
+                    Some(other) => {
+                        if reported.insert(alias.clone()) {
+                            diags.push(RokDiagnostic::error(
+                                ErrorKind::Module,
+                                *span,
+                                format!(
+                                    "glob re-export of `{target}` as `{alias}` conflicts with \
+                                     `{other}` (spec 5.8.6)"
+                                ),
+                            ));
+                        }
+                    }
+                    None if out
+                        .iter()
+                        .any(|r| r.module_path == **module && r.short_name == short) => {}
+                    None => {
+                        let rank = crate::lower::visibility_rank;
+                        out.push(ReExport {
+                            module_path: (*module).clone(),
+                            short_name: short.to_owned(),
+                            full_path: path.clone(),
+                            vis: if rank(item_vis) < rank(*vis) {
+                                item_vis
+                            } else {
+                                *vis
+                            },
+                        });
+                        chains.insert(alias, g.chain.clone());
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            return (out, diags);
+        }
+    }
+}
+
 /// Unresolved module-level imports, reported at the leaf's path.
 ///
 /// A leaf must name an item, an enum variant, a module, or a re-export. A
@@ -169,11 +378,9 @@ pub fn check_use_targets(
         .collect();
     let mut diags = Vec::new();
     for (module_path, use_vis, tree) in raw {
-        let bare = tree
-            .prefix
-            .segments
-            .first()
-            .is_some_and(|s| !matches!(s.name.as_str(), "pkg" | "sup" | "rok"));
+        let bare = tree.prefix.segments.first().is_some_and(|s| {
+            crate::lower::root_path(&[s.name.as_str(), ""], module_path).is_none()
+        });
         let earlier = table.get(module_path).map_or(&[][..], Vec::as_slice);
         let mut leaves = Vec::new();
         flatten_tree(tree, None, module_path, earlier, &mut leaves);

@@ -1,0 +1,194 @@
+// DER (X.690) reading: definite minimal lengths, one-byte tags. Views
+// into the input, no copies.
+
+use sup::TlsError;
+
+pub(pkg) const SEQUENCE: u8 = 0x30u8;
+pub(pkg) const SET: u8 = 0x31u8;
+pub(pkg) const INTEGER: u8 = 0x02u8;
+pub(pkg) const BIT_STRING: u8 = 0x03u8;
+pub(pkg) const OCTET_STRING: u8 = 0x04u8;
+pub(pkg) const NULL: u8 = 0x05u8;
+pub(pkg) const OID: u8 = 0x06u8;
+pub(pkg) const BOOLEAN: u8 = 0x01u8;
+pub(pkg) const UTC_TIME: u8 = 0x17u8;
+pub(pkg) const GENERALIZED_TIME: u8 = 0x18u8;
+
+pub(pkg) fn bad(what: str) -> TlsError { TlsError::certificate(f"malformed DER: {what}") }
+
+/// A cursor over DER elements.
+pub(pkg) struct Der {
+    s: Slice<u8>;
+    pos: usize;
+}
+
+impl Der {
+    pub(pkg) fn new(s: Slice<u8>) -> Der { Der { s, pos: 0 } }
+
+    pub(pkg) fn done(self) -> bool { self.pos == self.s.len() }
+
+    /// The next element's tag, if any.
+    pub(pkg) fn peek(self) -> u8 | none {
+        if self.pos < self.s.len() { return self.s[self.pos]; }
+        none
+    }
+
+    /// The next element: `(tag, contents, whole encoding)`.
+    pub(pkg) fn next(ref self) throws (TlsError) -> (u8, Slice<u8>, Slice<u8>) {
+        let start = self.pos;
+        let n = self.s.len();
+        if n - self.pos < 2 { throw bad("truncated"); }
+        let tag = self.s[self.pos];
+        if tag & 0x1fu8 == 0x1fu8 { throw bad("multi-byte tag"); }
+        let first = self.s[self.pos + 1];
+        self.pos += 2;
+        let len = 0usize;
+        if first < 0x80u8 {
+            len = first as usize;
+        } else {
+            let k = (first & 0x7fu8) as usize;
+            if k == 0 || k > 4 || n - self.pos < k { throw bad("length"); }
+            if self.s[self.pos] == 0u8 { throw bad("non-minimal length"); }
+            for _ in 0..k {
+                len = (len << 8) | (self.s[self.pos] as usize);
+                self.pos += 1;
+            }
+            if len < 0x80 { throw bad("non-minimal length"); }
+        }
+        if n - self.pos < len { throw bad("truncated"); }
+        let body = self.s[self.pos:self.pos + len];
+        self.pos += len;
+        (tag, body, self.s[start:self.pos])
+    }
+
+    /// The next element, which must have tag `tag`: its contents.
+    pub(pkg) fn expect(ref self, tag: u8) throws (TlsError) -> Slice<u8> {
+        let (t, body, _) = try self.next();
+        if t != tag { throw bad(f"tag {t:#x}, expected {tag:#x}"); }
+        body
+    }
+
+    /// The next element if it has tag `tag`.
+    pub(pkg) fn optional(ref self, tag: u8) throws (TlsError) -> Slice<u8> | none {
+        if self.peek() == tag {
+            return try self.expect(tag);
+        }
+        none
+    }
+
+    /// The next element (tag `tag`) as a cursor over its contents.
+    pub(pkg) fn enter(ref self, tag: u8) throws (TlsError) -> Der {
+        Der::new(try self.expect(tag))
+    }
+
+    pub(pkg) fn finish(self) throws (TlsError) {
+        if !self.done() { throw bad("trailing data"); }
+    }
+}
+
+/// The contents of a non-negative INTEGER without its sign byte.
+pub(pkg) fn unsigned(b: Slice<u8>) throws (TlsError) -> Slice<u8> {
+    if b.len() == 0 { throw bad("empty integer"); }
+    if b[0] & 0x80u8 != 0u8 { throw bad("negative integer"); }
+    if b.len() > 1 && b[0] == 0u8 {
+        if b[1] & 0x80u8 == 0u8 { throw bad("non-minimal integer"); }
+        return b[1:b.len()];
+    }
+    b
+}
+
+/// A small non-negative INTEGER.
+pub(pkg) fn small_int(b: Slice<u8>) throws (TlsError) -> i64 {
+    let m = try unsigned(b);
+    if m.len() > 7 { throw bad("integer too large"); }
+    let v = 0i64;
+    for x in m { v = (v << 8) | (x as i64); }
+    v
+}
+
+/// A BOOLEAN's value (DER: 0x00 or 0xff).
+pub(pkg) fn boolean(b: Slice<u8>) throws (TlsError) -> bool {
+    if b.len() != 1 || (b[0] != 0u8 && b[0] != 0xffu8) { throw bad("boolean"); }
+    b[0] == 0xffu8
+}
+
+/// A BIT STRING with no unused bits: its bytes.
+pub(pkg) fn bit_string_bytes(b: Slice<u8>) throws (TlsError) -> Slice<u8> {
+    if b.len() == 0 || b[0] != 0u8 { throw bad("bit string"); }
+    b[1:b.len()]
+}
+
+/// An OID's dotted text (`1.2.840.113549.1.1.11`).
+pub(pkg) fn oid_text(b: Slice<u8>) throws (TlsError) -> str {
+    if b.len() == 0 || b[b.len() - 1] & 0x80u8 != 0u8 { throw bad("object identifier"); }
+    let parts: List<str> = [];
+    let v = 0u64;
+    let first = true;
+    let fresh = true;
+    for x in b {
+        if fresh && x == 0x80u8 { throw bad("object identifier"); }
+        if v > 0x00ff_ffff_ffff_ffffu64 { throw bad("object identifier"); }
+        v = (v << 7) | ((x & 0x7fu8) as u64);
+        fresh = x & 0x80u8 == 0u8;
+        if fresh {
+            if first {
+                let a = if v < 40u64 { 0u64 } else if v < 80u64 { 1u64 } else { 2u64 };
+                parts.push(f"{a}");
+                parts.push(f"{v - a * 40u64}");
+                first = false;
+            } else {
+                parts.push(f"{v}");
+            }
+            v = 0u64;
+        }
+    }
+    parts.join(".")
+}
+
+/// Days from 1970-01-01 to `y-m-d` (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let yy = if m <= 2 { y - 1 } else { y };
+    let era = (if yy >= 0 { yy } else { yy - 399 }) / 400;
+    let yoe = yy - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn digits(b: Slice<u8>, at: usize, n: usize) throws (TlsError) -> i64 {
+    let v = 0i64;
+    for i in at..at + n {
+        let c = b[i];
+        if c < 0x30u8 || c > 0x39u8 { throw bad("time"); }
+        v = v * 10 + ((c - 0x30u8) as i64);
+    }
+    v
+}
+
+/// A UTCTime (`YYMMDDHHMMSSZ`, years 1950..2049) or GeneralizedTime
+/// (`YYYYMMDDHHMMSSZ`) as Unix seconds.
+pub(pkg) fn time(tag: u8, b: Slice<u8>) throws (TlsError) -> i64 {
+    let y = 0i64;
+    let at = 0usize;
+    if tag == UTC_TIME {
+        if b.len() != 13 { throw bad("time"); }
+        y = try digits(b, 0, 2);
+        y = if y < 50 { 2000 + y } else { 1900 + y };
+        at = 2;
+    } else if tag == GENERALIZED_TIME {
+        if b.len() != 15 { throw bad("time"); }
+        y = try digits(b, 0, 4);
+        at = 4;
+    } else {
+        throw bad("time");
+    }
+    if b[b.len() - 1] != 0x5au8 { throw bad("time zone"); }
+    let mo = try digits(b, at, 2);
+    let d = try digits(b, at + 2, 2);
+    let h = try digits(b, at + 4, 2);
+    let mi = try digits(b, at + 6, 2);
+    let s = try digits(b, at + 8, 2);
+    if mo < 1 || mo > 12 || d < 1 || d > 31 || h > 23 || mi > 59 || s > 59 { throw bad("time"); }
+    days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s
+}

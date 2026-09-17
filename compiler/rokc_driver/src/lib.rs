@@ -27,7 +27,7 @@ use rokc_parser::{
     collect_meta_blocks, collect_prec_table, parse_pattern, parse_program, parse_program_meta,
 };
 
-pub use cfg::CfgEnv;
+pub use cfg::{CfgEnv, feature_of};
 pub use rokc_codegen_mlir::{Demangled, demangle};
 pub use rokc_codegen_mlir::{MlirOutput, ReplCell, ReplFn};
 pub use rokc_hir::instance;
@@ -117,10 +117,22 @@ pub struct CompilerConfig {
 /// The build's cfg (spec 6.3): the target's keys, `--cfg` and `test`.
 #[must_use]
 pub fn cfg_env(config: &CompilerConfig) -> CfgEnv {
+    package_cfg(config, None)
+}
+
+/// The cfg a package of the build is parsed with: the build's, with its
+/// `feature` keys replaced by `features` when given (features are per
+/// package).
+fn package_cfg(config: &CompilerConfig, features: Option<&[String]>) -> CfgEnv {
     let mut env = CfgEnv::new();
     cfg::add_target(&mut env, &config.target);
     for f in &config.cfg_flags {
-        env.add(f);
+        if features.is_none() || cfg::feature_of(f).is_none() {
+            env.add(f);
+        }
+    }
+    for f in features.unwrap_or_default() {
+        env.add_pair("feature", f);
     }
     if config.test || config.bench {
         env.add("test");
@@ -480,6 +492,11 @@ pub fn compile_source(
             src_dir: dir,
             type_offset: m.mir.link.type_offset,
             type_count: 0,
+            features: config
+                .cfg_flags
+                .iter()
+                .filter_map(|f| cfg::feature_of(f).map(str::to_owned))
+                .collect(),
             files: interface,
         });
     }
@@ -564,6 +581,7 @@ fn compile_std(
         src_dir,
         type_offset: m.mir.link.type_offset,
         type_count: 0,
+        features: Vec::new(),
         files,
     });
     if !keep_ast {
@@ -659,6 +677,9 @@ fn compile_unit_in(
     diags.extend(cross_file_confusables(
         metas.idents.take().unwrap_or_default(),
     ));
+    for d in &mut metas.metas[lib_metas..] {
+        d.set_package("");
+    }
     let user_metas = format!("{:?}", &metas.metas[lib_metas..]);
     let ext = prec.ext_ops();
     relex_metas(&mut metas, &ext);
@@ -686,6 +707,19 @@ fn compile_unit_in(
             literals: std::sync::Arc::clone(if i == 0 { &user_lits } else { &lib_lits }),
             key: std::sync::OnceLock::new(),
             target: config.target.clone(),
+            cfg: match roots
+                .get(i.wrapping_sub(1))
+                .map(|(prefix, _)| prefix.join("::"))
+            {
+                // The library being built has the build's features; a
+                // prebuilt one those it was built with; others none.
+                None => cfg_env.clone(),
+                Some(p) if lib == Some(p.as_str()) => cfg_env.clone(),
+                Some(p) => {
+                    let built = prebuilt.iter().find(|b| b.rokhir.name == p);
+                    package_cfg(config, Some(built.map_or(&[], |b| &b.rokhir.features)))
+                }
+            },
         })
         .collect();
     let incr = incr::current();
@@ -697,7 +731,6 @@ fn compile_unit_in(
             &roots,
             &metas,
             &ext,
-            &cfg_env,
             config.keep_ast,
         );
     });
@@ -720,7 +753,6 @@ fn compile_unit_in(
             Some(source),
             sub_dir,
             &[],
-            &cfg_env,
             &ext,
             &metas[0],
             &mut diags,
@@ -768,7 +800,6 @@ fn compile_unit_in(
                 None,
                 root.parent(),
                 prefix,
-                &cfg_env,
                 &ext,
                 &metas[i + 1],
                 &mut diags,
@@ -811,7 +842,6 @@ fn compile_unit_in(
         &packages,
         &prebuilt_names,
         &config.target,
-        &cfg_env,
         &ext,
         &metas[0],
         &mut diags,
@@ -1027,7 +1057,12 @@ fn build_prec_table(
     let mut table = PrecTable::new();
     for (pkg, root) in roots {
         let mut tables = Vec::new();
+        let first = metas.metas.len();
         prepass_tree(root, root.parent(), pkg, &mut files, metas, &mut tables);
+        let package = pkg.join("::");
+        for d in &mut metas.metas[first..] {
+            d.set_package(&package);
+        }
         for (sub_table, mut collect_diags) in tables {
             diags.append(&mut collect_diags);
             diags.extend(sub_table.entries().cloned().filter_map(|e| table.merge(e)));
@@ -1367,14 +1402,25 @@ fn relex_metas(metas: &mut PrePass, ext: &rokc_parser::ExtOps) {
     if symbols.is_empty() || metas.meta_files.is_empty() {
         return;
     }
-    metas.metas.clear();
+    // What the module tree gave each block: its package and the cfgs of
+    // enclosing modules.
+    let placed: std::collections::HashMap<_, _> = std::mem::take(&mut metas.metas)
+        .into_iter()
+        .map(|d| ((d.file, d.span), (d.package, d.cfg)))
+        .collect();
     for (file, source, id) in &metas.meta_files {
         let lexer = Lexer::new(source, file.clone()).with_ext_ops(symbols.clone());
         let (mut tokens, _) = lexer.lex_all();
         for t in &mut tokens {
             t.span.file = *id;
         }
-        metas.metas.extend(collect_meta_blocks(&tokens, file));
+        for mut d in collect_meta_blocks(&tokens, file) {
+            if let Some((package, cfg)) = placed.get(&(d.file.clone(), d.span)) {
+                d.set_package(package);
+                d.cfg.clone_from(cfg);
+            }
+            metas.metas.push(d);
+        }
     }
 }
 
@@ -1417,6 +1463,8 @@ struct Summary {
     /// An extension-operator token; `cfg!`.
     ext_op: bool,
     cfg_bang: bool,
+    /// The path literals of its `include_str!("..")` / `include_bytes!("..")`.
+    includes: Vec<String>,
     metas: Vec<MetaDef>,
     keywords: Vec<KeywordDef>,
     literals: Vec<LiteralDef>,
@@ -1429,6 +1477,7 @@ rokc_core::codec_struct!(Summary {
     kinds,
     ext_op,
     cfg_bang,
+    includes,
     metas,
     keywords,
     literals,
@@ -1452,6 +1501,7 @@ impl Summary {
             kinds: Vec::new(),
             ext_op: false,
             cfg_bang: false,
+            includes: Vec::new(),
             metas: Vec::new(),
             keywords: Vec::new(),
             literals: Vec::new(),
@@ -1464,6 +1514,22 @@ impl Summary {
                     }
                     if n == "cfg" && tokens.get(i + 1).is_some_and(|b| b.kind == T::Bang) {
                         sum.cfg_bang = true;
+                    }
+                    if let (
+                        "include_str" | "include_bytes",
+                        [
+                            rokc_lexer::Token { kind: T::Bang, .. },
+                            rokc_lexer::Token {
+                                kind: T::LParen, ..
+                            },
+                            rokc_lexer::Token {
+                                kind: T::StrLit(s), ..
+                            },
+                            ..,
+                        ],
+                    ) = (n.as_str(), tokens.get(i + 1..).unwrap_or_default())
+                    {
+                        sum.includes.push(s.clone());
                     }
                 }
                 T::ExtOp(_) => sum.ext_op = true,
@@ -1549,6 +1615,8 @@ struct Parsed {
     stmts: Vec<rokc_ast::Stmt>,
     kept: Option<SourceFile>,
     diags: Vec<RokDiagnostic>,
+    /// The files its `include_str!` / `include_bytes!` read.
+    includes: Vec<PathBuf>,
 }
 
 // An AST is as deep as its longest operator chain, and dropping or
@@ -1568,7 +1636,6 @@ fn real_parse(
     roots: &[LibRoot],
     metas: &[MetaCtx],
     ext: &ExtOps,
-    cfg_env: &CfgEnv,
     keep: bool,
 ) {
     let files: Vec<(PathBuf, (u32, Prepassed))> =
@@ -1589,8 +1656,11 @@ fn real_parse(
                     .filter(|(_, d)| path.starts_with(d))
                     .max_by_key(|(_, d)| d.components().count())?;
                 let metas = metas.get(pkg)?;
-                let (program, diags) = cached_parse(&path, file_id, pre, incr, ext, metas, cfg_env);
-                let parsed = settle(&path, file_id, program, diags, metas, cfg_env, keep);
+                let includes = included(&path, &pre.sum.includes);
+                let (program, diags) =
+                    cached_parse(&path, file_id, pre, &includes, incr, ext, metas);
+                let mut parsed = settle(&path, file_id, program, diags, metas, keep);
+                parsed.includes = includes.into_iter().map(|(p, _)| p).collect();
                 Some((path, parsed))
             });
             jobs.push(job.expect("spawn a parse thread"));
@@ -1599,25 +1669,51 @@ fn real_parse(
             .filter_map(|j| j.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
             .collect()
     });
+    READ.with(|r| {
+        let mut r = r.borrow_mut();
+        r.extend(parsed.iter().flat_map(|(_, p)| p.includes.iter().cloned()));
+    });
     PARSED.with(|p| p.borrow_mut().extend(parsed));
+}
+
+/// The files `includes` (`Summary::includes`) of the file at `path`
+/// name, and the key part of their contents.
+fn included(path: &Path, includes: &[String]) -> Vec<(PathBuf, Vec<u8>)> {
+    let file = path.display().to_string();
+    includes
+        .iter()
+        .map(|lit| {
+            let p = rokc_parser::include_path(&file, lit);
+            let data = std::fs::read(&p).map_or_else(
+                |_| b"-".to_vec(),
+                |d| format!("+{:016x}", incr::key(&[&d])).into_bytes(),
+            );
+            (p, data)
+        })
+        .collect()
 }
 
 /// The real parse of pre-passed file `file_id` at `path`: the
 /// pre-pass's when `reusable`, else with the package's tables; from the
-/// incremental store when it has it.
+/// incremental store when it has it (and the files it includes are
+/// unchanged).
 fn cached_parse(
     path: &Path,
     file_id: u32,
     pre: Prepassed,
+    includes: &[(PathBuf, Vec<u8>)],
     incr: Option<(&incr::Incr, &incr::Ids)>,
     ext: &ExtOps,
     metas: &MetaCtx,
-    cfg_env: &CfgEnv,
 ) -> (rokc_ast::Program, Vec<RokDiagnostic>) {
     let file = path.display().to_string();
     let source = pre.source.as_bytes();
+    let inc: Vec<u8> = includes
+        .iter()
+        .flat_map(|(p, k)| [p.display().to_string().as_bytes(), b"\0", k].concat())
+        .collect();
     if reusable(&pre, ext, metas) {
-        let k = incr::key(&[b"plain", file.as_bytes(), source]);
+        let k = incr::key(&[b"plain", file.as_bytes(), source, &inc]);
         let cached = match pre.program {
             Some(_) => None,
             None => incr.and_then(|(i, ids)| i.parse.get(k, ids)),
@@ -1636,14 +1732,14 @@ fn cached_parse(
         });
         return (program, Vec::new());
     }
-    let tables = metas.tables_key(ext, cfg_env).to_le_bytes();
-    let k = incr::key(&[b"parse", file.as_bytes(), source, &tables]);
+    let tables = metas.tables_key(ext).to_le_bytes();
+    let k = incr::key(&[b"parse", file.as_bytes(), source, &tables, &inc]);
     let cached = incr.and_then(|(i, ids)| i.parse.get(k, ids));
     if let Some((i, _)) = incr {
         i.count_parse(cached.is_some());
     }
     cached.unwrap_or_else(|| {
-        let parsed = parse_file(&pre.source, file, file_id, ext, metas, cfg_env);
+        let parsed = parse_file(&pre.source, file, file_id, ext, metas);
         if let Some((i, ids)) = incr {
             i.parse.put(k, &parsed, ids);
         }
@@ -1660,11 +1756,10 @@ fn settle(
     program: rokc_ast::Program,
     mut diags: Vec<RokDiagnostic>,
     metas: &MetaCtx,
-    cfg_env: &CfgEnv,
     keep: bool,
 ) -> Parsed {
     attrs::check_cfg(&program.attrs, &program.items, &metas.table, &mut diags);
-    let items = cfg::filter_items(program.items, cfg_env);
+    let items = cfg::filter_items(program.items, &metas.cfg);
     attrs::check(&program.attrs, &items, &metas.table, &mut diags);
     let kept = keep.then(|| SourceFile {
         path: path.to_path_buf(),
@@ -1681,6 +1776,7 @@ fn settle(
         stmts: program.stmts,
         kept,
         diags,
+        includes: Vec::new(),
     }
 }
 
@@ -1692,7 +1788,6 @@ fn parse_file(
     file_id: u32,
     ext: &ExtOps,
     metas: &MetaCtx,
-    cfg_env: &CfgEnv,
 ) -> (rokc_ast::Program, Vec<RokDiagnostic>) {
     let lexer = Lexer::new(source, file.clone()).with_ext_ops(ext.symbols());
     let (mut tokens, mut diags) = lexer.lex_all();
@@ -1712,7 +1807,7 @@ fn parse_file(
         ext,
         &metas.table,
         &metas.literals,
-        Some(cfg_env),
+        Some(&metas.cfg),
     );
     diags.append(&mut parse_diags);
     (program, diags)
@@ -1778,13 +1873,15 @@ struct MetaCtx {
     /// `tables_key`, once asked for.
     key: std::sync::OnceLock<u64>,
     target: rokc_mir::Target,
+    /// The package's cfg (`package_cfg`).
+    cfg: CfgEnv,
 }
 
 impl MetaCtx {
     /// A key of what, besides its text, a file's parse in this package
     /// depends on: the extension operators, meta blocks, keywords,
     /// literals and cfg.
-    fn tables_key(&self, ext: &ExtOps, cfg: &CfgEnv) -> u64 {
+    fn tables_key(&self, ext: &ExtOps) -> u64 {
         *self.key.get_or_init(|| {
             let mut levels: Vec<String> = ext.levels.iter().map(|l| format!("{l:?}")).collect();
             levels.sort();
@@ -1793,7 +1890,7 @@ impl MetaCtx {
                 format!("{:?}", self.table).as_bytes(),
                 format!("{:?}", self.keywords).as_bytes(),
                 format!("{:?}", self.literals).as_bytes(),
-                incr::target_key(cfg, &self.target).as_bytes(),
+                incr::target_key(&self.cfg, &self.target).as_bytes(),
             ])
         })
     }
@@ -1963,7 +2060,6 @@ fn collect_module_tree(
     preloaded: Option<&str>,
     submodule_dir: Option<&Path>,
     module_path: &[String],
-    cfg_env: &CfgEnv,
     ext: &ExtOps,
     metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
@@ -1991,9 +2087,9 @@ fn collect_module_tree(
             let file = body_path.display().to_string();
             // Every span parsed from here on knows its file (diagnostic locations).
             let file_id = files.add(file.clone(), source.clone());
-            let (program, d) = parse_file(&source, file, file_id, ext, metas, cfg_env);
+            let (program, d) = parse_file(&source, file, file_id, ext, metas);
             let keeping = keep.is_some();
-            settle(body_path, file_id, program, d, metas, cfg_env, keeping)
+            settle(body_path, file_id, program, d, metas, keeping)
         }
     };
     let Parsed {
@@ -2001,6 +2097,7 @@ fn collect_module_tree(
         stmts,
         kept,
         diags: mut file_diags,
+        ..
     } = parsed;
     diags.append(&mut file_diags);
     if let (Some(keep), Some(mut f)) = (keep.as_deref_mut(), kept) {
@@ -2014,7 +2111,6 @@ fn collect_module_tree(
         items,
         module_path,
         submodule_dir,
-        cfg_env,
         ext,
         metas,
         diags,
@@ -2031,7 +2127,6 @@ fn flatten_module_items(
     items: Vec<rokc_ast::Item>,
     module_path: &[String],
     submodule_dir: Option<&Path>,
-    cfg_env: &CfgEnv,
     ext: &ExtOps,
     metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
@@ -2066,7 +2161,6 @@ fn flatten_module_items(
                         inner,
                         &child_path,
                         submodule_dir,
-                        cfg_env,
                         ext,
                         metas,
                         diags,
@@ -2088,7 +2182,6 @@ fn flatten_module_items(
                         None,
                         next_dir.as_deref(),
                         &child_path,
-                        cfg_env,
                         ext,
                         metas,
                         diags,

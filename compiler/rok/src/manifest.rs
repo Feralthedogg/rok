@@ -4,7 +4,8 @@
 //! The file is one ROKON value (`rokc_rokon`), a `Package { .. }` struct
 //! (the name `Package` may be left out). It is data only: strings,
 //! `{ "key": value }` dicts and the `Dep::path(..)` / `Dep::git(..)` /
-//! `Dep::version(..)` variants.
+//! `Dep::version(..)` variants, which also take `optional: true`,
+//! `features: [..]` and `default_features: false`.
 //!
 //! ```rokon
 //! Package {
@@ -18,7 +19,9 @@
 //!         "json": Dep::git("https://example.com/json.git", tag: "v1.2"),
 //!         "util": Dep::path("../util"),
 //!         "geom": Dep::version("^0.3"),   // a stone; also `"geom": "^0.3"`
+//!         "tls": Dep::version("^2", optional: true, default_features: false),
 //!     },
+//!     features: { "default": ["json"], "json": [], "tls": ["dep:tls", "geom/fast"] },
 //!     dev_deps: {},
 //!     lints_from: "..",                 // ../rok.rokon's lints first
 //!     lints: { "dead_code": "allow" },
@@ -33,14 +36,14 @@ use std::path::{Path, PathBuf};
 
 use rokc_core::lint::Level;
 use rokc_rokon::edit::{self, Step};
-use rokc_rokon::{Decoder, Doc, Value};
+use rokc_rokon::{Decoder, Doc, Field, Kind, Value};
 
 pub const MANIFEST: &str = "rok.rokon";
 pub const LOCK: &str = "rok.lock";
 /// A manifest with nothing in it, for `rok add` to fill.
 pub const EMPTY: &str = "Package {\n    deps: {},\n}\n";
 
-const FIELDS: [&str; 11] = [
+const FIELDS: [&str; 12] = [
     "name",
     "version",
     "toolchain",
@@ -52,7 +55,11 @@ const FIELDS: [&str; 11] = [
     "lints",
     "lints_from",
     "native",
+    "features",
 ];
+
+/// A dependency's feature arguments (`Dep::..(.., optional: true)`).
+const DEP_FLAGS: [&str; 3] = ["optional", "features", "default_features"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitRef {
@@ -121,10 +128,245 @@ impl Source {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dep {
     pub name: String,
     pub source: Source,
+    /// Built only when a feature enables it (`dep:<name>`, `<name>/<f>`).
+    pub optional: bool,
+    /// Its features this package enables.
+    pub features: Vec<String>,
+    /// Its `default` feature is on (`default_features: false` turns it
+    /// off).
+    pub default_features: bool,
+}
+
+impl Dep {
+    pub const fn new(name: String, source: Source) -> Self {
+        Self {
+            name,
+            source,
+            optional: false,
+            features: Vec::new(),
+            default_features: true,
+        }
+    }
+
+    /// The `Dep::..` value, with the feature arguments that differ from
+    /// the defaults.
+    pub fn to_value(&self) -> Value {
+        let mut v = self.source.to_value();
+        if let Kind::Variant { named, .. } = &mut v.kind {
+            if self.optional {
+                named.push(Field::new("optional", Value::new(Kind::Bool(true))));
+            }
+            if !self.features.is_empty() {
+                named.push(Field::new("features", strings(&self.features)));
+            }
+            if !self.default_features {
+                named.push(Field::new(
+                    "default_features",
+                    Value::new(Kind::Bool(false)),
+                ));
+            }
+        }
+        v
+    }
+
+    /// `to_value` on one line (it is spliced into `rok.rokon`).
+    pub fn to_rok(&self) -> String {
+        rokc_rokon::to_line(&self.to_value())
+    }
+}
+
+/// A list of strings.
+pub fn strings(items: &[String]) -> Value {
+    Value::new(Kind::List(items.iter().map(Value::str).collect()))
+}
+
+/// `features`: name -> what it enables, in file order.
+pub type Features = Vec<(String, Vec<String>)>;
+
+/// One entry of a feature's list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enables<'a> {
+    /// Another feature of the package.
+    Feature(&'a str),
+    /// `dep:<name>`: the optional dependency.
+    Dep(&'a str),
+    /// `<dep>/<feature>` (enabling the dependency too), or with `weak`
+    /// `<dep>?/<feature>` (only when something else enables it).
+    DepFeature {
+        dep: &'a str,
+        feature: &'a str,
+        weak: bool,
+    },
+}
+
+impl<'a> Enables<'a> {
+    pub fn parse(s: &'a str) -> Self {
+        if let Some(d) = s.strip_prefix("dep:") {
+            return Self::Dep(d);
+        }
+        match s.split_once('/') {
+            Some((dep, feature)) => match dep.strip_suffix('?') {
+                Some(dep) => Self::DepFeature {
+                    dep,
+                    feature,
+                    weak: true,
+                },
+                None => Self::DepFeature {
+                    dep,
+                    feature,
+                    weak: false,
+                },
+            },
+            None => Self::Feature(s),
+        }
+    }
+}
+
+/// A feature name: `[a-z0-9][a-z0-9_-]*`.
+pub fn check_feature(name: &str) -> Result<(), String> {
+    let ok = name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{name}` is not a valid feature name: lowercase ASCII letters, digits, `-` and `_`, \
+             starting with a letter or digit"
+        ))
+    }
+}
+
+/// Where a feature table is wrong.
+#[derive(Debug, PartialEq, Eq)]
+pub enum At {
+    /// The feature's name.
+    Feature(usize),
+    /// An entry of its list.
+    Entry(usize, usize),
+    /// A dependency (by index in `deps`).
+    Dep(usize),
+}
+
+/// Check `features` against the package's (normal) `deps`: names, that
+/// every entry names a feature or dependency of the package, that no
+/// feature reaches itself, and that every optional dependency is enabled
+/// by some feature.
+pub fn check_features(features: &Features, deps: &[Dep]) -> Result<(), (At, String)> {
+    // 0 new, 1 on the path, 2 done.
+    fn visit(
+        i: usize,
+        features: &Features,
+        state: &mut [u8],
+        path: &mut Vec<usize>,
+    ) -> Result<(), (At, String)> {
+        state[i] = 1;
+        path.push(i);
+        for (j, e) in features[i].1.iter().enumerate() {
+            let Enables::Feature(f) = Enables::parse(e) else {
+                continue;
+            };
+            let Some(k) = features.iter().position(|(n, _)| n == f) else {
+                continue;
+            };
+            if state[k] == 1 {
+                let from = path.iter().position(|&p| p == k).unwrap_or(0);
+                let names: Vec<&str> = path[from..]
+                    .iter()
+                    .chain([&k])
+                    .map(|&p| features[p].0.as_str())
+                    .collect();
+                return Err((
+                    At::Entry(i, j),
+                    format!("feature cycle: {}", names.join(" -> ")),
+                ));
+            }
+            if state[k] == 0 {
+                visit(k, features, state, path)?;
+            }
+        }
+        path.pop();
+        state[i] = 2;
+        Ok(())
+    }
+    let find = |d: &str| deps.iter().position(|x| same(&x.name, d));
+    for (i, (name, list)) in features.iter().enumerate() {
+        check_feature(name).map_err(|e| (At::Feature(i), e))?;
+        for (j, e) in list.iter().enumerate() {
+            let at = || At::Entry(i, j);
+            match Enables::parse(e) {
+                Enables::Feature(f) => {
+                    check_feature(f).map_err(|m| (at(), m))?;
+                    if !features.iter().any(|(n, _)| n == f) {
+                        return Err((at(), format!("`{f}` is not a feature of this package")));
+                    }
+                }
+                Enables::Dep(d) => match find(d) {
+                    Some(k) if deps[k].optional => {}
+                    Some(_) => {
+                        return Err((
+                            at(),
+                            format!("`{e}`: dependency `{d}` is not `optional: true`"),
+                        ));
+                    }
+                    None => return Err((at(), format!("`{e}`: there is no dependency `{d}`"))),
+                },
+                Enables::DepFeature { dep, feature, weak } => {
+                    check_feature(feature).map_err(|m| (at(), format!("`{e}`: {m}")))?;
+                    match find(dep) {
+                        Some(k) if weak && !deps[k].optional => {
+                            return Err((
+                                at(),
+                                format!(
+                                    "`{e}`: `?` is for an optional dependency, and `{dep}` is not"
+                                ),
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            return Err((at(), format!("`{e}`: there is no dependency `{dep}`")));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut state = vec![0; features.len()];
+    for i in 0..features.len() {
+        if state[i] == 0 {
+            visit(i, features, &mut state, &mut Vec::new())?;
+        }
+    }
+    for (k, d) in deps.iter().enumerate().filter(|(_, d)| d.optional) {
+        let enabled = features
+            .iter()
+            .flat_map(|(_, l)| l)
+            .any(|e| match Enables::parse(e) {
+                Enables::Dep(x)
+                | Enables::DepFeature {
+                    dep: x,
+                    weak: false,
+                    ..
+                } => same(x, &d.name),
+                _ => false,
+            });
+        if !enabled {
+            return Err((
+                At::Dep(k),
+                format!(
+                    "optional dependency `{}` is not enabled by any feature (add \"dep:{}\" to \
+                     one)",
+                    d.name, d.name
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Default)]
@@ -147,6 +389,7 @@ pub struct Manifest {
     pub lints_from: Option<String>,
     /// `native`: prebuilt C libraries (a namespace of their own).
     pub native: Vec<NativeDep>,
+    pub features: Features,
 }
 
 /// Where a native package comes from.
@@ -274,7 +517,10 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
     let pkg = doc.root().record("Package")?;
     pkg.only(&FIELDS)?;
     let string = |f: &str| pkg.opt(f).map(|d| d.string()).transpose();
-    let deps = |f: &str| pkg.opt(f).map_or(Ok(Vec::new()), deps);
+    let deps = |f: &str| {
+        pkg.opt(f)
+            .map_or(Ok(Vec::new()), |d| deps(d, f == "dev_deps"))
+    };
     let mut lints = Vec::new();
     if let Some(d) = pkg.opt("lints") {
         for (k, v) in d.dict()? {
@@ -291,6 +537,29 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
     if let Some(d) = pkg.opt("name") {
         check_name(&d.string()?).map_err(|m| d.error(&m))?;
     }
+    let normal = deps("deps")?;
+    let mut features = Features::new();
+    let mut at = Vec::new();
+    if let Some(d) = pkg.opt("features") {
+        for (k, v) in d.dict()? {
+            let items = v.list()?;
+            let list = items
+                .iter()
+                .map(Decoder::string)
+                .collect::<Result<_, _>>()?;
+            features.push((k.string()?, list));
+            at.push((k, items));
+        }
+    }
+    check_features(&features, &normal).map_err(|(a, m)| match a {
+        At::Feature(i) => at[i].0.error(&m),
+        At::Entry(i, j) => at[i].1[j].error(&m),
+        At::Dep(k) => pkg
+            .opt("deps")
+            .and_then(|d| d.dict().ok())
+            .and_then(|kv| kv.into_iter().nth(k))
+            .map_or_else(|| m.clone(), |(key, _)| key.error(&m)),
+    })?;
     Ok(Manifest {
         name: string("name")?,
         version: string("version")?,
@@ -298,11 +567,12 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
         description: string("description")?,
         license: string("license")?,
         repository: string("repository")?,
-        deps: deps("deps")?,
+        deps: normal,
         dev_deps: deps("dev_deps")?,
         lints,
         lints_from: string("lints_from")?,
         native: pkg.opt("native").map_or(Ok(Vec::new()), natives)?,
+        features,
     })
 }
 
@@ -397,7 +667,7 @@ pub fn natives(d: Decoder<'_>) -> Result<Vec<NativeDep>, String> {
     Ok(out)
 }
 
-fn deps(d: Decoder<'_>) -> Result<Vec<Dep>, String> {
+fn deps(d: Decoder<'_>, dev: bool) -> Result<Vec<Dep>, String> {
     let mut out = Vec::new();
     for (k, v) in d.dict()? {
         let name = k.string()?;
@@ -408,8 +678,12 @@ fn deps(d: Decoder<'_>) -> Result<Vec<Dep>, String> {
                 o.name
             )));
         }
-        let source = source(v)?;
-        out.push(Dep { name, source });
+        let mut dep = dep(v, true)?;
+        if dev && dep.optional {
+            return Err(v.error("a dev dependency cannot be optional"));
+        }
+        dep.name = name;
+        out.push(dep);
     }
     Ok(out)
 }
@@ -424,11 +698,20 @@ fn req(d: Decoder<'_>) -> Result<String, String> {
 /// A `Dep::path(..)` / `Dep::git(..)` / `Dep::version(..)` value, or a
 /// requirement string (`"^1.2"`, short for `Dep::version("^1.2")`).
 pub fn source(d: Decoder<'_>) -> Result<Source, String> {
+    dep(d, false).map(|d| d.source)
+}
+
+/// `source`, with the feature arguments when `flags` (the name is
+/// left empty).
+fn dep(d: Decoder<'_>, flags: bool) -> Result<Dep, String> {
     if d.string().is_ok() {
-        return Ok(Source::Registry {
-            req: req(d)?,
-            registry: None,
-        });
+        return Ok(Dep::new(
+            String::new(),
+            Source::Registry {
+                req: req(d)?,
+                registry: None,
+            },
+        ));
     }
     let v = d.variant("Dep").map_err(|_| {
         d.expected("`Dep::path(\"..\")`, `Dep::git(\"..\")` or `Dep::version(\"..\")`")
@@ -437,15 +720,19 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
         [x] => x.string(),
         _ => Err(d.error(&format!("`Dep::{}` takes one string, the {what}", v.name))),
     };
-    Ok(match v.name {
+    let only = |own: &[&str]| {
+        let extra: &[&str] = if flags { &DEP_FLAGS } else { &[] };
+        v.fields.only(&[own, extra].concat())
+    };
+    let source = match v.name {
         "path" => {
-            v.fields.only(&[])?;
+            only(&[])?;
             Source::Path(one("path")?)
         }
         "git" => {
-            v.fields.only(&["rev", "tag", "branch"])?;
+            only(&["rev", "tag", "branch"])?;
             let mut refs = Vec::new();
-            for k in v.fields.names() {
+            for k in v.fields.names().filter(|k| !DEP_FLAGS.contains(k)) {
                 let s = v.fields.req(k)?.string()?;
                 refs.push(match k {
                     "rev" => GitRef::Rev(s),
@@ -463,7 +750,7 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
             }
         }
         "version" => {
-            v.fields.only(&["registry"])?;
+            only(&["registry"])?;
             let [r] = v.args.as_slice() else {
                 return Err(d.error("`Dep::version` takes one string, the version requirement"));
             };
@@ -483,7 +770,22 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
                  Dep::version)"
             )));
         }
-    })
+    };
+    let mut out = Dep::new(String::new(), source);
+    if let Some(o) = v.fields.opt("optional") {
+        out.optional = o.bool()?;
+    }
+    if let Some(f) = v.fields.opt("features") {
+        for x in f.list()? {
+            let name = x.string()?;
+            check_feature(&name).map_err(|m| x.error(&m))?;
+            out.features.push(name);
+        }
+    }
+    if let Some(o) = v.fields.opt("default_features") {
+        out.default_features = o.bool()?;
+    }
+    Ok(out)
 }
 
 /// `text` with `field` (`deps` / `dev_deps`) entry `key` set to the
@@ -498,6 +800,28 @@ pub fn set_dep(
     parse(text, file)?;
     let out = edit::set(text, &[Step::Field(field), Step::Key(key)], value)
         .map_err(|e| e.render(text, file))?;
+    parse(&out, file).map(|_| out)
+}
+
+/// `text` with `dep` in `field` (`deps` / `dev_deps`). An optional one
+/// comes with a feature of its name that enables it, unless the package
+/// has that feature.
+pub fn add_dep(text: &str, file: &str, field: &str, dep: &Dep) -> Result<String, String> {
+    let m = parse(text, file)?;
+    let edit = |text: &str, steps: &[Step<'_>], value: &str| {
+        edit::set(text, steps, value).map_err(|e| e.render(text, file))
+    };
+    let mut out = text.to_owned();
+    if dep.optional && !m.features.iter().any(|(f, _)| *f == dep.name) {
+        let enable = strings(&[format!("dep:{}", dep.name)]);
+        let steps = [Step::Field("features"), Step::Key(&dep.name)];
+        out = edit(&out, &steps, &rokc_rokon::to_line(&enable))?;
+    }
+    out = edit(
+        &out,
+        &[Step::Field(field), Step::Key(&dep.name)],
+        &dep.to_rok(),
+    )?;
     parse(&out, file).map(|_| out)
 }
 
@@ -673,6 +997,46 @@ mod tests {
             ("Package { } Package { }", "holds one value"),
             ("", "expected a value"),
             ("Package { name: \"x }", "unterminated"),
+            (
+                "Package { features: { \"a\": [\"b\"] } }",
+                "`b` is not a feature of this package",
+            ),
+            (
+                "Package { features: { \"a\": [\"b\"], \"b\": [\"c\"], \"c\": [\"b\"] } }",
+                "feature cycle: b -> c -> b",
+            ),
+            (
+                "Package { features: { \"A\": [] } }",
+                "not a valid feature name",
+            ),
+            (
+                "Package { deps: { \"x\": Dep::path(\"p\", optional: true) } }",
+                "optional dependency `x` is not enabled by any feature (add \"dep:x\" to one)",
+            ),
+            (
+                "Package { deps: { \"x\": Dep::path(\"p\") }, features: { \"a\": [\"dep:x\"] } }",
+                "dependency `x` is not `optional: true`",
+            ),
+            (
+                "Package { deps: { \"x\": Dep::path(\"p\") }, features: { \"a\": [\"x?/f\"] } }",
+                "`?` is for an optional dependency",
+            ),
+            (
+                "Package { features: { \"a\": [\"y/f\"] } }",
+                "there is no dependency `y`",
+            ),
+            (
+                "Package { dev_deps: { \"x\": Dep::path(\"p\", optional: true) } }",
+                "a dev dependency cannot be optional",
+            ),
+            (
+                "Package { deps: { \"x\": Dep::git(\"u\", features: [\"B\"]) } }",
+                "`B` is not a valid feature name",
+            ),
+            (
+                "Package { deps: { \"x\": Dep::version(\"1\", optional: 1) } }",
+                "found an integer",
+            ),
         ] {
             let e = parse(src, "rok.rokon").unwrap_err();
             assert!(e.contains(want), "{src:?}: {e}");
@@ -729,6 +1093,24 @@ mod tests {
                 "Dep::version(\"~0.3\", registry: \"file:///i\")"
             ]
         );
+        // Feature arguments: on every kind, written when not the default.
+        let m = parse(
+            "{ deps: { \"t\": Dep::git(\"u\", tag: \"v\", optional: true, features: [\"a\"], \
+             default_features: false), \"j\": Dep::path(\"j\", default_features: true) }, \
+             features: { \"default\": [\"t?/b\", \"j/c\"], \"tls\": [\"dep:t\"] } }",
+            "f",
+        )
+        .unwrap();
+        let back: Vec<String> = m.deps.iter().map(Dep::to_rok).collect();
+        assert_eq!(
+            back,
+            [
+                "Dep::git(\"u\", tag: \"v\", optional: true, features: [\"a\"], default_features: \
+                 false)",
+                "Dep::path(\"j\")"
+            ]
+        );
+        assert_eq!(m.features[0].1, ["t?/b", "j/c"]);
     }
 
     #[test]

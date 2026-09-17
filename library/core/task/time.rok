@@ -6,7 +6,7 @@
 // overflow checks on (debug) that op panics; past it, saturate.
 
 #[track_caller]
-fn ns_add(a: i64, b: i64) -> i64 {
+const fn ns_add(a: i64, b: i64) -> i64 {
     let r = a.checked_add(b);
     if r is i64 { return r; }
     let _ = a + b;
@@ -14,7 +14,7 @@ fn ns_add(a: i64, b: i64) -> i64 {
 }
 
 #[track_caller]
-fn ns_sub(a: i64, b: i64) -> i64 {
+const fn ns_sub(a: i64, b: i64) -> i64 {
     let r = a.checked_sub(b);
     if r is i64 { return r; }
     let _ = a - b;
@@ -22,7 +22,7 @@ fn ns_sub(a: i64, b: i64) -> i64 {
 }
 
 #[track_caller]
-fn ns_mul(a: i64, b: i64) -> i64 {
+const fn ns_mul(a: i64, b: i64) -> i64 {
     let r = a.checked_mul(b);
     if r is i64 { return r; }
     let _ = a * b;
@@ -36,65 +36,65 @@ pub struct Duration {
 }
 
 impl Duration {
-    pub fn ns(n: i64) -> Duration { Duration { ns: n } }
+    pub const fn ns(n: i64) -> Duration { Duration { ns: n } }
     #[track_caller]
-    pub fn us(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000) } }
+    pub const fn us(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000) } }
     #[track_caller]
-    pub fn ms(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000000) } }
+    pub const fn ms(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000000) } }
     #[track_caller]
-    pub fn sec(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000000000) } }
+    pub const fn sec(n: i64) -> Duration { Duration { ns: ns_mul(n, 1000000000) } }
     #[track_caller]
-    pub fn min(n: i64) -> Duration { Duration { ns: ns_mul(n, 60000000000) } }
+    pub const fn min(n: i64) -> Duration { Duration { ns: ns_mul(n, 60000000000) } }
     #[track_caller]
-    pub fn hours(n: i64) -> Duration { Duration { ns: ns_mul(n, 3600000000000) } }
+    pub const fn hours(n: i64) -> Duration { Duration { ns: ns_mul(n, 3600000000000) } }
     #[track_caller]
-    pub fn days(n: i64) -> Duration { Duration { ns: ns_mul(n, 86400000000000) } }
+    pub const fn days(n: i64) -> Duration { Duration { ns: ns_mul(n, 86400000000000) } }
 
     pub const ZERO: Duration = Duration { ns: 0 };
     pub const MAX: Duration = Duration { ns: 9223372036854775807 };
 
     /// `s` seconds, truncated to whole nanoseconds (saturating at the
     /// `i64` range, NaN → 0 — the `as` rules).
-    pub fn from_secs_f64(s: f64) -> Duration { Duration { ns: (s * 1000000000.0) as i64 } }
+    pub const fn from_secs_f64(s: f64) -> Duration { Duration { ns: (s * 1000000000.0) as i64 } }
 
-    pub fn as_ns(self) -> i64 { self.ns }
-    pub fn as_us(self) -> i64 { self.ns / 1000 }
-    pub fn as_ms(self) -> i64 { self.ns / 1000000 }
-    pub fn as_secs(self) -> i64 { self.ns / 1000000000 }
-    pub fn as_secs_f64(self) -> f64 { self.ns as f64 / 1000000000.0 }
+    pub const fn as_ns(self) -> i64 { self.ns }
+    pub const fn as_us(self) -> i64 { self.ns / 1000 }
+    pub const fn as_ms(self) -> i64 { self.ns / 1000000 }
+    pub const fn as_secs(self) -> i64 { self.ns / 1000000000 }
+    pub const fn as_secs_f64(self) -> f64 { self.ns as f64 / 1000000000.0 }
 
     /// The part below one second (of the magnitude for a negative span).
-    pub fn subsec_ns(self) -> u32 { (self.ns % 1000000000).abs() as u32 }
-    pub fn subsec_us(self) -> u32 { self.subsec_ns() / 1000 }
-    pub fn subsec_ms(self) -> u32 { self.subsec_ns() / 1000000 }
+    pub const fn subsec_ns(self) -> u32 { (self.ns % 1000000000).abs() as u32 }
+    pub const fn subsec_us(self) -> u32 { self.subsec_ns() / 1000 }
+    pub const fn subsec_ms(self) -> u32 { self.subsec_ns() / 1000000 }
 
-    pub fn checked_add(self, rhs: Duration) -> Duration | none {
+    pub const fn checked_add(self, rhs: Duration) -> Duration | none {
         Duration { ns: self.ns.checked_add(rhs.ns)? }
     }
-    pub fn checked_sub(self, rhs: Duration) -> Duration | none {
+    pub const fn checked_sub(self, rhs: Duration) -> Duration | none {
         Duration { ns: self.ns.checked_sub(rhs.ns)? }
     }
-    pub fn checked_mul(self, factor: i64) -> Duration | none {
+    pub const fn checked_mul(self, factor: i64) -> Duration | none {
         Duration { ns: self.ns.checked_mul(factor)? }
     }
-    pub fn checked_div(self, divisor: i64) -> Duration | none {
+    pub const fn checked_div(self, divisor: i64) -> Duration | none {
         Duration { ns: self.ns.checked_div(divisor)? }
     }
-    pub fn saturating_add(self, rhs: Duration) -> Duration { Duration { ns: self.ns.saturating_add(rhs.ns) } }
-    pub fn saturating_sub(self, rhs: Duration) -> Duration { Duration { ns: self.ns.saturating_sub(rhs.ns) } }
-    pub fn saturating_mul(self, factor: i64) -> Duration { Duration { ns: self.ns.saturating_mul(factor) } }
+    pub const fn saturating_add(self, rhs: Duration) -> Duration { Duration { ns: self.ns.saturating_add(rhs.ns) } }
+    pub const fn saturating_sub(self, rhs: Duration) -> Duration { Duration { ns: self.ns.saturating_sub(rhs.ns) } }
+    pub const fn saturating_mul(self, factor: i64) -> Duration { Duration { ns: self.ns.saturating_mul(factor) } }
 }
 
 impl Mul<i64> for Duration {
     type Output = Duration;
     #[track_caller]
-    fn mul(self, rhs: i64) -> Duration { Duration { ns: ns_mul(self.ns, rhs) } }
+    const fn mul(self, rhs: i64) -> Duration { Duration { ns: ns_mul(self.ns, rhs) } }
 }
 
 impl Div<i64> for Duration {
     type Output = Duration;
     #[track_caller]
-    fn div(self, rhs: i64) -> Duration {
+    const fn div(self, rhs: i64) -> Duration {
         if rhs == 0 { panic("Duration divided by zero"); }
         // `MIN / -1` is the one overflow.
         if rhs == -1 { return Duration { ns: ns_sub(0, self.ns) }; }
@@ -104,7 +104,7 @@ impl Div<i64> for Duration {
 
 impl Mul<Duration> for f64 {
     type Output = Duration;
-    fn mul(self, rhs: Duration) -> Duration { Duration { ns: (self * rhs.ns as f64) as i64 } }
+    const fn mul(self, rhs: Duration) -> Duration { Duration { ns: (self * rhs.ns as f64) as i64 } }
 }
 
 /// The largest unit the span reaches, fraction without trailing zeros:
@@ -149,13 +149,13 @@ impl Debug for Duration {
 impl Add for Duration {
     type Output = Duration;
     #[track_caller]
-    fn add(self, rhs: Duration) -> Duration { Duration { ns: ns_add(self.ns, rhs.ns) } }
+    const fn add(self, rhs: Duration) -> Duration { Duration { ns: ns_add(self.ns, rhs.ns) } }
 }
 
 impl Sub for Duration {
     type Output = Duration;
     #[track_caller]
-    fn sub(self, rhs: Duration) -> Duration { Duration { ns: ns_sub(self.ns, rhs.ns) } }
+    const fn sub(self, rhs: Duration) -> Duration { Duration { ns: ns_sub(self.ns, rhs.ns) } }
 }
 
 /// A point on the monotonic clock (3.3.2); only meaningful within one
@@ -169,39 +169,39 @@ pub struct Instant {
 impl Instant {
     pub fn now() -> Instant { Instant { ns: unsafe { rok_time_now_ns() } } }
     pub fn elapsed(self) -> Duration { Instant::now().duration_since(self) }
-    pub fn duration_since(self, earlier: Instant) -> Duration {
+    pub const fn duration_since(self, earlier: Instant) -> Duration {
         Duration { ns: ns_sub(self.ns, earlier.ns) }
     }
-    pub fn checked_duration_since(self, earlier: Instant) -> Duration | none {
+    pub const fn checked_duration_since(self, earlier: Instant) -> Duration | none {
         if earlier.ns > self.ns {
             return none;
         }
         self.duration_since(earlier)
     }
-    pub fn saturating_duration_since(self, earlier: Instant) -> Duration {
+    pub const fn saturating_duration_since(self, earlier: Instant) -> Duration {
         if earlier.ns > self.ns {
             return Duration { ns: 0 };
         }
         self.duration_since(earlier)
     }
-    pub fn checked_add(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_add(d.ns)? } }
-    pub fn checked_sub(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_sub(d.ns)? } }
+    pub const fn checked_add(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_add(d.ns)? } }
+    pub const fn checked_sub(self, d: Duration) -> Instant | none { Instant { ns: self.ns.checked_sub(d.ns)? } }
 }
 
 impl Add<Duration> for Instant {
     type Output = Instant;
     #[track_caller]
-    fn add(self, rhs: Duration) -> Instant { Instant { ns: ns_add(self.ns, rhs.ns) } }
+    const fn add(self, rhs: Duration) -> Instant { Instant { ns: ns_add(self.ns, rhs.ns) } }
 }
 
 impl Sub<Duration> for Instant {
     type Output = Instant;
     #[track_caller]
-    fn sub(self, rhs: Duration) -> Instant { Instant { ns: ns_sub(self.ns, rhs.ns) } }
+    const fn sub(self, rhs: Duration) -> Instant { Instant { ns: ns_sub(self.ns, rhs.ns) } }
 }
 
 impl Sub<Instant> for Instant {
     type Output = Duration;
     #[track_caller]
-    fn sub(self, rhs: Instant) -> Duration { Duration { ns: ns_sub(self.ns, rhs.ns) } }
+    const fn sub(self, rhs: Instant) -> Duration { Duration { ns: ns_sub(self.ns, rhs.ns) } }
 }

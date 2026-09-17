@@ -20,22 +20,22 @@ pub trait Stream {
     fn poll_next(ref self, ref ctx: Context) -> Poll<Item | none>;
 
     /// `f` of each item.
-    fn map<U>(self, f: fn(Item) -> U) -> Map<Self, U> {
+    const fn map<U>(self, f: fn(Item) -> U) -> Map<Self, U> {
         Map { s: self, f: f }
     }
 
     /// The items `pred` accepts.
-    fn filter(self, pred: fn(Item) -> bool) -> Filter<Self> {
+    const fn filter(self, pred: fn(Item) -> bool) -> Filter<Self> {
         Filter { s: self, pred: pred }
     }
 
     /// At most the first `n` items.
-    fn take(self, n: usize) -> Take<Self> {
+    const fn take(self, n: usize) -> Take<Self> {
         Take { s: self, left: n }
     }
 
     /// All but the first `n` items.
-    fn skip(self, n: usize) -> Skip<Self> {
+    const fn skip(self, n: usize) -> Skip<Self> {
         Skip { s: self, n: n }
     }
 
@@ -123,7 +123,7 @@ pub struct AsyncStream<T> {
 
 impl<T> Stream for AsyncStream<T> {
     type Item = T;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<T | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<T | none> {
         (self.resume)(ctx)
     }
 }
@@ -137,7 +137,7 @@ pub struct Map<S, U> {
 
 impl<S: Stream, U> Stream for Map<S, U> {
     type Item = U;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<U | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<U | none> {
         match self.s.poll_next(ref ctx) {
             Poll::Ready(v) => {
                 if let x: S::Item = v {
@@ -157,7 +157,7 @@ pub struct Filter<S> {
 
 impl<S: Stream> Stream for Filter<S> {
     type Item = S::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
         loop {
             match self.s.poll_next(ref ctx) {
                 Poll::Ready(v) => {
@@ -184,7 +184,7 @@ pub struct Take<S> {
 
 impl<S: Stream> Stream for Take<S> {
     type Item = S::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
         if self.left == 0 {
             return Poll::Ready(none);
         }
@@ -207,7 +207,7 @@ pub struct Skip<S> {
 
 impl<S: Stream> Stream for Skip<S> {
     type Item = S::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
         loop {
             let r = self.s.poll_next(ref ctx);
             if self.n == 0 {
@@ -234,7 +234,7 @@ pub struct Throttle<S> {
 
 impl<S: Stream> Stream for Throttle<S> {
     type Item = S::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<S::Item | none> {
         self.inner.poll_next(ref ctx)
     }
 }
@@ -245,7 +245,7 @@ pub struct Buffered<S> {
 
 impl<S: Stream> Stream for Buffered<S> {
     type Item = <S::Item as Future>::Output;
-    fn poll_next(ref self, ref ctx: Context) -> Poll< <S::Item as Future>::Output | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll< <S::Item as Future>::Output | none> {
         self.inner.poll_next(ref ctx)
     }
 }
@@ -256,7 +256,7 @@ pub struct BufferUnordered<S> {
 
 impl<S: Stream> Stream for BufferUnordered<S> {
     type Item = <S::Item as Future>::Output;
-    fn poll_next(ref self, ref ctx: Context) -> Poll< <S::Item as Future>::Output | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll< <S::Item as Future>::Output | none> {
         self.inner.poll_next(ref ctx)
     }
 }
@@ -300,12 +300,12 @@ async fn for_each_of<S: Stream>(s: S, f: fn(S::Item)) {
 // ---- combinators (2.8.8) ----
 
 /// Both streams' items as they come; ends when both have.
-pub fn merge<S1: Stream, S2: Stream>(a: S1, b: S2) -> Merge<S1, S2> {
+pub const fn merge<S1: Stream, S2: Stream>(a: S1, b: S2) -> Merge<S1, S2> {
     Merge { a: a, b: b, a_done: false, b_done: false, either: false }
 }
 
 /// Like `merge`, but ends as soon as either stream does.
-pub fn select<S1: Stream, S2: Stream>(a: S1, b: S2) -> Select<S1, S2> {
+pub const fn select<S1: Stream, S2: Stream>(a: S1, b: S2) -> Select<S1, S2> {
     Select { m: Merge { a: a, b: b, a_done: false, b_done: false, either: true } }
 }
 
@@ -320,7 +320,7 @@ pub struct Merge<S1, S2> {
 
 impl<S1: Stream, S2: Stream> Stream for Merge<S1, S2> {
     type Item = S1::Item | S2::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | S2::Item | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | S2::Item | none> {
         if !self.a_done {
             if let Poll::Ready(v) = self.a.poll_next(ref ctx) {
                 if let x: S1::Item = v {
@@ -356,13 +356,13 @@ pub struct Select<S1, S2> {
 
 impl<S1: Stream, S2: Stream> Stream for Select<S1, S2> {
     type Item = S1::Item | S2::Item;
-    fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | S2::Item | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<S1::Item | S2::Item | none> {
         self.m.poll_next(ref ctx)
     }
 }
 
 /// Pairs of the two streams' items, until either ends.
-pub fn zip<S1: Stream, S2: Stream>(a: S1, b: S2) -> Zip<S1, S2> {
+pub const fn zip<S1: Stream, S2: Stream>(a: S1, b: S2) -> Zip<S1, S2> {
     Zip { a: a, b: b, left: none, right: none }
 }
 
@@ -375,7 +375,7 @@ pub struct Zip<S1, S2> {
 
 impl<S1: Stream, S2: Stream> Stream for Zip<S1, S2> {
     type Item = (S1::Item, S2::Item);
-    fn poll_next(ref self, ref ctx: Context) -> Poll<(S1::Item, S2::Item) | none> {
+    const fn poll_next(ref self, ref ctx: Context) -> Poll<(S1::Item, S2::Item) | none> {
         if self.left is none {
             if let Poll::Ready(v) = self.a.poll_next(ref ctx) {
                 if v is none {
@@ -410,7 +410,7 @@ pub struct TryAsyncStream<T, E> {
 }
 
 impl<T, E> TryAsyncStream<T, E> {
-    pub fn poll_next(ref self, ref ctx: Context) throws (E) -> Poll<T | none> {
+    pub const fn poll_next(ref self, ref ctx: Context) throws (E) -> Poll<T | none> {
         try (self.resume)(ctx)
     }
 }

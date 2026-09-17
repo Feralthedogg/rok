@@ -1,0 +1,19 @@
+// spec: §6.3.6 §9.2.3
+// rokc-arg: --extern fdep=tests/cases/extern_feature/fdep
+// rokc-arg: --extern-feature fdep=json --cfg feature=own
+// expect-exit: 0
+// expect-stdout:
+// json 7
+// dep json: true, dep own: false
+// own: true, json here: false
+
+// `--extern-feature` gives a dependency its features; `--cfg feature=..`
+// is the package's own. Each package's code, generic bodies parsed here
+// too, sees its own set.
+fn main() {
+    println(f"json {fdep::to_json()}");
+    println(fdep::which(0));
+    let own = cfg!(feature = "own");
+    let json = cfg!(feature = "json");
+    println(f"own: {own}, json here: {json}");
+}

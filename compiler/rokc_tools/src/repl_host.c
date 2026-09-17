@@ -44,6 +44,16 @@
 #include <stdint.h>
 #else
 #define _GNU_SOURCE
+#if defined(__linux__)
+// The host links against the toolchain's glibc 2.36 link stubs: none of
+// the __isoc23_* scanf / strto* entry points that glibc 2.38+ headers
+// select for _GNU_SOURCE.
+#include <features.h>
+#undef __GLIBC_USE_C2X_STRTOL
+#define __GLIBC_USE_C2X_STRTOL 0
+#undef __GLIBC_USE_C23_STRTOL
+#define __GLIBC_USE_C23_STRTOL 0
+#endif
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -1367,7 +1377,9 @@ static char *read_ir(size_t n) {
 void rok_runtime_yield(void);
 void rok_leave_native(void);
 void rok_set_exit_hook(void (*)(int));
-extern __declspec(thread) unsigned char rok_tls_yield_flag;
+// The runtime's TLS block (803); `ROK_TLS_YIELD_FLAG` comes from
+// `tls_abi` (build.rs).
+extern __declspec(thread) unsigned char rok_tls[];
 
 // A failed cell leaves the session as it was before it, like a forked
 // snapshot: before the cell, with the runtime's other threads stopped at
@@ -2004,7 +2016,7 @@ int main(void) {
     if (!book) return 1;
     book->cap = (BOOK_SIZE - sizeof *book) / sizeof *book->regions;
     main_thread = GetCurrentThreadId();
-    main_yield = &rok_tls_yield_flag;
+    main_yield = rok_tls + ROK_TLS_YIELD_FLAG;
     rok_set_exit_hook(on_exit_hook);
     SetUnhandledExceptionFilter(on_fault);
     AddVectoredExceptionHandler(1, on_overflow);

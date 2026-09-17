@@ -1,0 +1,175 @@
+// expect-exit: 0
+// expect-stdout:
+// ok aead 2.8.2 seal
+// ok aead 2.8.2 open
+// ok gcm 1 seal
+// ok gcm 1 open
+// ok gcm 2 seal
+// ok gcm 2 open
+// ok gcm 3 seal
+// ok gcm 3 open
+// ok gcm 4 seal
+// ok gcm 4 open
+// ok gcm 13 seal
+// ok gcm 13 open
+// ok gcm 14 seal
+// ok gcm 14 open
+// ok gcm 15 seal
+// ok gcm 15 open
+// ok gcm 16 seal
+// ok gcm 16 open
+// ok wycheproof g 1
+// ok wycheproof g 4
+// ok wycheproof g 5
+// ok wycheproof g 18
+// ok wycheproof g 39
+// ok wycheproof g 40
+// ok wycheproof g 41
+// ok wycheproof g 42
+// ok wycheproof g 43
+// ok wycheproof g 68
+// ok wycheproof g 69
+// ok wycheproof g 128
+// ok wycheproof c 1
+// ok wycheproof c 2
+// ok wycheproof c 3
+// ok wycheproof c 122
+// ok wycheproof c 123
+// ok wycheproof c 146
+// ok wycheproof c 147
+// ok wycheproof c 148
+// ok wycheproof c 226
+// ok wycheproof c 233
+// ok wycheproof c 234
+// ok wycheproof c 235
+// ok wycheproof c 317
+// ok wycheproof c 318
+// ok bad key
+
+// rok::core::crypto::aead: AES-GCM (FIPS-197 via the GCM spec cases 1-4, 13-16),
+// ChaCha20-Poly1305 (RFC 8439 2.8.2) and a Wycheproof subset.
+use rok::core::crypto::aead::{Aead, AeadAlgorithm};
+
+fn hex(b: List<u8>) -> str {
+    let s = "";
+    for x in b { s += f"{x:02x}"; }
+    s
+}
+
+fn unhex(s: str) -> List<u8> {
+    let out: List<u8> = [];
+    let b = s.as_bytes();
+    let i = 0usize;
+    while i + 1 < b.len() {
+        out.push((nib(b[i]) << 4) | nib(b[i + 1]));
+        i += 2;
+    }
+    out
+}
+
+fn nib(c: u8) -> u8 {
+    if c >= 0x30u8 && c <= 0x39u8 { return c - 0x30u8; }
+    if c >= 0x61u8 && c <= 0x66u8 { return c - 0x61u8 + 10u8; }
+    c - 0x41u8 + 10u8
+}
+
+fn check(name: str, got: List<u8>, want: str) {
+    let g = hex(got);
+    if g == want { println(f"ok {name}"); } else { println(f"FAIL {name}: {g} != {want}"); }
+}
+
+/// Seal and open one known-answer case.
+fn kat(name: str, alg: AeadAlgorithm, k: str, n: str, a: str, p: str, c: str, t: str) {
+    let ae = try Aead::new(alg, unhex(k)) catch _ { println(f"FAIL {name}: key"); return; };
+    let sealed = try ae.seal(unhex(n), unhex(a), unhex(p)) catch _ { [] };
+    check(name + " seal", sealed, c + t);
+    let opened = try ae.open(unhex(n), unhex(a), sealed) catch _ { none };
+    match opened {
+        x: List<u8> => check(name + " open", x, p),
+        none => println(f"FAIL {name} open"),
+    }
+}
+
+fn wycheproof(row: str) {
+    let f: List<str> = [];
+    for x in row.split("|") { f.push(x); }
+    let alg = if f[0] == "c" { AeadAlgorithm::ChaCha20Poly1305 } else if f[2].len() == 32 { AeadAlgorithm::Aes128Gcm } else { AeadAlgorithm::Aes256Gcm };
+    let name = f"wycheproof {f[0]} {f[1]}";
+    let ae = try Aead::new(alg, unhex(f[2])) catch _ { println(f"FAIL {name}: key"); return; };
+    let valid = f[8] == "v";
+    let got = try ae.open(unhex(f[3]), unhex(f[4]), unhex(f[6] + f[7])) catch _ {
+        // Only nonce sizes other than 96 bits throw (out of scope).
+        if f[3].len() != 24 { println(f"ok {name}"); } else { println(f"FAIL {name}: threw"); }
+        return;
+    };
+    let ok = match got {
+        x: List<u8> => valid && hex(x) == f[5],
+        none => !valid,
+    };
+    if valid {
+        let sealed = try ae.seal(unhex(f[3]), unhex(f[4]), unhex(f[5])) catch _ { [] };
+        ok = ok && hex(sealed) == f[6] + f[7];
+    }
+    if ok { println(f"ok {name}"); } else { println(f"FAIL {name}"); }
+}
+
+const WYCHEPROOF: [str; 26] = [
+    "g|1|5b9604fe14eadba931b0ccf34843dab9|028318abc1824029138141a2||001d0c231287c1182784554ca3a21908|26073cc1d851beff176384dc9896d5ff|0a3ea7a5487cb5f7d70fb6c58d038554|v",
+    "g|4|bedcfb5a011ebc84600fcb296c15af0d|438a547a94ea88dce46c6c85||||960247ba5cde02e41a313c4c0136edc3|v",
+    "g|5|384ea416ac3c2f51a76e7d8226346d4e|b30c084727ad1c592ac21d12||35|54|7c1e4ae88bb27e5638343cb9fd3f6337|v",
+    "g|18|65d38f0b268f180d6ba548d509111dde|e14dfc27394ac846c2373ea7||1fa76d7995dc996a5f5dabaa4be401be14f4d4706a213a4dd725df386ec147a6be074947c733094f47a7222552376740aa8348a0ae1c7f2d972a0ad664f8b8ec81dfc9af078b61daea5dde874fd73775b4cd65acf069ada0b2b9bfbb4a9817ba41d4dcaff7653df5c8cd9ce7f59eec92ae9e61314e03ef48839810ea825520|40dc9b139e888f1811391134b15e914826414a99db512a0632dc4c56d70f7b7991e9945a2025890e951699cf6b2ccee093c9a6a752b98ff696240126759f480299c1dd82aa2c4f462a4a8ad1ad0c7a755f07908c9c0d336d57dbdebc940bbae28ba0336dccaf6bfdc93623686f9487ef0884d100b6b98949afbd4217dc4640|4218d6ac98c0444bc64ecbe1d763136a|v",
+    "g|39|00112233445566778899aabbccddeeff|000000000000000000000000||ebd4a3e10cf6d41c50aeae007563b072|f62d84d649e56bc8cfedc5d74a51e2f7|ffffffffffffffffffffffffffffffff|v",
+    "g|40|00112233445566778899aabbccddeeff|ffffffffffffffffffffffff||d593c4d8224f1b100c35e4f6c4006543|431f31e6840931fd95f94bf88296ff69|00000000000000000000000000000000|v",
+    "g|41|000102030405060708090a0b0c0d0e0f|505152535455565758595a5b||202122232425262728292a2b2c2d2e2f|eb156d081ed6b6b55f4612f021d87b39|d9847dbc326a06e988c77ad3863e6083|i",
+    "g|42|000102030405060708090a0b0c0d0e0f|505152535455565758595a5b||202122232425262728292a2b2c2d2e2f|eb156d081ed6b6b55f4612f021d87b39|da847dbc326a06e988c77ad3863e6083|i",
+    "g|43|000102030405060708090a0b0c0d0e0f|505152535455565758595a5b||202122232425262728292a2b2c2d2e2f|eb156d081ed6b6b55f4612f021d87b39|58847dbc326a06e988c77ad3863e6083|i",
+    "g|68|aa023d0478dcb2b2312498293d9a9129|0432bc49ac344120|aac39231129872a2|2035af313d1346ab00154fea78322105|64c36bb3b732034e3a7d04efc5197785|b7d0dd70b00d65b97cfd080ff4b819d1|v",
+    "g|69|f3434725c82a7f8bb07df1f8122fb6c9|28e9b7851724bae3||||44aca00f42e4199b829a55e69b073d9e|v",
+    "g|128|00112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f|000000000000000000000000||561008fa07a68f5c61285cd013464eaf|23293e9b07ca7d1b0cae7cc489a973b3|ffffffffffffffffffffffffffffffff|v",
+    "c|1|808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f|070000004041424344454647|50515253c0c1c2c3c4c5c6c7|4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e|d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116|1ae10b594f09e26a7e902ecbd0600691|v",
+    "c|2|80ba3192c803ce965ea371d5ff073cf0f43b6a2ab576b208426e11409c09b9b0|4da5bf8dfd5852c1ea12379d||||76acb342cf3166a5b63c0c0ea1383c8d|v",
+    "c|3|7a4cd759172e02eb204db2c3f5c746227df584fc1345196391dbb9577a250742|a92ef0ac991dd516a3c6f689|bd506764f2d2c410|||906fa6284b52f87b7359cbaa7563c709|v",
+    "c|122|808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f|000102030405060708090a0b|00000000000000000000000000000000|65b63bf074b7283992e24b1ac0df0d22b555dbe2254d94a43f1de748d3cc6f0d|0000000000000000000000000000000000000000000000000000000000000000|39f4fce3026d83789ffd1ee6f2cd7c4f|v",
+    "c|123|808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f|000102030405060708090a0b|00000000000000000000000000000000|65b63bf074b7283992e24b1ac0df0d22b555dbe2254d94a43f1de748d3cc6f0d20c142fe898fbbe668d4324394434c1b18b58ead710aed9c31db1f2a8a1f1bb2|00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000|f5eaa804605c3a4785f9d7f13b6f67d6|v",
+    "c|146|202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f|000102030405060708090a0b|000102|||f5409bb729039d0814ac514054323f44|i",
+    "c|147|202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f|000102030405060708090a0b|000102|||f6409bb729039d0814ac514054323f44|i",
+    "c|148|202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f|000102030405060708090a0b|000102|||74409bb729039d0814ac514054323f44|i",
+    "c|226|404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f|000102030405060708090a0b|ffffffffffffffffffffffffffffffff415771fda4fbcc55c377f73203e60226|e48caf8a76183327c9561a4651c07c822ccd1642c06607d0d4bc0afb4de15915dbfa3b0b422e77e15c64bf6247031f15fdb643117809821870000adf83834da5|ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff|000102030405060708090a0b0c0d0e0f|v",
+    "c|233|000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f|000102030405060710abb165|ffffffff|c68ce708bf26aab862d97e1b42f31ef37bb66f8090c149e452ec7f20327eb2ea2e38aca2438b588d5459493e97e7fa330ff9bc23c897df6b00af86931d6c81555103478f2869b93ee29c837e95fb6b9903f3b72debfba2384baa48ceedfedb91|e5ffffffffffffffffffffffffffffff0871bc8f1e4aa235087712d9df183609ffffffffffffffffffffffffffffffffffffffe7a33009ef5fc604ea0f9a75e9ffffffffffffffffffffffffffffffffffffffe7a33009ef5fc604ea0f9a75e9|3572162777262c518eef573b720e8e64|v",
+    "c|234|000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f|00010203040506072dd4cd40|ffffffff|40115e67ecd3d4178c4c60e713ab4e5e390ef93aeb61aa307f141323c38e0685fa47139a5f4e3f8e92d7a3b71eb4ff0e259445f4ffc31bce540190edd6ad207876a0085c32ddfcbeb01a8be4c34d5331eda1a5b6139750f973f0d4841baa2cb8|d9ffffffffffffffffffffffffffffffa009d73c6544428cfac0b2d8c7bbef0bedffffffffffffffffffffffffffffff8a5ef60715bc4b07c92b9707376da105edffffffffffffffffffffffffffffff8a5ef60715bc4b07c92b9707376da105|19532d9fa0b5fbd582aaeda830602f1d|v",
+    "c|235|000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f|000102030405060703e76f6f|ffffffff|19de9b9ec8b247d42bbee2016d6715babc286fd979807951b183a188930ad15edcf0b056a2eecc51d30838e640615e14890e659fd3028c904e65018fdfd6038333d14da7b4f76f9f68fa8903138d563c33b7fb50c3e7ebca970f6f89a88a82d6|f9ffffffffffffffffffffffffffffff015d1565924f6c7418de9babf8be4407edffffffffffffffffffffffffffffff2e110e5e1c0468cbaad99c8abeffff07edffffffffffffffffffffffffffffff2e110e5e1c0468cbaad99c8abeffff07|47e5d4294239db73b836c04070ff5b2d|v",
+    "c|317|202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f||||||i",
+    "c|318|202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f|0001020304050607|||||i",
+];
+
+fn main() {
+    let sun = "Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.";
+    let sunhex = hex(sun.as_bytes().to_list());
+    kat("aead 2.8.2", AeadAlgorithm::ChaCha20Poly1305, "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f", "070000004041424344454647", "50515253c0c1c2c3c4c5c6c7", sunhex,
+        "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116",
+        "1ae10b594f09e26a7e902ecbd0600691");
+
+    // GCM spec (McGrew-Viega) test cases 1-4, 13-16.
+    let z12 = "000000000000000000000000";
+    let z16 = "00000000000000000000000000000000";
+    let kf = "feffe9928665731c6d6a8f9467308308";
+    let iv = "cafebabefacedbaddecaf888";
+    let p64 = "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255";
+    let p60 = "d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39";
+    let ad = "feedfacedeadbeeffeedfacedeadbeefabaddad2";
+    kat("gcm 1", AeadAlgorithm::Aes128Gcm, z16, z12, "", "", "", "58e2fccefa7e3061367f1d57a4e7455a");
+    kat("gcm 2", AeadAlgorithm::Aes128Gcm, z16, z12, "", z16, "0388dace60b6a392f328c2b971b2fe78", "ab6e47d42cec13bdf53a67b21257bddf");
+    kat("gcm 3", AeadAlgorithm::Aes128Gcm, kf, iv, "", p64, "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985", "4d5c2af327cd64a62cf35abd2ba6fab4");
+    kat("gcm 4", AeadAlgorithm::Aes128Gcm, kf, iv, ad, p60, "42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091", "5bc94fbc3221a5db94fae95ae7121a47");
+    kat("gcm 13", AeadAlgorithm::Aes256Gcm, z16 + z16, z12, "", "", "", "530f8afbc74536b9a963b4f1c4cb738b");
+    kat("gcm 14", AeadAlgorithm::Aes256Gcm, z16 + z16, z12, "", z16, "cea7403d4d606b6e074ec5d3baf39d18", "d0d1c8a799996bf0265b98b5d48ab919");
+    kat("gcm 15", AeadAlgorithm::Aes256Gcm, kf + kf, iv, "", p64, "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662898015ad", "b094dac5d93471bdec1a502270e3cc6c");
+    kat("gcm 16", AeadAlgorithm::Aes256Gcm, kf + kf, iv, ad, p60, "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662", "76fc6ece0f4e1768cddf8853bb2d551b");
+
+    for row in WYCHEPROOF { wycheproof(row); }
+
+    let bad = try Aead::new(AeadAlgorithm::Aes256Gcm, unhex(z16)) catch _ { println("ok bad key"); return; };
+    println(f"FAIL bad key {bad.algorithm():?}");
+}
+
+// spec: std 221-crypto §2.21.2

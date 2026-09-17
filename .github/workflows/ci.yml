@@ -1,55 +1,114 @@
 name: ci
 
+# Linux on every push and pull request; macOS and Windows on pushes to
+# main and on a manual run, which can also pick the hosts and jobs.
 on:
   push:
+    paths-ignore: ["**/*.md"]
   pull_request:
+    paths-ignore: ["**/*.md"]
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "Hosts: all, or some of linux-x64 linux-arm64 macos-arm64 macos-x64 windows-x64"
+        default: all
+      jobs:
+        description: "Jobs after the prefixes: all, or some of gate cross wasm (none: prefixes only)"
+        default: all
+
+# A newer run of the same branch and event cancels the older one.
+concurrency:
+  group: ci-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  LLVM_VERSION: "21"
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  test:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      hosts: ${{ steps.plan.outputs.hosts }}
+      jobs: ${{ steps.plan.outputs.jobs }}
+    steps:
+      - id: plan
+        env:
+          HOSTS: ${{ github.event_name == 'workflow_dispatch' && inputs.hosts || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'all' || 'linux-x64 linux-arm64') }}
+          JOBS: ${{ github.event_name == 'workflow_dispatch' && inputs.jobs || 'all' }}
+        run: |
+          all='[
+            {"name": "linux-x64", "os": "ubuntu-24.04"},
+            {"name": "linux-arm64", "os": "ubuntu-24.04-arm"},
+            {"name": "macos-arm64", "os": "macos-26"},
+            {"name": "macos-x64", "os": "macos-26-intel"},
+            {"name": "windows-x64", "os": "windows-2022"}
+          ]'
+          [ "$HOSTS" = all ] && HOSTS=$(echo "$all" | jq -r '.[].name')
+          [ "$JOBS" = all ] && JOBS="gate cross wasm"
+          hosts=$(echo "$all" | jq -c --arg h "$HOSTS" '[.[] | select(.name | IN($h | splits("[\\s,]+")))]')
+          echo "hosts=$hosts" | tee -a "$GITHUB_OUTPUT"
+          echo "jobs=$JOBS" | tee -a "$GITHUB_OUTPUT"
+
+  # The pinned LLVM prefix per host (llvm/build.sh, ~1-1.5 h), built
+  # once per content of the build script and PGO profile and cached;
+  # a cache hit only looks the entry up.
+  llvm:
+    needs: plan
+    if: needs.plan.outputs.hosts != '[]'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    name: llvm (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+        with:
+          build: "true"
 
-      # Toolchain comes from rust-toolchain.toml (rustup installs it on first use).
-
-      - name: Install LLVM/MLIR (Linux)
+  # The local gate (README "Checks"), every step even after a failure.
+  gate:
+    needs: [plan, llvm]
+    if: ${{ !cancelled() && contains(needs.plan.outputs.jobs, 'gate') && needs.plan.outputs.hosts != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    name: gate (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+      - name: toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -vV
+      # A Linux build, native too, links the toolchain's C library.
+      - name: host C library (Linux)
         if: runner.os == 'Linux'
         run: |
-          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- "$LLVM_VERSION"
-          sudo apt-get install -y "mlir-$LLVM_VERSION-tools"
-          echo "/usr/lib/llvm-$LLVM_VERSION/bin" >> "$GITHUB_PATH"
-
-      - name: Install LLVM/MLIR (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install "llvm@$LLVM_VERSION"
-          echo "$(brew --prefix "llvm@$LLVM_VERSION")/bin" >> "$GITHUB_PATH"
-
-      - run: mlir-opt --version && mlir-translate --version && clang --version
-
+          targets/build.sh "$(rustc -vV | sed -n 's/^host: //p')"
       - name: fmt
         run: cargo fmt --all --check
-
       - name: clippy
-        if: ${{ !cancelled() }}  # run even when fmt is red
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
+        if: ${{ !cancelled() }}
+        run: cargo clippy --all-targets -- -D warnings
       - name: test
-        if: ${{ !cancelled() }}  # run even when fmt is red
-        run: cargo test --workspace
-        env:
-          ROK_REQUIRE_LLVM: "1"
-
-      - name: compiler/runtime isolation (targets.md)
-        if: ${{ !cancelled() }}  # run even when fmt is red
+        if: ${{ !cancelled() }}
+        run: ROK_REQUIRE_LLVM=1 cargo test --no-fail-fast
+      - name: test -O2
+        if: ${{ !cancelled() }}
+        run: ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration --test differential
+      - name: fmt library
+        if: ${{ !cancelled() }}
+        run: ./target/debug/rokc fmt --check library
+      - name: compiler / runtime isolation (targets.md)
+        if: ${{ !cancelled() }}
         run: |
           if cargo tree -p rokc -e normal | grep -E '\brokr(_[a-z]+)?\b'; then
             echo "rokc depends on runtime crates"; exit 1
@@ -57,3 +116,63 @@ jobs:
           if cargo tree -p rokr -e normal | grep -E '\brokc(_[a-z]+)?\b'; then
             echo "rokr depends on compiler crates"; exit 1
           fi
+
+  # The non-wasm cross targets from Linux x86_64: the sysroot link check,
+  # then the corpora of the 32-bit Linux targets, i686 natively (the
+  # i386 loader and libc) and armv7 under qemu-user.
+  cross:
+    needs: [plan, llvm]
+    if: ${{ !cancelled() && contains(needs.plan.outputs.jobs, 'cross') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      QEMU_LD_PREFIX: /usr/arm-linux-gnueabihf
+      ROK_REQUIRE_LLVM: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+      - name: i386 and armhf runtimes, qemu-user
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libc6-i386 libc6-armhf-cross qemu-user-binfmt
+      - name: toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -vV
+      - name: targets/build.sh
+        run: |
+          targets/build.sh x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl i686-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-pc-windows-msvc
+      - name: cross link check
+        run: cargo test --test cli -- cross_targets_link_from_the_sysroot
+      - name: i686-unknown-linux-gnu -O0
+        if: ${{ !cancelled() }}
+        run: ROK_TEST_TARGET=i686-unknown-linux-gnu cargo test --test integration --test differential
+      - name: i686-unknown-linux-gnu -O2
+        if: ${{ !cancelled() }}
+        run: ROK_TEST_TARGET=i686-unknown-linux-gnu ROK_TEST_OPT=-O2 cargo test --test integration --test differential
+      - name: armv7-unknown-linux-gnueabihf -O0 (qemu)
+        if: ${{ !cancelled() }}
+        run: ROK_TEST_TARGET=armv7-unknown-linux-gnueabihf cargo test --test integration --test differential
+      - name: armv7-unknown-linux-gnueabihf -O2 (qemu)
+        if: ${{ !cancelled() }}
+        run: ROK_TEST_TARGET=armv7-unknown-linux-gnueabihf ROK_TEST_OPT=-O2 cargo test --test integration --test differential
+
+  # The wasm32 corpora (targets/test-wasm.sh), a job per target:
+  # wasmtime and node (the image's, 18+); the image's clang has the
+  # WebAssembly target, so wasm32-wasi's profile runtime and PGO test are
+  # built too.
+  wasm:
+    needs: [plan, llvm]
+    if: ${{ !cancelled() && contains(needs.plan.outputs.jobs, 'wasm') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [wasm32-wasi, wasm32-wasi-threads, wasm32-unknown-unknown]
+    name: wasm (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+      - name: toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -vV && node --version && clang --print-targets | grep wasm32
+      - run: targets/test-wasm.sh ${{ matrix.target }}

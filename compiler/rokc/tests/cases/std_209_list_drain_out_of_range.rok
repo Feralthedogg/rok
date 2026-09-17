@@ -1,0 +1,13 @@
+// spec: std 209-collections §2.9.2
+// A drain range past the length panics at the call.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/std_209_list_drain_out_of_range.rok:11:13:
+// expect-stderr: List::drain: range out of bounds
+// expect-stdout: 3
+
+fn main() -> i32 {
+    let xs: List<i32> = [1, 2, 3];
+    println(f"{xs.len()}");
+    let d = xs.drain(2..4);
+    d.len() as i32
+}

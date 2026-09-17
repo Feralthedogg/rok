@@ -74,10 +74,15 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         // the program.
         && o.profile == crate::Profile::Off
         && o.opt_level != "3";
-    // A `--cfg` or cross build is rare enough that a library build of
-    // its own costs more than it saves.
-    if !plain || key.bootstrap.is_empty() || !key.cfg.is_empty() || key.target != TargetSpec::host()
-    {
+    // The library has no features. Another `--cfg` or a cross build is
+    // rare enough that a library build of its own costs more than it
+    // saves.
+    let cfg: Vec<&String> = key
+        .cfg
+        .iter()
+        .filter(|c| crate::feature_of(c).is_none())
+        .collect();
+    if !plain || key.bootstrap.is_empty() || !cfg.is_empty() || key.target != TargetSpec::host() {
         return None;
     }
     let root = rokc_driver::cache_dir()?;
@@ -104,7 +109,7 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         } else {
             b"llvm".as_slice()
         },
-        format!("{} {:?} {:?}", key.test, key.cfg, key.bootstrap).as_bytes(),
+        format!("{} {cfg:?} {:?}", key.test, key.bootstrap).as_bytes(),
     ]);
     let mut sources: Vec<Vec<u8>> = Vec::new();
     for b in key.bootstrap {

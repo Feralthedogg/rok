@@ -1,3 +1,4 @@
+// only-pointer-width: 64
 // expect-exit: 0
 // expect-stdout:
 // 30

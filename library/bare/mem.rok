@@ -156,7 +156,7 @@ impl<T> MaybeUninit<T> {
 
     pub fn new(value: T) -> MaybeUninit<T> { MaybeUninit { value: value } }
 
-    pub fn write(ref self, value: T) { self.value = value; }
+    pub const fn write(ref self, value: T) { self.value = value; }
 
     /// A pointer to this variable's `T` (the receiver must be a place).
     #[intrinsic("rok.addr_of")]
@@ -166,5 +166,5 @@ impl<T> MaybeUninit<T> {
 
     /// The value; UB unless it was initialized (`write`, `new`, or
     /// through `as_mut_ptr`).
-    pub unsafe fn assume_init(self) -> T { self.value }
+    pub const unsafe fn assume_init(self) -> T { self.value }
 }

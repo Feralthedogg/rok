@@ -1,0 +1,3 @@
+pub fn note() -> str {
+    include_str!("note.txt")
+}

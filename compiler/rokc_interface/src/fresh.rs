@@ -7,9 +7,9 @@
 //! The key covers the compiler, the report style, the build words
 //! (options, paths), every source file the build can read and the
 //! prebuilt archives it links. Files the build read beyond those (a
-//! `#[path]` module outside the package) are listed in the record with
-//! their content hashes. One key per package: any change rebuilds the
-//! package whole.
+//! `#[path]` module outside the package, an `include_str!` /
+//! `include_bytes!` file) are listed in the record with their content
+//! hashes. One key per package: any change rebuilds the package whole.
 
 use std::path::{Path, PathBuf};
 
@@ -144,7 +144,10 @@ impl Fingerprint {
         let mut extra: Vec<PathBuf> = read
             .iter()
             .filter_map(|p| p.canonicalize().ok())
-            .filter(|p| !self.covered.iter().any(|c| p.starts_with(c)))
+            .filter(|p| {
+                !self.covered.iter().any(|c| p.starts_with(c))
+                    || !p.extension().is_some_and(|x| x == "rok" || x == "rokon")
+            })
             .collect();
         extra.sort();
         extra.dedup();

@@ -2,17 +2,16 @@
 //!
 //! The slots of 803 §8.3.1 are one exported `thread_local` block,
 //! `rok_tls`, at the offsets of `tls_abi`: compiled code takes the
-//! block's address once per function. Each 803 slot is also exported
-//! under its own name (`rok_tls_yield_flag`, ...) at its place in the
-//! block. Defined in per-target assembly below because stable `no_std`
+//! block's address once per function and addresses a slot as the block
+//! plus its offset. Defined in per-target assembly below because stable `no_std`
 //! Rust cannot define exported TLS symbols (`#[thread_local]` is
 //! unstable). The runtime reaches its own thread's block through a
 //! hidden accessor, `rokr_tls_addr`; another thread's slot through the
 //! address its owner published in the thread registry
 //! (`rokr_gc::world`).
 //!
-//! Targets: Mach-O `arm64` / `x86_64` (`__thread_vars`: a descriptor per
-//! symbol, a slot's pointing into the block's template), ELF `x86_64`
+//! Targets: Mach-O `arm64` / `x86_64` (`__thread_vars`: the block's
+//! descriptor), ELF `x86_64`
 //! (initial-exec) / `aarch64` / `x86` (`%gs`) / `arm` (`TPIDRURO`, what
 //! `__aeabi_read_tp` reads on Linux) (local-exec: the runtime is always
 //! linked into the executable), COFF `x86_64` / `aarch64` / `x86`
@@ -22,8 +21,7 @@
 //! startup object defines the block and its accessor in wasm TLS
 //! (`__tls_base`).
 //!
-//! Sizes are spliced into the assembly as text: `{p}` / `{p2}` are one
-//! and two pointer widths (803 §8.3.5), `{size}` the block's.
+//! The block's size is spliced into the assembly as `{size}`.
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -35,13 +33,12 @@ pub const MUTATOR_PARKED: u8 = 2;
 
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(0);
 
-/// The block `rok_tls` with a symbol per 803 slot `name size offset`, in
-/// offset order, and its accessor `rokr_tls_addr`.
+/// The block `rok_tls` and its accessor `rokr_tls_addr`.
 macro_rules! tls_block {
-    ($($name:ident $size:literal $off:literal;)*) => {
+    () => {
         #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@macho $($name $off;)*),
+            tls_block!(@macho),
             ".private_extern _rokr_tls_addr\n",
             ".globl _rokr_tls_addr\n",
             ".p2align 2\n",
@@ -51,19 +48,19 @@ macro_rules! tls_block {
             "ldr x16, [x0]\n",
             // Tail-call the TLV thunk: it returns the address in x0.
             "br x16\n",
-        ), p = const PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(target_vendor = "apple", target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@macho $($name $off;)*),
+            tls_block!(@macho),
             ".private_extern _rokr_tls_addr\n",
             ".globl _rokr_tls_addr\n",
             "_rokr_tls_addr:\n",
             "mov rdi, qword ptr [rip + _rok_tls@TLVP]\n",
             "jmp qword ptr [rdi]\n",
-        ), p = const PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@elf "@"; $($name $size;)*),
+            tls_block!(@elf "@"),
             ".globl rokr_tls_addr\n",
             ".hidden rokr_tls_addr\n",
             ".type rokr_tls_addr,@function\n",
@@ -71,10 +68,10 @@ macro_rules! tls_block {
             "mov rax, qword ptr fs:[0]\n",
             "add rax, qword ptr [rip + rok_tls@GOTTPOFF]\n",
             "ret\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@elf "@"; $($name $size;)*),
+            tls_block!(@elf "@"),
             ".globl rokr_tls_addr\n",
             ".hidden rokr_tls_addr\n",
             ".type rokr_tls_addr,%function\n",
@@ -83,10 +80,10 @@ macro_rules! tls_block {
             "add x0, x0, :tprel_hi12:rok_tls\n",
             "add x0, x0, :tprel_lo12_nc:rok_tls\n",
             "ret\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(target_os = "linux", target_arch = "x86"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@elf "@"; $($name $size;)*),
+            tls_block!(@elf "@"),
             ".globl rokr_tls_addr\n",
             ".hidden rokr_tls_addr\n",
             ".type rokr_tls_addr,@function\n",
@@ -94,10 +91,10 @@ macro_rules! tls_block {
             "mov eax, dword ptr gs:[0]\n",
             "lea eax, [eax + rok_tls@NTPOFF]\n",
             "ret\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(target_os = "linux", target_arch = "arm"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@elf "%"; $($name $size;)*),
+            tls_block!(@elf "%"),
             ".globl rokr_tls_addr\n",
             ".hidden rokr_tls_addr\n",
             ".type rokr_tls_addr,%function\n",
@@ -108,10 +105,10 @@ macro_rules! tls_block {
             "add r0, r0, r1\n",
             "bx lr\n",
             "1: .long rok_tls(TPOFF)\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(windows, target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@coff ""; $($name $size;)*),
+            tls_block!(@coff ""),
             ".globl rokr_tls_addr\n",
             ".p2align 4\n",
             "rokr_tls_addr:\n",
@@ -120,10 +117,10 @@ macro_rules! tls_block {
             "mov rcx, qword ptr [rcx + 8*rax]\n",
             "lea rax, [rcx + rok_tls@SECREL32]\n",
             "ret\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
         #[cfg(all(windows, target_arch = "aarch64"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@coff ""; $($name $size;)*),
+            tls_block!(@coff ""),
             ".globl rokr_tls_addr\n",
             ".p2align 2\n",
             "rokr_tls_addr:\n",
@@ -134,11 +131,11 @@ macro_rules! tls_block {
             "add x9, x9, :secrel_hi12:rok_tls\n",
             "add x0, x9, :secrel_lo12:rok_tls\n",
             "ret\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
         // C names carry a leading underscore on x86 COFF.
         #[cfg(all(windows, target_arch = "x86"))]
         core::arch::global_asm!(concat!(
-            tls_block!(@coff "_"; $($name $size;)*),
+            tls_block!(@coff "_"),
             ".globl _rokr_tls_addr\n",
             ".p2align 4\n",
             "_rokr_tls_addr:\n",
@@ -147,28 +144,21 @@ macro_rules! tls_block {
             "mov ecx, dword ptr [ecx + 4*eax]\n",
             "lea eax, [ecx + _rok_tls@SECREL32]\n",
             "ret\n",
-        ), p = const PTR, p2 = const 2 * PTR, size = const SIZE);
+        ), size = const SIZE);
     };
-    // The template, then a TLV descriptor for the block and each slot.
-    (@macho $($name:ident $off:literal;)*) => {
+    // The template and the block's TLV descriptor.
+    (@macho) => {
         concat!(
             ".tbss _rok_tls$tlv$init, {size}, 3\n",
             ".section __DATA,__thread_vars,thread_local_variables\n",
             ".globl _rok_tls\n",
             "_rok_tls:\n",
             ".quad __tlv_bootstrap\n.quad 0\n.quad _rok_tls$tlv$init\n",
-            $(
-                ".globl _rok_tls_", stringify!($name), "\n",
-                "_rok_tls_", stringify!($name), ":\n",
-                ".quad __tlv_bootstrap\n.quad 0\n",
-                ".quad _rok_tls$tlv$init + ", $off, "\n",
-            )*
             ".text\n",
         )
     };
-    // The slots' labels in `.tbss` (`$t`: the `@` / `%` of `.type`), then
-    // the implementation-defined rest of the block.
-    (@elf $t:literal; $($name:ident $size:literal;)*) => {
+    // `$t`: the `@` / `%` of `.type`.
+    (@elf $t:literal) => {
         concat!(
             ".pushsection .tbss,\"awT\",", $t, "nobits\n",
             ".p2align 3\n",
@@ -176,84 +166,30 @@ macro_rules! tls_block {
             ".type rok_tls,", $t, "object\n",
             ".size rok_tls,{size}\n",
             "rok_tls:\n",
-            $(
-                ".globl rok_tls_", stringify!($name), "\n",
-                ".type rok_tls_", stringify!($name), ",", $t, "object\n",
-                ".size rok_tls_", stringify!($name), ",", $size, "\n",
-                "rok_tls_", stringify!($name), ":\n",
-                ".zero ", $size, "\n",
-            )*
-            ".zero {size}-10*{p}-10\n",
+            ".zero {size}\n",
             ".popsection\n",
         )
     };
-    (@coff $u:literal; $($name:ident $size:literal;)*) => {
+    (@coff $u:literal) => {
         concat!(
             ".section .tls$,\"dw\"\n",
             ".p2align 3\n",
             ".globl ", $u, "rok_tls\n",
             $u, "rok_tls:\n",
-            $(
-                ".globl ", $u, "rok_tls_", stringify!($name), "\n",
-                $u, "rok_tls_", stringify!($name), ":\n",
-                ".zero ", $size, "\n",
-            )*
-            ".zero {size}-10*{p}-10\n",
+            ".zero {size}\n",
             ".text\n",
         )
     };
 }
 
-// 803 §8.3.1 at the `tls_abi` offsets (checked below); pointer slots are
-// pointer-width (§8.3.5). `wasm32-wasi-threads` gets the block from rokc
-// (`wasm_tls_object`, rokc_driver toolchain.rs).
+// `wasm32-wasi-threads` gets the block from rokc (`wasm_tls_object`,
+// rokc_driver toolchain.rs).
 #[cfg(not(target_family = "wasm"))]
-tls_block! {
-    shadow_stack_top "{p}" "0";
-    tlab_cursor "{p}" "{p}";
-    tlab_limit "{p}" "2*{p}";
-    wb_log_cursor "{p}" "3*{p}";
-    wb_log_limit "{p}" "4*{p}";
-    satb_cursor "{p}" "5*{p}";
-    satb_limit "{p}" "6*{p}";
-    task_worker "{p}" "7*{p}";
-    stack_guard "{p2}" "8*{p}";
-    worker_id "8" "10*{p}";
-    yield_flag "1" "10*{p}+8";
-    mutator_state "1" "10*{p}+9";
-}
+tls_block!();
 
-// The assembly's `{p}` / `{size}` (wasm32 has no assembly).
+// The assembly's `{size}` (wasm32 has no assembly).
 #[cfg(not(target_family = "wasm"))]
-const PTR: usize = size_of::<usize>();
-#[cfg(not(target_family = "wasm"))]
-const SIZE: usize = tls_abi::SIZE.offset(PTR as u32) as usize;
-// The table above is `tls_abi`'s layout.
-#[cfg(not(target_family = "wasm"))]
-const _: () = {
-    let p = PTR as u32;
-    let mut at = 0;
-    let order = [
-        tls_abi::SHADOW_STACK_TOP,
-        tls_abi::TLAB_CURSOR,
-        tls_abi::TLAB_LIMIT,
-        tls_abi::WB_LOG_CURSOR,
-        tls_abi::WB_LOG_LIMIT,
-        tls_abi::SATB_CURSOR,
-        tls_abi::SATB_LIMIT,
-        tls_abi::TASK_WORKER,
-    ];
-    let mut i = 0;
-    while i < order.len() {
-        assert!(order[i].offset(p) == at);
-        at += p;
-        i += 1;
-    }
-    assert!(tls_abi::STACK_GUARD.offset(p) == at);
-    assert!(tls_abi::WORKER_ID.offset(p) == at + 2 * p);
-    assert!(tls_abi::YIELD_FLAG.offset(p) == at + 2 * p + 8);
-    assert!(tls_abi::MUTATOR_STATE.offset(p) == at + 2 * p + 9);
-};
+const SIZE: usize = tls_abi::SIZE.offset(size_of::<usize>() as u32) as usize;
 
 #[cfg(not(any(
     target_vendor = "apple",

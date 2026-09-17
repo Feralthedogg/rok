@@ -1,0 +1,41 @@
+// spec: 001.07.5-byte-strings
+// expect-exit: 0
+// expect-stdout:
+// 9 104 0 255
+// 127 69 4
+// 195 3 3
+// 0 true
+// [65, 10]
+
+// `b"..."` is a `[u8; N]` of its bytes: ASCII written directly, any
+// byte by `\xHH`, the string escapes. Where a `Slice<u8>` is expected
+// (alone, or in a sum without an array) it is a view of that array.
+const MAGIC: [u8; 4] = b"\x7FELF";
+static GREETING: [u8; 3] = b"hey";
+
+fn total(s: Slice<u8>) -> usize {
+    let n: usize = 0;
+    for b in s {
+        n += b as usize;
+    }
+    n
+}
+
+fn either(x: Slice<u8> | List<u8>) -> usize {
+    match x {
+        s: Slice<u8> => s.len(),
+        l: List<u8> => l.len(),
+    }
+}
+
+fn main() -> i32 {
+    let a = b"hi\n\t\\\"\0'\xFF";
+    println(f"{a.len()} {a[0]} {a[6]} {a[8]}");
+    println(f"{MAGIC[0]} {MAGIC[1]} {MAGIC.len()}");
+    println(f"{total(b"ab")} {either(b"xyz")} {GREETING.len()}");
+    let e = b"";
+    println(f"{e.len()} {b"ab" == [97u8, 98]}");
+    let v: Slice<u8> = b"A\n";
+    println(f"{v:?}");
+    0
+}

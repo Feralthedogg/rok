@@ -1,0 +1,32 @@
+// expect-exit: 0
+// expect-stdout:
+// len 32 0
+// distinct true
+// spread true
+// fill true
+
+// rok::std::crypto::random: the OS random source fills lists of any
+// length (getentropy's 256-byte limit is chunked).
+use rok::std::crypto::random;
+
+fn main() {
+    let a = random::bytes(32);
+    println(f"len {a.len()} {random::bytes(0).len()}");
+    println(f"distinct {a != random::bytes(32)}");
+    let big = random::bytes(100000);
+    let zeros = 0;
+    for x in big {
+        if x == 0u8 { zeros += 1; }
+    }
+    // Expected 390 zero bytes; 6 standard deviations either side.
+    println(f"spread {zeros > 270 && zeros < 510}");
+    let buf: List<u8> = [0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8];
+    random::fill(buf);
+    let nonzero = false;
+    for x in buf {
+        if x != 0u8 { nonzero = true; }
+    }
+    println(f"fill {nonzero}");
+}
+
+// spec: std 310-crypto §3.10.1

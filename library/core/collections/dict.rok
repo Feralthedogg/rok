@@ -20,14 +20,14 @@ pub struct DictHead<K, V> {
 /// Home slot of hash `h` in a table of `mask + 1` slots: the hash
 /// mixed first, so a weak one (an integer's own value) still spreads
 /// over the low bits.
-fn home(h: u64, mask: usize) -> usize {
+const fn home(h: u64, mask: usize) -> usize {
     let x = h.wrapping_mul(0x9E37_79B9_7F4A_7C15u64);
     ((x ^ (x >> 32u64)) as usize) & mask
 }
 
 /// An empty table of `cap` slots.
 #[track_caller]
-fn new_table<K, V>(cap: usize) -> DictHead<K, V> {
+const fn new_table<K, V>(cap: usize) -> DictHead<K, V> {
     unsafe {
         let n = cap_add(cap, 1);
         DictHead {
@@ -50,7 +50,7 @@ impl<K, V> !Sync for Dict<K, V> {}
 
 /// `pairs.collect::<Dict<K, V>>()`; a later pair's value wins.
 impl<K: Hash, V> FromIterator<(K, V)> for Dict<K, V> {
-    fn from_iter<I>(it: I) -> Dict<K, V> {
+    const fn from_iter<I>(it: I) -> Dict<K, V> {
         let out: Dict<K, V> = Dict::new();
         for (k, v) in it {
             out.insert(k, v);
@@ -60,12 +60,12 @@ impl<K: Hash, V> FromIterator<(K, V)> for Dict<K, V> {
 }
 
 impl<K: Hash, V> Dict<K, V> {
-    pub fn new() -> Dict<K, V> {
+    pub const fn new() -> Dict<K, V> {
         Dict::with_capacity(4)
     }
 
     #[track_caller]
-    pub fn with_capacity(cap: usize) -> Dict<K, V> {
+    pub const fn with_capacity(cap: usize) -> Dict<K, V> {
         unsafe {
             let c = 8usize;
             let want = cap_mul(cap, 2);
@@ -78,18 +78,18 @@ impl<K: Hash, V> Dict<K, V> {
         }
     }
 
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         unsafe {
             self.h[0].len
         }
     }
 
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.len() == 0
     }
 
     /// The slot holding `k`, or the capacity when absent.
-    fn find(self, k: K) -> usize {
+    const fn find(self, k: K) -> usize {
         unsafe {
             let s = self.h[0];
             let cap = self.h[0].cap;
@@ -111,7 +111,7 @@ impl<K: Hash, V> Dict<K, V> {
 
     /// Store into the first non-full slot of `k`'s probe run (`k` is
     /// known to be absent and the table to have room).
-    fn place(self, k: K, v: V) {
+    const fn place(self, k: K, v: V) {
         unsafe {
             let s = self.h[0];
             let mask = self.h[0].cap - 1;
@@ -130,7 +130,7 @@ impl<K: Hash, V> Dict<K, V> {
     }
 
     /// Rebuild into a table of `cap` slots (drops tombstones).
-    fn rehash(self, cap: usize) {
+    const fn rehash(self, cap: usize) {
         unsafe {
             let old = self.h[0];
             let old_cap = self.h[0].cap;
@@ -144,7 +144,7 @@ impl<K: Hash, V> Dict<K, V> {
     }
 
     /// Insert or replace; the old value, or `none`.
-    pub fn insert(self, k: K, v: V) -> V | none {
+    pub const fn insert(self, k: K, v: V) -> V | none {
         unsafe {
             let cap = self.h[0].cap;
             let at = self.find(k);
@@ -167,7 +167,7 @@ impl<K: Hash, V> Dict<K, V> {
         }
     }
 
-    pub fn get(self, k: K) -> V | none {
+    pub const fn get(self, k: K) -> V | none {
         unsafe {
             let at = self.find(k);
             if at == self.h[0].cap {
@@ -178,13 +178,13 @@ impl<K: Hash, V> Dict<K, V> {
         }
     }
 
-    pub fn contains_key(self, k: K) -> bool {
+    pub const fn contains_key(self, k: K) -> bool {
         unsafe {
             self.find(k) < self.h[0].cap
         }
     }
 
-    pub fn remove(self, k: K) -> V | none {
+    pub const fn remove(self, k: K) -> V | none {
         unsafe {
             let cap = self.h[0].cap;
             let at = self.find(k);
@@ -202,7 +202,7 @@ impl<K: Hash, V> Dict<K, V> {
     }
 
     /// The first full slot at or after `from`, or the capacity.
-    fn next_full(self, from: usize) -> usize {
+    const fn next_full(self, from: usize) -> usize {
         unsafe {
             let s = self.h[0];
             let cap = self.h[0].cap;
@@ -215,22 +215,22 @@ impl<K: Hash, V> Dict<K, V> {
     }
 
     /// The keys, lazily (2.9.3; order unspecified).
-    pub fn keys(self) -> KeysIter<K, V> {
+    pub const fn keys(self) -> KeysIter<K, V> {
         KeysIter { d: self, at: 0 }
     }
 
     /// The values, lazily.
-    pub fn values(self) -> ValuesIter<K, V> {
+    pub const fn values(self) -> ValuesIter<K, V> {
         ValuesIter { d: self, at: 0 }
     }
 
     /// `(key, value)` pairs, lazily.
-    pub fn entries(self) -> EntriesIter<K, V> {
+    pub const fn entries(self) -> EntriesIter<K, V> {
         EntriesIter { d: self, at: 0 }
     }
 
     /// `k`'s place in the dict, present or not (2.9.3).
-    pub fn entry(self, k: K) -> Entry<K, V> {
+    pub const fn entry(self, k: K) -> Entry<K, V> {
         Entry { d: self, key: k }
     }
 }
@@ -248,7 +248,7 @@ impl<K: Hash, V> Entry<K, V> {
     }
 
     /// The value, after inserting `v` if the key is absent.
-    pub fn or_insert(self, v: V) -> V {
+    pub const fn or_insert(self, v: V) -> V {
         if !self.d.contains_key(self.key) {
             self.d.insert(self.key, v);
         }
@@ -256,7 +256,7 @@ impl<K: Hash, V> Entry<K, V> {
     }
 
     /// The value, after inserting `f()` if the key is absent.
-    pub fn or_insert_with(self, f: fn() -> V) -> V {
+    pub const fn or_insert_with(self, f: fn() -> V) -> V {
         if !self.d.contains_key(self.key) {
             self.d.insert(self.key, f());
         }
@@ -264,7 +264,7 @@ impl<K: Hash, V> Entry<K, V> {
     }
 
     /// A present value replaced by `f(value)`; an absent key is left alone.
-    pub fn and_modify(self, f: fn(V) -> V) -> Entry<K, V> {
+    pub const fn and_modify(self, f: fn(V) -> V) -> Entry<K, V> {
         if self.d.contains_key(self.key) {
             self.d.insert(self.key, f(self.d[self.key]));
         }
@@ -274,7 +274,7 @@ impl<K: Hash, V> Entry<K, V> {
 
 impl<K: Hash, V: Default> Entry<K, V> {
     /// The value, after inserting `V::default()` if the key is absent.
-    pub fn or_default(self) -> V {
+    pub const fn or_default(self) -> V {
         if !self.d.contains_key(self.key) {
             self.d.insert(self.key, V::default());
         }
@@ -292,7 +292,7 @@ pub struct KeysIter<K, V> {
 
 impl<K: Hash, V> Iterator for KeysIter<K, V> {
     type Item = K;
-    fn next(ref self) -> K | none {
+    const fn next(ref self) -> K | none {
         unsafe {
             let i = self.d.next_full(self.at);
             if i >= self.d.h[0].cap {
@@ -312,7 +312,7 @@ pub struct ValuesIter<K, V> {
 
 impl<K: Hash, V> Iterator for ValuesIter<K, V> {
     type Item = V;
-    fn next(ref self) -> V | none {
+    const fn next(ref self) -> V | none {
         unsafe {
             let i = self.d.next_full(self.at);
             if i >= self.d.h[0].cap {
@@ -332,7 +332,7 @@ pub struct EntriesIter<K, V> {
 
 impl<K: Hash, V> Iterator for EntriesIter<K, V> {
     type Item = (K, V);
-    fn next(ref self) -> (K, V) | none {
+    const fn next(ref self) -> (K, V) | none {
         unsafe {
             let i = self.d.next_full(self.at);
             if i >= self.d.h[0].cap {
@@ -351,7 +351,7 @@ impl<K: Hash, V> Default for Dict<K, V> {
 
 /// A new dict with every key and value cloned (stdlib 2.13.2).
 impl<K: Hash + Clone, V: Clone> Clone for Dict<K, V> {
-    fn clone(self) -> Dict<K, V> {
+    const fn clone(self) -> Dict<K, V> {
         let r: Dict<K, V> = Dict::new();
         for (k, v) in self {
             r.insert(k.clone(), v.clone());
@@ -362,7 +362,7 @@ impl<K: Hash + Clone, V: Clone> Clone for Dict<K, V> {
 
 /// `d += e`: merge `e` in place; its values win (stdlib 2.4.6).
 impl<K: Hash, V> AddAssign<Dict<K, V>> for Dict<K, V> {
-    fn add_assign(ref self, rhs: Dict<K, V>) {
+    const fn add_assign(ref self, rhs: Dict<K, V>) {
         for (k, v) in rhs {
             self.insert(k, v);
         }
@@ -373,7 +373,7 @@ impl<K: Hash, V> AddAssign<Dict<K, V>> for Dict<K, V> {
 impl<K: Hash, V> IntoIterator for Dict<K, V> {
     type IntoIter = EntriesIter<K, V>;
     type Item = (K, V);
-    fn into_iter(self) -> EntriesIter<K, V> {
+    const fn into_iter(self) -> EntriesIter<K, V> {
         self.entries()
     }
 }
@@ -382,7 +382,7 @@ impl<K: Hash, V> IntoIterator for Dict<K, V> {
 impl<K: Hash, V> Index<K> for Dict<K, V> {
     type Output = V;
     #[track_caller]
-    fn index(self, k: K) -> V {
+    const fn index(self, k: K) -> V {
         unsafe {
             let at = self.find(k);
             if at == self.h[0].cap {
@@ -397,14 +397,14 @@ impl<K: Hash, V> Index<K> for Dict<K, V> {
 /// `d[k] = v` inserts or replaces.
 impl<K: Hash, V> IndexSet<K> for Dict<K, V> {
     type Value = V;
-    fn index_set(self, k: K, v: V) {
+    const fn index_set(self, k: K, v: V) {
         self.insert(k, v);
     }
 }
 
 /// Same keys, equal values (insertion order does not matter).
 impl<K: Hash, V: PartialEq> PartialEq for Dict<K, V> {
-    fn eq(self, rhs: Dict<K, V>) -> bool {
+    const fn eq(self, rhs: Dict<K, V>) -> bool {
         if self.len() != rhs.len() { return false; }
         for (k, v) in self {
             if !rhs.contains_key(k) { return false; }
@@ -419,7 +419,7 @@ impl<K: Hash, V: Eq> Eq for Dict<K, V> {}
 
 /// Order-independent: entries combine by xor.
 impl<K: Hash, V: Hash> Hash for Dict<K, V> {
-    fn hash(self) -> u64 {
+    const fn hash(self) -> u64 {
         let h = self.len() as u64;
         for (k, v) in self {
             let vh = v.hash();
@@ -447,7 +447,7 @@ impl<K: Hash + Debug, V: Debug> Debug for Dict<K, V> {
 
 /// `{k: v, ..}` (refs-lang 6.5.1, 6.5.6).
 #[literal("{" {expr ":" expr} % "," * "}")]
-pub fn dict_literal<K: Hash, V>(pairs: ...(K, V)) -> Dict<K, V> {
+pub const fn dict_literal<K: Hash, V>(pairs: ...(K, V)) -> Dict<K, V> {
     let d: Dict<K, V> = Dict::new();
     for (k, v) in pairs {
         d.insert(k, v);

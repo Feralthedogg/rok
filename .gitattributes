@@ -1,0 +1,2 @@
+# LF everywhere, Windows checkouts too (rustfmt newline_style = "Unix").
+* text=auto eol=lf

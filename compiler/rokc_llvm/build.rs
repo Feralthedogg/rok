@@ -99,8 +99,24 @@ fn main() {
             n.clone(),
         )
     });
-    for n in &names {
-        println!("cargo:rustc-link-lib=static:-bundle={n}");
+    if apple || msvc {
+        for n in &names {
+            println!("cargo:rustc-link-lib=static:-bundle={n}");
+        }
+    } else {
+        // GNU ld reads each archive once, in order, and these reference
+        // each other in cycles: a linker script in place of an archive
+        // groups them.
+        let group: Vec<String> = names
+            .iter()
+            .map(|n| format!("\"{}\"", lib.join(format!("lib{n}.a")).display()))
+            .collect();
+        std::fs::write(
+            out.join("librokc_llvm_libs.a"),
+            format!("GROUP ( {} )\n", group.join(" ")),
+        )
+        .unwrap();
+        println!("cargo:rustc-link-lib=static:-bundle=rokc_llvm_libs");
     }
     let system: &[&str] = if apple {
         // dsymutil writes the dSYM bundle's Info.plist with it.
@@ -226,6 +242,8 @@ fn compile_shim(prefix: &Path, out: &Path, apple: bool, msvc: bool) {
                             "/EHs-c-",
                             "/D_HAS_EXCEPTIONS=0",
                             "/Zc:__cplusplus",
+                            // The option tables' variadic macros.
+                            "/Zc:preprocessor",
                             "/bigobj",
                             "/w",
                             "/c",

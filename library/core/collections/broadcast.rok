@@ -10,7 +10,7 @@
 /// Lengths of two broadcast operands agree (each collection is checked
 /// against the first).
 #[track_caller]
-pub fn check_len(len: usize, want: usize) {
+pub const fn check_len(len: usize, want: usize) {
     if len != want {
         panic(f"broadcast over lengths {want} and {len}");
     }
@@ -18,7 +18,7 @@ pub fn check_len(len: usize, want: usize) {
 
 /// `[f(a[i], b[i])]`; panics when the lengths differ.
 #[track_caller]
-fn zip_with<A, B, C>(a: List<A>, b: List<B>, f: fn(A, B) -> C) -> List<C> {
+const fn zip_with<A, B, C>(a: List<A>, b: List<B>, f: fn(A, B) -> C) -> List<C> {
     let n = a.len();
     check_len(b.len(), n);
     let out: List<C> = List::with_capacity(n);
@@ -29,7 +29,7 @@ fn zip_with<A, B, C>(a: List<A>, b: List<B>, f: fn(A, B) -> C) -> List<C> {
 }
 
 /// `[f(a[i], b)]`.
-fn map_right<A, B, C>(a: List<A>, b: B, f: fn(A, B) -> C) -> List<C> {
+const fn map_right<A, B, C>(a: List<A>, b: B, f: fn(A, B) -> C) -> List<C> {
     let out: List<C> = List::with_capacity(a.len());
     for x in a {
         out.push(f(x, b));
@@ -38,7 +38,7 @@ fn map_right<A, B, C>(a: List<A>, b: B, f: fn(A, B) -> C) -> List<C> {
 }
 
 /// `[f(a, b[i])]`.
-fn map_left<A, B, C>(a: A, b: List<B>, f: fn(A, B) -> C) -> List<C> {
+const fn map_left<A, B, C>(a: A, b: List<B>, f: fn(A, B) -> C) -> List<C> {
     let out: List<C> = List::with_capacity(b.len());
     for x in b {
         out.push(f(a, x));
@@ -54,12 +54,12 @@ impl<T: Add<Output = T>> DotAdd<List<T>> for List<T> {
 
 impl<T: Add<Output = T>> DotAdd<T> for List<T> {
     type Output = List<T>;
-    fn dot_add(self, rhs: T) -> List<T> { map_right(self, rhs, |a: T, b: T| -> T { a + b }) }
+    const fn dot_add(self, rhs: T) -> List<T> { map_right(self, rhs, |a: T, b: T| -> T { a + b }) }
 }
 
 impl<T: Add<Output = T>> DotAdd<List<T>> for T {
     type Output = List<T>;
-    fn dot_add(self, rhs: List<T>) -> List<T> { map_left(self, rhs, |a: T, b: T| -> T { a + b }) }
+    const fn dot_add(self, rhs: List<T>) -> List<T> { map_left(self, rhs, |a: T, b: T| -> T { a + b }) }
 }
 
 impl<T: Sub<Output = T>> DotSub<List<T>> for List<T> {
@@ -322,7 +322,7 @@ impl<T: PartialOrd> DotGe<List<T>> for T {
 impl DotLogicalAnd for List<bool> {
     type Output = List<bool>;
     #[track_caller]
-    fn dot_logical_and(self, rhs: List<bool>) -> List<bool> {
+    const fn dot_logical_and(self, rhs: List<bool>) -> List<bool> {
         zip_with(self, rhs, |a: bool, b: bool| -> bool { a && b })
     }
 }
@@ -331,7 +331,7 @@ impl DotLogicalAnd for List<bool> {
 impl DotLogicalOr for List<bool> {
     type Output = List<bool>;
     #[track_caller]
-    fn dot_logical_or(self, rhs: List<bool>) -> List<bool> {
+    const fn dot_logical_or(self, rhs: List<bool>) -> List<bool> {
         zip_with(self, rhs, |a: bool, b: bool| -> bool { a || b })
     }
 }
@@ -570,7 +570,7 @@ impl<T: PartialOrd> DotGt<Slice<T>> for Slice<T> {
 
 impl<T: PartialOrd> DotGt<T> for Slice<T> {
     type Output = List<bool>;
-    fn dot_gt(self, rhs: T) -> List<bool> { map_right(self.to_list(), rhs, |a: T, b: T| -> bool { a > b }) }
+    const fn dot_gt(self, rhs: T) -> List<bool> { map_right(self.to_list(), rhs, |a: T, b: T| -> bool { a > b }) }
 }
 
 impl<T: PartialOrd> DotGt<Slice<T>> for T {
@@ -614,7 +614,7 @@ impl<T: PartialOrd> DotGe<Slice<T>> for T {
 impl DotLogicalAnd for Slice<bool> {
     type Output = List<bool>;
     #[track_caller]
-    fn dot_logical_and(self, rhs: Slice<bool>) -> List<bool> {
+    const fn dot_logical_and(self, rhs: Slice<bool>) -> List<bool> {
         zip_with(self.to_list(), rhs.to_list(), |a: bool, b: bool| -> bool { a && b })
     }
 }
@@ -623,7 +623,7 @@ impl DotLogicalAnd for Slice<bool> {
 impl DotLogicalOr for Slice<bool> {
     type Output = List<bool>;
     #[track_caller]
-    fn dot_logical_or(self, rhs: Slice<bool>) -> List<bool> {
+    const fn dot_logical_or(self, rhs: Slice<bool>) -> List<bool> {
         zip_with(self.to_list(), rhs.to_list(), |a: bool, b: bool| -> bool { a || b })
     }
 }
@@ -635,7 +635,7 @@ impl DotLogicalOr for Slice<bool> {
 
 /// `out` with `out[i] = f(a[i], b[i])`; `out` only supplies the
 /// storage, so an empty array calls nothing.
-fn array_zip<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: [B; N], f: fn(A, B) -> C) -> [C; N] {
+const fn array_zip<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: [B; N], f: fn(A, B) -> C) -> [C; N] {
     for i in 0..N {
         out[i] = f(a[i], b[i]);
     }
@@ -643,7 +643,7 @@ fn array_zip<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: [B; N], f: fn(A
 }
 
 /// `out` with `out[i] = f(a[i], b)`.
-fn array_right<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: B, f: fn(A, B) -> C) -> [C; N] {
+const fn array_right<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: B, f: fn(A, B) -> C) -> [C; N] {
     for i in 0..N {
         out[i] = f(a[i], b);
     }
@@ -652,7 +652,7 @@ fn array_right<A, B, C, const N: usize>(out: [C; N], a: [A; N], b: B, f: fn(A, B
 
 impl<T: Add<Output = T>, const N: usize> DotAdd<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_add(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a + b }) }
+    const fn dot_add(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a + b }) }
 }
 
 impl<T: Add<Output = T>, const N: usize> DotAdd<T> for [T; N] {
@@ -672,7 +672,7 @@ impl<T: Sub<Output = T>, const N: usize> DotSub<T> for [T; N] {
 
 impl<T: Mul<Output = T>, const N: usize> DotMul<[T; N]> for [T; N] {
     type Output = [T; N];
-    fn dot_mul(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a * b }) }
+    const fn dot_mul(self, rhs: [T; N]) -> [T; N] { array_zip(self, self, rhs, |a: T, b: T| -> T { a * b }) }
 }
 
 impl<T: Mul<Output = T>, const N: usize> DotMul<T> for [T; N] {
@@ -767,7 +767,7 @@ impl<T: PartialEq, const N: usize> DotEq<[T; N]> for [T; N] {
 
 impl<T: PartialEq, const N: usize> DotEq<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_eq(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a == b }) }
+    const fn dot_eq(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a == b }) }
 }
 
 impl<T: PartialEq, const N: usize> DotNe<[T; N]> for [T; N] {
@@ -787,7 +787,7 @@ impl<T: PartialOrd, const N: usize> DotLt<[T; N]> for [T; N] {
 
 impl<T: PartialOrd, const N: usize> DotLt<T> for [T; N] {
     type Output = [bool; N];
-    fn dot_lt(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a < b }) }
+    const fn dot_lt(self, rhs: T) -> [bool; N] { array_right([false; N], self, rhs, |a: T, b: T| -> bool { a < b }) }
 }
 
 impl<T: PartialOrd, const N: usize> DotGt<[T; N]> for [T; N] {
@@ -823,7 +823,7 @@ impl<T: PartialOrd, const N: usize> DotGe<T> for [T; N] {
 /// No short-circuit: both arrays are evaluated (2.6.2).
 impl<const N: usize> DotLogicalAnd for [bool; N] {
     type Output = [bool; N];
-    fn dot_logical_and(self, rhs: [bool; N]) -> [bool; N] {
+    const fn dot_logical_and(self, rhs: [bool; N]) -> [bool; N] {
         array_zip(self, self, rhs, |a: bool, b: bool| -> bool { a && b })
     }
 }
@@ -831,7 +831,7 @@ impl<const N: usize> DotLogicalAnd for [bool; N] {
 /// No short-circuit: both arrays are evaluated (2.6.2).
 impl<const N: usize> DotLogicalOr for [bool; N] {
     type Output = [bool; N];
-    fn dot_logical_or(self, rhs: [bool; N]) -> [bool; N] {
+    const fn dot_logical_or(self, rhs: [bool; N]) -> [bool; N] {
         array_zip(self, self, rhs, |a: bool, b: bool| -> bool { a || b })
     }
 }
@@ -840,7 +840,7 @@ impl<const N: usize> DotLogicalOr for [bool; N] {
 // (no `.+=` token); the lengths must agree.
 impl<T> List<T> {
     #[track_caller]
-    pub fn dot_add_assign(self, rhs: List<T>) where T: Add<Output = T> {
+    pub const fn dot_add_assign(self, rhs: List<T>) where T: Add<Output = T> {
         let n = self.len();
         check_len(rhs.len(), n);
         for i in 0..n {
@@ -856,7 +856,7 @@ impl<T> List<T> {
         }
     }
     #[track_caller]
-    pub fn dot_mul_assign(self, rhs: List<T>) where T: Mul<Output = T> {
+    pub const fn dot_mul_assign(self, rhs: List<T>) where T: Mul<Output = T> {
         let n = self.len();
         check_len(rhs.len(), n);
         for i in 0..n {
@@ -880,7 +880,7 @@ impl<T> List<T> {
         }
     }
     #[track_caller]
-    pub fn dot_modulo_assign(self, rhs: List<T>) where T: Modulo<Output = T> {
+    pub const fn dot_modulo_assign(self, rhs: List<T>) where T: Modulo<Output = T> {
         let n = self.len();
         check_len(rhs.len(), n);
         for i in 0..n {
@@ -912,7 +912,7 @@ impl<T> List<T> {
         }
     }
     #[track_caller]
-    pub fn dot_shl_assign(self, rhs: List<T>) where T: Shl<Output = T> {
+    pub const fn dot_shl_assign(self, rhs: List<T>) where T: Shl<Output = T> {
         let n = self.len();
         check_len(rhs.len(), n);
         for i in 0..n {
@@ -920,7 +920,7 @@ impl<T> List<T> {
         }
     }
     #[track_caller]
-    pub fn dot_shr_assign(self, rhs: List<T>) where T: Shr<Output = T> {
+    pub const fn dot_shr_assign(self, rhs: List<T>) where T: Shr<Output = T> {
         let n = self.len();
         check_len(rhs.len(), n);
         for i in 0..n {

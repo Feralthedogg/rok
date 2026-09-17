@@ -1,0 +1,312 @@
+// AES-128 / AES-256 encryption (FIPS 197), constant time: bitsliced
+// over 32-bit words, two blocks at a time (BearSSL's aes_ct layout). No
+// table lookup; the S-box is the Boyar-Peralta circuit.
+
+/// An expanded AES key: `rounds + 1` round keys of 8 bitsliced words.
+pub(pkg) struct AesKey {
+    sk: [u32; 120];
+    rounds: usize;
+}
+
+/// Bit `i` of every byte gathered into word `i` (and back: an
+/// involution).
+fn ortho(ref q: [u32; 8]) {
+    swap(ref q, 0, 1, 0x55555555u32, 1u32);
+    swap(ref q, 2, 3, 0x55555555u32, 1u32);
+    swap(ref q, 4, 5, 0x55555555u32, 1u32);
+    swap(ref q, 6, 7, 0x55555555u32, 1u32);
+    swap(ref q, 0, 2, 0x33333333u32, 2u32);
+    swap(ref q, 1, 3, 0x33333333u32, 2u32);
+    swap(ref q, 4, 6, 0x33333333u32, 2u32);
+    swap(ref q, 5, 7, 0x33333333u32, 2u32);
+    swap(ref q, 0, 4, 0x0f0f0f0fu32, 4u32);
+    swap(ref q, 1, 5, 0x0f0f0f0fu32, 4u32);
+    swap(ref q, 2, 6, 0x0f0f0f0fu32, 4u32);
+    swap(ref q, 3, 7, 0x0f0f0f0fu32, 4u32);
+}
+
+fn swap(ref q: [u32; 8], i: usize, j: usize, cl: u32, s: u32) {
+    let a = q[i];
+    let b = q[j];
+    let ch = ~cl;
+    q[i] = (a & cl) | ((b & cl) << s);
+    q[j] = ((a & ch) >> s) | (b & ch);
+}
+
+fn sbox(ref q: [u32; 8]) {
+    let x0 = q[7];
+    let x1 = q[6];
+    let x2 = q[5];
+    let x3 = q[4];
+    let x4 = q[3];
+    let x5 = q[2];
+    let x6 = q[1];
+    let x7 = q[0];
+
+    // Top linear transformation.
+    let y14 = x3 ^ x5;
+    let y13 = x0 ^ x6;
+    let y9 = x0 ^ x3;
+    let y8 = x0 ^ x5;
+    let t0 = x1 ^ x2;
+    let y1 = t0 ^ x7;
+    let y4 = y1 ^ x3;
+    let y12 = y13 ^ y14;
+    let y2 = y1 ^ x0;
+    let y5 = y1 ^ x6;
+    let y3 = y5 ^ y8;
+    let t1 = x4 ^ y12;
+    let y15 = t1 ^ x5;
+    let y20 = t1 ^ x1;
+    let y6 = y15 ^ x7;
+    let y10 = y15 ^ t0;
+    let y11 = y20 ^ y9;
+    let y7 = x7 ^ y11;
+    let y17 = y10 ^ y11;
+    let y19 = y10 ^ y8;
+    let y16 = t0 ^ y11;
+    let y21 = y13 ^ y16;
+    let y18 = x0 ^ y16;
+
+    // Non-linear section.
+    let t2 = y12 & y15;
+    let t3 = y3 & y6;
+    let t4 = t3 ^ t2;
+    let t5 = y4 & x7;
+    let t6 = t5 ^ t2;
+    let t7 = y13 & y16;
+    let t8 = y5 & y1;
+    let t9 = t8 ^ t7;
+    let t10 = y2 & y7;
+    let t11 = t10 ^ t7;
+    let t12 = y9 & y11;
+    let t13 = y14 & y17;
+    let t14 = t13 ^ t12;
+    let t15 = y8 & y10;
+    let t16 = t15 ^ t12;
+    let t17 = t4 ^ t14;
+    let t18 = t6 ^ t16;
+    let t19 = t9 ^ t14;
+    let t20 = t11 ^ t16;
+    let t21 = t17 ^ y20;
+    let t22 = t18 ^ y19;
+    let t23 = t19 ^ y21;
+    let t24 = t20 ^ y18;
+
+    let t25 = t21 ^ t22;
+    let t26 = t21 & t23;
+    let t27 = t24 ^ t26;
+    let t28 = t25 & t27;
+    let t29 = t28 ^ t22;
+    let t30 = t23 ^ t24;
+    let t31 = t22 ^ t26;
+    let t32 = t31 & t30;
+    let t33 = t32 ^ t24;
+    let t34 = t23 ^ t33;
+    let t35 = t27 ^ t33;
+    let t36 = t24 & t35;
+    let t37 = t36 ^ t34;
+    let t38 = t27 ^ t36;
+    let t39 = t29 & t38;
+    let t40 = t25 ^ t39;
+
+    let t41 = t40 ^ t37;
+    let t42 = t29 ^ t33;
+    let t43 = t29 ^ t40;
+    let t44 = t33 ^ t37;
+    let t45 = t42 ^ t41;
+    let z0 = t44 & y15;
+    let z1 = t37 & y6;
+    let z2 = t33 & x7;
+    let z3 = t43 & y16;
+    let z4 = t40 & y1;
+    let z5 = t29 & y7;
+    let z6 = t42 & y11;
+    let z7 = t45 & y17;
+    let z8 = t41 & y10;
+    let z9 = t44 & y12;
+    let z10 = t37 & y3;
+    let z11 = t33 & y4;
+    let z12 = t43 & y13;
+    let z13 = t40 & y5;
+    let z14 = t29 & y2;
+    let z15 = t42 & y9;
+    let z16 = t45 & y14;
+    let z17 = t41 & y8;
+
+    // Bottom linear transformation.
+    let t46 = z15 ^ z16;
+    let t47 = z10 ^ z11;
+    let t48 = z5 ^ z13;
+    let t49 = z9 ^ z10;
+    let t50 = z2 ^ z12;
+    let t51 = z2 ^ z5;
+    let t52 = z7 ^ z8;
+    let t53 = z0 ^ z3;
+    let t54 = z6 ^ z7;
+    let t55 = z16 ^ z17;
+    let t56 = z12 ^ t48;
+    let t57 = t50 ^ t53;
+    let t58 = z4 ^ t46;
+    let t59 = z3 ^ t54;
+    let t60 = t46 ^ t57;
+    let t61 = z14 ^ t57;
+    let t62 = t52 ^ t58;
+    let t63 = t49 ^ t58;
+    let t64 = z4 ^ t59;
+    let t65 = t61 ^ t62;
+    let t66 = z1 ^ t63;
+    let s0 = t59 ^ t63;
+    let s6 = t56 ^ ~t62;
+    let s7 = t48 ^ ~t60;
+    let t67 = t64 ^ t65;
+    let s3 = t53 ^ t66;
+    let s4 = t51 ^ t66;
+    let s5 = t47 ^ t65;
+    let s1 = t64 ^ ~s3;
+    let s2 = t55 ^ ~t67;
+
+    q[7] = s0;
+    q[6] = s1;
+    q[5] = s2;
+    q[4] = s3;
+    q[3] = s4;
+    q[2] = s5;
+    q[1] = s6;
+    q[0] = s7;
+}
+
+/// SubWord on the four bytes of `x`.
+fn sub_word(x: u32) -> u32 {
+    let q: [u32; 8] = [0u32; 8];
+    q[0] = x;
+    ortho(ref q);
+    sbox(ref q);
+    ortho(ref q);
+    q[0]
+}
+
+fn shift_rows(ref q: [u32; 8]) {
+    for i in 0..8 {
+        let x = q[i];
+        q[i] = (x & 0x000000ffu32)
+            | ((x & 0x0000fc00u32) >> 2) | ((x & 0x00000300u32) << 6)
+            | ((x & 0x00f00000u32) >> 4) | ((x & 0x000f0000u32) << 4)
+            | ((x & 0xc0000000u32) >> 6) | ((x & 0x3f000000u32) << 2);
+    }
+}
+
+fn mix_columns(ref q: [u32; 8]) {
+    let q0 = q[0];
+    let q1 = q[1];
+    let q2 = q[2];
+    let q3 = q[3];
+    let q4 = q[4];
+    let q5 = q[5];
+    let q6 = q[6];
+    let q7 = q[7];
+    let r0 = q0.rotate_right(8);
+    let r1 = q1.rotate_right(8);
+    let r2 = q2.rotate_right(8);
+    let r3 = q3.rotate_right(8);
+    let r4 = q4.rotate_right(8);
+    let r5 = q5.rotate_right(8);
+    let r6 = q6.rotate_right(8);
+    let r7 = q7.rotate_right(8);
+    q[0] = q7 ^ r7 ^ r0 ^ (q0 ^ r0).rotate_right(16);
+    q[1] = q0 ^ r0 ^ q7 ^ r7 ^ r1 ^ (q1 ^ r1).rotate_right(16);
+    q[2] = q1 ^ r1 ^ r2 ^ (q2 ^ r2).rotate_right(16);
+    q[3] = q2 ^ r2 ^ q7 ^ r7 ^ r3 ^ (q3 ^ r3).rotate_right(16);
+    q[4] = q3 ^ r3 ^ q7 ^ r7 ^ r4 ^ (q4 ^ r4).rotate_right(16);
+    q[5] = q4 ^ r4 ^ r5 ^ (q5 ^ r5).rotate_right(16);
+    q[6] = q5 ^ r5 ^ r6 ^ (q6 ^ r6).rotate_right(16);
+    q[7] = q6 ^ r6 ^ r7 ^ (q7 ^ r7).rotate_right(16);
+}
+
+fn le32(k: Slice<u8>, i: usize) -> u32 {
+    (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
+}
+
+impl AesKey {
+    /// The schedule of a 16- or 32-byte key (the caller checks the
+    /// length).
+    pub(pkg) fn new(key: Slice<u8>) -> AesKey {
+        let rcon: [u32; 10] = [0x01u32, 0x02u32, 0x04u32, 0x08u32, 0x10u32, 0x20u32, 0x40u32, 0x80u32, 0x1bu32, 0x36u32];
+        let nk = key.len() / 4;
+        let rounds = nk + 6;
+        let nkf = (rounds + 1) * 4;
+        let w: [u32; 120] = [0u32; 120];
+        let tmp = 0u32;
+        for i in 0..nk {
+            tmp = le32(key, 4 * i);
+            w[2 * i] = tmp;
+            w[2 * i + 1] = tmp;
+        }
+        let j = 0usize;
+        let k = 0usize;
+        for i in nk..nkf {
+            if j == 0 {
+                tmp = sub_word(tmp.rotate_right(8)) ^ rcon[k];
+            } else if nk > 6 && j == 4 {
+                tmp = sub_word(tmp);
+            }
+            tmp = tmp ^ w[2 * (i - nk)];
+            w[2 * i] = tmp;
+            w[2 * i + 1] = tmp;
+            j += 1;
+            if j == nk {
+                j = 0;
+                k += 1;
+            }
+        }
+        // Each round key orthogonalized, then compressed (one copy per
+        // block slot kept) and expanded back to both slots.
+        let sk: [u32; 120] = [0u32; 120];
+        let r = 0usize;
+        while r < nkf {
+            let q: [u32; 8] = [0u32; 8];
+            for t in 0usize..8 { q[t] = w[2 * r + t]; }
+            ortho(ref q);
+            for t in 0usize..4 {
+                let c = (q[2 * t] & 0x55555555u32) | (q[2 * t + 1] & 0xaaaaaaaau32);
+                let x = c & 0x55555555u32;
+                let y = c & 0xaaaaaaaau32;
+                sk[2 * (r + t)] = x | (x << 1);
+                sk[2 * (r + t) + 1] = y | (y >> 1);
+            }
+            r += 4;
+        }
+        AesKey { sk, rounds }
+    }
+
+    /// Encrypt two blocks in place: `w[0..4]` and `w[4..8]`, each four
+    /// little-endian words.
+    pub(pkg) fn encrypt2(self, ref w: [u32; 8]) {
+        let q: [u32; 8] = [w[0], w[4], w[1], w[5], w[2], w[6], w[3], w[7]];
+        let sk = self.sk;
+        ortho(ref q);
+        for i in 0usize..8 { q[i] = q[i] ^ sk[i]; }
+        for u in 1..self.rounds {
+            sbox(ref q);
+            shift_rows(ref q);
+            mix_columns(ref q);
+            for i in 0usize..8 { q[i] = q[i] ^ sk[8 * u + i]; }
+        }
+        sbox(ref q);
+        shift_rows(ref q);
+        for i in 0usize..8 { q[i] = q[i] ^ sk[8 * self.rounds + i]; }
+        ortho(ref q);
+        w = [q[0], q[2], q[4], q[6], q[1], q[3], q[5], q[7]];
+    }
+
+    /// One block, 16 bytes in, 16 out.
+    pub(pkg) fn encrypt_block(self, b: Slice<u8>) -> List<u8> {
+        let w: [u32; 8] = [le32(b, 0), le32(b, 4), le32(b, 8), le32(b, 12), 0u32, 0u32, 0u32, 0u32];
+        self.encrypt2(ref w);
+        let out: List<u8> = List::with_capacity(16);
+        for i in 0..16 {
+            out.push((w[i / 4] >> (8 * (i % 4)) as u32) as u8);
+        }
+        out
+    }
+}

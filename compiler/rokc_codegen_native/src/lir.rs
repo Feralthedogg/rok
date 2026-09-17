@@ -412,24 +412,17 @@ pub type Waits = HashMap<(u32, u32), (u32, u32)>;
 struct Use {
     /// Reached by address, or accessed whole (a copy).
     opaque: bool,
-    /// `(offset, size, reads, writes)` of its scalar parts.
-    parts: Vec<(u32, u32, u32, u32)>,
+    /// `(offset, size, reads, writes)` of its scalar parts, by offset.
+    parts: std::collections::BTreeMap<u32, (u32, u32, u32, u32)>,
 }
 
 impl Use {
     /// The part at `off`, accessed as `size` bytes: one size per part,
     /// else the slot is opaque.
     fn part(&mut self, off: u32, size: u32) -> &mut (u32, u32, u32, u32) {
-        let i = self
-            .parts
-            .iter()
-            .position(|p| p.0 == off)
-            .unwrap_or_else(|| {
-                self.parts.push((off, size, 0, 0));
-                self.parts.len() - 1
-            });
-        self.opaque |= self.parts[i].1 != size;
-        &mut self.parts[i]
+        let p = self.parts.entry(off).or_insert((off, size, 0, 0));
+        self.opaque |= p.1 != size;
+        p
     }
 }
 
@@ -572,15 +565,12 @@ pub fn waitable(f: &Func) -> (Waits, Vec<bool>) {
     }
     let mut out = HashMap::new();
     for (s, use_) in u.iter().enumerate() {
-        let ps = &use_.parts;
-        // Every part written; no two overlapping.
+        let ps: Vec<_> = use_.parts.values().collect();
+        // Every part written; no two overlapping (by offset: no two
+        // neighbours).
         let clean = !use_.opaque
             && ps.iter().all(|p| p.3 > 0)
-            && ps.iter().enumerate().all(|(i, p)| {
-                ps[i + 1..]
-                    .iter()
-                    .all(|q| p.0 + p.1 <= q.0 || q.0 + q.1 <= p.0)
-            });
+            && ps.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0);
         if clean {
             for p in ps.iter().filter(|p| p.3 == 1 && p.2 <= 1) {
                 out.insert((s as u32, p.0), (p.1, p.2));

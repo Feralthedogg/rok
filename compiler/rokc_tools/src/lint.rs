@@ -399,10 +399,12 @@ fn item_regions(
 ) {
     for (i, item) in items.iter().enumerate() {
         let (start, attrs) = starts[i];
+        // Past the item's own keyword: what `#[derive]` generates carries
+        // the attribute's span, before it.
         let next = starts
             .iter()
             .map(|(s, _)| *s)
-            .filter(|s| *s > start)
+            .filter(|s| *s > item.span().start)
             .min()
             .unwrap_or(end)
             .min(end);
@@ -551,9 +553,17 @@ fn is_snake(n: &str) -> bool {
     !n.chars().any(|c| c.is_ascii_uppercase())
 }
 
+/// rustc's rule: no lowercase first letter, no `__`, and an inner `_`
+/// only between caseless characters (`V1_0`).
 fn is_camel(n: &str) -> bool {
-    let t = n.trim_start_matches('_');
-    !t.starts_with(|c: char| c.is_ascii_lowercase()) && !t.contains('_')
+    let t = n.trim_matches('_');
+    let cased = |c: char| c.is_lowercase() || c.is_uppercase();
+    let cs: Vec<char> = t.chars().collect();
+    !t.starts_with(char::is_lowercase)
+        && !t.contains("__")
+        && !cs
+            .windows(2)
+            .any(|w| (w[1] == '_' && cased(w[0])) || (w[0] == '_' && cased(w[1])))
 }
 
 fn is_upper(n: &str) -> bool {

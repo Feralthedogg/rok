@@ -104,16 +104,41 @@ During development you can use `target/debug/rok` / `rokc` directly (they find t
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ROK_REQUIRE_LLVM=1 cargo test --no-fail-fast
-ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration
-cargo run -p rokc -- fmt --check library
+ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration --test differential
+./target/debug/rokc fmt --check library
 ```
 
-The WebAssembly targets have their own corpus run (not in CI): `targets/test-wasm.sh [<target>..]` builds the
+On a Linux host run `targets/build.sh <host triple>` once first: a Linux build, native too, links the
+toolchain's C library (glibc link stubs), which it puts in `target/lib/rok/targets/`.
+
+The WebAssembly targets have their own corpus run: `targets/test-wasm.sh [<target>..]` builds the
 runtimes of `wasm32-wasi`, `wasm32-wasi-threads` and `wasm32-unknown-unknown`, fetches the pinned wasmtime
 (v46.0.3, the last release with wasi-threads), and runs every integration and differential case for each at
 `-O0` and `-O2`: the WASI targets under wasmtime, the browser target under node with `rok.mjs`. Cases that need
 what a target lacks (`// needs:`) are skipped there; others assert its `Unsupported` errors (`// only-target:`).
 Set `CC` to a clang with a WebAssembly backend to include `wasm32-wasi`'s profile-guided-optimization test.
+
+### CI
+
+`.github/workflows/ci.yml` (GitHub Actions). Linux runs on every push and pull request; macOS and Windows on
+pushes to `main` and on a manual run (`workflow_dispatch`, whose `hosts` / `jobs` inputs pick a subset).
+Changes to Markdown files alone run nothing; a newer push to the same branch cancels the older run.
+
+- `llvm`, per host (`ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64, `macos-26` arm64, `macos-26-intel`
+  x86_64, `windows-2022` x86_64): the pinned LLVM prefix (`.github/actions/llvm-prefix`), built by
+  `llvm/build.sh` (Windows `llvm/build.ps1`) only when the actions cache has none for the hash of the build
+  script and its PGO profile, then stripped of what `rokc_llvm` does not link and saved (120–175 MB each in
+  the cache). On a private repository's standard runners a build took 0.5 h (macOS arm64), 2.2 h (macOS
+  x86_64, Linux aarch64), 4.5 h (Linux x86_64) and 6.0 h (Windows: at the 6 h job limit). Linux needs clang
+  19+ to read `rok.profdata.xz`; a build without PGO fails. A hit only looks the entry up. Caches made on a
+  branch serve that branch only, so the first push to `main` builds every host once.
+- `gate`, per host: the checks above (on Linux after `targets/build.sh <host>`), every step even after one
+  fails, plus the compiler / runtime crate isolation check.
+- `cross` (Linux x86_64): `targets/build.sh` for the Linux targets and `i686-pc-windows-msvc`, the sysroot
+  link test, and the integration and differential corpora at `-O0` and `-O2` for `i686-unknown-linux-gnu`
+  (the i386 loader) and `armv7-unknown-linux-gnueabihf` (qemu-user).
+- `wasm` (Linux x86_64), a job per wasm32 target: `targets/test-wasm.sh <target>`, with the image's node and
+  clang (which has the WebAssembly target, so `wasm32-wasi`'s PGO test runs).
 
 ## License
 

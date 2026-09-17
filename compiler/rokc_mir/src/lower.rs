@@ -989,6 +989,28 @@ impl<'a> FnBuilder<'a> {
 
     fn lower_expr_to_operand(&mut self, e: &HirExpr) -> Operand {
         match &e.kind {
+            HirExprKind::Const(ConstVal::Bytes(b)) => {
+                let u8_ty = MirTy::Prim(PrimTy::U8);
+                let n = u32::try_from(b.len()).unwrap_or(0);
+                let dst = self.fresh_local(MirTy::Array(Box::new(u8_ty.clone()), n));
+                let elements = b
+                    .iter()
+                    .map(|&x| {
+                        Operand::Const(ConstVal::Int {
+                            value: i128::from(x),
+                            ty: PrimTy::U8,
+                        })
+                    })
+                    .collect();
+                self.push_stmt(Statement::Assign {
+                    target: dst,
+                    rvalue: RValue::ArrayInit {
+                        elem_ty: u8_ty,
+                        elements,
+                    },
+                });
+                Operand::Copy(dst)
+            }
             HirExprKind::Const(c) => Operand::Const(c.clone()),
             HirExprKind::Local(id) => Operand::Copy(*id),
             HirExprKind::StaticRef(name) => {

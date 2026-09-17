@@ -1,0 +1,66 @@
+// expect-exit: 0
+// expect-stdout:
+// 40000 360000 k8
+// 5000 45000 v4999
+// 360000
+
+// GC: many small collections kept alive through growing outer lists
+// (a parsed document's shape) across minor and full collections, then
+// the same rows churned with nothing retained; every retained element
+// is still intact afterwards.
+fn main() -> i32 {
+    let rows: List<List<str>> = [];
+    let i: i64 = 0;
+    while i < 40000 {
+        let row: List<str> = [];
+        let j = 0;
+        while j < 9 {
+            row.push(f"k{j}");
+            j += 1;
+        }
+        rows.push(row);
+        i += 1;
+    }
+    let objs: List<OrderedDict<str, str>> = [];
+    i = 0;
+    while i < 5000 {
+        let o: OrderedDict<str, str> = OrderedDict::new();
+        let j = 0;
+        while j < 9 {
+            o.insert(f"k{j}", f"v{i}");
+            j += 1;
+        }
+        objs.push(o);
+        i += 1;
+    }
+    let churn: usize = 0;
+    i = 0;
+    while i < 40000 {
+        let row: List<str> = [];
+        let j = 0;
+        while j < 9 {
+            row.push(f"k{j}");
+            j += 1;
+        }
+        churn += row.len();
+        i += 1;
+    }
+    let total: usize = 0;
+    for r in rows {
+        for (j, s) in r.iter().enumerate() {
+            if s != f"k{j}" { return 1; }
+            total += 1;
+        }
+    }
+    let kv: usize = 0;
+    for (n, o) in objs.iter().enumerate() {
+        for (k, v) in o {
+            if v != f"v{n}" || !k.starts_with("k") { return 2; }
+            kv += 1;
+        }
+    }
+    println(f"{rows.len()} {total} {rows[39999][8]}");
+    println(f"{objs.len()} {kv} {objs[4999].get("k3") ?? ""}");
+    println(f"{churn}");
+    return 0;
+}

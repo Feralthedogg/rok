@@ -58,6 +58,8 @@ pub struct MetaDef {
     pub public: bool,
     /// The defining file (a private block is usable there only).
     pub file: String,
+    /// The defining package (`""` for the one being built).
+    pub package: String,
     /// The `#[impl_..]` attribute.
     pub span: Span,
     /// Tokens between the body's braces.
@@ -66,6 +68,30 @@ pub struct MetaDef {
     /// only when they hold (6.9.8: cfg runs before expansion).
     pub cfg: Vec<Attribute>,
 }
+
+impl MetaDef {
+    /// Place the block in `package` (its mount path, `""` for the one
+    /// being built): a `pkg::` path in the body names that package
+    /// wherever the block expands (6.9.8), as the root `pkg@<package>`.
+    pub fn set_package(&mut self, package: &str) {
+        package.clone_into(&mut self.package);
+        for k in 0..self.body.len() {
+            let after_sep = k > 0 && self.body[k - 1].kind == TokenKind::ColonColon;
+            let root = matches!(&self.body[k].kind, TokenKind::Ident(n) if n == "pkg")
+                && self
+                    .body
+                    .get(k + 1)
+                    .is_some_and(|t| t.kind == TokenKind::ColonColon);
+            if root && !after_sep {
+                self.body[k].kind = TokenKind::Ident(format!("{PKG_ROOT}{package}"));
+            }
+        }
+    }
+}
+
+/// Prefix of the path root a meta block's `pkg::` becomes; `@` keeps it
+/// out of reach of source text.
+pub const PKG_ROOT: &str = "pkg@";
 
 /// Every meta block of the compilation, by name.
 #[derive(Clone, Debug, Default)]
@@ -1251,6 +1277,7 @@ impl Parser<'_> {
             field_attr: words.get(1).cloned(),
             public: vis != Visibility::Private,
             file: self.file.clone(),
+            package: String::new(),
             span: ma.span,
             body: self.tokens[body_start + 1..end].to_vec(),
             cfg: attrs.into_iter().filter(|a| a.name() == "cfg").collect(),
@@ -1690,7 +1717,14 @@ fn render(tokens: &[Token]) -> String {
                 out.push(' ');
             }
         }
-        out.push_str(&k.text());
+        match k {
+            // A block's `pkg::` as the package it names.
+            K::Ident(w) if w.starts_with(PKG_ROOT) => {
+                let package = &w[PKG_ROOT.len()..];
+                out.push_str(if package.is_empty() { "pkg" } else { package });
+            }
+            _ => out.push_str(&k.text()),
+        }
         if *k == K::LBrace {
             depth += 1;
         }
@@ -1749,6 +1783,7 @@ rokc_core::codec_struct!(MetaDef {
     field_attr,
     public,
     file,
+    package,
     span,
     body,
     cfg

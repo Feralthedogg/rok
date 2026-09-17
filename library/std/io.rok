@@ -54,7 +54,7 @@ pub enum IoErrorKind {
 
 impl IoErrorKind {
     /// The kind's number.
-    pub fn index(self) -> i32 {
+    pub const fn index(self) -> i32 {
         match self {
             IoErrorKind::Other => KIND_OTHER,
             IoErrorKind::NotFound => KIND_NOT_FOUND,
@@ -99,8 +99,8 @@ impl IoErrorKind {
 }
 
 impl PartialEq for IoErrorKind {
-    fn eq(self, rhs: IoErrorKind) -> bool { self.index() == rhs.index() }
-    fn ne(self, rhs: IoErrorKind) -> bool { self.index() != rhs.index() }
+    const fn eq(self, rhs: IoErrorKind) -> bool { self.index() == rhs.index() }
+    const fn ne(self, rhs: IoErrorKind) -> bool { self.index() != rhs.index() }
 }
 
 impl Debug for IoErrorKind {
@@ -138,11 +138,11 @@ pub struct IoError {
 
 impl IoError {
     /// A library-raised error of kind `Other`.
-    pub fn new(message: str) -> IoError {
+    pub const fn new(message: str) -> IoError {
         IoError { kind: IoErrorKind::Other, code: 0, message: message }
     }
 
-    pub fn with_kind(kind: IoErrorKind, message: str) -> IoError {
+    pub const fn with_kind(kind: IoErrorKind, message: str) -> IoError {
         IoError { kind: kind, code: 0, message: message }
     }
 
@@ -154,9 +154,9 @@ impl IoError {
         IoError { kind: IoErrorKind::of_os(code), code: code, message: msg }
     }
 
-    pub fn kind(self) -> IoErrorKind { self.kind }
-    pub fn code(self) -> i32 { self.code }
-    pub fn message(self) -> str { self.message }
+    pub const fn kind(self) -> IoErrorKind { self.kind }
+    pub const fn code(self) -> i32 { self.code }
+    pub const fn message(self) -> str { self.message }
 }
 
 impl Display for IoError {
@@ -199,22 +199,27 @@ impl AsBytes for str {
 }
 
 impl AsBytes for List<u8> {
-    fn byte_slice(self) -> Slice<u8> { self[0:self.len()] }
+    const fn byte_slice(self) -> Slice<u8> { self[0:self.len()] }
 }
 
 impl AsBytes for Slice<u8> {
-    fn byte_slice(self) -> Slice<u8> { self }
+    const fn byte_slice(self) -> Slice<u8> { self }
+}
+
+/// `b"..."` and `include_bytes!` data: a view of a copy.
+impl<const N: usize> AsBytes for [u8; N] {
+    const fn byte_slice(self) -> Slice<u8> { self[:] }
 }
 
 /// A zeroed list of `n` bytes (a read buffer).
-pub fn byte_buf(n: usize) -> List<u8> {
+pub const fn byte_buf(n: usize) -> List<u8> {
     let out: List<u8> = List::with_capacity(n);
     unsafe { out.set_len(n) };
     out
 }
 
 /// The region `(buf, off, len)` holding `b`'s bytes.
-pub(pkg) fn region<B: AsBytes>(b: B) -> (GcBuf<u8>, usize, usize) {
+pub(pkg) const fn region<B: AsBytes>(b: B) -> (GcBuf<u8>, usize, usize) {
     unsafe { b.byte_slice().raw_parts() }
 }
 
@@ -240,7 +245,7 @@ pub(pkg) type RegionIo = fn(GcBuf<u8>, usize, usize) -> isize;
 
 /// Grow `out` by `n` bytes to fill in place: their region's buffer and
 /// offset.
-fn spare(out: List<u8>, n: usize) -> (GcBuf<u8>, usize) {
+const fn spare(out: List<u8>, n: usize) -> (GcBuf<u8>, usize) {
     out.reserve(n);
     let m = out.len();
     unsafe { out.set_len(m + n) };
@@ -361,13 +366,13 @@ pub trait Reader {
     }
 
     /// The remaining lines (without `\n` / `\r\n`).
-    fn lines(ref self) -> Lines<Self> {
+    const fn lines(ref self) -> Lines<Self> {
         Lines { reader: self }
     }
 
     /// The remaining bytes one at a time (wrap in `BufReader` first:
     /// each item is one `read`).
-    fn bytes(ref self) -> Bytes<Self> {
+    const fn bytes(ref self) -> Bytes<Self> {
         Bytes { reader: self, one: byte_buf(1) }
     }
 }
@@ -460,9 +465,9 @@ pub struct BufReader<R> {
 }
 
 impl<R: Reader> BufReader<R> {
-    pub fn new(inner: R) -> BufReader<R> { BufReader::with_capacity(8192, inner) }
+    pub const fn new(inner: R) -> BufReader<R> { BufReader::with_capacity(8192, inner) }
 
-    pub fn with_capacity(cap: usize, inner: R) -> BufReader<R> {
+    pub const fn with_capacity(cap: usize, inner: R) -> BufReader<R> {
         let c = if cap == 0 { 1 } else { cap };
         BufReader { inner: inner, chunk: byte_buf(c), pos: 0, end: 0 }
     }
@@ -527,9 +532,9 @@ pub struct BufWriter<W> {
 }
 
 impl<W: Writer> BufWriter<W> {
-    pub fn new(inner: W) -> BufWriter<W> { BufWriter::with_capacity(8192, inner) }
+    pub const fn new(inner: W) -> BufWriter<W> { BufWriter::with_capacity(8192, inner) }
 
-    pub fn with_capacity(cap: usize, inner: W) -> BufWriter<W> {
+    pub const fn with_capacity(cap: usize, inner: W) -> BufWriter<W> {
         BufWriter { inner: inner, cap: cap, pending: List::with_capacity(cap), by_line: false }
     }
 
@@ -596,7 +601,7 @@ pub struct LineWriter<W> {
 }
 
 impl<W: Writer> LineWriter<W> {
-    pub fn new(inner: W) -> LineWriter<W> {
+    pub const fn new(inner: W) -> LineWriter<W> {
         LineWriter {
             buf: BufWriter { inner: inner, cap: 8192, pending: List::with_capacity(8192), by_line: true },
         }
@@ -644,12 +649,12 @@ pub struct Stderr {}
 /// `stdin().lock()`: the same handle (the runtime locks each read).
 pub type StdinLock = Stdin;
 
-pub fn stdin() -> Stdin { Stdin {} }
-pub fn stdout() -> Stdout { Stdout {} }
-pub fn stderr() -> Stderr { Stderr {} }
+pub const fn stdin() -> Stdin { Stdin {} }
+pub const fn stdout() -> Stdout { Stdout {} }
+pub const fn stderr() -> Stderr { Stderr {} }
 
 impl Stdin {
-    pub fn lock(self) -> StdinLock { self }
+    pub const fn lock(self) -> StdinLock { self }
 }
 
 /// One stdin read into a region, stopping after `delim` (`-1`: none).
@@ -704,5 +709,5 @@ impl Writer for Stderr {
         try check(unsafe { rok_stdio_write(2, s, 0) } as i64, "stderr");
     }
 
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }

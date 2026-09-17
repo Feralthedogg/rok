@@ -101,9 +101,43 @@ pub fn unescape(body: &str, mode: EscapeMode) -> Result<String, (usize, String)>
     Ok(out)
 }
 
+/// `s` as a `"..."` body that `unescape(_, Str)` gives back.
+#[must_use]
+pub fn escape_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `bytes` as a `b"..."` body that `unescape(_, CChar)` gives back, a
+/// char per byte.
+#[must_use]
+pub fn escape_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
+        if b.is_ascii_graphic() && b != b'\\' && b != b'"' || b == b' ' {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("\\x{b:02X}"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EscapeMode::*, unescape};
+    use super::{EscapeMode::*, escape_bytes, escape_str, unescape};
+
+    #[test]
+    fn escapes_round_trip() {
+        let s = "a\"b\\c\n\u{AC00}\\\n";
+        assert_eq!(unescape(&escape_str(s), Str).unwrap(), s);
+        let b: Vec<u8> = (0..=255).collect();
+        let back: Vec<u8> = unescape(&escape_bytes(&b), CChar)
+            .unwrap()
+            .chars()
+            .map(|c| u8::try_from(c).unwrap())
+            .collect();
+        assert_eq!(back, b);
+    }
 
     #[test]
     fn decodes_and_rejects() {

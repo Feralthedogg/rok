@@ -13,18 +13,18 @@ impl<T> !Sync for BinaryHeap<T> {}
 
 impl<T: Ord> BinaryHeap<T> {
     /// A max-heap.
-    pub fn new() -> BinaryHeap<T> {
+    pub const fn new() -> BinaryHeap<T> {
         BinaryHeap { items: List::new(), before: |a: T, b: T| a > b }
     }
 }
 
 impl<T> BinaryHeap<T> {
     /// A heap whose top is the item `before` ranks first.
-    pub fn by(before: fn(T, T) -> bool) -> BinaryHeap<T> {
+    pub const fn by(before: fn(T, T) -> bool) -> BinaryHeap<T> {
         BinaryHeap { items: List::new(), before }
     }
 
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         self.items.len()
     }
 
@@ -33,11 +33,11 @@ impl<T> BinaryHeap<T> {
     }
 
     /// The top item.
-    pub fn peek(self) -> T | none {
+    pub const fn peek(self) -> T | none {
         self.items.get(0)
     }
 
-    pub fn push(self, x: T) {
+    pub const fn push(self, x: T) {
         let xs = self.items;
         xs.push(x);
         let i = xs.len() - 1;
@@ -52,7 +52,7 @@ impl<T> BinaryHeap<T> {
     }
 
     /// Remove and return the top item.
-    pub fn pop(self) -> T | none {
+    pub const fn pop(self) -> T | none {
         let xs = self.items;
         let n = xs.len();
         if n == 0 {
@@ -69,7 +69,7 @@ impl<T> BinaryHeap<T> {
     }
 
     /// Keep only the items `keep` accepts; O(n).
-    pub fn retain(self, keep: fn(T) -> bool) {
+    pub const fn retain(self, keep: fn(T) -> bool) {
         let xs = self.items;
         let kept: List<T> = List::new();
         for x in xs {
@@ -85,18 +85,18 @@ impl<T> BinaryHeap<T> {
     }
 
     /// Every item, in no particular order.
-    pub fn iter(self) -> ListIter<T> {
+    pub const fn iter(self) -> ListIter<T> {
         self.items.iter()
     }
 
-    fn swap(self, i: usize, j: usize) {
+    const fn swap(self, i: usize, j: usize) {
         let xs = self.items;
         let t = xs[i];
         xs[i] = xs[j];
         xs[j] = t;
     }
 
-    fn sift_down(self, from: usize) {
+    const fn sift_down(self, from: usize) {
         let xs = self.items;
         let n = xs.len();
         let i = from;

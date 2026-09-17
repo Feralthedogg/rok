@@ -44,6 +44,7 @@ codec_enum!(Literal {
     Bool(x0),
     Str(x0),
     RawStr(x0),
+    ByteStr(x0),
     FStr(x0),
     Char(x0),
     CChar(x0),

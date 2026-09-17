@@ -53,7 +53,7 @@ pub(super) fn literal_to_const_val(expr: &Expr, ty: &HirTy) -> Option<ConstVal> 
 fn is_lazy_static_init(v: &Expr) -> bool {
     match &v.kind {
         // Folded by the compile-time evaluator instead.
-        ExprKind::Literal(AstLit::Float(_)) => true,
+        ExprKind::Literal(AstLit::Float(_) | AstLit::ByteStr(_)) => true,
         ExprKind::Literal(_) => false,
         ExprKind::OpPrefix { op, operand } if op == "-" => {
             !matches!(operand.kind, ExprKind::Literal(_))
@@ -247,13 +247,16 @@ pub fn lower_full(
     }
     // Ahead of lowering's own diagnostics and not merged with them.
     let mut early = lang_diags;
+    let (reexports, glob_diags) =
+        crate::uses::glob_reexports(raw_uses, &owned.items, uses, reexports);
+    let reexports = reexports.as_slice();
+    early.extend(glob_diags);
     early.extend(crate::uses::check_use_targets(
         raw_uses,
         &owned.items,
         uses,
         reexports,
     ));
-    let reexports = &glob_reexports(raw_uses, &owned.items, reexports);
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -426,7 +429,30 @@ pub fn lower_full(
             })
             .collect(),
         const_leaves: std::cell::OnceCell::new(),
+        value_reexports: HashMap::new(),
     };
+    let mut names = names;
+    let statics: std::collections::HashSet<&str> = program
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::Static(s) => Some(s.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    names.value_reexports = aliases
+        .iter()
+        .filter(|(_, end)| names.consts.contains_key(*end) || statics.contains(end.as_str()))
+        .map(|(a, end)| (a.clone(), end.clone()))
+        .collect();
+    let aliased: Vec<(String, (Ty, Expr))> = names
+        .value_reexports
+        .iter()
+        .filter_map(|(a, end)| Some((a.clone(), names.consts.get(end)?.clone())))
+        .collect();
+    for (alias, c) in aliased {
+        names.consts.entry(alias).or_insert(c);
+    }
     warn_assoc_shadowing(program, &names, &mut pre_diags);
     let defaults = assoc_defaults(program, &names);
     for (i, added) in defaults {
@@ -607,6 +633,11 @@ pub fn lower_full(
                     format!("const `{key}` is defined more than once"),
                 );
             }
+        }
+    }
+    for (alias, end) in &names.value_reexports {
+        if let Some(c) = consts.get(end).cloned() {
+            consts.entry(alias.clone()).or_insert(c);
         }
     }
     let mut static_defs: Vec<HirStaticDef> = Vec::new();
@@ -2185,85 +2216,6 @@ fn resolve_projection_aliases(env: &Env<'_>) {
         rcx.resolve_ast_ty(body);
         if count() != before {
             names.broken_aliases.borrow_mut().insert(full.clone());
-        }
-    }
-}
-
-/// `reexports` plus one per item a `pub use m::*` reaches (spec 5.8):
-/// the non-private items of `m` and what `m` re-exports, through chains
-/// of glob re-exports, each no wider than its item (5.8.12).
-fn glob_reexports(
-    raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
-    items: &[Item],
-    reexports: &[crate::uses::ReExport],
-) -> Vec<crate::uses::ReExport> {
-    let mut globs: Vec<(&str, Visibility, String)> = Vec::new();
-    for (module, vis, tree) in raw_uses
-        .iter()
-        .filter(|(_, v, _)| *v != Visibility::Private)
-    {
-        let mut entries = Vec::new();
-        crate::uses::flatten_tree_for_local(tree, module, &mut entries);
-        for e in entries {
-            if let crate::uses::UseEntry::Glob { prefix } = e {
-                globs.push((module, *vis, prefix));
-            }
-        }
-    }
-    let mut out = reexports.to_vec();
-    if globs.is_empty() {
-        return out;
-    }
-    let public: Vec<(String, Visibility)> = items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Fn(d) => Some((d.name.as_str(), d.vis)),
-            Item::Struct(d) => Some((d.name.as_str(), d.vis)),
-            Item::Enum(d) => Some((d.name.as_str(), d.vis)),
-            Item::Union(d) => Some((d.name.as_str(), d.vis)),
-            Item::Trait(d) => Some((d.name.as_str(), d.vis)),
-            Item::Const(d) => Some((d.name.as_str(), d.vis)),
-            Item::Static(d) => Some((d.name.as_str(), d.vis)),
-            Item::TypeAlias(d) => Some((d.name.as_str(), d.vis)),
-            Item::Mod(d) => Some((d.name.as_str(), d.vis)),
-            Item::Impl(_) | Item::Use(_) | Item::Extern(_) => None,
-        })
-        .filter(|(_, vis)| *vis != Visibility::Private)
-        .map(|(name, vis)| (name.to_owned(), vis))
-        .collect();
-    let mut seen: std::collections::HashSet<String> = out.iter().map(reexport_key).collect();
-    loop {
-        let mut grew = false;
-        for (module, vis, prefix) in &globs {
-            let reached: Vec<(String, Visibility)> = public
-                .iter()
-                .cloned()
-                .chain(
-                    out.iter()
-                        .filter(|r| r.vis != Visibility::Private)
-                        .map(|r| (reexport_key(r), r.vis)),
-                )
-                .filter(|(full, _)| module_of(full) == *prefix)
-                .collect();
-            for (full, item_vis) in reached {
-                let re = crate::uses::ReExport {
-                    module_path: (*module).to_owned(),
-                    short_name: full.rsplit("::").next().unwrap_or(&full).to_owned(),
-                    full_path: full,
-                    vis: if visibility_rank(item_vis) < visibility_rank(*vis) {
-                        item_vis
-                    } else {
-                        *vis
-                    },
-                };
-                if seen.insert(reexport_key(&re)) {
-                    out.push(re);
-                    grew = true;
-                }
-            }
-        }
-        if !grew {
-            return out;
         }
     }
 }

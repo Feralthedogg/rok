@@ -13,10 +13,10 @@ pub enum Ordering {
 }
 
 impl Ordering {
-    pub fn is_lt(self) -> bool { match self { Ordering::Less => true, _ => false } }
-    pub fn is_eq(self) -> bool { match self { Ordering::Equal => true, _ => false } }
-    pub fn is_gt(self) -> bool { match self { Ordering::Greater => true, _ => false } }
-    pub fn reverse(self) -> Ordering {
+    pub const fn is_lt(self) -> bool { match self { Ordering::Less => true, _ => false } }
+    pub const fn is_eq(self) -> bool { match self { Ordering::Equal => true, _ => false } }
+    pub const fn is_gt(self) -> bool { match self { Ordering::Greater => true, _ => false } }
+    pub const fn reverse(self) -> Ordering {
         match self {
             Ordering::Less => Ordering::Greater,
             Ordering::Equal => Ordering::Equal,
@@ -26,7 +26,7 @@ impl Ordering {
 }
 
 impl PartialEq for Ordering {
-    fn eq(self, rhs: Ordering) -> bool {
+    const fn eq(self, rhs: Ordering) -> bool {
         match (self, rhs) {
             (Ordering::Less, Ordering::Less) => true,
             (Ordering::Equal, Ordering::Equal) => true,
@@ -34,7 +34,7 @@ impl PartialEq for Ordering {
             _ => false,
         }
     }
-    fn ne(self, rhs: Ordering) -> bool { !self.eq(rhs) }
+    const fn ne(self, rhs: Ordering) -> bool { !self.eq(rhs) }
 }
 
 impl Eq for Ordering {}
@@ -54,15 +54,15 @@ impl Debug for Ordering {
 pub trait Ord: PartialOrd + Eq {
     fn cmp(self, rhs: Self) -> Ordering;
 
-    fn min(self, rhs: Self) -> Self {
+    const fn min(self, rhs: Self) -> Self {
         if self.le(rhs) { self } else { rhs }
     }
 
-    fn max(self, rhs: Self) -> Self {
+    const fn max(self, rhs: Self) -> Self {
         if self.ge(rhs) { self } else { rhs }
     }
 
-    fn clamp(self, low: Self, high: Self) -> Self {
+    const fn clamp(self, low: Self, high: Self) -> Self {
         if self.lt(low) { return low; }
         if self.gt(high) { return high; }
         self

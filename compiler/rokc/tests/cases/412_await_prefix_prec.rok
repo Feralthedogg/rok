@@ -1,0 +1,25 @@
+// spec: 004.12.2-await-operator / 003.02.3-precedence-table
+// expect-exit: 0
+// expect-stdout:
+// true false
+// 7 -1
+// 6 i64
+// 10
+
+// `await` is a prefix unary operator (level 12): it binds tighter than
+// every binary operator, `as` / `is` and `??`, and looser than postfix
+// member access and calls.
+async fn five() -> i32 { 5 }
+async fn maybe(b: bool) -> i32 | none { if b { 7 } else { none } }
+struct Box { f: AsyncFuture<i32>; }
+
+let a = await five() == 5;
+let b = await five() + 1 == 5;
+println(f"{a} {b}");
+let c = await maybe(true) ?? -1;
+let d = await maybe(false) ?? -1;
+println(f"{c} {d}");
+let e: i64 = await five() as i64 + 1i64;
+println(f"{e} i64");
+let bx = Box { f: five() };
+println(f"{await bx.f * 2}");

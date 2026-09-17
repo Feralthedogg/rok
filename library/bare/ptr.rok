@@ -35,20 +35,20 @@ pub struct Ptr<T> {
 
 impl<T> Ptr<T> {
     /// Well aligned, never dereferenceable.
-    pub fn dangling() -> Ptr<T> { Ptr { address: align_of::<T>() } }
+    pub const fn dangling() -> Ptr<T> { Ptr { address: align_of::<T>() } }
     /// Always `none` (a `Ptr` is never null).
     pub fn null() -> Ptr<T> | none { none }
 
     /// The address (provenance is lost).
-    pub fn addr(self) -> usize { self.address }
-    pub fn with_addr(self, addr: usize) -> Ptr<T> { Ptr { address: addr } }
-    pub fn map_addr(self, f: fn(usize) -> usize) -> Ptr<T> { Ptr { address: f(self.address) } }
+    pub const fn addr(self) -> usize { self.address }
+    pub const fn with_addr(self, addr: usize) -> Ptr<T> { Ptr { address: addr } }
+    pub const fn map_addr(self, f: fn(usize) -> usize) -> Ptr<T> { Ptr { address: f(self.address) } }
 
     /// `count` elements further (`count * size_of::<T>()` bytes).
     pub fn offset(self, count: isize) -> Ptr<T> {
         Ptr { address: (self.address as isize + count * size_of::<T>() as isize) as usize }
     }
-    pub fn add(self, count: usize) -> Ptr<T> {
+    pub const fn add(self, count: usize) -> Ptr<T> {
         Ptr { address: self.address + count * size_of::<T>() }
     }
     pub fn sub(self, count: usize) -> Ptr<T> {
@@ -59,13 +59,13 @@ impl<T> Ptr<T> {
         Ptr { address: (self.address as isize + count) as usize }
     }
     /// `self.addr() - origin.addr()` in elements.
-    pub fn distance(self, origin: Ptr<T>) -> isize {
+    pub const fn distance(self, origin: Ptr<T>) -> isize {
         (self.address as isize - origin.address as isize) / size_of::<T>() as isize
     }
-    pub fn is_aligned(self) -> bool { self.address % align_of::<T>() == 0 }
+    pub const fn is_aligned(self) -> bool { self.address % align_of::<T>() == 0 }
     /// Elements to `add` so the address is a multiple of `align`, or
     /// `usize::MAX` when no element count gets there.
-    pub fn align_offset(self, align: usize) -> usize {
+    pub const fn align_offset(self, align: usize) -> usize {
         let size = size_of::<T>();
         let n: usize = 0;
         // The remainders repeat within `align` steps.
@@ -77,9 +77,9 @@ impl<T> Ptr<T> {
     }
 
     /// The same address as a pointer to `U` (alignment is the caller's).
-    pub fn cast<U>(self) -> Ptr<U> { Ptr { address: self.address } }
-    pub fn as_const(self) -> ConstPtr<T> { ConstPtr { address: self.address } }
-    pub fn as_many(self) -> ManyPtr<T> { ManyPtr { address: self.address } }
+    pub const fn cast<U>(self) -> Ptr<U> { Ptr { address: self.address } }
+    pub const fn as_const(self) -> ConstPtr<T> { ConstPtr { address: self.address } }
+    pub const fn as_many(self) -> ManyPtr<T> { ManyPtr { address: self.address } }
 
     /// The `T` it points at. UB unless it points at a live, initialized `T`.
     pub unsafe fn read(self) -> T { raw_read(self) }
@@ -97,15 +97,15 @@ pub struct ConstPtr<T> {
 }
 
 impl<T> ConstPtr<T> {
-    pub fn dangling() -> ConstPtr<T> { ConstPtr { address: align_of::<T>() } }
-    pub fn addr(self) -> usize { self.address }
-    pub fn with_addr(self, addr: usize) -> ConstPtr<T> { ConstPtr { address: addr } }
+    pub const fn dangling() -> ConstPtr<T> { ConstPtr { address: align_of::<T>() } }
+    pub const fn addr(self) -> usize { self.address }
+    pub const fn with_addr(self, addr: usize) -> ConstPtr<T> { ConstPtr { address: addr } }
     pub fn offset(self, count: isize) -> ConstPtr<T> {
         ConstPtr {
             address: (self.address as isize + count * size_of::<T>() as isize) as usize,
         }
     }
-    pub fn add(self, count: usize) -> ConstPtr<T> {
+    pub const fn add(self, count: usize) -> ConstPtr<T> {
         ConstPtr { address: self.address + count * size_of::<T>() }
     }
     pub fn sub(self, count: usize) -> ConstPtr<T> {
@@ -168,11 +168,11 @@ impl<T> CPtr<T> {
     pub fn null() -> CPtr<T> { CPtr { address: 0 } }
     pub fn from_ptr(p: Ptr<T>) -> CPtr<T> { CPtr { address: p.address } }
     pub fn from_const(p: ConstPtr<T>) -> CPtr<T> { CPtr { address: p.address } }
-    pub fn from_addr(addr: usize) -> CPtr<T> { CPtr { address: addr } }
+    pub const fn from_addr(addr: usize) -> CPtr<T> { CPtr { address: addr } }
     pub fn is_null(self) -> bool { self.address == 0 }
     pub fn addr(self) -> usize { self.address }
     /// `none` when null.
-    pub fn as_ptr(self) -> Ptr<T> | none {
+    pub const fn as_ptr(self) -> Ptr<T> | none {
         if self.address == 0 { return none; }
         let p: Ptr<T> = Ptr { address: self.address };
         p
@@ -196,7 +196,7 @@ impl<T> !Sync for CPtr<T> {}
 
 /// The same address as a pointer to `U` (spec 1.2.2: `ptr_cast::<U>(p)`;
 /// alignment is the caller's problem).
-pub fn ptr_cast<U, T>(p: Ptr<T>) -> Ptr<U> { Ptr { address: p.address } }
+pub const fn ptr_cast<U, T>(p: Ptr<T>) -> Ptr<U> { Ptr { address: p.address } }
 
 /// `p` as a `Ptr<T>` when its address suits `T`'s alignment (1.2.3).
 pub fn align_cast<T>(p: Ptr<u8>) -> Ptr<T> | none {
@@ -213,7 +213,7 @@ pub unsafe fn const_cast<T>(p: ConstPtr<T>) -> Ptr<T> { Ptr { address: p.address
 pub fn expose_provenance<T>(p: Ptr<T>) -> usize { p.address }
 
 /// A pointer at `addr`, assumed to carry an exposed provenance.
-pub unsafe fn from_exposed_provenance<T>(addr: usize) -> Ptr<T> { Ptr { address: addr } }
+pub const unsafe fn from_exposed_provenance<T>(addr: usize) -> Ptr<T> { Ptr { address: addr } }
 
 /// A pointer to `place` itself (a local, or a field / array element of
 /// one), valid while that local is in scope: the local lives in memory

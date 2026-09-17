@@ -186,7 +186,18 @@ pub fn root_path(segments: &[&str], module: &str) -> Option<Vec<String>> {
             Some(parts)
         }
         "rok" => Some(owned(segments)),
-        _ => None,
+        // A meta block's `pkg::`: its own package wherever it expands.
+        root => {
+            let package = root.strip_prefix(rokc_parser::PKG_ROOT)?;
+            let mut out = owned(
+                &package
+                    .split("::")
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>(),
+            );
+            out.extend(owned(&segments[1..]));
+            Some(out)
+        }
     }
 }
 
@@ -232,7 +243,7 @@ pub const CORE_PREFIX: &str = "rok::core";
 
 /// Can code in `cur_module` see an item declared in `def_module` with
 /// visibility `vis`? (spec 5.6)
-pub(super) fn visible_from(cur_module: &str, def_module: &str, vis: Visibility) -> bool {
+pub fn visible_from(cur_module: &str, def_module: &str, vis: Visibility) -> bool {
     match vis {
         Visibility::Pub => true,
         // Spec 5.6.4: the package the item is declared in.

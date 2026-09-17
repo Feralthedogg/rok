@@ -14,25 +14,25 @@ pub enum Result<T, E> {
 
 impl<T, E> Result<T, E> {
     /// Run `f`, keeping its value or its error.
-    pub fn catching(f: fn() throws (E) -> T) -> Result<T, E> {
+    pub const fn catching(f: fn() throws (E) -> T) -> Result<T, E> {
         try Result::Ok(f()) catch e { Result::Err(e) }
     }
 
-    pub fn is_ok(self) -> bool {
+    pub const fn is_ok(self) -> bool {
         match self {
             Result::Ok(_) => true,
             Result::Err(_) => false,
         }
     }
 
-    pub fn is_err(self) -> bool {
+    pub const fn is_err(self) -> bool {
         match self {
             Result::Ok(_) => false,
             Result::Err(_) => true,
         }
     }
 
-    pub fn ok(self) -> T | none {
+    pub const fn ok(self) -> T | none {
         match self {
             Result::Ok(v) => v,
             Result::Err(_) => none,
@@ -47,7 +47,7 @@ impl<T, E> Result<T, E> {
     }
 
     /// Back into the error flow: the value, or `throw` the error.
-    pub fn get(self) throws (E) -> T {
+    pub const fn get(self) throws (E) -> T {
         match self {
             Result::Ok(v) => v,
             Result::Err(e) => throw e,
@@ -56,46 +56,46 @@ impl<T, E> Result<T, E> {
 
     /// The value; panics on `Err`.
     #[track_caller]
-    pub fn unwrap(self) -> T {
+    pub const fn unwrap(self) -> T {
         try! self.get()
     }
 
-    pub fn unwrap_or(self, default: T) -> T {
+    pub const fn unwrap_or(self, default: T) -> T {
         match self {
             Result::Ok(v) => v,
             Result::Err(_) => default,
         }
     }
 
-    pub fn unwrap_or_else(self, f: fn(E) -> T) -> T {
+    pub const fn unwrap_or_else(self, f: fn(E) -> T) -> T {
         match self {
             Result::Ok(v) => v,
             Result::Err(e) => f(e),
         }
     }
 
-    pub fn map<U>(self, f: fn(T) -> U) -> Result<U, E> {
+    pub const fn map<U>(self, f: fn(T) -> U) -> Result<U, E> {
         match self {
             Result::Ok(v) => Result::Ok(f(v)),
             Result::Err(e) => Result::Err(e),
         }
     }
 
-    pub fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
+    pub const fn map_err<F>(self, f: fn(E) -> F) -> Result<T, F> {
         match self {
             Result::Ok(v) => Result::Ok(v),
             Result::Err(e) => Result::Err(f(e)),
         }
     }
 
-    pub fn and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E> {
+    pub const fn and_then<U>(self, f: fn(T) -> Result<U, E>) -> Result<U, E> {
         match self {
             Result::Ok(v) => f(v),
             Result::Err(e) => Result::Err(e),
         }
     }
 
-    pub fn or_else<F>(self, f: fn(E) -> Result<T, F>) -> Result<T, F> {
+    pub const fn or_else<F>(self, f: fn(E) -> Result<T, F>) -> Result<T, F> {
         match self {
             Result::Ok(v) => Result::Ok(v),
             Result::Err(e) => f(e),
@@ -252,7 +252,7 @@ impl Error for InternalError {}
 /// means `throws (any Error)`.
 pub trait Error: Display + Debug {
     /// The error that caused this one, if any.
-    fn source(self) -> any Error | none {
+    const fn source(self) -> any Error | none {
         none
     }
 }

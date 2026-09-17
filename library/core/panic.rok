@@ -6,27 +6,27 @@
 /// `#[track_caller]` chain.
 #[lang("panic_fn")]
 #[track_caller]
-pub fn panic(msg: str) -> ! {
+pub const fn panic(msg: str) -> ! {
     unsafe { rok_panic_at(msg) };
 }
 
 /// Out of memory (Fatal). The runtime's allocation failures end in the
 /// same `rok_oom`.
 #[lang("oom_fn")]
-pub fn oom() -> ! {
+pub const fn oom() -> ! {
     unsafe { rok_oom() };
 }
 
 /// Abort: code the program believed it could never reach ran.
 #[lang("unreachable_fn")]
 #[track_caller]
-pub fn unreachable() -> ! {
+pub const fn unreachable() -> ! {
     unsafe { rok_panic_at("internal error: entered unreachable code") };
 }
 
 /// Abort unless `cond` holds.
 #[track_caller]
-pub fn assert(cond: bool, msg: str = "") {
+pub const fn assert(cond: bool, msg: str = "") {
     if !cond {
         panic(if msg == "" { "assertion failed" } else { f"assertion failed: {msg}" });
     }
@@ -34,7 +34,7 @@ pub fn assert(cond: bool, msg: str = "") {
 
 /// Abort unless `left == right`; the message shows both via `Debug`.
 #[track_caller]
-pub fn assert_eq<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
+pub const fn assert_eq<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
     if !(left == right) {
         panic(assert_failed("==", f"{left:?}", f"{right:?}", msg));
     }
@@ -42,7 +42,7 @@ pub fn assert_eq<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
 
 /// Abort if `left == right`; the message shows both via `Debug`.
 #[track_caller]
-pub fn assert_ne<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
+pub const fn assert_ne<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
     if left == right {
         panic(assert_failed("!=", f"{left:?}", f"{right:?}", msg));
     }

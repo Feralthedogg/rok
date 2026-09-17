@@ -18,7 +18,7 @@ extern "rok" {
     fn rok_stdio_flush() -> i32;
 }
 
-fn at<T>(a: i32) -> Ptr<T> { unsafe { from_exposed_provenance::<T>(a as u32 as usize) } }
+const fn at<T>(a: i32) -> Ptr<T> { unsafe { from_exposed_provenance::<T>(a as u32 as usize) } }
 
 pub unsafe fn load_u8(a: i32) -> u8 { at::<u8>(a).read() }
 pub unsafe fn load_u16(a: i32) -> u16 { at::<u16>(a).read() }
@@ -39,7 +39,7 @@ pub fn f32_from(x: i32) -> f32 { reinterpret(x) }
 pub fn f64_bits(x: f64) -> i64 { reinterpret(x) }
 pub fn f64_from(x: i64) -> f64 { reinterpret(x) }
 
-pub fn char_from(x: i32) -> char {
+pub const fn char_from(x: i32) -> char {
     match char::from_u32(x as u32) {
         c: char => c,
         none => panic("wit: not a char"),
@@ -47,7 +47,7 @@ pub fn char_from(x: i32) -> char {
 }
 
 /// A discriminant out of range.
-pub fn bad_case() -> ! { panic("wit: invalid variant case") }
+pub const fn bad_case() -> ! { panic("wit: invalid variant case") }
 
 /// A block freed by `free`.
 pub unsafe fn free(a: i32) { rok_free(a as u32 as usize); }
@@ -80,7 +80,7 @@ pub struct Blocks {
 }
 
 impl Blocks {
-    pub fn new() -> Blocks { Blocks { list: List::new() } }
+    pub const fn new() -> Blocks { Blocks { list: List::new() } }
 
     /// `size` bytes aligned to `align`; an empty block is the address
     /// `align` (the canonical ABI checks only its alignment).
@@ -132,10 +132,10 @@ pub struct Handle {
 }
 
 impl Handle {
-    pub fn own(h: i32) -> Handle { Handle { cell: [h], owned: true } }
-    pub fn borrowed(h: i32) -> Handle { Handle { cell: [h], owned: false } }
+    pub const fn own(h: i32) -> Handle { Handle { cell: [h], owned: true } }
+    pub const fn borrowed(h: i32) -> Handle { Handle { cell: [h], owned: false } }
 
-    pub fn get(self) -> i32 {
+    pub const fn get(self) -> i32 {
         let h = self.cell[0];
         if h < 0 {
             panic("wit: resource used after it was dropped or passed on");
@@ -144,7 +144,7 @@ impl Handle {
     }
 
     /// The handle, given away (an `own` parameter).
-    pub fn take(self) -> i32 {
+    pub const fn take(self) -> i32 {
         if !self.owned {
             panic("wit: a borrowed resource cannot be passed as `own`");
         }
@@ -154,7 +154,7 @@ impl Handle {
     }
 
     /// The handle to drop, if this value still owns one.
-    pub fn release(self) -> i32 | none {
+    pub const fn release(self) -> i32 | none {
         let h = self.cell[0];
         if !self.owned || h < 0 {
             return none;
@@ -293,7 +293,7 @@ pub struct Waiting {
 
 impl Future for Waiting {
     type Output = i32;
-    fn poll(ref self, ref ctx: Context) -> Poll<i32> {
+    const fn poll(ref self, ref ctx: Context) -> Poll<i32> {
         if self.cell[0] != 0 {
             return Poll::Ready(self.cell[1]);
         }

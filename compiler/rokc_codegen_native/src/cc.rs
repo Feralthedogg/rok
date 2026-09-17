@@ -2,7 +2,8 @@
 //!
 //! A rok function's parameters and result are LLVM first-class values
 //! (spec 8.6.6: the platform C ABI with no variations, as LLVM lowers
-//! the emitter's `func.func` types). LLVM splits an aggregate into its
+//! the emitter's `func.func` types), except aggregates over 64 bytes,
+//! which go by address (`FnLower::rok_shapes`). LLVM splits an aggregate into its
 //! scalar leaves and passes each like a separate argument, so this
 //! backend does the same, leaf by leaf: objects of both backends call
 //! each other. A C function's signature is first classified by

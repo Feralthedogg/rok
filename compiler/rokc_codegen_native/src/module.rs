@@ -469,6 +469,9 @@ fn glue_code(
 
 /// A scalar static's initial bytes (the emitter's `format_const_attr`).
 fn const_bytes(v: &ConstVal, ty: &MirTy, t: &rokc_mir::Target) -> Option<Vec<u8>> {
+    if let (ConstVal::Bytes(b), MirTy::Array(..)) = (v, ty) {
+        return Some(b.clone());
+    }
     let MirTy::Prim(p) = ty else { return None };
     let size = t.size_align(ty).0 as usize;
     let int = |x: i128| Some(x.to_le_bytes()[..size].to_vec());

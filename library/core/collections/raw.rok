@@ -11,9 +11,9 @@ pub struct GcBuf<T> {}
 
 /// The method forms of `buf_new` / `buf_get` / `buf_set` (2.9.12).
 impl<T> GcBuf<T> {
-    pub unsafe fn new(len: usize) -> GcBuf<T> { unsafe { buf_new(len) } }
-    pub unsafe fn get(self, i: usize) -> T { unsafe { buf_get(self, i) } }
-    pub unsafe fn set(self, i: usize, v: T) { unsafe { buf_set(self, i, v); } }
+    pub const unsafe fn new(len: usize) -> GcBuf<T> { unsafe { buf_new(len) } }
+    pub const unsafe fn get(self, i: usize) -> T { unsafe { buf_get(self, i) } }
+    pub const unsafe fn set(self, i: usize, v: T) { unsafe { buf_set(self, i, v); } }
 }
 
 /// A zeroed buffer of `len` elements; `T` comes from the slot's type.
@@ -54,8 +54,11 @@ pub(pkg) fn size_of<T>() -> usize;
 /// `len` as the length of a buffer of `size`-byte elements: panics with
 /// "capacity overflow" when the bytes would not fit one allocation, at
 /// every opt level. Not generic, so it is one function, not one per `T`.
+/// The compile-time evaluator answers a call with `len` without
+/// evaluating `size` (its buffers hold elements, not bytes), so no type
+/// layout is needed there.
 #[track_caller]
-pub(pkg) fn buf_len(len: usize, size: usize) -> usize {
+pub(pkg) const fn buf_len(len: usize, size: usize) -> usize {
     // Head room for the object header.
     if size != 0 && len > (isize::MAX as usize - 4096) / size {
         panic("capacity overflow");
@@ -65,7 +68,7 @@ pub(pkg) fn buf_len(len: usize, size: usize) -> usize {
 
 /// `a + b` for a capacity: panics instead of wrapping.
 #[track_caller]
-pub(pkg) fn cap_add(a: usize, b: usize) -> usize {
+pub(pkg) const fn cap_add(a: usize, b: usize) -> usize {
     let n = a.checked_add(b);
     if n is usize {
         return n;
@@ -75,7 +78,7 @@ pub(pkg) fn cap_add(a: usize, b: usize) -> usize {
 
 /// `a * b` for a capacity: panics instead of wrapping.
 #[track_caller]
-pub(pkg) fn cap_mul(a: usize, b: usize) -> usize {
+pub(pkg) const fn cap_mul(a: usize, b: usize) -> usize {
     let n = a.checked_mul(b);
     if n is usize {
         return n;

@@ -21,8 +21,9 @@ pub use parser::literal::{
     ArgKind, LitRule, LiteralDef, LiteralTable, PatElem, PatKind, Pattern, Shape, collect_literals,
     parse_pattern,
 };
-pub use parser::meta::{MetaDef, MetaKind, MetaTable, collect_meta_blocks};
+pub use parser::meta::{MetaDef, MetaKind, MetaTable, PKG_ROOT, collect_meta_blocks};
 pub use parser::{
-    Parser, VARIADIC_SLICE, parse_expr_file, parse_program, parse_program_ext, parse_program_meta,
+    Parser, VARIADIC_SLICE, include_path, parse_expr_file, parse_program, parse_program_ext,
+    parse_program_meta,
 };
 pub use prec::{Assoc, ExtOps, Fixity, OpEntry, PrecTable, collect_prec_table};

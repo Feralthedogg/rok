@@ -78,7 +78,7 @@ unsafe impl<T: Send> Send for Chan<T> {}
 unsafe impl<T: Send> Sync for Chan<T> {}
 
 impl<T> Chan<T> {
-    fn get(self, i: usize) -> usize {
+    const fn get(self, i: usize) -> usize {
         unsafe {
             self.meta[i]
         }
@@ -98,17 +98,17 @@ impl<T> Chan<T> {
     fn send_key(self) -> usize {
         key(self.meta) + 1
     }
-    fn put(self, i: usize, v: usize) {
+    const fn put(self, i: usize, v: usize) {
         unsafe {
             self.meta[i] = v;
         }
     }
 
-    fn full(self) -> bool {
+    const fn full(self) -> bool {
         self.get(LIMIT) > 0 && self.len() >= self.get(LIMIT)
     }
 
-    fn len(self) -> usize {
+    const fn len(self) -> usize {
         match self.queue {
             q: Deque<T> => q.len(),
             q: Segments<T> => q.len(),
@@ -116,7 +116,7 @@ impl<T> Chan<T> {
     }
 
     // The lock is held for the calls below.
-    fn push(self, v: T) {
+    const fn push(self, v: T) {
         unsafe {
             match self.queue {
                 q: Deque<T> => q.push_back(v),
@@ -126,7 +126,7 @@ impl<T> Chan<T> {
         }
     }
 
-    fn pop(self) -> T {
+    const fn pop(self) -> T {
         unsafe {
             self.meta[POPPED] += 1;
             match self.queue {
@@ -145,7 +145,7 @@ struct Segment<T> {
     next: GcBuf<Segment<T> | none>;
 }
 
-fn segment<T>() -> Segment<T> {
+const fn segment<T>() -> Segment<T> {
     unsafe {
         let next: GcBuf<Segment<T> | none> = buf_new(1);
         next[0] = none;
@@ -164,7 +164,7 @@ struct Segments<T> {
     zero: GcBuf<T>;
 }
 
-fn segments<T>() -> Segments<T> {
+const fn segments<T>() -> Segments<T> {
     unsafe {
         let ends: GcBuf<Segment<T>> = buf_new(2);
         let s = segment();
@@ -175,11 +175,11 @@ fn segments<T>() -> Segments<T> {
 }
 
 impl<T> Segments<T> {
-    fn len(self) -> usize {
+    const fn len(self) -> usize {
         unsafe { self.at[2] }
     }
 
-    fn push(self, v: T) {
+    const fn push(self, v: T) {
         unsafe {
             if self.at[1] == SEGMENT {
                 let s = segment();
@@ -194,7 +194,7 @@ impl<T> Segments<T> {
     }
 
     /// The oldest value; the queue is not empty.
-    fn pop(self) -> T {
+    const fn pop(self) -> T {
         unsafe {
             if self.at[2] == 0 {
                 panic("channel: pop from an empty queue");
@@ -213,7 +213,7 @@ impl<T> Segments<T> {
     }
 }
 
-fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
+const fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
     unsafe {
         let meta: GcBuf<usize> = buf_new(7);
         meta[SENDERS] = 1;
@@ -239,14 +239,14 @@ fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
 }
 
 /// An unbounded channel.
-pub fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
+pub const fn channel<T: Send>() -> (Sender<T>, Receiver<T>) {
     make(0usize, false)
 }
 
 /// A channel holding at most `cap` queued values: `send` blocks while
 /// it is full. `cap` 0 is a rendezvous channel: `send` returns once a
 /// receiver has taken the value.
-pub fn channel_bounded<T: Send>(cap: usize) -> (Sender<T>, Receiver<T>) {
+pub const fn channel_bounded<T: Send>(cap: usize) -> (Sender<T>, Receiver<T>) {
     if cap == 0 {
         return make(1usize, true);
     }
@@ -316,7 +316,7 @@ impl<T> Sender<T> {
     /// `try await tx.send_async(v)` inside async code: like `send`, but
     /// suspends the task (not the thread) while a bounded channel is
     /// full, and on a rendezvous channel until the value is received.
-    pub fn send_async(self, value: T) -> SendFuture<T> {
+    pub const fn send_async(self, value: T) -> SendFuture<T> {
         SendFuture { tx: self, value: value, pushed: false, ticket: 0 }
     }
 
@@ -357,7 +357,7 @@ pub struct Receiver<T> {
 impl<T> Receiver<T> {
     /// `await rx.recv_async()` inside async code: like `recv`, but
     /// suspends the task instead of blocking the thread.
-    pub fn recv_async(self) -> RecvFuture<T> {
+    pub const fn recv_async(self) -> RecvFuture<T> {
         RecvFuture { rx: self }
     }
 
@@ -411,7 +411,7 @@ impl<T> Receiver<T> {
 impl<T> IntoIterator for Receiver<T> {
     type IntoIter = ChannelIter<T>;
     type Item = T;
-    fn into_iter(self) -> ChannelIter<T> {
+    const fn into_iter(self) -> ChannelIter<T> {
         ChannelIter { rx: self }
     }
 }

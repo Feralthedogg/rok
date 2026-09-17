@@ -1049,10 +1049,19 @@ fn aggregate_suite(rng: &mut Rng) -> Suite {
                 r - 1,
                 c - 1
             );
+            // Half the time through a function value (spec 8.6.6 covers
+            // both).
+            let call = if rng.chance(50) {
+                format!(
+                    "let f: fn({arr}, usize, usize) -> {arr} = agg{i};\n        let b = f(a, {y}, {x});"
+                )
+            } else {
+                format!("let b = agg{i}(a, {y}, {x});")
+            };
             s.line(
                 "array",
                 &format!(
-                    "        let a: {arr} = [{}];\n        let b = agg{i}(a, {y}, {x});\n",
+                    "        let a: {arr} = [{}];\n        {call}\n",
                     rows.join(", ")
                 ),
                 &format!("f\"{}\"", get("b")),

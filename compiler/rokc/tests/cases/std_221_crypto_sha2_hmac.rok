@@ -1,0 +1,108 @@
+// expect-exit: 0
+// expect-stdout:
+// sha256 abc ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// sha256 empty e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+// sha256 two 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+// sha256 million-a cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0
+// sha384 abc cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7
+// sha384 two 09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712fcc7c71a557e2db966c3e9fa91746039
+// sha512 abc ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+// sha512 two 8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909
+// sha512 split true
+// digest fork true true
+// hmac256 1 b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+// hmac384 1 afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6
+// hmac512 1 87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854
+// hmac256 2 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+// hmac256 6 60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54
+// hmac512 6 80b24263c7c1a3ebb71493c1dd7be8b49b46d1f41b4aeec1121b013783f8f3526b56d037e05f2598bd0fd2215d6a1e5295e64f73f63f0aec8b915a985d786598
+// hmac verify true false
+// hkdf prk 077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5
+// hkdf okm 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
+// hkdf okm nosalt 8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d9d201395faa4b61a96c8
+// hkdf too long: HKDF output too long
+// ct_eq true false false
+
+// rok::core::crypto: SHA-2 (FIPS 180-4 examples), HMAC (RFC 4231
+// cases 1, 2, 6), HKDF (RFC 5869 cases 1, 3), constant-time compare.
+use rok::core::crypto::sha2::{HashAlgorithm, Digest};
+use rok::core::crypto::hmac::{Hmac, Hkdf};
+use rok::core::crypto::constant_time_eq;
+
+fn hex(b: List<u8>) -> str {
+    let s = "";
+    for x in b { s += f"{x:02x}"; }
+    s
+}
+
+fn unhex(s: str) -> List<u8> {
+    let out: List<u8> = [];
+    let b = s.as_bytes();
+    let i = 0usize;
+    while i + 1 < b.len() {
+        out.push((nib(b[i]) << 4) | nib(b[i + 1]));
+        i += 2;
+    }
+    out
+}
+
+fn nib(c: u8) -> u8 {
+    if c <= 0x39u8 { c - 0x30u8 } else { c - 0x61u8 + 10u8 }
+}
+
+fn main() {
+    let abc = "abc";
+    let two = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+    let two5 = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu";
+    println(f"sha256 abc {hex(HashAlgorithm::Sha256.digest(abc))}");
+    println(f"sha256 empty {hex(HashAlgorithm::Sha256.digest(""))}");
+    println(f"sha256 two {hex(HashAlgorithm::Sha256.digest(two))}");
+    let h = Digest::new(HashAlgorithm::Sha256);
+    let chunk: List<u8> = [];
+    for _ in 0..1000 { chunk.push(0x61u8); }
+    for _ in 0..1000 { h.update(chunk); }
+    println(f"sha256 million-a {hex(h.finish())}");
+    println(f"sha384 abc {hex(HashAlgorithm::Sha384.digest(abc))}");
+    println(f"sha384 two {hex(HashAlgorithm::Sha384.digest(two5))}");
+    println(f"sha512 abc {hex(HashAlgorithm::Sha512.digest(abc))}");
+    println(f"sha512 two {hex(HashAlgorithm::Sha512.digest(two5))}");
+    let s = Digest::new(HashAlgorithm::Sha512);
+    s.update(two5.as_bytes()[0:111]);
+    s.update(two5.as_bytes()[111:112]);
+    println(f"sha512 split {hex(s.finish()) == hex(HashAlgorithm::Sha512.digest(two5))}");
+
+    // A copied Digest forks the running hash.
+    let d = Digest::new(HashAlgorithm::Sha384);
+    d.update("ab");
+    let fork = d;
+    d.update("c");
+    fork.update("c");
+    println(f"digest fork {hex(d.finish()) == hex(HashAlgorithm::Sha384.digest(abc))} {hex(fork.finish()) == hex(d.finish())}");
+
+    let k1 = unhex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");
+    println(f"hmac256 1 {hex(Hmac::mac(HashAlgorithm::Sha256, k1, "Hi There"))}");
+    println(f"hmac384 1 {hex(Hmac::mac(HashAlgorithm::Sha384, k1, "Hi There"))}");
+    println(f"hmac512 1 {hex(Hmac::mac(HashAlgorithm::Sha512, k1, "Hi There"))}");
+    println(f"hmac256 2 {hex(Hmac::mac(HashAlgorithm::Sha256, "Jefe", "what do ya want for nothing?"))}");
+    let k6: List<u8> = [];
+    for _ in 0..131 { k6.push(0xaau8); }
+    let m6 = "Test Using Larger Than Block-Size Key - Hash Key First";
+    println(f"hmac256 6 {hex(Hmac::mac(HashAlgorithm::Sha256, k6, m6))}");
+    println(f"hmac512 6 {hex(Hmac::mac(HashAlgorithm::Sha512, k6, m6))}");
+    let tag = Hmac::mac(HashAlgorithm::Sha256, k1, "Hi There");
+    let bad = Hmac::mac(HashAlgorithm::Sha256, k1, "Hi there");
+    println(f"hmac verify {Hmac::verify(HashAlgorithm::Sha256, k1, "Hi There", tag)} {Hmac::verify(HashAlgorithm::Sha256, k1, "Hi There", bad)}");
+
+    let ikm = unhex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");
+    let prk = Hkdf::extract(HashAlgorithm::Sha256, unhex("000102030405060708090a0b0c"), ikm);
+    println(f"hkdf prk {hex(prk)}");
+    let okm = try Hkdf::expand(HashAlgorithm::Sha256, prk, unhex("f0f1f2f3f4f5f6f7f8f9"), 42) catch _ { [] };
+    println(f"hkdf okm {hex(okm)}");
+    let prk3 = Hkdf::extract(HashAlgorithm::Sha256, "", ikm);
+    let okm3 = try Hkdf::expand(HashAlgorithm::Sha256, prk3, "", 42) catch _ { [] };
+    println(f"hkdf okm nosalt {hex(okm3)}");
+    try Hkdf::expand(HashAlgorithm::Sha256, prk3, "", 255 * 32 + 1) catch e { println(f"hkdf too long: {e}"); };
+    println(f"ct_eq {constant_time_eq("ab", "ab")} {constant_time_eq("ab", "ac")} {constant_time_eq("ab", "a")}");
+}
+
+// spec: std 221-crypto §2.21.1

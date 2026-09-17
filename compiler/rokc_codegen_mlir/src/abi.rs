@@ -286,6 +286,21 @@ pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<Fn
     Some(abi)
 }
 
+/// Aggregates larger than this go between rok functions by address.
+pub const BY_REF_BYTES: u32 = 64;
+
+/// A rok-to-rok argument or result passed by address (spec 8.6.6): an
+/// aggregate over [`BY_REF_BYTES`].
+///
+/// Such an argument is a pointer to the
+/// caller's value, which the callee copies on entry; such a result is
+/// stored through a pointer passed before the arguments, and the
+/// function returns nothing.
+#[must_use]
+pub fn rok_by_ref(ty: &MirTy, target: &Target) -> bool {
+    is_aggregate(ty) && target.size_align(ty).0 > BY_REF_BYTES
+}
+
 /// The type a value of `ty` crosses the C boundary as: the field of a
 /// `#[repr(transparent)]` struct (recursively), else `ty`.
 #[must_use]

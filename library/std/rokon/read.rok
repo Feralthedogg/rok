@@ -21,7 +21,7 @@ struct Tok {
 }
 
 /// `msg` at char index `at` of `cs`, with its 1-based line / column.
-fn fail(cs: List<char>, at: usize, msg: str) -> RokonError {
+const fn fail(cs: List<char>, at: usize, msg: str) -> RokonError {
     let line = 1u32;
     let col = 1u32;
     let i = 0usize;
@@ -44,7 +44,7 @@ fn fail(cs: List<char>, at: usize, msg: str) -> RokonError {
 fn is_ident_start(c: char) -> bool { c == '_' || c.is_alphabetic() }
 fn is_ident_continue(c: char) -> bool { c == '_' || c.is_alphanumeric() }
 
-fn at(cs: List<char>, i: usize) -> char {
+const fn at(cs: List<char>, i: usize) -> char {
     if i < cs.len() { cs[i] } else { '\0' }
 }
 
@@ -341,16 +341,16 @@ impl Reader {
         v
     }
 
-    fn peek(self) -> Tok { self.toks[self.i] }
+    const fn peek(self) -> Tok { self.toks[self.i] }
 
-    fn peek2(self) -> Tok { self.toks[(self.i + 1).min(self.toks.len() - 1)] }
+    const fn peek2(self) -> Tok { self.toks[(self.i + 1).min(self.toks.len() - 1)] }
 
-    fn at_punct(self, p: str) -> bool {
+    const fn at_punct(self, p: str) -> bool {
         let t = self.toks[self.i];
         t.kind == K_PUNCT && t.text == p
     }
 
-    fn err(self, at: usize, msg: str) -> RokonError { fail(self.cs, at, msg) }
+    const fn err(self, at: usize, msg: str) -> RokonError { fail(self.cs, at, msg) }
 
     fn expect(ref self, p: str, what: str) throws (RokonError) {
         if !self.at_punct(p) { throw self.unexpected(self.peek(), what); }
@@ -376,13 +376,13 @@ impl Reader {
     }
 
     /// Enter path segment `seg` (in `locate` mode); the old path.
-    fn enter(ref self, seg: str) -> str {
+    const fn enter(ref self, seg: str) -> str {
         let old = self.path;
         if self.locating { self.path = old + seg; }
         old
     }
 
-    fn mark_key(ref self, at: usize) {
+    const fn mark_key(ref self, at: usize) {
         if self.locating && self.hit_key == 0 && self.path == self.want { self.hit_key = at + 1; }
     }
 

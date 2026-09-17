@@ -13,9 +13,8 @@
 //! intrinsics wrap). Loops and calls are bounded by `STEP_LIMIT` and
 //! `DEPTH_LIMIT`.
 //!
-//! A user function must be a `const fn` to be entered; standard library
-//! (`rok::*`) bodies are entered as long as they stay evaluable, since
-//! the library does not mark its pure functions `const` yet.
+//! Only a `const fn` is entered (spec 5.2.5), standard library ones
+//! included; lifted closures belong to the function that defines them.
 
 // `a` / `b` operands, `p` their primitive, `f` the frame, `v` a value.
 #![allow(clippy::many_single_char_names)]
@@ -30,6 +29,8 @@ use rokc_diagnostic::Span;
 use super::*;
 
 const STEP_LIMIT: u64 = 4_000_000;
+/// `rok::core::collections::raw::buf_len`, a buffer's byte-size check.
+const BUF_LEN: &str = "rok::core::collections::raw::buf_len";
 const DEPTH_LIMIT: u32 = 128;
 
 thread_local! {
@@ -174,6 +175,11 @@ fn from_const(c: &ConstVal, ty: &HirTy) -> Value {
         }
         ConstVal::Char(c) => Value::Char(*c),
         ConstVal::Str(s) => Value::Str(s.as_str().into()),
+        ConstVal::Bytes(b) => Value::Array(
+            b.iter()
+                .map(|&x| Value::Int(i128::from(x), PrimTy::U8))
+                .collect(),
+        ),
         ConstVal::None => Value::None,
     }
 }
@@ -411,8 +417,13 @@ impl<'b> Interp<'b> {
             }
             HirStmt::Continue { label } => return Err(Stop::Continue(label.clone())),
             HirStmt::Panic(e) => {
-                self.expr(e, f)?;
-                return Err(Stop::Fail(e.span, "panicked".to_owned()));
+                // A message that cannot be built now still panics.
+                return match self.expr(e, f) {
+                    Err(Stop::Runtime(..)) | Ok(_) => {
+                        Err(Stop::Fail(e.span, "panicked".to_owned()))
+                    }
+                    Err(stop) => Err(stop),
+                };
             }
         }
         Ok(())
@@ -462,6 +473,13 @@ impl<'b> Interp<'b> {
                 let v = self.expr(operand, f)?;
                 unop(*op, v, span)
             }
+            // A buffer here holds elements, not bytes: its byte-size
+            // check has nothing to check, and its size argument (a type
+            // layout) is never evaluated.
+            K::Call { callee, args } if self.is_buf_len(*callee) => match args.first() {
+                Some(len) => self.expr(len, f),
+                None => Err(Stop::Poisoned),
+            },
             K::Call { callee, args } => {
                 let args = self.exprs(args, f)?;
                 self.call(*callee, args, span)
@@ -670,6 +688,10 @@ impl<'b> Interp<'b> {
         }
     }
 
+    fn is_buf_len(&mut self, id: FunctionId) -> bool {
+        matches!(self.bodies.callee(id), Callee::Body(func, _) if func.name == BUF_LEN)
+    }
+
     fn exprs(&mut self, es: &[HirExpr], f: &mut Frame) -> R<Vec<Value>> {
         es.iter().map(|e| self.expr(e, f)).collect()
     }
@@ -857,6 +879,18 @@ fn pure_extern(name: &str, args: &[Value]) -> Option<Value> {
             i128::from(s.as_bytes().get(int(i)?).copied().unwrap_or(0)),
             PrimTy::U8,
         ),
+        // FNV-1a, as `rokr`'s.
+        ("rok_str_hash", [Value::Str(s)]) => Value::Int(
+            i128::from(s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            })),
+            PrimTy::U64,
+        ),
+        ("rok_str_eq", [Value::Str(a), Value::Str(b)]) => {
+            Value::Int(i128::from(a == b), PrimTy::I32)
+        }
+        ("rok_f64_abs", [Value::Float(x, p)]) => Value::Float(x.abs(), *p),
+        ("rok_f64_trunc", [Value::Float(x, p)]) => Value::Float(x.trunc(), *p),
         ("rok_str_cmp", [Value::Str(a), Value::Str(b)]) => {
             Value::Int(a.as_bytes().cmp(b.as_bytes()) as i128, PrimTy::I32)
         }
@@ -903,6 +937,10 @@ fn evaluable_extern(name: &str) -> bool {
                 | "rok_str_char_count"
                 | "rok_str_byte"
                 | "rok_str_cmp"
+                | "rok_str_hash"
+                | "rok_str_eq"
+                | "rok_f64_abs"
+                | "rok_f64_trunc"
                 | "rok_str_concat"
                 | "rok_str_from_char"
                 | "rok_bytes_slice"
@@ -911,8 +949,8 @@ fn evaluable_extern(name: &str) -> bool {
 
 /// Spec 5.2.5: a `const fn` calls only `const fn`s and reads no
 /// `static`, whether or not it is ever evaluated. Checks the package's
-/// lowered `const fn` bodies (`fns`). Standard library callees count as
-/// `const` when their bodies are, transitively.
+/// lowered `const fn` bodies (`fns`); a lifted closure called there is
+/// checked as part of its definer.
 pub(super) fn check_const_fns(env: &Env<'_>, fns: &[&HirFunction]) {
     let Some(first) = fns.first() else { return };
     let no_subst = HashMap::new();
@@ -940,14 +978,41 @@ fn impure(
     body: &HirBlock,
     memo: &mut HashMap<FunctionId, Option<String>>,
 ) -> Option<(Span, String)> {
+    // A panic's message is never needed: reaching the panic fails the
+    // evaluation anyway (5.2.4).
+    let mut in_panic: std::collections::HashSet<*const HirExpr> = std::collections::HashSet::new();
+    let mark = |b: &HirBlock, in_panic: &mut std::collections::HashSet<*const HirExpr>| {
+        for s in &b.stmts {
+            if let HirStmt::Panic(p) = s {
+                crate::each_expr(p, &mut |x| {
+                    in_panic.insert(std::ptr::from_ref(x));
+                });
+            }
+        }
+    };
+    mark(body, &mut in_panic);
     let mut sites: Vec<(Span, Result<FunctionId, String>)> = Vec::new();
     crate::each_block(body, &mut |e| match &e.kind {
+        _ if in_panic.contains(&std::ptr::from_ref(e)) => {}
+        HirExprKind::Block(b) => mark(b, &mut in_panic),
         HirExprKind::Call { callee, .. } => sites.push((e.span, Ok(*callee))),
         HirExprKind::StaticRef(name) => {
             sites.push((
                 e.span,
                 Err(format!("reads the static `{}`", leaf_name(name))),
             ));
+        }
+        HirExprKind::RawRead { .. } | HirExprKind::RawWrite { .. } | HirExprKind::AddrOf { .. } => {
+            sites.push((e.span, Err("accesses raw memory".to_owned())));
+        }
+        HirExprKind::BufAtomic { .. } => {
+            sites.push((e.span, Err("performs an atomic operation".to_owned())));
+        }
+        HirExprKind::CoroNew { .. } | HirExprKind::Suspend { .. } => {
+            sites.push((e.span, Err("runs a coroutine".to_owned())));
+        }
+        HirExprKind::MlirOp { .. } => {
+            sites.push((e.span, Err("runs an MLIR operation".to_owned())));
         }
         _ => {}
     });
@@ -972,16 +1037,8 @@ fn callee_impure(
     if let Some(r) = memo.get(&id) {
         return r.clone();
     }
-    // A user `const fn` is checked on its own.
-    let user = bodies
-        .ctx
-        .env
-        .sink
-        .fn_origin
-        .borrow()
-        .get(&id)
-        .is_none_or(|o| !o.1);
-    if user && is_const_fn(bodies.ctx, id) {
+    // A `const fn` is checked on its own.
+    if is_const_fn(bodies.ctx, id) {
         return None;
     }
     // Optimistic while in progress (recursion).
@@ -1304,7 +1361,7 @@ impl Bodies for CtxBodies<'_, '_> {
             // Lifted closures / thunks have no origin and belong to
             // their (const) definer.
             let origin = env.sink.fn_origin.borrow().get(&id).copied();
-            if origin == Some((false, false)) {
+            if origin.is_some_and(|(is_const, _)| !is_const) {
                 return Callee::Refused(not_const(&name(&f.name)));
             }
             (f, origin.is_some_and(|(_, std)| std))
@@ -1321,7 +1378,7 @@ impl Bodies for CtxBodies<'_, '_> {
                 .attrs
                 .iter()
                 .any(|a| a.path == [rokc_ast::CONST_FN_ATTR]);
-            if !is_const && !is_std(&module) {
+            if !is_const {
                 return Callee::Refused(not_const(&name(&def.name)));
             }
             if def.body.is_none() {
@@ -1589,6 +1646,18 @@ pub(super) fn static_init(env: &Env<'_>, init_fn: &HirFunction) -> Option<ConstV
     let (Ok(v) | Err(Stop::Return(v))) = interp.block(body, &mut Frame::new()) else {
         return None;
     };
+    if let (HirTy::Array(e, _), Value::Array(vs)) = (&init_fn.ret_ty, &v) {
+        if **e == HirTy::Prim(PrimTy::U8) {
+            return vs
+                .iter()
+                .map(|x| match x {
+                    Value::Int(i, _) => u8::try_from(*i).ok(),
+                    _ => None,
+                })
+                .collect::<Option<Vec<u8>>>()
+                .map(ConstVal::Bytes);
+        }
+    }
     match embed(&ctx, &v, &init_fn.ret_ty, init_fn.span)?.kind {
         HirExprKind::Const(c) => Some(c),
         _ => None,

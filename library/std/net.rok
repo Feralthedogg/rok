@@ -16,14 +16,16 @@
 // suspend a stackless coroutine). Unix sockets reuse the same core; a
 // listener's `accept` gives the peer's bound path (`none`: unnamed)
 // instead of a `SocketAddr`, which has no Unix form. `sendfile` /
-// `splice` are Linux only. No TLS, IPv6 multicast or `MSG_ZEROCOPY`
-// (302.5 / 302.7). `set_*_timeout` applies to the blocking calls only
+// `splice` are Linux only. TLS 1.3 is `tls` (302.5). No IPv6 multicast or
+// `MSG_ZEROCOPY` (302.7). `set_*_timeout` applies to the blocking calls only
 // (`task::timeout` covers async).
 
 use rok::std::io::{IoError, IoErrorKind, RawFd, Reader, Writer, AsBytes, check, would_block, region};
 use rok::std::time::Duration;
 use rok::std::fs::File;
 use rok::std::path::{AsPath, Path};
+
+pub mod tls;
 
 // ---- addresses (302.4) ----
 
@@ -39,30 +41,30 @@ impl Ipv4Addr {
     pub const LOCALHOST: Ipv4Addr = Ipv4Addr { octets: [127u8, 0u8, 0u8, 1u8] };
     pub const UNSPECIFIED: Ipv4Addr = Ipv4Addr { octets: [0u8, 0u8, 0u8, 0u8] };
 
-    pub fn new(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
+    pub const fn new(a: u8, b: u8, c: u8, d: u8) -> Ipv4Addr {
         Ipv4Addr { octets: [a, b, c, d] }
     }
 
     /// The address as a big-endian number (`a.b.c.d` = `a << 24 | ..`).
-    pub fn to_bits(self) -> u32 {
+    pub const fn to_bits(self) -> u32 {
         ((self.octets[0] as u32) << 24) | ((self.octets[1] as u32) << 16)
             | ((self.octets[2] as u32) << 8) | (self.octets[3] as u32)
     }
 
-    pub fn is_loopback(self) -> bool { self.octets[0] == 127u8 }
-    pub fn is_unspecified(self) -> bool { self.to_bits() == 0u32 }
-    pub fn is_multicast(self) -> bool { self.octets[0] >= 224u8 && self.octets[0] <= 239u8 }
+    pub const fn is_loopback(self) -> bool { self.octets[0] == 127u8 }
+    pub const fn is_unspecified(self) -> bool { self.to_bits() == 0u32 }
+    pub const fn is_multicast(self) -> bool { self.octets[0] >= 224u8 && self.octets[0] <= 239u8 }
 }
 
 impl Ipv6Addr {
     pub const LOCALHOST: Ipv6Addr = Ipv6Addr { segments: [0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 1u16] };
     pub const UNSPECIFIED: Ipv6Addr = Ipv6Addr { segments: [0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16, 0u16] };
 
-    pub fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Ipv6Addr {
+    pub const fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Ipv6Addr {
         Ipv6Addr { segments: [a, b, c, d, e, f, g, h] }
     }
 
-    pub fn is_loopback(self) -> bool {
+    pub const fn is_loopback(self) -> bool {
         for i in 0..7 {
             if self.segments[i] != 0u16 { return false; }
         }
@@ -71,18 +73,18 @@ impl Ipv6Addr {
 }
 
 impl PartialEq for Ipv4Addr {
-    fn eq(self, rhs: Ipv4Addr) -> bool { self.to_bits() == rhs.to_bits() }
-    fn ne(self, rhs: Ipv4Addr) -> bool { !self.eq(rhs) }
+    const fn eq(self, rhs: Ipv4Addr) -> bool { self.to_bits() == rhs.to_bits() }
+    const fn ne(self, rhs: Ipv4Addr) -> bool { !self.eq(rhs) }
 }
 
 impl PartialEq for Ipv6Addr {
-    fn eq(self, rhs: Ipv6Addr) -> bool {
+    const fn eq(self, rhs: Ipv6Addr) -> bool {
         for i in 0..8 {
             if self.segments[i] != rhs.segments[i] { return false; }
         }
         true
     }
-    fn ne(self, rhs: Ipv6Addr) -> bool { !self.eq(rhs) }
+    const fn ne(self, rhs: Ipv6Addr) -> bool { !self.eq(rhs) }
 }
 
 impl Display for Ipv4Addr {
@@ -161,38 +163,38 @@ pub enum SocketAddr {
 }
 
 impl SocketAddr {
-    pub fn v4(ip: Ipv4Addr, port: u16) -> SocketAddr {
+    pub const fn v4(ip: Ipv4Addr, port: u16) -> SocketAddr {
         SocketAddr::V4(SocketAddrV4 { ip: ip, port: port })
     }
 
-    pub fn v6(ip: Ipv6Addr, port: u16) -> SocketAddr {
+    pub const fn v6(ip: Ipv6Addr, port: u16) -> SocketAddr {
         SocketAddr::V6(SocketAddrV6 { ip: ip, port: port, flow_info: 0u32, scope_id: 0u32 })
     }
 
-    pub fn port(self) -> u16 {
+    pub const fn port(self) -> u16 {
         match self {
             SocketAddr::V4(a) => a.port,
             SocketAddr::V6(a) => a.port,
         }
     }
 
-    pub fn with_port(self, port: u16) -> SocketAddr {
+    pub const fn with_port(self, port: u16) -> SocketAddr {
         match self {
             SocketAddr::V4(a) => SocketAddr::v4(a.ip, port),
             SocketAddr::V6(a) => SocketAddr::V6(SocketAddrV6 { ip: a.ip, port: port, flow_info: a.flow_info, scope_id: a.scope_id }),
         }
     }
 
-    pub fn is_ipv4(self) -> bool {
+    pub const fn is_ipv4(self) -> bool {
         match self {
             SocketAddr::V4(a) => true,
             SocketAddr::V6(a) => false,
         }
     }
 
-    pub fn is_ipv6(self) -> bool { !self.is_ipv4() }
+    pub const fn is_ipv6(self) -> bool { !self.is_ipv4() }
 
-    fn family(self) -> i32 { if self.is_ipv4() { 4 } else { 6 } }
+    const fn family(self) -> i32 { if self.is_ipv4() { 4 } else { 6 } }
 }
 
 impl PartialEq for SocketAddr {
@@ -215,7 +217,7 @@ impl Debug for SocketAddr {
 
 // ---- parsing ----
 
-fn bad_addr(s: str) -> ParseError {
+const fn bad_addr(s: str) -> ParseError {
     ParseError { input: s, pos: 0, reason: "invalid IP address syntax" }
 }
 
@@ -312,7 +314,7 @@ impl FromStr for SocketAddr {
 
 const ADDR_WORDS: usize = 20;
 
-fn words_of(a: SocketAddr) -> GcBuf<i64> {
+const fn words_of(a: SocketAddr) -> GcBuf<i64> {
     unsafe {
         let w: GcBuf<i64> = buf_new(ADDR_WORDS);
         match a {
@@ -337,7 +339,7 @@ fn words_of(a: SocketAddr) -> GcBuf<i64> {
     }
 }
 
-fn addr_at(w: GcBuf<i64>, at: usize) -> SocketAddr {
+const fn addr_at(w: GcBuf<i64>, at: usize) -> SocketAddr {
     unsafe {
         let b = |i: usize| -> i64 { w[at + 4 + i] };
         let port = w[at + 1] as u16;
@@ -413,7 +415,7 @@ struct Sock {
     opts: GcBuf<i64>;
 }
 
-fn sock_of(fd: i32) -> Sock {
+const fn sock_of(fd: i32) -> Sock {
     unsafe {
         let cell: GcBuf<i32> = buf_new(1);
         cell[0] = fd;
@@ -429,7 +431,7 @@ fn new_sock(family: i32, kind: i32) throws (IoError) -> Sock {
     sock_of(fd as i32)
 }
 
-fn timed_out(what: str) -> IoError {
+const fn timed_out(what: str) -> IoError {
     IoError::with_kind(IoErrorKind::TimedOut, what + ": timed out")
 }
 
@@ -437,7 +439,7 @@ fn timed_out(what: str) -> IoError {
 const CHUNK: usize = 16384;
 
 impl Sock {
-    fn live(self) throws (IoError) -> i32 {
+    const fn live(self) throws (IoError) -> i32 {
         unsafe {
             let fd = self.fd[0];
             if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, "socket is closed"); }
@@ -468,7 +470,7 @@ impl Sock {
         }
     }
 
-    fn set_timeout(self, write: usize, dur: Duration | none) {
+    const fn set_timeout(self, write: usize, dur: Duration | none) {
         unsafe {
             self.opts[1 + write] = match dur {
                 d: Duration => d.as_ns(),
@@ -477,7 +479,7 @@ impl Sock {
         }
     }
 
-    fn timeout(self, write: usize) -> Duration | none {
+    const fn timeout(self, write: usize) -> Duration | none {
         unsafe {
             let ns = self.opts[1 + write];
             if ns < 0i64 { return none; }
@@ -691,7 +693,7 @@ impl TcpStream {
     }
 
     /// The OS socket descriptor (`-1` once closed).
-    pub fn fd(self) -> i32 {
+    pub const fn fd(self) -> i32 {
         unsafe {
             self.sock.fd[0]
         }
@@ -736,7 +738,7 @@ impl TcpStream {
     }
 
     /// Nothing to flush: writes go straight to the socket.
-    pub fn flush(self) throws (IoError) {}
+    pub const fn flush(self) throws (IoError) {}
 
     pub fn peer_addr(self) throws (IoError) -> SocketAddr { try self.sock.addr(1) }
     pub fn local_addr(self) throws (IoError) -> SocketAddr { try self.sock.addr(0) }
@@ -762,13 +764,13 @@ impl TcpStream {
         }
     }
 
-    pub fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
-    pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
-    pub fn read_timeout(self) -> Duration | none { self.sock.timeout(0) }
-    pub fn write_timeout(self) -> Duration | none { self.sock.timeout(1) }
+    pub const fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
+    pub const fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
+    pub const fn read_timeout(self) -> Duration | none { self.sock.timeout(0) }
+    pub const fn write_timeout(self) -> Duration | none { self.sock.timeout(1) }
 
     /// Make the blocking calls throw `WouldBlock` instead of waiting.
-    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+    pub const fn set_nonblocking(self, nb: bool) throws (IoError) {
         unsafe {
             self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
         }
@@ -791,7 +793,7 @@ impl Writer for TcpStream {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.sock.write(buf.byte_slice()) }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.sock.write_all(buf.byte_slice()); }
     fn write_str(ref self, s: str) throws (IoError) { try self.sock.write_all(s.as_bytes()); }
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }
 
 impl Drop for TcpStream {
@@ -861,7 +863,7 @@ impl TcpListener {
         TcpListener { sock: try self.sock.try_clone() }
     }
 
-    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+    pub const fn set_nonblocking(self, nb: bool) throws (IoError) {
         unsafe {
             self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
         }
@@ -869,9 +871,9 @@ impl TcpListener {
 
     /// `for c in l.incoming() { let s = try c.get(); .. }`: connections
     /// forever (each item is the stream or the error `accept` threw).
-    pub fn incoming(self) -> Incoming { Incoming { listener: self } }
+    pub const fn incoming(self) -> Incoming { Incoming { listener: self } }
 
-    pub fn fd(self) -> i32 {
+    pub const fn fd(self) -> i32 {
         unsafe {
             self.sock.fd[0]
         }
@@ -1016,10 +1018,10 @@ impl UdpSocket {
         try self.sock.setopt(6, size as i64);
     }
 
-    pub fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
-    pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
+    pub const fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
+    pub const fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
 
-    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+    pub const fn set_nonblocking(self, nb: bool) throws (IoError) {
         unsafe {
             self.sock.opts[0] = if nb { 1i64 } else { 0i64 };
         }
@@ -1029,7 +1031,7 @@ impl UdpSocket {
         UdpSocket { sock: try self.sock.try_clone() }
     }
 
-    pub fn fd(self) -> i32 {
+    pub const fn fd(self) -> i32 {
         unsafe {
             self.sock.fd[0]
         }
@@ -1130,13 +1132,13 @@ impl UnixListener {
 
     pub fn local_addr(self) throws (IoError) -> Path | none { try unix_path(self.sock, 0) }
 
-    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+    pub const fn set_nonblocking(self, nb: bool) throws (IoError) {
         unsafe { self.sock.opts[0] = if nb { 1i64 } else { 0i64 }; }
     }
 
     pub fn try_clone(self) throws (IoError) -> UnixListener { UnixListener { sock: try self.sock.try_clone() } }
 
-    pub fn fd(self) -> i32 { unsafe { self.sock.fd[0] } }
+    pub const fn fd(self) -> i32 { unsafe { self.sock.fd[0] } }
 
     pub fn close(self) { self.sock.close(); }
 }
@@ -1174,7 +1176,7 @@ impl UnixStream {
 
     pub fn write_str(self, s: str) throws (IoError) { try self.sock.write_all(s.as_bytes()); }
 
-    pub fn flush(self) throws (IoError) {}
+    pub const fn flush(self) throws (IoError) {}
 
     /// `buf` with fd `fd` alongside (`SCM_RIGHTS`): the bytes sent.
     pub fn send_with_fd<B: AsBytes>(self, buf: B, fd: RawFd) throws (IoError) -> usize {
@@ -1213,17 +1215,17 @@ impl UnixStream {
         try check(unsafe { rok_net_shutdown(try self.sock.live(), h) } as i64, "shutdown");
     }
 
-    pub fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
+    pub const fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
 
-    pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
+    pub const fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
 
-    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+    pub const fn set_nonblocking(self, nb: bool) throws (IoError) {
         unsafe { self.sock.opts[0] = if nb { 1i64 } else { 0i64 }; }
     }
 
     pub fn try_clone(self) throws (IoError) -> UnixStream { UnixStream { sock: try self.sock.try_clone() } }
 
-    pub fn fd(self) -> i32 { unsafe { self.sock.fd[0] } }
+    pub const fn fd(self) -> i32 { unsafe { self.sock.fd[0] } }
 
     pub fn close(self) { self.sock.close(); }
 }
@@ -1239,7 +1241,7 @@ impl Writer for UnixStream {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.sock.write(buf.byte_slice()) }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.sock.write_all(buf.byte_slice()); }
     fn write_str(ref self, s: str) throws (IoError) { try self.sock.write_all(s.as_bytes()); }
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }
 
 #[cfg(target_family = "unix")]
@@ -1279,15 +1281,15 @@ impl UnixDatagram {
 
     pub fn local_addr(self) throws (IoError) -> Path | none { try unix_path(self.sock, 0) }
 
-    pub fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
+    pub const fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
 
-    pub fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
+    pub const fn set_write_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(1, dur); }
 
-    pub fn set_nonblocking(self, nb: bool) throws (IoError) {
+    pub const fn set_nonblocking(self, nb: bool) throws (IoError) {
         unsafe { self.sock.opts[0] = if nb { 1i64 } else { 0i64 }; }
     }
 
-    pub fn fd(self) -> i32 { unsafe { self.sock.fd[0] } }
+    pub const fn fd(self) -> i32 { unsafe { self.sock.fd[0] } }
 
     pub fn close(self) { self.sock.close(); }
 }

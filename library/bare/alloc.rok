@@ -25,10 +25,10 @@ pub struct Layout {
 
 impl Layout {
     /// The layout of one `T`.
-    pub fn new<T>() -> Layout { Layout { size: size_of::<T>(), align: align_of::<T>() } }
+    pub const fn new<T>() -> Layout { Layout { size: size_of::<T>(), align: align_of::<T>() } }
 
     /// The layout of `n` `T`s.
-    pub fn array<T>(n: usize) throws (LayoutError) -> Layout {
+    pub const fn array<T>(n: usize) throws (LayoutError) -> Layout {
         let size = size_of::<T>();
         // usize::MAX without overflowing on the way.
         let half = 1usize << (size_of::<usize>() * 8usize - 1usize);
@@ -40,15 +40,15 @@ impl Layout {
     }
 
     /// `align` must be a power of two.
-    pub fn from_size_align(size: usize, align: usize) throws (LayoutError) -> Layout {
+    pub const fn from_size_align(size: usize, align: usize) throws (LayoutError) -> Layout {
         if align == 0 || (align & (align - 1)) != 0 {
             throw LayoutError { reason: "align is not a power of two" };
         }
         Layout { size, align }
     }
 
-    pub fn size(self) -> usize { self.size }
-    pub fn align(self) -> usize { self.align }
+    pub const fn size(self) -> usize { self.size }
+    pub const fn align(self) -> usize { self.align }
 }
 
 pub unsafe fn alloc(layout: Layout) -> CPtr<u8> {
@@ -102,9 +102,9 @@ impl<T> Allocation<T> {
         Allocation { ptr: Ptr::<T>::dangling().with_addr(at), len: n }
     }
 
-    pub fn as_ptr(self) -> Ptr<T> { self.ptr }
-    pub fn as_many(self) -> ManyPtr<T> { self.ptr.as_many() }
-    pub fn len(self) -> usize { self.len }
+    pub const fn as_ptr(self) -> Ptr<T> { self.ptr }
+    pub const fn as_many(self) -> ManyPtr<T> { self.ptr.as_many() }
+    pub const fn len(self) -> usize { self.len }
 }
 
 impl<T> Drop for Allocation<T> {

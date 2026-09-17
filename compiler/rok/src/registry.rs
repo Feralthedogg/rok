@@ -13,6 +13,11 @@
 //! Stone { name: "geom", vers: "0.3.1", deps: [{ name: "num", req: "^1.2", kind: "normal" }], source: Dep::git("https://github.com/o/geom", rev: "<commit>"), cksum: "<tree>", yanked: false }
 //! ```
 //!
+//! A stone with features has `features: { "name": [..] }` after `deps`,
+//! and a dependency `optional: true`, `features: [..]` and
+//! `default_features: false` (each only when not the default), as in
+//! `rok.rokon`.
+//!
 //! Sources are not uploaded: `source` names a git commit, and `cksum` is
 //! that commit's tree hash, checked after the checkout. A dependency
 //! without `registry` is on the same index.
@@ -25,7 +30,7 @@ use std::path::{Path, PathBuf};
 use rokc_rokon::{Decoder, Doc, Kind, Value};
 
 use crate::git::{self, Cache};
-use crate::manifest::{self, GitRef, Manifest, Source};
+use crate::manifest::{self, Dep, Features, GitRef, Manifest, Source};
 use crate::semver::{Req, Version};
 
 /// The index used when neither `ROK_REGISTRY` nor `$ROK_HOME/config.rokon`
@@ -53,6 +58,7 @@ pub fn path(name: &str) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // the line's fields
 pub struct IndexDep {
     pub name: String,
     pub req: String,
@@ -62,6 +68,27 @@ pub struct IndexDep {
     pub native: bool,
     /// Another index (`None`: the stone's own).
     pub registry: Option<String>,
+    pub optional: bool,
+    pub features: Vec<String>,
+    pub default_features: bool,
+}
+
+impl IndexDep {
+    /// As a dependency of a stone from index `url`.
+    pub fn to_dep(&self, url: &str) -> Dep {
+        Dep {
+            optional: self.optional,
+            features: self.features.clone(),
+            default_features: self.default_features,
+            ..Dep::new(
+                self.name.clone(),
+                Source::Registry {
+                    req: self.req.clone(),
+                    registry: Some(self.registry.clone().unwrap_or_else(|| url.to_owned())),
+                },
+            )
+        }
+    }
 }
 
 /// One version of a stone: one line of its file.
@@ -70,6 +97,7 @@ pub struct Entry {
     pub name: String,
     pub vers: Version,
     pub deps: Vec<IndexDep>,
+    pub features: Features,
     /// `source: Dep::git(url, rev: commit)`.
     pub url: String,
     pub rev: String,
@@ -89,6 +117,7 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
         "name",
         "vers",
         "deps",
+        "features",
         "source",
         "cksum",
         "yanked",
@@ -108,7 +137,15 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
         .unwrap_or_default()
     {
         let q = item.record("Req")?;
-        q.only(&["name", "req", "kind", "registry"])?;
+        q.only(&[
+            "name",
+            "req",
+            "kind",
+            "registry",
+            "optional",
+            "features",
+            "default_features",
+        ])?;
         let name = q.req("name")?.string()?;
         manifest::check_name(&name).map_err(|e| q.field_error("name", &e))?;
         let req = q.req("req")?.string()?;
@@ -122,14 +159,59 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
             }
         };
         let registry = q.opt("registry").map(|r| r.string()).transpose()?;
+        let optional = q.opt("optional").map(|o| o.bool()).transpose()?;
+        if optional == Some(true) && (dev || native) {
+            return Err(q.field_error("optional", "only a normal dependency is optional"));
+        }
+        let mut features = Vec::new();
+        for f in q
+            .opt("features")
+            .map(|l| l.list())
+            .transpose()?
+            .unwrap_or_default()
+        {
+            let n = f.string()?;
+            manifest::check_feature(&n).map_err(|e| f.error(&e))?;
+            features.push(n);
+        }
+        if native && !features.is_empty() {
+            return Err(q.field_error("features", "a native package has no features"));
+        }
         deps.push(IndexDep {
             name,
             req,
             dev,
             native,
             registry,
+            optional: optional.unwrap_or(false),
+            features,
+            default_features: q
+                .opt("default_features")
+                .map(|o| o.bool())
+                .transpose()?
+                .unwrap_or(true),
         });
     }
+    let mut features = Features::new();
+    for (k, v) in r
+        .opt("features")
+        .map(|f| f.dict())
+        .transpose()?
+        .unwrap_or_default()
+    {
+        let list = v
+            .list()?
+            .iter()
+            .map(Decoder::string)
+            .collect::<Result<_, _>>()?;
+        features.push((k.string()?, list));
+    }
+    let normal: Vec<Dep> = deps
+        .iter()
+        .filter(|d| !d.dev && !d.native)
+        .map(|d| d.to_dep(""))
+        .collect();
+    manifest::check_features(&features, &normal).map_err(|(_, e)| r.field_error("features", &e))?;
     let src = r.req("source")?;
     let Source::Git {
         url,
@@ -142,6 +224,7 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
         name,
         vers,
         deps,
+        features,
         url,
         rev,
         cksum: string("cksum")?,
@@ -191,6 +274,15 @@ impl Entry {
                 if let Some(r) = &d.registry {
                     f.push(("registry", Value::str(r)));
                 }
+                if d.optional {
+                    f.push(("optional", Value::new(Kind::Bool(true))));
+                }
+                if !d.features.is_empty() {
+                    f.push(("features", manifest::strings(&d.features)));
+                }
+                if !d.default_features {
+                    f.push(("default_features", Value::new(Kind::Bool(false))));
+                }
                 Value::record(None, f)
             })
             .collect();
@@ -198,17 +290,28 @@ impl Entry {
             url: self.url.clone(),
             reference: GitRef::Rev(self.rev.clone()),
         };
+        let features = (!self.features.is_empty()).then(|| {
+            let kv = self
+                .features
+                .iter()
+                .map(|(k, l)| (Value::str(k), manifest::strings(l)))
+                .collect();
+            ("features", Value::new(Kind::Dict(kv)))
+        });
         rokc_rokon::to_line(&Value::record(
             Some("Stone"),
-            vec![
+            [
                 ("name", Value::str(&self.name)),
                 ("vers", Value::str(self.vers.to_string())),
                 ("deps", Value::new(Kind::List(deps))),
+            ]
+            .into_iter()
+            .chain(features)
+            .chain([
                 ("source", source.to_value()),
                 ("cksum", Value::str(&self.cksum)),
                 ("yanked", Value::new(Kind::Bool(self.yanked))),
-            ]
-            .into_iter()
+            ])
             .chain(self.meta.iter().map(|(k, v)| (*k, Value::str(v))))
             .collect(),
         ))
@@ -315,6 +418,9 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
             dev: false,
             native: true,
             registry: registry.clone(),
+            optional: false,
+            features: Vec::new(),
+            default_features: true,
         });
     }
     for (d, dev) in m
@@ -330,6 +436,9 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
                 dev,
                 native: false,
                 registry: registry.clone(),
+                optional: d.optional,
+                features: d.features.clone(),
+                default_features: d.default_features,
             }),
             // A stone's users never build its tests.
             _ if dev => {}
@@ -358,6 +467,7 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
         name,
         vers,
         deps,
+        features: m.features.clone(),
         url,
         rev: git::run(dir, &["rev-parse", "HEAD"])?,
         cksum: git::run(dir, &["rev-parse", "HEAD^{tree}"])?,
@@ -785,7 +895,11 @@ mod tests {
                 dev: false,
                 native: false,
                 registry: None,
+                optional: false,
+                features: Vec::new(),
+                default_features: true,
             }],
+            features: Vec::new(),
             url: "https://github.com/o/geom".into(),
             rev: "c".repeat(40),
             cksum: "t".repeat(40),
@@ -808,6 +922,28 @@ mod tests {
         assert_eq!(back[0], e);
         assert_eq!(back[1].vers.to_string(), "0.4.0");
         assert_eq!(best(&back, &Req::parse("^0.3").unwrap()), Some(&back[0]));
+        // Features round-trip; only what differs from the defaults is written.
+        let mut f = e;
+        f.deps[0].optional = true;
+        f.deps[0].features = vec!["fast".into()];
+        f.deps[0].default_features = false;
+        f.features = vec![
+            ("default".into(), vec!["simd".into()]),
+            ("simd".into(), vec!["dep:num".into(), "num?/x".into()]),
+        ];
+        let fl = f.to_line();
+        assert!(
+            fl.contains(
+                "kind: \"normal\", optional: true, features: [\"fast\"], default_features: false \
+                 }], features: { \"default\": [\"simd\"], \"simd\": [\"dep:num\", \"num?/x\"] }, \
+                 source:"
+            ),
+            "{fl}"
+        );
+        assert_eq!(parse_file(&fl, "f").unwrap()[0], f);
+        let bad = fl.replace("\"dep:num\"", "\"dep:nope\"");
+        let err = parse_file(&bad, "f").unwrap_err();
+        assert!(err.contains("there is no dependency `nope`"), "{err}");
         let e = parse_file(&format!("\n{}", line.replace("rev:", "tag:")), "f").unwrap_err();
         assert!(e.contains("--> f (line 2):1:"), "{e}");
         assert!(e.contains("a stone's source"), "{e}");

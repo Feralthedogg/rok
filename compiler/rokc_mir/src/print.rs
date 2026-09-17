@@ -387,6 +387,9 @@ fn print_const(out: &mut String, c: &ConstVal) {
         ConstVal::Str(s) => {
             let _ = write!(out, "{s:?}");
         }
+        ConstVal::Bytes(b) => {
+            let _ = write!(out, "b{:?}", b.escape_ascii().to_string());
+        }
         ConstVal::None => out.push_str("none"),
     }
 }

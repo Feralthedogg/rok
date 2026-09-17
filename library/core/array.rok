@@ -3,7 +3,7 @@
 // lexicographic (stdlib 2.5.7, 2.13.6, 2.10.9).
 
 impl<T: Clone, const N: usize> Clone for [T; N] {
-    fn clone(self) -> [T; N] {
+    const fn clone(self) -> [T; N] {
         let r = self;
         for i in 0..N {
             r[i] = self[i].clone();
@@ -15,7 +15,7 @@ impl<T: Clone, const N: usize> Clone for [T; N] {
 impl<T: Copy, const N: usize> Copy for [T; N] {}
 
 impl<T: Default, const N: usize> Default for [T; N] {
-    fn default() -> [T; N] {
+    const fn default() -> [T; N] {
         let d: T = rok::core::marker::default_of();
         [d; N]
     }
@@ -33,7 +33,7 @@ impl<T: Debug, const N: usize> Debug for [T; N] {
 }
 
 impl<T: PartialEq, const N: usize> PartialEq for [T; N] {
-    fn eq(self, rhs: [T; N]) -> bool {
+    const fn eq(self, rhs: [T; N]) -> bool {
         for i in 0..N {
             if self[i].ne(rhs[i]) { return false; }
         }
@@ -46,24 +46,24 @@ impl<T: Eq, const N: usize> Eq for [T; N] {}
 
 // Lexicographic, like `List` and tuples (2.5.7).
 impl<T: PartialEq + PartialOrd, const N: usize> PartialOrd for [T; N] {
-    fn lt(self, rhs: [T; N]) -> bool {
+    const fn lt(self, rhs: [T; N]) -> bool {
         for i in 0..N {
             if self[i] != rhs[i] { return self[i] < rhs[i]; }
         }
         false
     }
-    fn le(self, rhs: [T; N]) -> bool {
+    const fn le(self, rhs: [T; N]) -> bool {
         for i in 0..N {
             if self[i] != rhs[i] { return self[i] < rhs[i]; }
         }
         true
     }
-    fn gt(self, rhs: [T; N]) -> bool { rhs.lt(self) }
-    fn ge(self, rhs: [T; N]) -> bool { rhs.le(self) }
+    const fn gt(self, rhs: [T; N]) -> bool { rhs.lt(self) }
+    const fn ge(self, rhs: [T; N]) -> bool { rhs.le(self) }
 }
 
 impl<T: Ord, const N: usize> Ord for [T; N] {
-    fn cmp(self, rhs: [T; N]) -> rok::core::cmp::Ordering {
+    const fn cmp(self, rhs: [T; N]) -> rok::core::cmp::Ordering {
         for i in 0..N {
             let c = self[i].cmp(rhs[i]);
             if !c.is_eq() { return c; }
@@ -73,7 +73,7 @@ impl<T: Ord, const N: usize> Ord for [T; N] {
 }
 
 impl<T: Hash, const N: usize> Hash for [T; N] {
-    fn hash(self) -> u64 {
+    const fn hash(self) -> u64 {
         let h = N as u64;
         for i in 0..N {
             h = ((h << 5) | (h >> 59)) ^ self[i].hash();
@@ -84,6 +84,6 @@ impl<T: Hash, const N: usize> Hash for [T; N] {
 
 impl<T, const N: usize> [T; N] {
     /// The element count `N`.
-    pub fn len(self) -> usize { N }
-    pub fn is_empty(self) -> bool { N == 0 }
+    pub const fn len(self) -> usize { N }
+    pub const fn is_empty(self) -> bool { N == 0 }
 }

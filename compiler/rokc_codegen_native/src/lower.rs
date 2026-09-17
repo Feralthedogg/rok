@@ -6,13 +6,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rokc_codegen_mlir::abi::{ArgAbi, FnAbi, RetAbi};
+use rokc_codegen_mlir::abi::{ArgAbi, FnAbi, RetAbi, rok_by_ref};
 use rokc_codegen_mlir::emit::{cannot_overflow, const_int, gc_object_size, scan_table};
 use rokc_ir_common::{Abi, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 use rokc_mir::gc_abi::{
     CARD_SHIFT, FLAG_CARDED, FLAG_UNLOGGED, GC_FLAGS_OFFSET, GC_WORD_OFFSET, HEADER_SIZE,
     LOS_THRESHOLD, PLAIN_TYPE_ID,
 };
+use rokc_mir::tls_abi;
 use rokc_mir::{BasicBlock, MirFunction, MirTy, Operand, RValue, Statement, Target, Terminator};
 
 use crate::cc::{self, Shape};
@@ -110,10 +111,10 @@ pub struct FnLower<'c, 'a> {
     slots: Vec<Option<Slot>>,
     block_label: HashMap<u32, Label>,
     block_params: HashMap<u32, Vec<LocalId>>,
-    /// Cached thread-local addresses (filled in the prologue).
-    tls: Vec<(SymId, Slot)>,
+    /// This thread's `rok_tls` block address (filled in the prologue).
+    tls: Option<Slot>,
     /// The shadow-stack frame: its slot and the TLS slot of the top.
-    gc_frame: Option<(Slot, Slot)>,
+    gc_frame: Option<(Slot, Mem)>,
     rooted: HashSet<u32>,
     deaths: rokc_mir::Deaths,
     back_edges: HashSet<u32>,
@@ -132,7 +133,7 @@ const fn const_ty(c: &ConstVal) -> MirTy {
         ConstVal::Bool(_) => MirTy::Prim(PrimTy::Bool),
         ConstVal::Str(_) => MirTy::Prim(PrimTy::Str),
         ConstVal::Char(_) => MirTy::Prim(PrimTy::Char),
-        ConstVal::Unit | ConstVal::None => MirTy::Unit,
+        ConstVal::Unit | ConstVal::None | ConstVal::Bytes(_) => MirTy::Unit,
     }
 }
 
@@ -192,7 +193,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             slots,
             block_label,
             block_params,
-            tls: Vec::new(),
+            tls: None,
             gc_frame: None,
             rooted: HashSet::new(),
             deaths: rokc_mir::Deaths::default(),
@@ -284,14 +285,13 @@ impl<'c, 'a> FnLower<'c, 'a> {
 
     // ---- thread-locals, polls, native edges ----
 
-    fn tls(&mut self, name: &str) -> Slot {
-        let sym = self.c.sym(name);
-        if let Some((_, s)) = self.tls.iter().find(|(x, _)| *x == sym) {
-            return *s;
-        }
-        let s = self.out.slot(8, 8);
-        self.tls.push((sym, s));
-        s
+    /// Slot `slot` of this thread's TLS block `rok_tls` (803 §8.3.1):
+    /// the block's address is taken once, in the prologue.
+    fn tls(&mut self, slot: tls_abi::Slot) -> Mem {
+        let out = &mut self.out;
+        let base = *self.tls.get_or_insert_with(|| out.slot(8, 8));
+        let off = slot.offset(self.pw() / 8);
+        Mem::Ind(base, i32::try_from(off).expect("TLS offset"))
     }
 
     fn call_rt(&mut self, name: &str, args: &[(V, K)], ret: Option<(Mem, K)>) {
@@ -344,12 +344,12 @@ impl<'c, 'a> FnLower<'c, 'a> {
     /// Safepoint poll (804 §8.4.1): `rok_runtime_yield` when this
     /// thread's yield flag is set.
     fn poll(&mut self) {
-        let flag = self.tls("rok_tls_yield_flag");
+        let flag = self.tls(tls_abi::YIELD_FLAG);
         let v = self.tmp_k(K::I8);
         self.push(Inst::Mov {
             k: K::I8,
             dst: v,
-            src: V::M(Mem::Ind(flag, 0)),
+            src: V::M(flag),
         });
         let (y, run) = (self.label(), self.label());
         self.push(Inst::Br {
@@ -370,18 +370,18 @@ impl<'c, 'a> FnLower<'c, 'a> {
         } else {
             (0, "rok_leave_native")
         };
-        let st = self.tls("rok_tls_mutator_state");
-        let fl = self.tls("rok_tls_yield_flag");
+        let st = self.tls(tls_abi::MUTATOR_STATE);
+        let fl = self.tls(tls_abi::YIELD_FLAG);
         self.push(Inst::AtomicStore {
             k: K::I8,
-            ptr: Mem::Ind(st, 0),
+            ptr: st,
             src: V::I(state),
         });
         let v = self.tmp_k(K::I8);
         self.push(Inst::AtomicLoad {
             k: K::I8,
             dst: v,
-            ptr: Mem::Ind(fl, 0),
+            ptr: fl,
         });
         let (s, fast) = (self.label(), self.label());
         self.push(Inst::Br {
@@ -573,6 +573,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 Val::M(m)
             }
             ConstVal::Unit | ConstVal::None => self.zero_val(ty),
+            ConstVal::Bytes(_) => unreachable!("MIR lowering expands byte arrays"),
         }
     }
 
@@ -900,6 +901,43 @@ impl<'c, 'a> FnLower<'c, 'a> {
         }
     }
 
+    /// The shapes of a rok signature (spec 8.6.6): a by-address
+    /// argument (`abi::rok_by_ref`) is a pointer word; a by-address
+    /// result comes back through a leading pointer (`true`), nothing
+    /// returned.
+    fn rok_shapes(&self, params: &[MirTy], ret: &MirTy) -> (Vec<Shape>, Option<Shape>, bool) {
+        let t = self.c.t;
+        let lead = rok_by_ref(ret, t);
+        let mut shapes = Vec::new();
+        if lead {
+            shapes.push(cc::coerced("!llvm.ptr"));
+        }
+        shapes.extend(params.iter().map(|p| {
+            if rok_by_ref(p, t) {
+                cc::coerced("!llvm.ptr")
+            } else {
+                cc::shape(p, t)
+            }
+        }));
+        let rs = (*ret != MirTy::Unit && !lead).then(|| cc::shape(ret, t));
+        (shapes, rs, lead)
+    }
+
+    /// The address of `v` (a `ty` value) as a pointer argument.
+    fn addr_arg(&mut self, v: Val, ty: &MirTy) -> Val {
+        let m = match v {
+            Val::M(m) => m,
+            v => {
+                let m = self.tmp(ty);
+                self.store(v, ty, m);
+                m
+            }
+        };
+        let p = self.word_tmp();
+        self.push(Inst::Addr { dst: p, src: m });
+        Val::S(V::M(p), K::I64)
+    }
+
     fn call_rok(
         &mut self,
         callee: Callee,
@@ -909,18 +947,33 @@ impl<'c, 'a> FnLower<'c, 'a> {
         dst: Option<Mem>,
     ) {
         let t = self.c.t;
-        let shapes: Vec<Shape> = params.iter().map(|p| cc::shape(p, t)).collect();
-        let rs = (*ret != MirTy::Unit).then(|| cc::shape(ret, t));
+        let (shapes, rs, lead) = self.rok_shapes(params, ret);
         let locs = cc::assign(self.c.conv, &shapes, rs.as_ref(), false, None);
-        let mut a = Vec::new();
-        for ((v, ty), parts) in args.iter().zip(params).zip(&locs.params) {
-            self.arg_parts(*v, ty, parts, &mut a);
-        }
         let dst = match (dst, ret) {
             (_, MirTy::Unit) => None,
             (Some(d), _) => Some(d),
             (None, r) => Some(self.tmp(r)),
         };
+        let word = MirTy::Prim(PrimTy::Usize);
+        let mut vals: Vec<(Val, &MirTy)> = Vec::new();
+        if let (true, Some(d)) = (lead, dst) {
+            let p = self.word_tmp();
+            self.push(Inst::Addr { dst: p, src: d });
+            vals.push((Val::S(V::M(p), K::I64), &word));
+        }
+        for (v, ty) in args.iter().zip(params) {
+            if rok_by_ref(ty, t) {
+                let p = self.addr_arg(*v, ty);
+                vals.push((p, &word));
+            } else {
+                vals.push((*v, ty));
+            }
+        }
+        let mut a = Vec::new();
+        for ((v, ty), parts) in vals.into_iter().zip(&locs.params) {
+            self.arg_parts(v, ty, parts, &mut a);
+        }
+        let dst = if lead { None } else { dst };
         let (rets, sret) = match (&locs.ret, dst, &rs) {
             (Some(parts), Some(d), Some(sh)) => (
                 parts
@@ -1199,18 +1252,18 @@ impl<'c, 'a> FnLower<'c, 'a> {
             self.call_rt("rok_gc_alloc_slow", &args, Some((obj, w)));
             return obj;
         }
-        let cp = self.tls("rok_tls_tlab_cursor");
-        let lp = self.tls("rok_tls_tlab_limit");
+        let cp = self.tls(tls_abi::TLAB_CURSOR);
+        let lp = self.tls(tls_abi::TLAB_LIMIT);
         let [cur, lim, room] = [(); 3].map(|()| self.word_tmp());
         self.push(Inst::Mov {
             k: w,
             dst: cur,
-            src: V::M(Mem::Ind(cp, 0)),
+            src: V::M(cp),
         });
         self.push(Inst::Mov {
             k: w,
             dst: lim,
-            src: V::M(Mem::Ind(lp, 0)),
+            src: V::M(lp),
         });
         self.push(Inst::Bin {
             op: Bin::Sub,
@@ -1232,7 +1285,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             op: Bin::Add,
             k: w,
             signed: false,
-            dst: Mem::Ind(cp, 0),
+            dst: cp,
             a: V::M(cur),
             b: V::I(i64::from(size)),
         });
@@ -1482,11 +1535,11 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let w = self.word();
         let n = roots.len() as u32;
         let frame = self.out.slot(wb * (2 + n), wb);
-        let top = self.tls("rok_tls_shadow_stack_top");
+        let top = self.tls(tls_abi::SHADOW_STACK_TOP);
         self.push(Inst::Mov {
             k: w,
             dst: Mem::Frame(frame, 0),
-            src: V::M(Mem::Ind(top, 0)),
+            src: V::M(top),
         });
         self.push(Inst::Mov {
             k: w,
@@ -1500,7 +1553,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             });
         }
         self.push(Inst::Addr {
-            dst: Mem::Ind(top, 0),
+            dst: top,
             src: Mem::Frame(frame, 0),
         });
         self.gc_frame = Some((frame, top));
@@ -1513,7 +1566,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             let w = self.word();
             self.push(Inst::Mov {
                 k: w,
-                dst: Mem::Ind(top, 0),
+                dst: top,
                 src: V::M(Mem::Frame(frame, 0)),
             });
         }
@@ -1533,10 +1586,19 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let t = self.c.t;
         let f = self.f;
         // Incoming parameters.
-        let shapes: Vec<Shape> = f.param_tys.iter().map(|p| cc::shape(p, t)).collect();
-        let rs = (f.ret_ty != MirTy::Unit).then(|| cc::shape(&f.ret_ty, t));
+        let (shapes, rs, lead) = self.rok_shapes(&f.param_tys, &f.ret_ty);
         let locs = cc::assign(self.c.conv, &shapes, rs.as_ref(), false, None);
-        if locs.ret.is_none() {
+        let (mut param_locs, mut param_shapes) = (locs.params.iter(), shapes.iter());
+        if lead {
+            // The result's address: returned through like a hidden one.
+            let s = self.out.slot(8, 8);
+            let (parts, _) = (param_locs.next(), param_shapes.next());
+            self.push(Inst::Param {
+                part: parts.expect("result pointer")[0],
+                dst: Mem::Frame(s, 0),
+            });
+            self.sret = Some(s);
+        } else if locs.ret.is_none() {
             let s = self.out.slot(8, 8);
             self.push(Inst::Param {
                 part: Part {
@@ -1549,16 +1611,41 @@ impl<'c, 'a> FnLower<'c, 'a> {
             self.sret = Some(s);
         }
         self.ret_parts.clone_from(&locs.ret);
-        for ((p, parts), sh) in f.params.iter().zip(&locs.params).zip(&shapes) {
+        // A by-address argument: its pointer first, the copy once every
+        // parameter is stored.
+        let mut copies = Vec::new();
+        for (((p, ty), parts), sh) in f
+            .params
+            .iter()
+            .zip(&f.param_tys)
+            .zip(param_locs)
+            .zip(param_shapes)
+        {
             let Some(m) = self.local_mem(*p) else {
                 continue;
             };
+            if rok_by_ref(ty, t) {
+                let s = self.out.slot(8, 8);
+                self.push(Inst::Param {
+                    part: parts[0],
+                    dst: Mem::Frame(s, 0),
+                });
+                copies.push((m, s, t.size_align(ty).0));
+                continue;
+            }
             for (part, l) in parts.iter().zip(&sh.leaves) {
                 self.push(Inst::Param {
                     part: *part,
                     dst: m.at(l.off),
                 });
             }
+        }
+        for (dst, s, size) in copies {
+            self.push(Inst::Copy {
+                dst,
+                src: Mem::Ind(s, 0),
+                size,
+            });
         }
         // After every parameter is stored: an instruction's scratch
         // registers may be argument registers.
@@ -1578,16 +1665,17 @@ impl<'c, 'a> FnLower<'c, 'a> {
             self.block(b);
         }
         self.emit_panics();
-        // The thread-local addresses, right after the parameters.
-        let tls: Vec<Inst> = self
-            .tls
-            .iter()
-            .map(|(sym, s)| Inst::Tls {
-                dst: Mem::Frame(*s, 0),
-                sym: *sym,
-            })
-            .collect();
-        self.out.insts.splice(head..head, tls);
+        // The TLS block's address, right after the parameters.
+        if let Some(s) = self.tls {
+            let sym = self.c.sym("rok_tls");
+            self.out.insts.insert(
+                head,
+                Inst::Tls {
+                    dst: Mem::Frame(s, 0),
+                    sym,
+                },
+            );
+        }
         if self.c.debug.is_some() && f.span.line != 0 {
             self.out.debug = Some(self.debug_facts());
         }

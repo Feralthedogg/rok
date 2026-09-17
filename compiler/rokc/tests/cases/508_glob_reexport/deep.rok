@@ -1,0 +1,6 @@
+pub mod inner {
+    pub fn h() -> i32 { 7 }
+    pub fn d() -> i32 { 5 }
+}
+pub const LIMIT: i32 = 11;
+pub static COUNT: i32 = 12;

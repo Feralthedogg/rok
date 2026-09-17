@@ -1,0 +1,25 @@
+// spec: 002.03-struct
+// expect-exit: 0
+// expect-stdout: 0 2 3 1 0 1 [0]
+
+// Spec 2.3.3 / 5.2.5: a field default holding a collection of user
+// structs (empty or not) or a `Dict` is checked at compile time without
+// any type layout, and built at run time for each instance.
+struct Route { path: str; hits: i32; }
+
+struct Config {
+    routes: List<Route> = [];
+    seeds: List<Route> = [Route { path: "/", hits: 1 }, Route { path: "/a", hits: 2 }];
+    names: Dict<str, i32> = {"a": 1, "b": 2, "c": 3};
+    grid: List<List<Route>> = [[]];
+    pins: List<[i64; 2]> = [];
+}
+
+fn main() -> i32 {
+    let c = Config {};
+    c.routes.push(Route { path: "/x", hits: 0 });
+    let d = Config {};
+    let s = d.seeds[0];
+    println(f"{d.routes.len()} {d.seeds.len()} {d.names.len()} {s.hits} {d.pins.len()} {d.grid.len()} [{d.grid[0].len()}]");
+    return 0;
+}

@@ -133,6 +133,9 @@ build options:
                                each after the ones before it), or a prebuilt
                                <name>.rokhir / lib<name>.a; importable as
                                `use name::..` (repeatable; `rok` passes these)
+  --extern-feature <name>=<f>  build source dependency <name> with
+                               cfg feature=<f> (repeatable; `--cfg
+                               feature=..` is the package's own)
   --name <name>                the package name (default: its directory's;
                                `rok` passes rok.rokon's `name`); a
                                library's is in its symbols
@@ -178,6 +181,8 @@ struct Args {
     emit: Vec<EmitKind>,
     bootstrap: Vec<PathBuf>,
     externs: Vec<(String, PathBuf)>,
+    /// `--extern-feature <name>=<f>`: `(code name, feature)`.
+    extern_features: Vec<(String, String)>,
     /// `--name`: a library build's package name.
     name: Option<String>,
     target_dir: Option<PathBuf>,
@@ -324,6 +329,19 @@ fn parse_args(raw: Vec<String>) -> Args {
             "--cfg" => a.cfg.push(value(&name, inline, &mut it)),
             "--print" => a.print = Some(value(&name, inline, &mut it)),
             "--extern" => a.externs.push(parse_extern(&value(&name, inline, &mut it))),
+            "--extern-feature" => {
+                let v = value(&name, inline, &mut it);
+                let Some((dep, f)) = v
+                    .split_once('=')
+                    .filter(|(d, f)| !d.is_empty() && !f.is_empty())
+                else {
+                    usage_error(&format!(
+                        "`--extern-feature {v}`: expected <name>=<feature>"
+                    ));
+                };
+                a.extern_features
+                    .push((dep.replace('-', "_"), f.to_owned()));
+            }
             "--name" => a.name = Some(value(&name, inline, &mut it)),
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
             "--target" => a.target = Some(value(&name, inline, &mut it)),
@@ -812,6 +830,7 @@ fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
     let build = DepBuild {
         bootstrap: &a.bootstrap,
         cfg: &a.cfg,
+        features: &a.extern_features,
         opts: &a.opts,
         target: a.spec(),
         dir: &dir,

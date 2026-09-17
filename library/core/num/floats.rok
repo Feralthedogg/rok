@@ -32,26 +32,26 @@ impl f64 {
     pub const LOG2_E: f64 = 1.44269504088896340735992468100189214;
     pub const LOG10_E: f64 = 0.434294481903251827651128918916605082;
 
-    pub fn nan() -> f64 { f64::NAN }
-    pub fn infinity() -> f64 { f64::INFINITY }
-    pub fn neg_infinity() -> f64 { f64::NEG_INFINITY }
+    pub const fn nan() -> f64 { f64::NAN }
+    pub const fn infinity() -> f64 { f64::INFINITY }
+    pub const fn neg_infinity() -> f64 { f64::NEG_INFINITY }
     /// The gap between `1.0` and the next f64 (`EPSILON`).
-    pub fn epsilon() -> f64 { f64::EPSILON }
+    pub const fn epsilon() -> f64 { f64::EPSILON }
 
     /// The IEEE 754 bit pattern.
-    pub fn to_bits(self) -> u64 { unsafe { F64Bits { f: self }.u } }
-    pub fn from_bits(bits: u64) -> f64 { unsafe { F64Bits { u: bits }.f } }
+    pub const fn to_bits(self) -> u64 { unsafe { F64Bits { f: self }.u } }
+    pub const fn from_bits(bits: u64) -> f64 { unsafe { F64Bits { u: bits }.f } }
 
-    pub fn is_nan(self) -> bool { self != self }
-    pub fn is_infinite(self) -> bool { self.to_bits() & 0x7fffffffffffffff == 0x7ff0000000000000 }
-    pub fn is_finite(self) -> bool { self.to_bits() & 0x7ff0000000000000 != 0x7ff0000000000000 }
+    pub const fn is_nan(self) -> bool { self != self }
+    pub const fn is_infinite(self) -> bool { self.to_bits() & 0x7fffffffffffffff == 0x7ff0000000000000 }
+    pub const fn is_finite(self) -> bool { self.to_bits() & 0x7ff0000000000000 != 0x7ff0000000000000 }
     /// Neither zero, subnormal, infinite nor NaN.
-    pub fn is_normal(self) -> bool {
+    pub const fn is_normal(self) -> bool {
         let e = self.to_bits() & 0x7ff0000000000000;
         e != 0 && e != 0x7ff0000000000000
     }
-    pub fn is_sign_positive(self) -> bool { self.to_bits() & 0x8000000000000000 == 0 }
-    pub fn is_sign_negative(self) -> bool { self.to_bits() & 0x8000000000000000 != 0 }
+    pub const fn is_sign_positive(self) -> bool { self.to_bits() & 0x8000000000000000 == 0 }
+    pub const fn is_sign_negative(self) -> bool { self.to_bits() & 0x8000000000000000 != 0 }
 
     /// Largest integer `<= self`.
     pub fn floor(self) -> f64 { unsafe { rok_f64_floor(self) } }
@@ -60,8 +60,8 @@ impl f64 {
     /// Nearest integer, halves away from zero.
     pub fn round(self) -> f64 { unsafe { rok_f64_round(self) } }
     /// Integer part (toward zero).
-    pub fn trunc(self) -> f64 { unsafe { rok_f64_trunc(self) } }
-    pub fn abs(self) -> f64 { unsafe { rok_f64_abs(self) } }
+    pub const fn trunc(self) -> f64 { unsafe { rok_f64_trunc(self) } }
+    pub const fn abs(self) -> f64 { unsafe { rok_f64_abs(self) } }
     pub fn cbrt(self) -> f64 { unsafe { rok_f64_cbrt(self) } }
     /// `e^self`.
     pub fn exp(self) -> f64 { unsafe { rok_f64_exp(self) } }
@@ -88,17 +88,17 @@ impl f64 {
     pub fn acosh(self) -> f64 { unsafe { rok_f64_acosh(self) } }
     pub fn atanh(self) -> f64 { unsafe { rok_f64_atanh(self) } }
     /// `self - self.trunc()`.
-    pub fn fract(self) -> f64 { self - self.trunc() }
+    pub const fn fract(self) -> f64 { self - self.trunc() }
     /// `-1.0` / `1.0` by sign; zeros and NaN are returned as they are
     /// (spec 2.1.4: `-1.0, 0.0, or 1.0`).
-    pub fn signum(self) -> f64 {
+    pub const fn signum(self) -> f64 {
         if self > 0.0 { return 1.0; }
         if self < 0.0 { return -1.0; }
         self
     }
-    pub fn recip(self) -> f64 { 1.0 / self }
-    pub fn to_degrees(self) -> f64 { self * (180.0 / f64::PI) }
-    pub fn to_radians(self) -> f64 { self * (f64::PI / 180.0) }
+    pub const fn recip(self) -> f64 { 1.0 / self }
+    pub const fn to_degrees(self) -> f64 { self * (180.0 / f64::PI) }
+    pub const fn to_radians(self) -> f64 { self * (f64::PI / 180.0) }
     /// `ln(self) / ln(base)`.
     pub fn log(self, base: f64) -> f64 { self.ln() / base.ln() }
     /// `self^exp` (spec 2.1.4; `powf` in Rust).
@@ -118,19 +118,19 @@ impl f64 {
     /// `self * a + b` with one rounding.
     pub fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { rok_f64_mul_add(self, a, b) } }
     /// `self` limited to `lo..=hi`; NaN stays NaN.
-    pub fn clamp(self, lo: f64, hi: f64) -> f64 {
+    pub const fn clamp(self, lo: f64, hi: f64) -> f64 {
         if self < lo { return lo; }
         if self > hi { return hi; }
         self
     }
-    pub fn div_euclid(self, rhs: f64) -> f64 {
+    pub const fn div_euclid(self, rhs: f64) -> f64 {
         let q = (self / rhs).trunc();
         if self % rhs < 0.0 {
             return if rhs > 0.0 { q - 1.0 } else { q + 1.0 };
         }
         q
     }
-    pub fn rem_euclid(self, rhs: f64) -> f64 {
+    pub const fn rem_euclid(self, rhs: f64) -> f64 {
         let r = self % rhs;
         if r < 0.0 { r + rhs.abs() } else { r }
     }
@@ -164,26 +164,26 @@ impl f32 {
     pub const LOG2_E: f32 = 1.44269504088896340735992468100189214;
     pub const LOG10_E: f32 = 0.434294481903251827651128918916605082;
 
-    pub fn nan() -> f32 { f32::NAN }
-    pub fn infinity() -> f32 { f32::INFINITY }
-    pub fn neg_infinity() -> f32 { f32::NEG_INFINITY }
+    pub const fn nan() -> f32 { f32::NAN }
+    pub const fn infinity() -> f32 { f32::INFINITY }
+    pub const fn neg_infinity() -> f32 { f32::NEG_INFINITY }
     /// The gap between `1.0` and the next f32 (`EPSILON`).
-    pub fn epsilon() -> f32 { f32::EPSILON }
+    pub const fn epsilon() -> f32 { f32::EPSILON }
 
     /// The IEEE 754 bit pattern.
-    pub fn to_bits(self) -> u32 { unsafe { F32Bits { f: self }.u } }
-    pub fn from_bits(bits: u32) -> f32 { unsafe { F32Bits { u: bits }.f } }
+    pub const fn to_bits(self) -> u32 { unsafe { F32Bits { f: self }.u } }
+    pub const fn from_bits(bits: u32) -> f32 { unsafe { F32Bits { u: bits }.f } }
 
-    pub fn is_nan(self) -> bool { self != self }
-    pub fn is_infinite(self) -> bool { self.to_bits() & 0x7fffffff == 0x7f800000 }
-    pub fn is_finite(self) -> bool { self.to_bits() & 0x7f800000 != 0x7f800000 }
+    pub const fn is_nan(self) -> bool { self != self }
+    pub const fn is_infinite(self) -> bool { self.to_bits() & 0x7fffffff == 0x7f800000 }
+    pub const fn is_finite(self) -> bool { self.to_bits() & 0x7f800000 != 0x7f800000 }
     /// Neither zero, subnormal, infinite nor NaN.
-    pub fn is_normal(self) -> bool {
+    pub const fn is_normal(self) -> bool {
         let e = self.to_bits() & 0x7f800000;
         e != 0 && e != 0x7f800000
     }
-    pub fn is_sign_positive(self) -> bool { self.to_bits() & 0x80000000 == 0 }
-    pub fn is_sign_negative(self) -> bool { self.to_bits() & 0x80000000 != 0 }
+    pub const fn is_sign_positive(self) -> bool { self.to_bits() & 0x80000000 == 0 }
+    pub const fn is_sign_negative(self) -> bool { self.to_bits() & 0x80000000 != 0 }
 
     /// Largest integer `<= self`.
     pub fn floor(self) -> f32 { unsafe { rok_f32_floor(self) } }
@@ -223,14 +223,14 @@ impl f32 {
     pub fn fract(self) -> f32 { self - self.trunc() }
     /// `-1.0` / `1.0` by sign; zeros and NaN are returned as they are
     /// (spec 2.1.4: `-1.0, 0.0, or 1.0`).
-    pub fn signum(self) -> f32 {
+    pub const fn signum(self) -> f32 {
         if self > 0.0 { return 1.0; }
         if self < 0.0 { return -1.0; }
         self
     }
-    pub fn recip(self) -> f32 { 1.0 / self }
-    pub fn to_degrees(self) -> f32 { self * (180.0 / f32::PI) }
-    pub fn to_radians(self) -> f32 { self * (f32::PI / 180.0) }
+    pub const fn recip(self) -> f32 { 1.0 / self }
+    pub const fn to_degrees(self) -> f32 { self * (180.0 / f32::PI) }
+    pub const fn to_radians(self) -> f32 { self * (f32::PI / 180.0) }
     /// `ln(self) / ln(base)`.
     pub fn log(self, base: f32) -> f32 { self.ln() / base.ln() }
     /// `self^exp` (spec 2.1.4; `powf` in Rust).
@@ -250,7 +250,7 @@ impl f32 {
     /// `self * a + b` with one rounding.
     pub fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { rok_f32_mul_add(self, a, b) } }
     /// `self` limited to `lo..=hi`; NaN stays NaN.
-    pub fn clamp(self, lo: f32, hi: f32) -> f32 {
+    pub const fn clamp(self, lo: f32, hi: f32) -> f32 {
         if self < lo { return lo; }
         if self > hi { return hi; }
         self

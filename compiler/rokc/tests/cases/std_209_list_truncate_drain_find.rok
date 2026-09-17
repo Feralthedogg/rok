@@ -1,0 +1,40 @@
+// spec: std 209-collections §2.9.2
+// expect-exit: 0
+// expect-stdout:
+// [1, 2, 3] 3
+// [1, 2, 3]
+// [] 0
+// [2, 3] [1, 4, 5]
+// [] [1, 4, 5]
+// [1, 4, 5] []
+// 2 none 0 none
+// 4 0 6
+// 0 none
+
+// `truncate` keeps a prefix; `drain(a..b)` removes and returns the
+// elements in `a..b`; byte search on `Slice<u8>` and `List<u8>`.
+fn main() -> i32 {
+    let xs: List<i32> = [1, 2, 3, 4, 5];
+    xs.truncate(3);
+    println(f"{xs:?} {xs.len()}");
+    xs.truncate(10);
+    println(f"{xs:?}");
+    let e: List<i32> = [];
+    e.truncate(0);
+    println(f"{e:?} {e.len()}");
+
+    let ys: List<i32> = [1, 2, 3, 4, 5];
+    let mid = ys.drain(1..3);
+    println(f"{mid:?} {ys:?}");
+    println(f"{ys.drain(1..1):?} {ys:?}");
+    println(f"{ys.drain(0..3):?} {ys:?}");
+
+    let hay: List<u8> = [104, 101, 108, 108, 111];
+    let s: Slice<u8> = hay[:];
+    println(f"{s.find(b"ll"):?} {s.find(b"lo!"):?} {s.find(b""):?} {s.find(b"x"):?}");
+    let needle: List<u8> = [111];
+    println(f"{hay.find(needle):?} {hay[1:].find(b"e"):?} {b"GET / HTTP/1.1"[:].find(b"HTTP"):?}");
+    let tail: Slice<u8> = hay[2:];
+    println(f"{tail.find(tail):?} {tail.find(hay):?}");
+    0
+}

@@ -11,14 +11,14 @@ pub enum Poll<T> {
 }
 
 impl<T> Poll<T> {
-    pub fn is_ready(self) -> bool {
+    pub const fn is_ready(self) -> bool {
         match self {
             Poll::Ready(_) => true,
             Poll::Pending => false,
         }
     }
 
-    pub fn is_pending(self) -> bool {
+    pub const fn is_pending(self) -> bool {
         !self.is_ready()
     }
 }
@@ -35,7 +35,7 @@ impl Waker {
         rok::core::task::wake_task(self.task);
     }
 
-    pub fn clone(self) -> Waker {
+    pub const fn clone(self) -> Waker {
         self
     }
 }
@@ -46,11 +46,11 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn from_waker(waker: Waker) -> Context {
+    pub const fn from_waker(waker: Waker) -> Context {
         Context { waker: waker }
     }
 
-    pub fn waker(self) -> Waker {
+    pub const fn waker(self) -> Waker {
         self.waker
     }
 }
@@ -73,7 +73,7 @@ pub trait IntoFuture {
 impl<F: Future> IntoFuture for F {
     type Output = F::Output;
     type IntoFuture = F;
-    fn into_future(self) -> F { self }
+    const fn into_future(self) -> F { self }
 }
 
 /// The value of an `async fn` call / `async { .. }` block: `resume` runs
@@ -92,7 +92,7 @@ unsafe impl<T: Send, E: Send> Send for TryAsyncFuture<T, E> {}
 
 impl<T> Future for AsyncFuture<T> {
     type Output = T;
-    fn poll(ref self, ref ctx: Context) -> Poll<T> {
+    const fn poll(ref self, ref ctx: Context) -> Poll<T> {
         (self.resume)(ctx)
     }
 }
@@ -106,7 +106,7 @@ pub struct TryAsyncFuture<T, E> {
 }
 
 impl<T, E> TryAsyncFuture<T, E> {
-    pub fn poll(ref self, ref ctx: Context) throws (E) -> Poll<T> {
+    pub const fn poll(ref self, ref ctx: Context) throws (E) -> Poll<T> {
         try (self.resume)(ctx)
     }
 }

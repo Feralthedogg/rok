@@ -514,14 +514,21 @@ impl Repl {
             return;
         }
         let Some(out) = run("deps", &[]) else { return };
-        // `name=<lib.rok>` lines, then native packages' rokc arguments
+        // `name=<lib.rok>` lines, each followed by its
+        // `--extern-feature=name=<f>` lines, then native packages' rokc arguments
         // (`-L<dir>`, `-l<kind>=<name>`, `--native-runtime=<file>`), each
         // under a `# native ..` line. New ones join the session's.
         let text = String::from_utf8_lossy(&out.stdout);
         let o = &mut self.opts;
         let mut deps: Vec<(String, PathBuf)> = Vec::new();
+        let mut features: Vec<(String, String)> = Vec::new();
         for l in text.lines().filter(|l| !l.starts_with('#')) {
-            if let Some(d) = l.strip_prefix("-L") {
+            if let Some((n, f)) = l
+                .strip_prefix("--extern-feature=")
+                .and_then(|v| v.split_once('='))
+            {
+                features.push((n.to_owned(), f.to_owned()));
+            } else if let Some(d) = l.strip_prefix("-L") {
                 push_new(&mut o.lib_dirs, PathBuf::from(d));
             } else if let Some(f) = l.strip_prefix("--native-runtime=") {
                 push_new(&mut o.runtime_files, PathBuf::from(f));
@@ -535,6 +542,7 @@ impl Repl {
         let build = rokc_interface::DepBuild {
             bootstrap: &self.bootstrap,
             cfg: &[],
+            features: &features,
             opts: &self.opts,
             target: rokc_interface::TargetSpec::host(),
             dir: &self.deps_dir,

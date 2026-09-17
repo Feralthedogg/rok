@@ -1,0 +1,185 @@
+// RSA signature verification (RFC 8017): PKCS #1 v1.5 and PSS (MGF1
+// with the message hash, salt as long as the hash), moduli of 2048 to
+// 4096 bits.
+
+use sup::{view, Bytes, constant_time_eq};
+use sup::sha2::{HashAlgorithm, Digest};
+use sup::bignum::{Nat, Modulus};
+
+/// An RSA public key `(n, e)`.
+pub struct RsaPublicKey {
+    md: Modulus;
+    e: List<u8>;
+    bits: usize;
+}
+
+/// `b` without its leading zero bytes.
+fn strip(b: Slice<u8>) -> Slice<u8> {
+    let i = 0usize;
+    while i < b.len() && b[i] == 0u8 { i += 1; }
+    b[i:b.len()]
+}
+
+/// A DER length at `s[at..]`: the length and the index past it
+/// (definite, minimal, below 2^16).
+fn der_len(s: Slice<u8>, at: usize) -> (usize, usize) | none {
+    if at >= s.len() { return none; }
+    let b = s[at];
+    if b < 0x80u8 { return (b as usize, at + 1); }
+    if b == 0x81u8 {
+        if at + 1 >= s.len() || s[at + 1] < 0x80u8 { return none; }
+        return (s[at + 1] as usize, at + 2);
+    }
+    if b == 0x82u8 {
+        if at + 2 >= s.len() || s[at + 1] == 0u8 { return none; }
+        return (((s[at + 1] as usize) << 8) | (s[at + 2] as usize), at + 3);
+    }
+    none
+}
+
+/// A positive DER INTEGER at `s[at..]`: its magnitude and the index
+/// past it.
+fn der_uint(s: Slice<u8>, at: usize) -> (Slice<u8>, usize) | none {
+    if at >= s.len() || s[at] != 0x02u8 { return none; }
+    let t1: (usize, usize) = der_len(s, at + 1) else { return none; };
+    let (len, start) = t1;
+    if len == 0 || start + len > s.len() { return none; }
+    let v = s[start:start + len];
+    if v[0] >= 0x80u8 { return none; }
+    if v[0] == 0u8 && len > 1 && v[1] < 0x80u8 { return none; }
+    (strip(v), start + len)
+}
+
+/// The DER `DigestInfo` prefix of `hash` (RFC 8017 9.2 note 1).
+fn digest_info(hash: HashAlgorithm) -> List<u8> {
+    let id = match hash {
+        HashAlgorithm::Sha256 => 1u8,
+        HashAlgorithm::Sha384 => 2u8,
+        HashAlgorithm::Sha512 => 3u8,
+    };
+    let hl = hash.output_len() as u8;
+    [0x30u8, 0x0du8 + 4u8 + hl, 0x30u8, 0x0du8, 0x06u8, 0x09u8, 0x60u8, 0x86u8, 0x48u8, 0x01u8,
+        0x65u8, 0x03u8, 0x04u8, 0x02u8, id, 0x05u8, 0x00u8, 0x04u8, hl]
+}
+
+/// MGF1 (RFC 8017 B.2.1): `len` bytes from `seed`.
+fn mgf1(hash: HashAlgorithm, seed: Slice<u8>, len: usize) -> List<u8> {
+    let out: List<u8> = List::with_capacity(len);
+    let c = 0u32;
+    while out.len() < len {
+        let d = Digest::new(hash);
+        d.update(seed);
+        d.update([(c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8]);
+        for x in d.finish() {
+            if out.len() < len { out.push(x); }
+        }
+        c += 1u32;
+    }
+    out
+}
+
+impl RsaPublicKey {
+    /// From big-endian `n` and `e`: `n` odd, 2048 to 4096 bits; `e` odd,
+    /// at least 3, below `n`.
+    pub fn new(n: Bytes, e: Bytes) throws (ValueError) -> RsaPublicKey {
+        let nb = strip(view(n));
+        let eb = strip(view(e));
+        if nb.len() == 0 || nb.len() > 512 {
+            throw ValueError { msg: "RSA modulus must be 2048 to 4096 bits" };
+        }
+        let m: List<u32> = Nat::from_be(nb, (nb.len() + 3) / 4) else { throw ValueError { msg: "bad RSA modulus" }; };
+        let bits = Nat::bits(m);
+        if bits < 2048 || bits > 4096 {
+            throw ValueError { msg: "RSA modulus must be 2048 to 4096 bits" };
+        }
+        if m[0] & 1u32 == 0u32 {
+            throw ValueError { msg: "RSA modulus must be odd" };
+        }
+        if eb.len() == 0 || eb.len() >= nb.len() || eb[eb.len() - 1] & 1u8 == 0u8 || (eb.len() == 1 && eb[0] < 3u8) {
+            throw ValueError { msg: "RSA exponent must be odd, at least 3 and below the modulus" };
+        }
+        RsaPublicKey { md: Modulus::new(m), e: eb.to_list(), bits }
+    }
+
+    /// From a DER `RSAPublicKey ::= SEQUENCE { modulus INTEGER,
+    /// publicExponent INTEGER }`.
+    pub fn from_pkcs1_der(der: Bytes) throws (ValueError) -> RsaPublicKey {
+        let s = view(der);
+        let bad = ValueError { msg: "malformed RSAPublicKey" };
+        if s.len() < 2 || s[0] != 0x30u8 { throw bad; }
+        let t2: (usize, usize) = der_len(s, 1) else { throw bad; };
+        let (len, at) = t2;
+        if at + len != s.len() { throw bad; }
+        let t3: (Slice<u8>, usize) = der_uint(s, at) else { throw bad; };
+        let (n, next) = t3;
+        let t4: (Slice<u8>, usize) = der_uint(s, next) else { throw bad; };
+        let (e, end) = t4;
+        if end != s.len() { throw bad; }
+        try RsaPublicKey::new(n, e)
+    }
+
+    pub fn bits(self) -> usize { self.bits }
+
+    /// `signature^e mod n` as `k` bytes; `none` if the signature is not
+    /// `k` bytes or not below `n`.
+    fn open(self, signature: Bytes) -> List<u8> | none {
+        let k = (self.bits + 7) / 8;
+        let sig = view(signature);
+        if sig.len() != k { return none; }
+        let s: List<u32> = Nat::from_be(sig, self.md.n) else { return none; };
+        if !Nat::lt(s, self.md.m) { return none; }
+        let m = self.md.from_mont(self.md.pow(self.md.to_mont(s), self.e[0:self.e.len()]));
+        Nat::to_be(m, k)
+    }
+
+    /// RSASSA-PKCS1-v1_5 verification: the whole encoding is rebuilt
+    /// and compared.
+    pub fn verify_pkcs1v15(self, hash: HashAlgorithm, msg: Bytes, signature: Bytes) -> bool {
+        let em: List<u8> = self.open(signature) else { return false; };
+        let k = em.len();
+        let t = digest_info(hash);
+        for x in hash.digest(msg) { t.push(x); }
+        if k < t.len() + 11 { return false; }
+        let want: List<u8> = List::with_capacity(k);
+        want.push(0u8);
+        want.push(1u8);
+        for _ in 0..k - t.len() - 3 { want.push(0xffu8); }
+        want.push(0u8);
+        for x in t { want.push(x); }
+        constant_time_eq(em, want)
+    }
+
+    /// RSASSA-PSS verification, MGF1 with `hash`, salt length = hash
+    /// length.
+    pub fn verify_pss(self, hash: HashAlgorithm, msg: Bytes, signature: Bytes) -> bool {
+        let full: List<u8> = self.open(signature) else { return false; };
+        let em_bits = self.bits - 1;
+        let em_len = (em_bits + 7) / 8;
+        // `full` is k bytes; with em_bits a multiple of 8 the extra top
+        // byte must be zero.
+        if full.len() > em_len && full[0] != 0u8 { return false; }
+        let em = full[full.len() - em_len:full.len()];
+        let hl = hash.output_len();
+        let sl = hl;
+        if em_len < hl + sl + 2 || em[em_len - 1] != 0xbcu8 { return false; }
+        let db_len = em_len - hl - 1;
+        let masked = em[0:db_len];
+        let h = em[db_len:db_len + hl];
+        let top = (8 * em_len - em_bits) as u8;
+        let top_mask = if top > 0u8 { 0xffu8 << (8u8 - top) } else { 0u8 };
+        if top > 0u8 && masked[0] & top_mask != 0u8 { return false; }
+        let db = mgf1(hash, h, db_len);
+        for i in 0..db_len { db[i] = db[i] ^ masked[i]; }
+        if top > 0u8 { db[0] = db[0] & ~top_mask; }
+        let ps = db_len - sl - 1;
+        for i in 0..ps {
+            if db[i] != 0u8 { return false; }
+        }
+        if db[ps] != 1u8 { return false; }
+        let d = Digest::new(hash);
+        d.update([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
+        d.update(hash.digest(msg));
+        d.update(db[db_len - sl:db_len]);
+        constant_time_eq(d.finish(), h)
+    }
+}

@@ -24,13 +24,13 @@ const SEP: str = "\\";
 const SEP: str = "/";
 
 /// Whether byte `i` of `s` separates components.
-fn sep_at(s: str, i: usize) -> bool {
+const fn sep_at(s: str, i: usize) -> bool {
     let b = s.byte(i);
     b == 47u8 || (WINDOWS && b == 92u8)
 }
 
 /// The first separator at or after byte `i` of `s` (or its length).
-fn comp_end(s: str, i: usize) -> usize {
+const fn comp_end(s: str, i: usize) -> usize {
     let j = i;
     while j < s.len() && !sep_at(s, j) { j += 1; }
     j
@@ -75,7 +75,7 @@ pub enum Component {
 }
 
 impl Component {
-    pub fn as_str(self) -> str {
+    pub const fn as_str(self) -> str {
         match self {
             Component::RootDir => SEP,
             Component::Prefix(p) => p,
@@ -87,8 +87,8 @@ impl Component {
 }
 
 impl PartialEq for Component {
-    fn eq(self, rhs: Component) -> bool { self.as_str() == rhs.as_str() }
-    fn ne(self, rhs: Component) -> bool { self.as_str() != rhs.as_str() }
+    const fn eq(self, rhs: Component) -> bool { self.as_str() == rhs.as_str() }
+    const fn ne(self, rhs: Component) -> bool { self.as_str() != rhs.as_str() }
 }
 
 impl Debug for Component {
@@ -120,11 +120,11 @@ pub trait AsPath {
 }
 
 impl AsPath for Path {
-    fn as_path(self) -> Path { self }
+    const fn as_path(self) -> Path { self }
 }
 
 impl AsPath for str {
-    fn as_path(self) -> Path { Path { s: self } }
+    const fn as_path(self) -> Path { Path { s: self } }
 }
 
 /// `s` without trailing `/`s (but `/` stays `/`).
@@ -135,8 +135,8 @@ fn trim_slashes(s: str) -> str {
 }
 
 impl Path {
-    pub fn new() -> Path { Path { s: "" } }
-    pub fn from(s: str) -> Path { Path { s: s } }
+    pub const fn new() -> Path { Path { s: "" } }
+    pub const fn from(s: str) -> Path { Path { s: s } }
 
     pub fn from_components<I: Iterator<Item = str>>(components: I) -> Path {
         let p = Path::new();
@@ -144,7 +144,7 @@ impl Path {
         p
     }
 
-    pub fn as_str(self) -> str { self.s }
+    pub const fn as_str(self) -> str { self.s }
     pub fn to_raw(self) -> RawPath { raw_of(self.s) }
 
     /// Unix: rooted. Windows: a prefix and a root (`C:\x`, `\\srv\s\x`).
@@ -202,7 +202,7 @@ impl Path {
     }
 
     /// `self`, its parent, its grandparent, ...
-    pub fn ancestors(self) -> Ancestors {
+    pub const fn ancestors(self) -> Ancestors {
         Ancestors { next: self }
     }
 
@@ -366,7 +366,7 @@ fn raw_of(s: str) -> RawPath { RawPath { raw: list_of_str(s) } }
 impl RawPath {
     pub fn from_bytes(bytes: List<u8>) -> RawPath { RawPath { raw: list_of(bytes) } }
 
-    pub fn as_bytes(self) -> Slice<u8> { self.raw[0:self.raw.len()] }
+    pub const fn as_bytes(self) -> Slice<u8> { self.raw[0:self.raw.len()] }
 
     /// The path, if the bytes are UTF-8.
     pub fn try_to_path(self) throws (NonUtf8Error) -> Path {
@@ -465,8 +465,8 @@ impl RawPath {
 }
 
 impl PartialEq for RawPath {
-    fn eq(self, rhs: RawPath) -> bool { self.raw == rhs.raw }
-    fn ne(self, rhs: RawPath) -> bool { self.raw != rhs.raw }
+    const fn eq(self, rhs: RawPath) -> bool { self.raw == rhs.raw }
+    const fn ne(self, rhs: RawPath) -> bool { self.raw != rhs.raw }
 }
 
 impl Debug for RawPath {
@@ -495,8 +495,8 @@ impl Debug for NonUtf8Error {
 impl Error for NonUtf8Error {}
 
 impl PartialEq for Path {
-    fn eq(self, rhs: Path) -> bool { self.s == rhs.s }
-    fn ne(self, rhs: Path) -> bool { self.s != rhs.s }
+    const fn eq(self, rhs: Path) -> bool { self.s == rhs.s }
+    const fn ne(self, rhs: Path) -> bool { self.s != rhs.s }
 }
 
 impl Display for Path {
@@ -514,7 +514,7 @@ pub struct Components {
 
 impl Iterator for Components {
     type Item = Component;
-    fn next(ref self) -> Component | none {
+    const fn next(ref self) -> Component | none {
         let c = self.items.get(self.pos)?;
         self.pos += 1;
         c

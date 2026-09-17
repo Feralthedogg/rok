@@ -1,0 +1,283 @@
+// ChaCha20 and Poly1305 (RFC 8439), constant time: only adds, xors,
+// rotates and fixed-pattern multiplies on 32-bit limbs with 64-bit
+// products.
+
+/// The ChaCha20 state words: constants, key, block counter, nonce.
+pub(pkg) struct ChaChaState {
+    s: [u32; 16];
+}
+
+impl ChaChaState {
+    /// `key`: 32 bytes; `nonce`: 12 bytes.
+    pub(pkg) fn new(key: Slice<u8>, nonce: Slice<u8>, counter: u32) -> ChaChaState {
+        let s: [u32; 16] = [0x61707865u32, 0x3320646eu32, 0x79622d32u32, 0x6b206574u32,
+            0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
+        for i in 0usize..8 { s[4 + i] = le32(key, 4 * i); }
+        s[12] = counter;
+        for i in 0usize..3 { s[13 + i] = le32(nonce, 4 * i); }
+        ChaChaState { s }
+    }
+
+    /// The keystream block at the current counter; the counter advances.
+    pub(pkg) fn block(ref self) -> [u32; 16] {
+        let s = self.s;
+        let x0 = s[0];
+        let x1 = s[1];
+        let x2 = s[2];
+        let x3 = s[3];
+        let x4 = s[4];
+        let x5 = s[5];
+        let x6 = s[6];
+        let x7 = s[7];
+        let x8 = s[8];
+        let x9 = s[9];
+        let x10 = s[10];
+        let x11 = s[11];
+        let x12 = s[12];
+        let x13 = s[13];
+        let x14 = s[14];
+        let x15 = s[15];
+        for _ in 0..10 {
+            // Columns.
+            x0 = x0.wrapping_add(x4); x12 = (x12 ^ x0).rotate_left(16);
+            x8 = x8.wrapping_add(x12); x4 = (x4 ^ x8).rotate_left(12);
+            x0 = x0.wrapping_add(x4); x12 = (x12 ^ x0).rotate_left(8);
+            x8 = x8.wrapping_add(x12); x4 = (x4 ^ x8).rotate_left(7);
+            x1 = x1.wrapping_add(x5); x13 = (x13 ^ x1).rotate_left(16);
+            x9 = x9.wrapping_add(x13); x5 = (x5 ^ x9).rotate_left(12);
+            x1 = x1.wrapping_add(x5); x13 = (x13 ^ x1).rotate_left(8);
+            x9 = x9.wrapping_add(x13); x5 = (x5 ^ x9).rotate_left(7);
+            x2 = x2.wrapping_add(x6); x14 = (x14 ^ x2).rotate_left(16);
+            x10 = x10.wrapping_add(x14); x6 = (x6 ^ x10).rotate_left(12);
+            x2 = x2.wrapping_add(x6); x14 = (x14 ^ x2).rotate_left(8);
+            x10 = x10.wrapping_add(x14); x6 = (x6 ^ x10).rotate_left(7);
+            x3 = x3.wrapping_add(x7); x15 = (x15 ^ x3).rotate_left(16);
+            x11 = x11.wrapping_add(x15); x7 = (x7 ^ x11).rotate_left(12);
+            x3 = x3.wrapping_add(x7); x15 = (x15 ^ x3).rotate_left(8);
+            x11 = x11.wrapping_add(x15); x7 = (x7 ^ x11).rotate_left(7);
+            // Diagonals.
+            x0 = x0.wrapping_add(x5); x15 = (x15 ^ x0).rotate_left(16);
+            x10 = x10.wrapping_add(x15); x5 = (x5 ^ x10).rotate_left(12);
+            x0 = x0.wrapping_add(x5); x15 = (x15 ^ x0).rotate_left(8);
+            x10 = x10.wrapping_add(x15); x5 = (x5 ^ x10).rotate_left(7);
+            x1 = x1.wrapping_add(x6); x12 = (x12 ^ x1).rotate_left(16);
+            x11 = x11.wrapping_add(x12); x6 = (x6 ^ x11).rotate_left(12);
+            x1 = x1.wrapping_add(x6); x12 = (x12 ^ x1).rotate_left(8);
+            x11 = x11.wrapping_add(x12); x6 = (x6 ^ x11).rotate_left(7);
+            x2 = x2.wrapping_add(x7); x13 = (x13 ^ x2).rotate_left(16);
+            x8 = x8.wrapping_add(x13); x7 = (x7 ^ x8).rotate_left(12);
+            x2 = x2.wrapping_add(x7); x13 = (x13 ^ x2).rotate_left(8);
+            x8 = x8.wrapping_add(x13); x7 = (x7 ^ x8).rotate_left(7);
+            x3 = x3.wrapping_add(x4); x14 = (x14 ^ x3).rotate_left(16);
+            x9 = x9.wrapping_add(x14); x4 = (x4 ^ x9).rotate_left(12);
+            x3 = x3.wrapping_add(x4); x14 = (x14 ^ x3).rotate_left(8);
+            x9 = x9.wrapping_add(x14); x4 = (x4 ^ x9).rotate_left(7);
+        }
+        self.s[12] = s[12].wrapping_add(1u32);
+        [x0.wrapping_add(s[0]), x1.wrapping_add(s[1]), x2.wrapping_add(s[2]), x3.wrapping_add(s[3]),
+            x4.wrapping_add(s[4]), x5.wrapping_add(s[5]), x6.wrapping_add(s[6]), x7.wrapping_add(s[7]),
+            x8.wrapping_add(s[8]), x9.wrapping_add(s[9]), x10.wrapping_add(s[10]), x11.wrapping_add(s[11]),
+            x12.wrapping_add(s[12]), x13.wrapping_add(s[13]), x14.wrapping_add(s[14]), x15.wrapping_add(s[15])]
+    }
+
+    /// `data` xored with the keystream.
+    pub(pkg) fn xor(ref self, data: Slice<u8>) -> List<u8> {
+        let n = data.len();
+        let out: List<u8> = List::with_capacity(n);
+        let i = 0usize;
+        while i < n {
+            let ks = self.block();
+            let m = if n - i < 64 { n - i } else { 64 };
+            for j in 0usize..m {
+                out.push(data[i + j] ^ ((ks[j / 4] >> (8 * (j % 4)) as u32) as u8));
+            }
+            i += 64;
+        }
+        out
+    }
+}
+
+fn le32(k: Slice<u8>, i: usize) -> u32 {
+    (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
+}
+
+const M26: u32 = 0x3ffffffu32;
+
+fn mul(a: u32, b: u32) -> u64 { (a as u64) * (b as u64) }
+
+/// `h` after absorbing the 16 bytes of `b` from `off`; `hibit`: 2^128
+/// (as `1 << 24` in limb 4) for a whole block, 0 for the padded last
+/// one.
+fn absorb(h: [u32; 5], r: [u32; 5], b: Slice<u8>, off: usize, hibit: u32) -> [u32; 5] {
+    let r0 = r[0];
+    let r1 = r[1];
+    let r2 = r[2];
+    let r3 = r[3];
+    let r4 = r[4];
+    let s1 = r1 * 5u32;
+    let s2 = r2 * 5u32;
+    let s3 = r3 * 5u32;
+    let s4 = r4 * 5u32;
+    let h0 = h[0] + (le32(b, off) & M26);
+    let h1 = h[1] + ((le32(b, off + 3) >> 2) & M26);
+    let h2 = h[2] + ((le32(b, off + 6) >> 4) & M26);
+    let h3 = h[3] + ((le32(b, off + 9) >> 6) & M26);
+    let h4 = h[4] + ((le32(b, off + 12) >> 8) | hibit);
+    let d0 = mul(h0, r0) + mul(h1, s4) + mul(h2, s3) + mul(h3, s2) + mul(h4, s1);
+    let d1 = mul(h0, r1) + mul(h1, r0) + mul(h2, s4) + mul(h3, s3) + mul(h4, s2);
+    let d2 = mul(h0, r2) + mul(h1, r1) + mul(h2, r0) + mul(h3, s4) + mul(h4, s3);
+    let d3 = mul(h0, r3) + mul(h1, r2) + mul(h2, r1) + mul(h3, r0) + mul(h4, s4);
+    let d4 = mul(h0, r4) + mul(h1, r3) + mul(h2, r2) + mul(h3, r1) + mul(h4, r0);
+    let c = (d0 >> 26) as u32;
+    h0 = (d0 as u32) & M26;
+    d1 += c as u64;
+    c = (d1 >> 26) as u32;
+    h1 = (d1 as u32) & M26;
+    d2 += c as u64;
+    c = (d2 >> 26) as u32;
+    h2 = (d2 as u32) & M26;
+    d3 += c as u64;
+    c = (d3 >> 26) as u32;
+    h3 = (d3 as u32) & M26;
+    d4 += c as u64;
+    c = (d4 >> 26) as u32;
+    h4 = (d4 as u32) & M26;
+    h0 += c * 5u32;
+    c = h0 >> 26;
+    h0 = h0 & M26;
+    h1 += c;
+    [h0, h1, h2, h3, h4]
+}
+
+/// Poly1305 over 26-bit limbs (poly1305-donna-32).
+pub(pkg) struct Poly1305State {
+    r: [u32; 5];
+    pad: [u32; 4];
+    h: [u32; 5];
+    buf: [u8; 16];
+    n: usize;
+}
+
+impl Poly1305State {
+    /// `key`: 32 bytes, `r || s`.
+    pub(pkg) fn new(key: Slice<u8>) -> Poly1305State {
+        Poly1305State {
+            r: [le32(key, 0) & 0x3ffffffu32, (le32(key, 3) >> 2) & 0x3ffff03u32,
+                (le32(key, 6) >> 4) & 0x3ffc0ffu32, (le32(key, 9) >> 6) & 0x3f03fffu32,
+                (le32(key, 12) >> 8) & 0x00fffffu32],
+            pad: [le32(key, 16), le32(key, 20), le32(key, 24), le32(key, 28)],
+            h: [0u32; 5],
+            buf: [0u8; 16],
+            n: 0,
+        }
+    }
+
+    pub(pkg) fn update(ref self, data: Slice<u8>) {
+        let len = data.len();
+        let i = 0usize;
+        while self.n != 0 && i < len {
+            self.buf[self.n] = data[i];
+            self.n += 1;
+            i += 1;
+            if self.n == 16 {
+                self.h = absorb(self.h, self.r, self.buf[0:16], 0, 1u32 << 24);
+                self.n = 0;
+            }
+        }
+        let h = self.h;
+        let r = self.r;
+        while i + 16 <= len {
+            h = absorb(h, r, data, i, 1u32 << 24);
+            i += 16;
+        }
+        self.h = h;
+        while i < len {
+            self.buf[self.n] = data[i];
+            self.n += 1;
+            i += 1;
+        }
+    }
+
+    /// Zero bytes up to the next 16-byte boundary (RFC 8439 2.8).
+    pub(pkg) fn pad16(ref self) {
+        if self.n != 0 {
+            while self.n < 16 { self.buf[self.n] = 0u8; self.n += 1; }
+            self.h = absorb(self.h, self.r, self.buf[0:16], 0, 1u32 << 24);
+            self.n = 0;
+        }
+    }
+
+    /// The 16-byte tag.
+    pub(pkg) fn finish(self) -> List<u8> {
+        if self.n != 0 {
+            self.buf[self.n] = 1u8;
+            self.n += 1;
+            while self.n < 16 { self.buf[self.n] = 0u8; self.n += 1; }
+            self.h = absorb(self.h, self.r, self.buf[0:16], 0, 0u32);
+        }
+        let h0 = self.h[0];
+        let h1 = self.h[1];
+        let h2 = self.h[2];
+        let h3 = self.h[3];
+        let h4 = self.h[4];
+        let c = h1 >> 26;
+        h1 = h1 & M26;
+        h2 += c;
+        c = h2 >> 26;
+        h2 = h2 & M26;
+        h3 += c;
+        c = h3 >> 26;
+        h3 = h3 & M26;
+        h4 += c;
+        c = h4 >> 26;
+        h4 = h4 & M26;
+        h0 += c * 5u32;
+        c = h0 >> 26;
+        h0 = h0 & M26;
+        h1 += c;
+
+        // h - p = h + 5 - 2^130: taken when it does not go negative.
+        let g0 = h0 + 5u32;
+        c = g0 >> 26;
+        g0 = g0 & M26;
+        let g1 = h1 + c;
+        c = g1 >> 26;
+        g1 = g1 & M26;
+        let g2 = h2 + c;
+        c = g2 >> 26;
+        g2 = g2 & M26;
+        let g3 = h3 + c;
+        c = g3 >> 26;
+        g3 = g3 & M26;
+        let g4 = (h4 + c).wrapping_sub(1u32 << 26);
+        let mask = (g4 >> 31).wrapping_sub(1u32);
+        let keep = ~mask;
+        h0 = (h0 & keep) | (g0 & mask);
+        h1 = (h1 & keep) | (g1 & mask);
+        h2 = (h2 & keep) | (g2 & mask);
+        h3 = (h3 & keep) | (g3 & mask);
+        h4 = (h4 & keep) | (g4 & mask);
+
+        // h mod 2^128, plus s.
+        let w0 = h0 | (h1 << 26);
+        let w1 = (h1 >> 6) | (h2 << 20);
+        let w2 = (h2 >> 12) | (h3 << 14);
+        let w3 = (h3 >> 18) | (h4 << 8);
+        let f = (w0 as u64) + (self.pad[0] as u64);
+        let t0 = f as u32;
+        f = (w1 as u64) + (self.pad[1] as u64) + (f >> 32);
+        let t1 = f as u32;
+        f = (w2 as u64) + (self.pad[2] as u64) + (f >> 32);
+        let t2 = f as u32;
+        f = (w3 as u64) + (self.pad[3] as u64) + (f >> 32);
+        let t3 = f as u32;
+        let out: List<u8> = List::with_capacity(16);
+        for t in [t0, t1, t2, t3] {
+            out.push(t as u8);
+            out.push((t >> 8) as u8);
+            out.push((t >> 16) as u8);
+            out.push((t >> 24) as u8);
+        }
+        out
+    }
+}

@@ -1,0 +1,257 @@
+// Fixed-width natural numbers for RSA and elliptic curves: little-endian
+// 32-bit limbs (`List<u32>`, products in `u64`, so 32-bit targets need
+// no wide multiply), a width fixed per modulus. Arithmetic runs in time
+// that depends only on the width (and, for `pow`, the exponent's
+// length): carries and final subtractions are masks, not branches.
+// `Nat::bits` and the conversions are variable-time; they see public
+// sizes only.
+
+pub(pkg) struct Nat;
+
+impl Nat {
+    pub(pkg) fn zero(n: usize) -> List<u32> {
+        let r: List<u32> = List::with_capacity(n);
+        for _ in 0..n { r.push(0u32); }
+        r
+    }
+
+    /// Big-endian bytes as `n` limbs; `none` if the value needs more.
+    pub(pkg) fn from_be(b: Slice<u8>, n: usize) -> List<u32> | none {
+        let r = Nat::zero(n);
+        let len = b.len();
+        for i in 0..len {
+            let k = len - 1 - i;
+            let x = b[i];
+            if k / 4 >= n {
+                if x != 0u8 { return none; }
+                continue;
+            }
+            r[k / 4] = r[k / 4] | ((x as u32) << (8 * (k % 4)) as u32);
+        }
+        r
+    }
+
+    /// The low `len` bytes of `a`, big-endian.
+    pub(pkg) fn to_be(a: List<u32>, len: usize) -> List<u8> {
+        let out: List<u8> = List::with_capacity(len);
+        for i in 0..len {
+            let k = len - 1 - i;
+            let v = if k / 4 < a.len() { (a[k / 4] >> (8 * (k % 4)) as u32) as u8 } else { 0u8 };
+            out.push(v);
+        }
+        out
+    }
+
+    /// A constant from hex digits (no prefix).
+    pub(pkg) fn from_hex(s: str) -> List<u32> {
+        let b = s.as_bytes();
+        let n = (b.len() + 7) / 8;
+        let r = Nat::zero(n);
+        for i in 0..b.len() {
+            let c = b[b.len() - 1 - i];
+            let v = if c <= 0x39u8 { c - 0x30u8 } else if c >= 0x61u8 { c - 0x61u8 + 10u8 } else { c - 0x41u8 + 10u8 };
+            r[i / 8] = r[i / 8] | ((v as u32) << (4 * (i % 8)) as u32);
+        }
+        r
+    }
+
+    /// `a - b` (equal widths) and the borrow out (0 or 1).
+    pub(pkg) fn sub(a: List<u32>, b: List<u32>) -> (List<u32>, u32) {
+        let n = a.len();
+        let r = Nat::zero(n);
+        let borrow = 0u64;
+        for i in 0..n {
+            let t = (a[i] as u64).wrapping_sub(b[i] as u64).wrapping_sub(borrow);
+            r[i] = t as u32;
+            borrow = t >> 63u64;
+        }
+        (r, borrow as u32)
+    }
+
+    /// `a + b` (equal widths) and the carry out (0 or 1).
+    pub(pkg) fn add(a: List<u32>, b: List<u32>) -> (List<u32>, u32) {
+        let n = a.len();
+        let r = Nat::zero(n);
+        let carry = 0u64;
+        for i in 0..n {
+            let t = (a[i] as u64) + (b[i] as u64) + carry;
+            r[i] = t as u32;
+            carry = t >> 32u64;
+        }
+        (r, carry as u32)
+    }
+
+    /// `a` if `mask` is all ones, `b` if it is zero.
+    pub(pkg) fn select(mask: u32, a: List<u32>, b: List<u32>) -> List<u32> {
+        let n = a.len();
+        let r = Nat::zero(n);
+        for i in 0..n {
+            r[i] = (a[i] & mask) | (b[i] & ~mask);
+        }
+        r
+    }
+
+    /// Whether `a < b` (equal widths).
+    pub(pkg) fn lt(a: List<u32>, b: List<u32>) -> bool {
+        let (_, borrow) = Nat::sub(a, b);
+        borrow == 1u32
+    }
+
+    pub(pkg) fn is_zero(a: List<u32>) -> bool {
+        let d = 0u32;
+        for x in a { d = d | x; }
+        d == 0u32
+    }
+
+    pub(pkg) fn eq(a: List<u32>, b: List<u32>) -> bool {
+        let d = 0u32;
+        for i in 0..a.len() { d = d | (a[i] ^ b[i]); }
+        d == 0u32
+    }
+
+    /// Significant bits (variable-time).
+    pub(pkg) fn bits(a: List<u32>) -> usize {
+        let i = a.len();
+        while i > 0 {
+            i -= 1;
+            if a[i] != 0u32 { return 32 * i + 32 - (a[i].leading_zeros() as usize); }
+        }
+        0
+    }
+
+    /// `a` widened (or cut) to `n` limbs.
+    pub(pkg) fn resize(a: List<u32>, n: usize) -> List<u32> {
+        let r = Nat::zero(n);
+        for i in 0..n {
+            if i < a.len() { r[i] = a[i]; }
+        }
+        r
+    }
+}
+
+/// An odd modulus `m` and its Montgomery constants (`R = 2^(32 n)`).
+pub(pkg) struct Modulus {
+    pub(pkg) m: List<u32>;
+    pub(pkg) n: usize;
+    inv: u32;
+    r1: List<u32>;
+    r2: List<u32>;
+}
+
+impl Modulus {
+    /// `m` odd, its top limb non-zero.
+    pub(pkg) fn new(m: List<u32>) -> Modulus {
+        let n = m.len();
+        // -m^-1 mod 2^32 by Newton's iteration (x = m0 is right to 3 bits).
+        let m0 = m[0];
+        let x = m0;
+        for _ in 0..4 {
+            x = x.wrapping_mul(2u32.wrapping_sub(m0.wrapping_mul(x)));
+        }
+        let md = Modulus { m, n, inv: 0u32.wrapping_sub(x), r1: Nat::zero(n), r2: Nat::zero(n) };
+        // R mod m: 1 doubled 32 n times; one more is 2 in Montgomery
+        // form, and 2^(32 n) of that is R^2 mod m.
+        let r = Nat::zero(n);
+        r[0] = 1u32;
+        for _ in 0..32 * n {
+            r = md.add(r, r);
+        }
+        md.r1 = r;
+        let k = 32 * n;
+        let kb: List<u8> = [(k >> 8) as u8, k as u8];
+        md.r2 = md.pow(md.add(r, r), kb[0:2]);
+        md
+    }
+
+    /// `(a + b) mod m` for `a, b < m`.
+    pub(pkg) fn add(self, a: List<u32>, b: List<u32>) -> List<u32> {
+        let (s, carry) = Nat::add(a, b);
+        let (d, borrow) = Nat::sub(s, self.m);
+        // Keep the difference when the sum overflowed or reached m.
+        Nat::select(0u32.wrapping_sub(carry | (borrow ^ 1u32)), d, s)
+    }
+
+    /// `(a - b) mod m` for `a, b < m`.
+    pub(pkg) fn sub(self, a: List<u32>, b: List<u32>) -> List<u32> {
+        let (d, borrow) = Nat::sub(a, b);
+        let mask = 0u32.wrapping_sub(borrow);
+        let corr = Nat::zero(self.n);
+        for i in 0..self.n { corr[i] = self.m[i] & mask; }
+        let (r, _) = Nat::add(d, corr);
+        r
+    }
+
+    /// `a mod m` for `a < 2m` (equal widths).
+    pub(pkg) fn reduce_once(self, a: List<u32>) -> List<u32> {
+        let (d, borrow) = Nat::sub(a, self.m);
+        Nat::select(0u32.wrapping_sub(borrow ^ 1u32), d, a)
+    }
+
+    /// Montgomery product `a b R^-1 mod m` (CIOS) for `a, b < m`.
+    pub(pkg) fn mul(self, a: List<u32>, b: List<u32>) -> List<u32> {
+        let n = self.n;
+        let t = Nat::zero(n + 2);
+        for i in 0..n {
+            let bi = b[i] as u64;
+            let c = 0u64;
+            for j in 0..n {
+                let s = (t[j] as u64) + (a[j] as u64) * bi + c;
+                t[j] = s as u32;
+                c = s >> 32u64;
+            }
+            let s = (t[n] as u64) + c;
+            t[n] = s as u32;
+            t[n + 1] = (s >> 32u64) as u32;
+            let q = (t[0].wrapping_mul(self.inv)) as u64;
+            let s0 = (t[0] as u64) + q * (self.m[0] as u64);
+            c = s0 >> 32u64;
+            for j in 1..n {
+                let s2 = (t[j] as u64) + q * (self.m[j] as u64) + c;
+                t[j - 1] = s2 as u32;
+                c = s2 >> 32u64;
+            }
+            let s3 = (t[n] as u64) + c;
+            t[n - 1] = s3 as u32;
+            t[n] = t[n + 1] + ((s3 >> 32u64) as u32);
+        }
+        // t < 2m: subtract m once if t[n] is set or t >= m.
+        let lo = Nat::resize(t, n);
+        let (d, borrow) = Nat::sub(lo, self.m);
+        Nat::select(0u32.wrapping_sub(t[n] | (borrow ^ 1u32)), d, lo)
+    }
+
+    pub(pkg) fn to_mont(self, a: List<u32>) -> List<u32> { self.mul(a, self.r2) }
+
+    pub(pkg) fn from_mont(self, a: List<u32>) -> List<u32> {
+        let one = Nat::zero(self.n);
+        one[0] = 1u32;
+        self.mul(a, one)
+    }
+
+    /// `R mod m`: one in Montgomery form.
+    pub(pkg) fn one(self) -> List<u32> { self.r1 }
+
+    /// `a^e` in Montgomery form (`a` in Montgomery form), `e` big-endian.
+    /// Every bit squares and multiplies, so time depends on `e`'s length
+    /// only.
+    pub(pkg) fn pow(self, a: List<u32>, e: Slice<u8>) -> List<u32> {
+        let r = self.one();
+        for byte in e {
+            for k in 0..8 {
+                r = self.mul(r, r);
+                let ra = self.mul(r, a);
+                let bit = ((byte >> (7 - k) as u8) & 1u8) as u32;
+                r = Nat::select(0u32.wrapping_sub(bit), ra, r);
+            }
+        }
+        r
+    }
+
+    /// `a^-1` (Montgomery form in and out) for prime `m`, by Fermat.
+    pub(pkg) fn inv_prime(self, a: List<u32>) -> List<u32> {
+        let two = Nat::zero(self.n);
+        two[0] = 2u32;
+        let (e, _) = Nat::sub(self.m, two);
+        self.pow(a, Nat::to_be(e, 4 * self.n)[0:4 * self.n])
+    }
+}

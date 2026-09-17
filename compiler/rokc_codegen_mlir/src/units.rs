@@ -27,8 +27,8 @@
 //!   ([`Plan::placeholder`]) the driver replaces in the objects, so a
 //!   source edit (which changes the content hash) does not change every
 //!   unit's code;
-//! - the whole-program analyses (`quiet_functions`, `reentrant_functions`,
-//!   the local calling convention).
+//! - the whole-program analyses (`quiet_functions`,
+//!   `reentrant_functions`).
 //!
 //! A unit's key hashes what its object depends on: its functions' MIR
 //! (ids replaced by symbols and type names), the signatures and facts
@@ -40,7 +40,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use rokc_core::hash::{fnv, hex, sha256};
-use rokc_ir_common::{Abi, FnRole, FunctionId, Linkage};
+use rokc_ir_common::{FnRole, FunctionId, Linkage};
 use rokc_mir::{
     BasicBlock, DebugTy, Link, MirFunction, MirModule, MirTy, Operand, RValue, Statement,
     Terminator,
@@ -84,8 +84,6 @@ pub struct Core {
     pub renamed: HashSet<FunctionId>,
     pub quiet: Arc<HashSet<FunctionId>>,
     pub reentrant: Arc<HashSet<FunctionId>>,
-    /// The functions with the module-local calling convention.
-    pub local_abi: Arc<HashSet<FunctionId>>,
     /// Lazy statics: name → symbol of the initializer.
     pub lazy_statics: HashMap<String, String>,
     /// Per unit: the functions it refers to but does not define
@@ -341,7 +339,6 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         .collect();
     let quiet = quiet_functions(module, &pkgs, &module.target);
     let reentrant = reentrant_functions(module);
-    let local_abi = local_abi(module, link, &shared);
 
     // GC types: every table the code allocates with, sorted.
     let fn_tables: HashMap<FunctionId, Vec<Vec<u32>>> = module
@@ -365,7 +362,6 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         renamed,
         quiet: Arc::new(quiet),
         reentrant: Arc::new(reentrant),
-        local_abi: Arc::new(local_abi),
         lazy_statics: pkgs.lazy_statics.clone(),
         refs: refs.into_iter().map(|r| r.into_iter().collect()).collect(),
         statics,
@@ -482,45 +478,6 @@ fn each_ref<'a>(f: &'a MirFunction, out: &mut dyn FnMut(Ref<'a>)) {
             _ => {}
         }
     }
-}
-
-/// The module-local calling convention (`Emitter::local_abi_functions`)
-/// of a unit build: internal functions only their own unit calls,
-/// directly (in a library, not its own: its users call them).
-fn local_abi(module: &MirModule, link: &Link, shared: &HashSet<FunctionId>) -> HashSet<FunctionId> {
-    let private = |f: &MirFunction| match &link.lib {
-        Some(lib) => !Link::owns(lib, f.path()),
-        None => link.in_prebuilt(f.path()) || f.facts.export_name.is_none(),
-    };
-    let mut out: HashSet<FunctionId> = module
-        .functions
-        .iter()
-        .filter(|f| {
-            f.facts.linkage == Linkage::Defined
-                && f.facts.role == FnRole::Plain
-                && f.facts.abi == Abi::Rok
-                && private(f)
-                && !shared.contains(&f.id)
-        })
-        .map(|f| f.id)
-        .collect();
-    for s in &module.statics {
-        if let Some(id) = s.init_fn {
-            out.remove(&id);
-        }
-    }
-    for f in &module.functions {
-        for s in f.blocks.iter().flat_map(|b| &b.stmts) {
-            if let Statement::Assign {
-                rvalue: RValue::FnAddr { callee, .. },
-                ..
-            } = s
-            {
-                out.remove(callee);
-            }
-        }
-    }
-    out
 }
 
 /// The `ScanTable`s `f`'s allocations register (`gc_type_id`'s uses).
@@ -645,14 +602,13 @@ impl Key<'_> {
         let (s, c) = (self.s, self.s.core);
         let _ = write!(
             self.b,
-            "{} {:?} {} {} {} {} {} {} (",
+            "{} {:?} {} {} {} {} {} (",
             s.symbols[&f.id],
             f.facts,
             c.shared.contains(&f.id),
             c.renamed.contains(&f.id),
             c.quiet.contains(&f.id),
             c.reentrant.contains(&f.id),
-            c.local_abi.contains(&f.id),
             s.init_fns.contains(&f.id),
         );
         for t in &f.param_tys {

@@ -1,0 +1,73 @@
+// X25519 (RFC 7748): Diffie-Hellman on Curve25519's u coordinate.
+
+use sup::{view, Bytes};
+use sup::curve25519::{Fe25519, f25519_zero, f25519_one, f25519_small, f25519_add, f25519_sub, f25519_mul, f25519_sq, f25519_invert, f25519_cswap, f25519_to_bytes, f25519_from_bytes};
+
+/// X25519 key agreement. Keys are 32 bytes.
+pub struct X25519;
+
+/// `[k]u` with the clamped scalar `k`: a Montgomery ladder, swapping
+/// by mask (RFC 7748 5).
+fn ladder(k: Slice<u8>, u: Slice<u8>) -> List<u8> {
+    let s: [u8; 32] = [0u8; 32];
+    for i in 0usize..32 { s[i] = k[i]; }
+    s[0] &= 248u8;
+    s[31] = (s[31] & 127u8) | 64u8;
+    let x1 = f25519_from_bytes(u);
+    let x2 = f25519_one();
+    let z2 = f25519_zero();
+    let x3 = x1;
+    let z3 = f25519_one();
+    let a24 = f25519_small(121665i64);
+    let swap = 0i64;
+    let t = 255usize;
+    while t > 0 {
+        t -= 1;
+        let bit = ((s[t / 8] >> (t % 8) as u8) & 1u8) as i64;
+        swap ^= bit;
+        f25519_cswap(ref x2, ref x3, swap);
+        f25519_cswap(ref z2, ref z3, swap);
+        swap = bit;
+        let a = f25519_add(x2, z2);
+        let aa = f25519_sq(a);
+        let b = f25519_sub(x2, z2);
+        let bb = f25519_sq(b);
+        let e = f25519_sub(aa, bb);
+        let c = f25519_add(x3, z3);
+        let d = f25519_sub(x3, z3);
+        let da = f25519_mul(d, a);
+        let cb = f25519_mul(c, b);
+        x3 = f25519_sq(f25519_add(da, cb));
+        z3 = f25519_mul(x1, f25519_sq(f25519_sub(da, cb)));
+        x2 = f25519_mul(aa, bb);
+        z2 = f25519_mul(e, f25519_add(aa, f25519_mul(a24, e)));
+    }
+    f25519_cswap(ref x2, ref x3, swap);
+    f25519_cswap(ref z2, ref z3, swap);
+    f25519_to_bytes(f25519_mul(x2, f25519_invert(z2)))[0:32].to_list()
+}
+
+fn key32(b: Bytes, what: str) throws (ValueError) -> Slice<u8> {
+    let s = view(b);
+    if s.len() != 32 { throw ValueError { msg: f"X25519 {what} must be 32 bytes" }; }
+    s
+}
+
+impl X25519 {
+    /// The public key of a 32-byte secret (clamped as RFC 7748 says).
+    pub fn public_key(secret: Bytes) throws (ValueError) -> List<u8> {
+        let base: [u8; 32] = [0u8; 32];
+        base[0] = 9u8;
+        ladder(try key32(secret, "secret"), base[0:32])
+    }
+
+    /// The shared secret with `peer_public`; `none` when it is all
+    /// zero (a small-order peer key, RFC 7748 6.1).
+    pub fn shared_secret(secret: Bytes, peer_public: Bytes) throws (ValueError) -> List<u8> | none {
+        let out = ladder(try key32(secret, "secret"), try key32(peer_public, "public key"));
+        let d = 0u8;
+        for x in out { d |= x; }
+        if d == 0u8 { return none; }
+        out
+    }
+}

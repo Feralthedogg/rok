@@ -1,0 +1,261 @@
+// Authenticated encryption with associated data: AES-GCM (NIST SP
+// 800-38D, 96-bit nonces) and ChaChaState-Poly1305State (RFC 8439). Tags are
+// 16 bytes, appended to the ciphertext.
+
+use sup::{view, Bytes, constant_time_eq};
+use sup::aes::AesKey;
+use sup::chacha::{ChaChaState, Poly1305State};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AeadAlgorithm {
+    Aes128Gcm,
+    Aes256Gcm,
+    ChaCha20Poly1305,
+}
+
+impl AeadAlgorithm {
+    pub fn key_len(self) -> usize {
+        match self {
+            AeadAlgorithm::Aes128Gcm => 16,
+            _ => 32,
+        }
+    }
+
+    pub fn nonce_len(self) -> usize { 12 }
+
+    pub fn tag_len(self) -> usize { 16 }
+}
+
+/// A key ready for `seal` / `open`.
+pub struct Aead {
+    alg: AeadAlgorithm;
+    aes: AesKey;
+    // GHASH key (AES-GCM) or the ChaChaState key.
+    h: [u64; 2];
+    key: List<u8>;
+}
+
+impl Aead {
+    pub fn new(alg: AeadAlgorithm, key: Bytes) throws (ValueError) -> Aead {
+        let k = view(key);
+        if k.len() != alg.key_len() {
+            throw ValueError { msg: f"{alg:?} key must be {alg.key_len()} bytes, not {k.len()}" };
+        }
+        if alg == AeadAlgorithm::ChaCha20Poly1305 {
+            let zero: [u8; 32] = [0u8; 32];
+            return Aead { alg, aes: AesKey::new(zero[0:16]), h: [0u64, 0u64], key: k.to_list() };
+        }
+        let aes = AesKey::new(k);
+        let w: [u32; 8] = [0u32; 8];
+        aes.encrypt2(ref w);
+        let h: [u64; 2] = [be64(w[0], w[1]), be64(w[2], w[3])];
+        Aead { alg, aes, h, key: [] }
+    }
+
+    pub fn algorithm(self) -> AeadAlgorithm { self.alg }
+
+    /// `plaintext` encrypted, then the tag.
+    pub fn seal(self, nonce: Bytes, aad: Bytes, plaintext: Bytes) throws (ValueError) -> List<u8> {
+        let n = try nonce12(nonce);
+        let a = view(aad);
+        let p = view(plaintext);
+        if self.alg == AeadAlgorithm::ChaCha20Poly1305 {
+            let c = ChaChaState::new(self.key[0:32], n, 1u32);
+            let out = c.xor(p);
+            let tag = self.poly_tag(n, a, out[0:out.len()]);
+            for x in tag { out.push(x); }
+            return out;
+        }
+        let out = self.ctr(n, p);
+        let tag = self.gcm_tag(n, a, out[0:out.len()]);
+        for x in tag { out.push(x); }
+        out
+    }
+
+    /// The plaintext, or `none` when the tag does not match (nothing is
+    /// decrypted then).
+    pub fn open(self, nonce: Bytes, aad: Bytes, ciphertext_and_tag: Bytes) throws (ValueError) -> List<u8> | none {
+        let n = try nonce12(nonce);
+        let a = view(aad);
+        let ct = view(ciphertext_and_tag);
+        if ct.len() < 16 { return none; }
+        let body = ct[0:ct.len() - 16];
+        let tag = ct[ct.len() - 16:ct.len()];
+        if self.alg == AeadAlgorithm::ChaCha20Poly1305 {
+            if !constant_time_eq(self.poly_tag(n, a, body), tag) { return none; }
+            let c = ChaChaState::new(self.key[0:32], n, 1u32);
+            return c.xor(body);
+        }
+        if !constant_time_eq(self.gcm_tag(n, a, body), tag) { return none; }
+        self.ctr(n, body)
+    }
+
+    fn poly_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {
+        let otk = ChaChaState::new(self.key[0:32], n, 0u32).block();
+        let kb: List<u8> = List::with_capacity(32);
+        for i in 0usize..8 {
+            let w = otk[i];
+            kb.push(w as u8);
+            kb.push((w >> 8) as u8);
+            kb.push((w >> 16) as u8);
+            kb.push((w >> 24) as u8);
+        }
+        let m = Poly1305State::new(kb[0:32]);
+        m.update(a);
+        m.pad16();
+        m.update(c);
+        m.pad16();
+        let lens: List<u8> = List::with_capacity(16);
+        put_le64(lens, a.len() as u64);
+        put_le64(lens, c.len() as u64);
+        m.update(lens[0:16]);
+        m.finish()
+    }
+
+    /// AES-CTR from counter block 2 (`J0 + 1`).
+    fn ctr(self, n: Slice<u8>, data: Slice<u8>) -> List<u8> {
+        let len = data.len();
+        let out: List<u8> = List::with_capacity(len + 16);
+        let n0 = le32(n, 0);
+        let n1 = le32(n, 4);
+        let n2 = le32(n, 8);
+        let aes = self.aes;
+        let ctr = 2u32;
+        let i = 0usize;
+        while i < len {
+            let w: [u32; 8] = [n0, n1, n2, ctr.swap_bytes(), n0, n1, n2, ctr.wrapping_add(1u32).swap_bytes()];
+            ctr = ctr.wrapping_add(2u32);
+            aes.encrypt2(ref w);
+            let m = if len - i < 32 { len - i } else { 32 };
+            for j in 0usize..m {
+                out.push(data[i + j] ^ ((w[j / 4] >> (8 * (j % 4)) as u32) as u8));
+            }
+            i += 32;
+        }
+        out
+    }
+
+    fn gcm_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {
+        let x: [u64; 2] = [0u64, 0u64];
+        ghash(ref x, self.h, a);
+        ghash(ref x, self.h, c);
+        let lens: [u64; 2] = [(a.len() as u64) * 8u64, (c.len() as u64) * 8u64];
+        x[0] = x[0] ^ lens[0];
+        x[1] = x[1] ^ lens[1];
+        x = gmul(x, self.h);
+        let w: [u32; 8] = [le32(n, 0), le32(n, 4), le32(n, 8), 0x01000000u32, 0u32, 0u32, 0u32, 0u32];
+        self.aes.encrypt2(ref w);
+        let out: List<u8> = List::with_capacity(16);
+        for i in 0usize..16 {
+            let e = (w[i / 4] >> (8 * (i % 4)) as u32) as u8;
+            out.push(e ^ ((x[i / 8] >> (56 - 8 * (i % 8)) as u64) as u8));
+        }
+        out
+    }
+}
+
+fn nonce12(nonce: Bytes) throws (ValueError) -> Slice<u8> {
+    let n = view(nonce);
+    if n.len() != 12 {
+        throw ValueError { msg: f"AEAD nonce must be 12 bytes, not {n.len()}" };
+    }
+    n
+}
+
+fn le32(k: Slice<u8>, i: usize) -> u32 {
+    (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
+}
+
+fn put_le64(out: List<u8>, v: u64) {
+    for i in 0u64..8 { out.push((v >> (8u64 * i)) as u8); }
+}
+
+/// Two little-endian AES words as the big-endian 64-bit value of their
+/// eight bytes.
+fn be64(a: u32, b: u32) -> u64 {
+    ((a.swap_bytes() as u64) << 32) | (b.swap_bytes() as u64)
+}
+
+fn be64at(d: Slice<u8>, i: usize) -> u64 {
+    let v = 0u64;
+    for j in 0usize..8 { v = (v << 8) | (d[i + j] as u64); }
+    v
+}
+
+/// Carry-less 32x32 product: the operands are split into four sparse
+/// pieces (every fourth bit), so integer products keep each 4-bit digit
+/// sum below 16 and never carry into the next digit.
+fn bmul(x: u32, y: u32) -> u64 {
+    let x0 = (x & 0x11111111u32) as u64;
+    let x1 = (x & 0x22222222u32) as u64;
+    let x2 = (x & 0x44444444u32) as u64;
+    let x3 = (x & 0x88888888u32) as u64;
+    let y0 = (y & 0x11111111u32) as u64;
+    let y1 = (y & 0x22222222u32) as u64;
+    let y2 = (y & 0x44444444u32) as u64;
+    let y3 = (y & 0x88888888u32) as u64;
+    let z0 = (x0 * y0) ^ (x1 * y3) ^ (x2 * y2) ^ (x3 * y1);
+    let z1 = (x0 * y1) ^ (x1 * y0) ^ (x2 * y3) ^ (x3 * y2);
+    let z2 = (x0 * y2) ^ (x1 * y1) ^ (x2 * y0) ^ (x3 * y3);
+    let z3 = (x0 * y3) ^ (x1 * y2) ^ (x2 * y1) ^ (x3 * y0);
+    (z0 & 0x1111111111111111u64) | (z1 & 0x2222222222222222u64)
+        | (z2 & 0x4444444444444444u64) | (z3 & 0x8888888888888888u64)
+}
+
+/// Carry-less 64x64 product (Karatsuba): `[high, low]`.
+fn clmul64(a: u64, b: u64) -> [u64; 2] {
+    let al = a as u32;
+    let ah = (a >> 32) as u32;
+    let bl = b as u32;
+    let bh = (b >> 32) as u32;
+    let lo = bmul(al, bl);
+    let hi = bmul(ah, bh);
+    let mid = bmul(al ^ ah, bl ^ bh) ^ lo ^ hi;
+    [hi ^ (mid >> 32), lo ^ (mid << 32)]
+}
+
+/// `x * h` in GF(2^128) with GCM's bit order (`[0]`: the first eight
+/// bytes, big-endian). The integer product of the bit-reflected values,
+/// shifted left once, holds the polynomial product with coefficient `k`
+/// at bit `255 - k`; the low half is folded back with x^128 = x^7 + x^2
+/// + x + 1.
+fn gmul(x: [u64; 2], h: [u64; 2]) -> [u64; 2] {
+    let lo = clmul64(x[1], h[1]);
+    let hi = clmul64(x[0], h[0]);
+    let mid = clmul64(x[0] ^ x[1], h[0] ^ h[1]);
+    let m0 = mid[0] ^ lo[0] ^ hi[0];
+    let m1 = mid[1] ^ lo[1] ^ hi[1];
+    let z3 = hi[0];
+    let z2 = hi[1] ^ m0;
+    let z1 = lo[0] ^ m1;
+    let z0 = lo[1];
+    z3 = (z3 << 1) | (z2 >> 63);
+    z2 = (z2 << 1) | (z1 >> 63);
+    z1 = (z1 << 1) | (z0 >> 63);
+    z0 = z0 << 1;
+    // Low-half bits that fold past x^127 land in the low half again.
+    let v1 = z1 ^ (z0 << 63) ^ (z0 << 62) ^ (z0 << 57);
+    let v0 = z0;
+    let f1 = v1 ^ (v1 >> 1) ^ (v1 >> 2) ^ (v1 >> 7);
+    let f0 = v0 ^ ((v0 >> 1) | (v1 << 63)) ^ ((v0 >> 2) | (v1 << 62)) ^ ((v0 >> 7) | (v1 << 57));
+    [z3 ^ f1, z2 ^ f0]
+}
+
+/// GHASH `data` (zero-padded to whole blocks) into `x`.
+fn ghash(ref x: [u64; 2], h: [u64; 2], data: Slice<u8>) {
+    let len = data.len();
+    let i = 0usize;
+    let y = x;
+    while i + 16 <= len {
+        y = gmul([y[0] ^ be64at(data, i), y[1] ^ be64at(data, i + 8)], h);
+        i += 16;
+    }
+    if i < len {
+        let b: [u64; 2] = [0u64, 0u64];
+        for j in 0usize..len - i {
+            b[j / 8] = b[j / 8] | ((data[i + j] as u64) << (56 - 8 * (j % 8)) as u64);
+        }
+        y = gmul([y[0] ^ b[0], y[1] ^ b[1]], h);
+    }
+    x = y;
+}

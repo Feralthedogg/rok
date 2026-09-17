@@ -1,0 +1,43 @@
+// Many small collections kept alive (a parsed document's shape): 500k
+// 9-element `List<str>` rows and 50k 9-key `OrderedDict`s pushed into
+// outer lists, then the same rows again with nothing retained.
+fn main() -> i32 {
+    let rows: List<List<str>> = [];
+    let i: i64 = 0;
+    while i < 500000 {
+        let row: List<str> = [];
+        let j = 0;
+        while j < 9 {
+            row.push(f"k{j}");
+            j += 1;
+        }
+        rows.push(row);
+        i += 1;
+    }
+    let objs: List<OrderedDict<str, str>> = [];
+    i = 0;
+    while i < 50000 {
+        let o: OrderedDict<str, str> = OrderedDict::new();
+        let j = 0;
+        while j < 9 {
+            o.insert(f"k{j}", f"v{i}");
+            j += 1;
+        }
+        objs.push(o);
+        i += 1;
+    }
+    let n: usize = 0;
+    i = 0;
+    while i < 500000 {
+        let row: List<str> = [];
+        let j = 0;
+        while j < 9 {
+            row.push(f"k{j}");
+            j += 1;
+        }
+        n += row.len();
+        i += 1;
+    }
+    println(f"{rows.len() * rows[7].len()} {objs.len() * objs[3].len()} {n}");
+    return 0;
+}

@@ -10,7 +10,7 @@ use rokc_lexer::Lexer;
 use rokc_mir::WitLink;
 use rokc_parser::{ExtOps, apply_keywords, parse_program_meta};
 
-use crate::{CfgEnv, MetaCtx, ModItem, UseEntry, flatten_module_items};
+use crate::{MetaCtx, ModItem, UseEntry, flatten_module_items};
 
 /// Replace the `ffi::wit` items of `items` (the package's, by module)
 /// with their bindings; the component's link data when there are any.
@@ -21,7 +21,6 @@ pub fn expand(
     packages: &[String],
     prebuilt: &[String],
     target: &rokc_mir::TargetSpec,
-    cfg_env: &CfgEnv,
     ext: &ExtOps,
     metas: &MetaCtx,
     diags: &mut Vec<RokDiagnostic>,
@@ -127,7 +126,7 @@ pub fn expand(
             ext,
             &metas.table,
             &metas.literals,
-            Some(cfg_env),
+            Some(&metas.cfg),
         );
         diags.extend(parse_diags);
         let mut generated = program.items;
@@ -143,7 +142,7 @@ pub fn expand(
             module.split("::").map(str::to_owned).collect()
         };
         flatten_module_items(
-            generated, &path, None, cfg_env, ext, metas, diags, items, uses, None, files,
+            generated, &path, None, ext, metas, diags, items, uses, None, files,
         );
         any = true;
         world.push_str(&b.world);

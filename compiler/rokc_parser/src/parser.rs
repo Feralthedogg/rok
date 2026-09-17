@@ -13,7 +13,7 @@ use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 use rokc_lexer::token::keyword_str;
 use rokc_lexer::{Token, TokenKind};
 
-use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, ExtOps, Fixity};
+use crate::prec::{Assoc, CAST_PREC, COALESCE_PREC, ExtOps, Fixity, PREFIX_PREC};
 
 #[path = "fstring.rs"]
 mod fstring;
@@ -125,6 +125,42 @@ pub fn variadic_slice_ty(elem: Ty) -> Ty {
         span,
     }
 }
+
+/// The file an `include_str!` / `include_bytes!` in `file` names by
+/// the string literal body `lit`: relative to `file`'s directory.
+#[must_use]
+pub fn include_path(file: &str, lit: &str) -> std::path::PathBuf {
+    let rel = rokc_ast::escape::unescape(lit, rokc_ast::escape::EscapeMode::Str)
+        .unwrap_or_else(|_| lit.to_owned());
+    std::path::Path::new(file)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""))
+        .join(rel)
+}
+
+/// The literal `include_bytes!` (`bytes`) or `include_str!` gives for
+/// the path literal `lit` in `file`, or why not.
+fn include_file(file: &str, lit: &str, bytes: bool) -> Result<Literal, String> {
+    let data = std::fs::read(include_path(file, lit)).map_err(|e| {
+        let why = if e.kind() == std::io::ErrorKind::NotFound {
+            "no such file".to_owned()
+        } else {
+            e.to_string()
+        };
+        format!("cannot read \"{lit}\": {why}")
+    })?;
+    if bytes {
+        return Ok(Literal::ByteStr(rokc_ast::escape::escape_bytes(&data)));
+    }
+    match String::from_utf8(data) {
+        Ok(s) => Ok(Literal::Str(rokc_ast::escape::escape_str(&s))),
+        Err(e) => Err(format!(
+            "\"{lit}\" is not UTF-8 (invalid byte at offset {}); use `include_bytes!`",
+            e.utf8_error().valid_up_to()
+        )),
+    }
+}
+
 /// `MAX_DEPTH` levels need ~5 MiB (the dev profile builds the parser at
 /// opt-level 1; ~4 MiB at opt-level 3: `Expr` values are large).
 const PARSER_STACK: usize = 16 << 20;
@@ -779,7 +815,10 @@ impl<'a> Parser<'a> {
         };
         match k.as_str() {
             "extern" => matches!(next, Some(TokenKind::StrLit(_) | TokenKind::LBrace)),
-            "const" => matches!(next, Some(TokenKind::Ident(_) | TokenKind::Fn)),
+            "const" => matches!(
+                next,
+                Some(TokenKind::Ident(_) | TokenKind::Fn | TokenKind::Unsafe)
+            ),
             "static" | "type" => matches!(next, Some(TokenKind::Ident(_))),
             _ => false,
         }
@@ -1242,7 +1281,7 @@ impl<'a> Parser<'a> {
             return self.parse_extern_block(attrs).map(Item::Extern);
         }
         if self.at_kw("const") {
-            if matches!(self.peek_next(), Some(TokenKind::Fn)) {
+            if self.at_const_fn() {
                 return self.parse_const_fn(vis, attrs).map(Item::Fn);
             }
             return self.parse_const(vis, attrs).map(Item::Const);
@@ -1643,9 +1682,7 @@ impl<'a> Parser<'a> {
                         ty: aty,
                     });
                 }
-                TokenKind::Ident(k)
-                    if k == "const" && matches!(self.peek_next(), Some(TokenKind::Fn)) =>
-                {
+                TokenKind::Ident(k) if k == "const" && self.at_const_fn() => {
                     let from = self.pos;
                     if let Some(f) = self.parse_const_fn(item_vis, item_attrs) {
                         let fs = self.expand_method(f, attrs_from);
@@ -2152,9 +2189,7 @@ impl<'a> Parser<'a> {
                 let f = self.parse_fn(vis, attrs)?;
                 Some(TraitItem::Method(f))
             }
-            TokenKind::Ident(k)
-                if k == "const" && matches!(self.peek_next(), Some(TokenKind::Fn)) =>
-            {
+            TokenKind::Ident(k) if k == "const" && self.at_const_fn() => {
                 self.parse_const_fn(vis, attrs).map(TraitItem::Method)
             }
             TokenKind::Ident(k) if k == "const" => {
@@ -2447,6 +2482,11 @@ impl<'a> Parser<'a> {
     }
 
     /// `const fn` (spec 5.2.5): a plain fn carrying `CONST_FN_ATTR`.
+    /// `const fn` / `const unsafe fn` (spec 5.2: `"const" fn_decl`).
+    fn at_const_fn(&self) -> bool {
+        matches!(self.peek_next(), Some(TokenKind::Fn | TokenKind::Unsafe))
+    }
+
     fn parse_const_fn(&mut self, vis: Visibility, mut attrs: Vec<Attribute>) -> Option<FnDef> {
         let span = self.peek_span();
         self.bump(); // `const`
@@ -4301,10 +4341,59 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `include_str!("path")` / `include_bytes!("path")`: the file at
+    /// `path` (relative to this file's directory), read now, as a string
+    /// or byte string literal.
+    fn include_macro(&mut self) -> Option<Expr> {
+        let start = self.peek_span();
+        let at = |k: usize| self.tokens.get(self.pos + k).map(|t| &t.kind);
+        let (name, bytes) = match at(0) {
+            Some(TokenKind::Ident(n)) if n == "include_str" => ("include_str", false),
+            Some(TokenKind::Ident(n)) if n == "include_bytes" => ("include_bytes", true),
+            _ => return None,
+        };
+        if self.pending.is_some()
+            || at(1) != Some(&TokenKind::Bang)
+            || at(2) != Some(&TokenKind::LParen)
+        {
+            return None;
+        }
+        let lit = match (at(3), at(4)) {
+            (Some(TokenKind::StrLit(s)), Some(TokenKind::RParen)) => Some(s.clone()),
+            _ => None,
+        };
+        self.bump();
+        self.bump();
+        let read = match lit {
+            Some(lit) => {
+                for _ in 0..3 {
+                    self.bump();
+                }
+                include_file(&self.file, &lit, bytes)
+            }
+            None => {
+                let _ = self.parse_attr_body();
+                Err("takes one string literal path".to_owned())
+            }
+        };
+        let lit = read.unwrap_or_else(|msg| {
+            self.error(start, format!("`{name}!` {msg}"));
+            Literal::Str(String::new())
+        });
+        Some(Expr {
+            kind: ExprKind::Literal(lit),
+            span: start,
+        })
+    }
+
     #[allow(clippy::cognitive_complexity)] // one arm per primary-expression token
     fn parse_primary(&mut self) -> Option<Expr> {
         let stmt_head = std::mem::take(&mut self.stmt_head);
-        if let Some(e) = self.try_magic_literal().or_else(|| self.cfg_macro()) {
+        if let Some(e) = self
+            .try_magic_literal()
+            .or_else(|| self.cfg_macro())
+            .or_else(|| self.include_macro())
+        {
             return Some(e);
         }
         let start = self.peek_span();
@@ -4341,6 +4430,10 @@ impl<'a> Parser<'a> {
             TokenKind::RawStrLit(s) => {
                 self.bump();
                 ExprKind::Literal(Literal::RawStr(s))
+            }
+            TokenKind::ByteStrLit(s) => {
+                self.bump();
+                ExprKind::Literal(Literal::ByteStr(s))
             }
             TokenKind::FStrStart(_) => self.parse_fstring(),
             TokenKind::Unsafe => {
@@ -4929,9 +5022,10 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Await => {
-                // Spec 4.12.2: prefix `await expr`.
+                // Spec 4.12.2: `await` is a prefix unary operator
+                // (`await f() == x` is `(await f()) == x`).
                 self.bump();
-                let inner = self.parse_expr_bp(0)?;
+                let inner = self.parse_expr_bp(PREFIX_PREC)?;
                 ExprKind::Await(Box::new(inner))
             }
             // Spec 4.11.7: `yield {` is a generator block, `yield |` a

@@ -1,0 +1,360 @@
+// ML-KEM-768 (FIPS 203): k = 3, eta1 = eta2 = 2, du = 10, dv = 4.
+//
+// Polynomials are 256 coefficients in [0, q) held in `List<u32>`
+// (a vector of k polynomials is one list of 256k). Secret values never
+// steer a branch or an index: reduction is an exact multiply-shift
+// division by q, the re-encryption compare and the implicit-rejection
+// key select are masks. Only the rejection sampling of the public
+// matrix branches.
+
+use sup::{view, Bytes};
+use sup::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
+
+const Q: u32 = 3329u32;
+const K: usize = 3;
+const N: usize = 256;
+
+// 17^BitRev7(i) mod q.
+const ZETAS: [u16; 128] = [
+    1u16, 1729u16, 2580u16, 3289u16, 2642u16, 630u16, 1897u16, 848u16, 1062u16, 1919u16, 193u16, 797u16, 2786u16, 3260u16, 569u16, 1746u16,
+    296u16, 2447u16, 1339u16, 1476u16, 3046u16, 56u16, 2240u16, 1333u16, 1426u16, 2094u16, 535u16, 2882u16, 2393u16, 2879u16, 1974u16, 821u16,
+    289u16, 331u16, 3253u16, 1756u16, 1197u16, 2304u16, 2277u16, 2055u16, 650u16, 1977u16, 2513u16, 632u16, 2865u16, 33u16, 1320u16, 1915u16,
+    2319u16, 1435u16, 807u16, 452u16, 1438u16, 2868u16, 1534u16, 2402u16, 2647u16, 2617u16, 1481u16, 648u16, 2474u16, 3110u16, 1227u16, 910u16,
+    17u16, 2761u16, 583u16, 2649u16, 1637u16, 723u16, 2288u16, 1100u16, 1409u16, 2662u16, 3281u16, 233u16, 756u16, 2156u16, 3015u16, 3050u16,
+    1703u16, 1651u16, 2789u16, 1789u16, 1847u16, 952u16, 1461u16, 2687u16, 939u16, 2308u16, 2437u16, 2388u16, 733u16, 2337u16, 268u16, 641u16,
+    1584u16, 2298u16, 2037u16, 3220u16, 375u16, 2549u16, 2090u16, 1645u16, 1063u16, 319u16, 2773u16, 757u16, 2099u16, 561u16, 2466u16, 2594u16,
+    2804u16, 1092u16, 403u16, 1026u16, 1143u16, 2150u16, 2775u16, 886u16, 1722u16, 1212u16, 1874u16, 1029u16, 2110u16, 2935u16, 885u16, 2154u16,
+];
+
+// 17^(2 BitRev7(i) + 1) mod q.
+const GAMMAS: [u16; 128] = [
+    17u16, 3312u16, 2761u16, 568u16, 583u16, 2746u16, 2649u16, 680u16, 1637u16, 1692u16, 723u16, 2606u16, 2288u16, 1041u16, 1100u16, 2229u16,
+    1409u16, 1920u16, 2662u16, 667u16, 3281u16, 48u16, 233u16, 3096u16, 756u16, 2573u16, 2156u16, 1173u16, 3015u16, 314u16, 3050u16, 279u16,
+    1703u16, 1626u16, 1651u16, 1678u16, 2789u16, 540u16, 1789u16, 1540u16, 1847u16, 1482u16, 952u16, 2377u16, 1461u16, 1868u16, 2687u16, 642u16,
+    939u16, 2390u16, 2308u16, 1021u16, 2437u16, 892u16, 2388u16, 941u16, 733u16, 2596u16, 2337u16, 992u16, 268u16, 3061u16, 641u16, 2688u16,
+    1584u16, 1745u16, 2298u16, 1031u16, 2037u16, 1292u16, 3220u16, 109u16, 375u16, 2954u16, 2549u16, 780u16, 2090u16, 1239u16, 1645u16, 1684u16,
+    1063u16, 2266u16, 319u16, 3010u16, 2773u16, 556u16, 757u16, 2572u16, 2099u16, 1230u16, 561u16, 2768u16, 2466u16, 863u16, 2594u16, 735u16,
+    2804u16, 525u16, 1092u16, 2237u16, 403u16, 2926u16, 1026u16, 2303u16, 1143u16, 2186u16, 2150u16, 1179u16, 2775u16, 554u16, 886u16, 2443u16,
+    1722u16, 1607u16, 1212u16, 2117u16, 1874u16, 1455u16, 1029u16, 2300u16, 2110u16, 1219u16, 2935u16, 394u16, 885u16, 2444u16, 2154u16, 1175u16,
+];
+
+/// `floor(x / q)` for `x < 2^24`, without a divide instruction.
+fn div_q(x: u32) -> u32 {
+    (((x as u64) * 20642679u64) >> 36u64) as u32
+}
+
+/// `x mod q` for `x < 2^24`.
+fn mod_q(x: u32) -> u32 { x - div_q(x) * Q }
+
+fn add_q(a: u32, b: u32) -> u32 { mod_q(a + b) }
+
+fn sub_q(a: u32, b: u32) -> u32 { mod_q(a + Q - b) }
+
+fn mul_q(a: u32, b: u32) -> u32 { mod_q(a * b) }
+
+fn zeros(n: usize) -> List<u32> {
+    let p: List<u32> = List::with_capacity(n);
+    for _ in 0..n { p.push(0u32); }
+    p
+}
+
+/// In-place NTT of the polynomial at `f[o..o + 256]` (Algorithm 9).
+fn ntt(f: List<u32>, o: usize) {
+    let i = 1usize;
+    let len = 128usize;
+    while len >= 2 {
+        let start = 0usize;
+        while start < N {
+            let z = ZETAS[i] as u32;
+            i += 1;
+            for j in start..start + len {
+                let t = mul_q(z, f[o + j + len]);
+                f[o + j + len] = sub_q(f[o + j], t);
+                f[o + j] = add_q(f[o + j], t);
+            }
+            start += 2 * len;
+        }
+        len = len / 2;
+    }
+}
+
+/// In-place inverse NTT (Algorithm 10).
+fn inv_ntt(f: List<u32>, o: usize) {
+    let i = 127usize;
+    let len = 2usize;
+    while len <= 128 {
+        let start = 0usize;
+        while start < N {
+            let z = ZETAS[i] as u32;
+            i -= 1;
+            for j in start..start + len {
+                let t = f[o + j];
+                f[o + j] = add_q(t, f[o + j + len]);
+                f[o + j + len] = mul_q(z, sub_q(f[o + j + len], t));
+            }
+            start += 2 * len;
+        }
+        len = len * 2;
+    }
+    for j in 0..N { f[o + j] = mul_q(f[o + j], 3303u32); }
+}
+
+/// `acc[ao..] += a[ai..] * b[bi..]` in the NTT domain (Algorithm 11).
+fn mul_acc(acc: List<u32>, ao: usize, a: List<u32>, ai: usize, b: List<u32>, bi: usize) {
+    for i in 0usize..128 {
+        let a0 = a[ai + 2 * i];
+        let a1 = a[ai + 2 * i + 1];
+        let b0 = b[bi + 2 * i];
+        let b1 = b[bi + 2 * i + 1];
+        let c0 = add_q(mul_q(a0, b0), mul_q(mul_q(a1, b1), GAMMAS[i] as u32));
+        let c1 = add_q(mul_q(a0, b1), mul_q(a1, b0));
+        acc[ao + 2 * i] = add_q(acc[ao + 2 * i], c0);
+        acc[ao + 2 * i + 1] = add_q(acc[ao + 2 * i + 1], c1);
+    }
+}
+
+/// The NTT-domain matrix A from `rho` (Algorithm 7), row-major;
+/// `A[i][j]` from `rho || j || i`.
+fn matrix(rho: Slice<u8>) -> List<u32> {
+    let a = zeros(K * K * N);
+    for i in 0..K {
+        for j in 0..K {
+            let x = Shake128::new();
+            x.update(rho);
+            x.update([j as u8, i as u8]);
+            let o = (i * K + j) * N;
+            let n = 0usize;
+            while n < N {
+                let c = x.squeeze(168);
+                let p = 0usize;
+                while p + 3 <= 168 && n < N {
+                    let d1 = (c[p] as u32) | (((c[p + 1] as u32) & 15u32) << 8);
+                    let d2 = ((c[p + 1] as u32) >> 4) | ((c[p + 2] as u32) << 4);
+                    if d1 < Q { a[o + n] = d1; n += 1; }
+                    if d2 < Q && n < N { a[o + n] = d2; n += 1; }
+                    p += 3;
+                }
+            }
+        }
+    }
+    a
+}
+
+/// CBD with eta = 2 of `PRF(s, b)` into `f[o..]` (Algorithms 8, 4.3).
+fn cbd(f: List<u32>, o: usize, s: Slice<u8>, b: u8) {
+    let x = Shake256::new();
+    x.update(s);
+    x.update([b]);
+    let buf = x.squeeze(128);
+    for i in 0..N {
+        // Four bits of coefficient i: x0 + x1 - y0 - y1.
+        let bits = ((buf[i / 2] as u32) >> ((4 * (i % 2)) as u32)) & 15u32;
+        let x = (bits & 1u32) + ((bits >> 1) & 1u32);
+        let y = ((bits >> 2) & 1u32) + ((bits >> 3) & 1u32);
+        f[o + i] = mod_q(x + Q - y);
+    }
+}
+
+/// `ByteEncode_d` of `f[0..n]`.
+fn encode(f: List<u32>, n: usize, d: u32, out: List<u8>) {
+    let acc = 0u64;
+    let bits = 0u32;
+    for i in 0..n {
+        acc = acc | ((f[i] as u64) << (bits as u64));
+        bits += d;
+        while bits >= 8u32 {
+            out.push(acc as u8);
+            acc = acc >> 8u64;
+            bits -= 8u32;
+        }
+    }
+}
+
+/// `ByteDecode_d` of `b` into `n` values (no reduction).
+fn decode(b: Slice<u8>, n: usize, d: u32) -> List<u32> {
+    let f: List<u32> = List::with_capacity(n);
+    let mask = (1u64 << (d as u64)) - 1u64;
+    let acc = 0u64;
+    let bits = 0u32;
+    let p = 0usize;
+    for _ in 0..n {
+        while bits < d {
+            acc = acc | ((b[p] as u64) << (bits as u64));
+            p += 1;
+            bits += 8u32;
+        }
+        f.push((acc & mask) as u32);
+        acc = acc >> (d as u64);
+        bits -= d;
+    }
+    f
+}
+
+/// `Compress_d` in place: `round(2^d x / q) mod 2^d`.
+fn compress(f: List<u32>, d: u32) {
+    for i in 0..f.len() {
+        f[i] = div_q((f[i] << d) + 1664u32) & ((1u32 << d) - 1u32);
+    }
+}
+
+/// `Decompress_d` in place: `round(q y / 2^d)`.
+fn decompress(f: List<u32>, d: u32) {
+    for i in 0..f.len() {
+        f[i] = (f[i] * Q + (1u32 << (d - 1u32))) >> d;
+    }
+}
+
+/// K-PKE.Encrypt (Algorithm 14); `ek` already passed the modulus check.
+fn encrypt(ek: Slice<u8>, m: Slice<u8>, r: Slice<u8>) -> List<u8> {
+    let t = decode(ek[0:384 * K], K * N, 12u32);
+    let a = matrix(ek[384 * K:384 * K + 32]);
+    let y = zeros(K * N);
+    let e1 = zeros(K * N);
+    let e2 = zeros(N);
+    for i in 0..K { cbd(y, i * N, r, i as u8); }
+    for i in 0..K { cbd(e1, i * N, r, (K + i) as u8); }
+    cbd(e2, 0, r, (2 * K) as u8);
+    for i in 0..K { ntt(y, i * N); }
+    let u = zeros(K * N);
+    for i in 0..K {
+        for j in 0..K { mul_acc(u, i * N, a, (j * K + i) * N, y, j * N); }
+        inv_ntt(u, i * N);
+        for c in 0..N { u[i * N + c] = add_q(u[i * N + c], e1[i * N + c]); }
+    }
+    let v = zeros(N);
+    for j in 0..K { mul_acc(v, 0, t, j * N, y, j * N); }
+    inv_ntt(v, 0);
+    let mu = decode(m, N, 1u32);
+    decompress(mu, 1u32);
+    for c in 0..N { v[c] = add_q(add_q(v[c], e2[c]), mu[c]); }
+    compress(u, 10u32);
+    compress(v, 4u32);
+    let out: List<u8> = List::with_capacity(1088);
+    encode(u, K * N, 10u32, out);
+    encode(v, N, 4u32, out);
+    out
+}
+
+/// K-PKE.Decrypt (Algorithm 15).
+fn decrypt(dk: Slice<u8>, c: Slice<u8>) -> List<u8> {
+    let u = decode(c[0:320 * K], K * N, 10u32);
+    decompress(u, 10u32);
+    let v = decode(c[320 * K:1088], N, 4u32);
+    decompress(v, 4u32);
+    let s = decode(dk[0:384 * K], K * N, 12u32);
+    for i in 0..K * N { s[i] = mod_q(s[i]); }
+    for i in 0..K { ntt(u, i * N); }
+    let w = zeros(N);
+    for i in 0..K { mul_acc(w, 0, s, i * N, u, i * N); }
+    inv_ntt(w, 0);
+    for c in 0..N { w[c] = sub_q(v[c], w[c]); }
+    compress(w, 1u32);
+    let m: List<u8> = List::with_capacity(32);
+    encode(w, N, 1u32, m);
+    m
+}
+
+fn concat(a: Slice<u8>, b: Slice<u8>) -> List<u8> {
+    let out = a.to_list();
+    for x in b { out.push(x); }
+    out
+}
+
+fn need(b: Slice<u8>, n: usize, what: str) throws (ValueError) {
+    if b.len() != n { throw ValueError { msg: f"ML-KEM-768: {what} must be {n} bytes" }; }
+}
+
+/// ML-KEM-768 key encapsulation. The functions are the deterministic
+/// `_internal` forms: the caller supplies the random seeds.
+pub struct MlKem768;
+
+impl MlKem768 {
+    pub const ENCAPSULATION_KEY_LEN: usize = 1184;
+    pub const DECAPSULATION_KEY_LEN: usize = 2400;
+    pub const CIPHERTEXT_LEN: usize = 1088;
+    pub const SHARED_KEY_LEN: usize = 32;
+
+    /// KeyGen from 32-byte seeds `d` and `z`: `(ek, dk)`.
+    pub fn keygen(d: Bytes, z: Bytes) throws (ValueError) -> (List<u8>, List<u8>) {
+        let dv = view(d);
+        let zv = view(z);
+        try need(dv, 32, "d");
+        try need(zv, 32, "z");
+        let g = Sha3_512::new();
+        g.update(dv);
+        g.update([K as u8]);
+        let rs = g.finish();
+        let rho = rs[0:32];
+        let sigma = rs[32:64];
+        let a = matrix(rho);
+        let s = zeros(K * N);
+        let e = zeros(K * N);
+        for i in 0..K { cbd(s, i * N, sigma, i as u8); }
+        for i in 0..K { cbd(e, i * N, sigma, (K + i) as u8); }
+        for i in 0..K {
+            ntt(s, i * N);
+            ntt(e, i * N);
+        }
+        let t = zeros(K * N);
+        for i in 0..K {
+            for j in 0..K { mul_acc(t, i * N, a, (i * K + j) * N, s, j * N); }
+            for c in 0..N { t[i * N + c] = add_q(t[i * N + c], e[i * N + c]); }
+        }
+        let ek: List<u8> = List::with_capacity(1184);
+        encode(t, K * N, 12u32, ek);
+        for x in rho { ek.push(x); }
+        let dk: List<u8> = List::with_capacity(2400);
+        encode(s, K * N, 12u32, dk);
+        for x in ek { dk.push(x); }
+        for x in Sha3_256::digest(ek) { dk.push(x); }
+        for x in zv { dk.push(x); }
+        (ek, dk)
+    }
+
+    /// Encaps with the 32-byte message `m`: `(shared key, ciphertext)`.
+    /// `ek` must pass the length and modulus checks (FIPS 203 7.2).
+    pub fn encapsulate(ek: Bytes, m: Bytes) throws (ValueError) -> (List<u8>, List<u8>) {
+        let e = view(ek);
+        let mv = view(m);
+        try need(e, 1184, "encapsulation key");
+        try need(mv, 32, "m");
+        let t = decode(e[0:384 * K], K * N, 12u32);
+        for x in t {
+            if x >= Q { throw ValueError { msg: "ML-KEM-768: encapsulation key coefficient out of range" }; }
+        }
+        let kr = Sha3_512::digest(concat(mv, Sha3_256::digest(e)[0:32]));
+        let c = encrypt(e, mv, kr[32:64]);
+        (kr[0:32].to_list(), c)
+    }
+
+    /// Decaps: the shared key, or (implicit rejection) a key derived
+    /// from `z` and `c` when `c` does not re-encrypt to itself.
+    pub fn decapsulate(dk: Bytes, c: Bytes) throws (ValueError) -> List<u8> {
+        let d = view(dk);
+        let cv = view(c);
+        try need(d, 2400, "decapsulation key");
+        try need(cv, 1088, "ciphertext");
+        let ek = d[384 * K:768 * K + 32];
+        let h = d[768 * K + 32:768 * K + 64];
+        let z = d[768 * K + 64:2400];
+        let hd = Sha3_256::digest(ek);
+        let bad = 0u8;
+        for i in 0..32 { bad = bad | (hd[i] ^ h[i]); }
+        if bad != 0u8 { throw ValueError { msg: "ML-KEM-768: decapsulation key hash mismatch" }; }
+        let m = decrypt(d, cv);
+        let kr = Sha3_512::digest(concat(m[0:32], h));
+        let j = Shake256::new();
+        j.update(z);
+        j.update(cv);
+        let kbar = j.squeeze(32);
+        let c2 = encrypt(ek, m[0:32], kr[32:64]);
+        let diff = 0u32;
+        for i in 0..1088 { diff = diff | ((cv[i] ^ c2[i]) as u32); }
+        // 0xff when the ciphertexts differ, else 0.
+        let bit = (0u32.wrapping_sub(diff) >> 31) as u8;
+        let mask = 0u8.wrapping_sub(bit);
+        let out: List<u8> = List::with_capacity(32);
+        for i in 0..32 { out.push(kr[i] ^ (mask & (kr[i] ^ kbar[i]))); }
+        out
+    }
+}

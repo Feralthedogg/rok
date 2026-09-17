@@ -2,7 +2,8 @@
 //! built once into `<deps dir>/lib<name>.a` + `<name>.rokhir` and the build
 //! goes on with the ROKHIR. A dependency is rebuilt when its fingerprint
 //! changes; it sees the dependencies before it (its own, and the GC type
-//! ids to start after), so `externs` come dependencies first.
+//! ids to start after), so `externs` come dependencies first. Each has
+//! its own features: the build's `feature` cfg is not its.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,8 @@ use crate::{BuildOptions, Session, TargetSpec, rokhir};
 pub struct DepBuild<'a> {
     pub bootstrap: &'a [PathBuf],
     pub cfg: &'a [String],
+    /// `(dependency, feature)`: `--extern-feature`.
+    pub features: &'a [(String, String)],
     pub opts: &'a BuildOptions,
     pub target: &'a TargetSpec,
     /// `target/[<target>/]<profile>/deps`.
@@ -54,6 +57,24 @@ impl DepBuild<'_> {
         Ok(out)
     }
 
+    /// Dependency `name`'s cfg: the build's without its features, and
+    /// its own.
+    fn cfg_of(&self, name: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .cfg
+            .iter()
+            .filter(|c| crate::feature_of(c).is_none())
+            .cloned()
+            .collect();
+        out.extend(
+            self.features
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, f)| format!("feature=\"{f}\"")),
+        );
+        out
+    }
+
     fn fingerprint(
         &self,
         name: &str,
@@ -66,7 +87,7 @@ impl DepBuild<'_> {
             format!("target {:016x}", self.target.hash()),
             name.to_owned(),
         ];
-        words.extend(self.cfg.iter().cloned());
+        words.extend(self.cfg_of(name));
         let mut inputs = vec![root.parent().unwrap_or(root).to_path_buf()];
         let mut stamped = Vec::new();
         stamped.extend(self.opts.profile.used().map(Path::to_path_buf));
@@ -105,8 +126,8 @@ impl DepBuild<'_> {
         for b in self.bootstrap {
             s.add_bootstrap_file(b.clone());
         }
-        for c in self.cfg {
-            s.add_cfg(c.clone());
+        for c in self.cfg_of(name) {
+            s.add_cfg(c);
         }
         for (n, p) in before {
             s.add_extern(n.clone(), p.clone());

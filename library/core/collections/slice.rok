@@ -24,27 +24,27 @@ pub struct Slice<T> {
 impl<T> !Sync for Slice<T> {}
 
 /// A contiguous view of `buf[r]` (`r` clamped to the length `n`).
-pub(pkg) fn view_of<T>(buf: GcBuf<T>, r: Range<usize>, n: usize) -> Slice<T> {
+pub(pkg) const fn view_of<T>(buf: GcBuf<T>, r: Range<usize>, n: usize) -> Slice<T> {
     let r = clamp_range(r, n);
     Slice { buf: buf, start: r.start, len: r.end - r.start, stride: 1 }
 }
 
 impl<T> Slice<T> {
-    pub fn len(self) -> usize {
+    pub const fn len(self) -> usize {
         self.len
     }
 
-    pub fn is_empty(self) -> bool {
+    pub const fn is_empty(self) -> bool {
         self.len == 0
     }
 
     /// Buffer index of element `i` (`i < len`).
-    fn at(self, i: usize) -> usize {
+    const fn at(self, i: usize) -> usize {
         ((self.start as isize) + (i as isize) * self.stride) as usize
     }
 
     /// Element `i`, or `none` out of bounds.
-    pub fn get(self, i: usize) -> T | none {
+    pub const fn get(self, i: usize) -> T | none {
         unsafe {
             if i >= self.len {
                 return none;
@@ -53,11 +53,11 @@ impl<T> Slice<T> {
         }
     }
 
-    pub fn first(self) -> T | none {
+    pub const fn first(self) -> T | none {
         self.get(0)
     }
 
-    pub fn last(self) -> T | none {
+    pub const fn last(self) -> T | none {
         if self.len == 0 {
             return none;
         }
@@ -66,7 +66,7 @@ impl<T> Slice<T> {
 
     /// Every `k`th element (`k` != 0), back to front when `k` < 0.
     #[track_caller]
-    pub fn step(self, k: isize) -> Slice<T> {
+    pub const fn step(self, k: isize) -> Slice<T> {
         if k == 0 {
             panic("slice step must not be zero");
         }
@@ -76,14 +76,14 @@ impl<T> Slice<T> {
         Slice { buf: self.buf, start: first, len: n, stride: self.stride * k }
     }
 
-    pub fn iter(self) -> SliceIter<T> {
+    pub const fn iter(self) -> SliceIter<T> {
         SliceIter { s: self, i: 0 }
     }
 
     /// `(buffer, start, len)` of the viewed elements as one contiguous
     /// run, for runtime calls on a buffer region. A strided view is
     /// copied first, so writes through its run do not reach the view.
-    pub unsafe fn raw_parts(self) -> (GcBuf<T>, usize, usize) {
+    pub const unsafe fn raw_parts(self) -> (GcBuf<T>, usize, usize) {
         if self.stride == 1 {
             return (self.buf, self.start, self.len);
         }
@@ -92,12 +92,12 @@ impl<T> Slice<T> {
 
     /// The view `raw_parts` takes apart: `len` elements of `buf` from
     /// `start`.
-    pub unsafe fn from_raw_parts(buf: GcBuf<T>, start: usize, len: usize) -> Slice<T> {
+    pub const unsafe fn from_raw_parts(buf: GcBuf<T>, start: usize, len: usize) -> Slice<T> {
         Slice { buf: buf, start: start, len: len, stride: 1 }
     }
 
     /// A new list holding the viewed elements.
-    pub fn to_list(self) -> List<T> {
+    pub const fn to_list(self) -> List<T> {
         let out: List<T> = List::with_capacity(self.len);
         for x in self {
             out.push(x);
@@ -116,7 +116,7 @@ pub struct SliceIter<T> {
 
 impl<T> Iterator for SliceIter<T> {
     type Item = T;
-    fn next(ref self) -> T | none {
+    const fn next(ref self) -> T | none {
         unsafe {
             if self.i + self.back >= self.s.len {
                 return none;
@@ -128,11 +128,11 @@ impl<T> Iterator for SliceIter<T> {
     }
 
     /// `ExactSizeIterator`: O(1) (2.7.10).
-    fn count(self) -> usize { self.len() }
+    const fn count(self) -> usize { self.len() }
 }
 
 impl<T> DoubleEndedIterator for SliceIter<T> {
-    fn next_back(ref self) -> T | none {
+    const fn next_back(ref self) -> T | none {
         unsafe {
             if self.i + self.back >= self.s.len {
                 return none;
@@ -144,13 +144,13 @@ impl<T> DoubleEndedIterator for SliceIter<T> {
 }
 
 impl<T> ExactSizeIterator for SliceIter<T> {
-    fn len(self) -> usize { self.s.len - self.i - self.back }
+    const fn len(self) -> usize { self.s.len - self.i - self.back }
 }
 
 impl<T> IntoIterator for Slice<T> {
     type IntoIter = SliceIter<T>;
     type Item = T;
-    fn into_iter(self) -> SliceIter<T> {
+    const fn into_iter(self) -> SliceIter<T> {
         self.iter()
     }
 }
@@ -159,7 +159,7 @@ impl<T> IntoIterator for Slice<T> {
 impl<T> Index<usize> for Slice<T> {
     type Output = T;
     #[track_caller]
-    fn index(self, i: usize) -> T {
+    const fn index(self, i: usize) -> T {
         unsafe {
             if i >= self.len {
                 return index_oob("slice index", i, self.len);
@@ -172,7 +172,7 @@ impl<T> Index<usize> for Slice<T> {
 /// `s[a:b]`: a view of the view.
 impl<T> Sliceable<Range<usize>> for Slice<T> {
     type Output = Slice<T>;
-    fn slice(self, r: Range<usize>) -> Slice<T> {
+    const fn slice(self, r: Range<usize>) -> Slice<T> {
         let r = clamp_range(r, self.len);
         let first = if r.start < self.len { self.at(r.start) } else { self.start };
         Slice { buf: self.buf, start: first, len: r.end - r.start, stride: self.stride }
@@ -182,7 +182,7 @@ impl<T> Sliceable<Range<usize>> for Slice<T> {
 /// `xs[a:b]` (2.9.8): a view of the list's current buffer.
 impl<T> Sliceable<Range<usize>> for List<T> {
     type Output = Slice<T>;
-    fn slice(self, r: Range<usize>) -> Slice<T> {
+    const fn slice(self, r: Range<usize>) -> Slice<T> {
         view_of(self.buffer(), r, self.len())
     }
 }
@@ -190,7 +190,7 @@ impl<T> Sliceable<Range<usize>> for List<T> {
 /// `a[i:j]` on a fixed array: a view of a GC copy (arrays are values).
 impl<T, const N: usize> Sliceable<Range<usize>> for [T; N] {
     type Output = Slice<T>;
-    fn slice(self, r: Range<usize>) -> Slice<T> {
+    const fn slice(self, r: Range<usize>) -> Slice<T> {
         unsafe {
             let r = clamp_range(r, N);
             let buf: GcBuf<T> = buf_new(r.end - r.start);
@@ -202,9 +202,42 @@ impl<T, const N: usize> Sliceable<Range<usize>> for [T; N] {
     }
 }
 
+impl Slice<u8> {
+    /// The offset of the first occurrence of `needle`, or `none`; an
+    /// empty needle is at 0. A `b"..."` argument is a view.
+    // Naive O(n * m) scan.
+    pub const fn find(self, needle: Slice<u8> | List<u8>) -> usize | none {
+        let p = match needle {
+            s: Slice<u8> => s,
+            l: List<u8> => l[:],
+        };
+        let m = p.len;
+        if m > self.len {
+            return none;
+        }
+        for i in 0..self.len - m + 1 {
+            let j: usize = 0;
+            while j < m && self[i + j] == p[j] {
+                j += 1;
+            }
+            if j == m {
+                return i;
+            }
+        }
+        none
+    }
+}
+
+impl List<u8> {
+    /// `self[:].find(needle)`.
+    pub const fn find(self, needle: Slice<u8> | List<u8>) -> usize | none {
+        self[:].find(needle)
+    }
+}
+
 /// Element-wise, in view order.
 impl<T: PartialEq> PartialEq for Slice<T> {
-    fn eq(self, rhs: Slice<T>) -> bool {
+    const fn eq(self, rhs: Slice<T>) -> bool {
         if self.len != rhs.len { return false; }
         for i in 0..self.len {
             if self[i] != rhs[i] { return false; }

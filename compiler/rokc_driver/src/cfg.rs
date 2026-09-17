@@ -9,6 +9,13 @@ use rokc_ast::{Attribute, Item};
 
 pub use rokc_parser::CfgEnv;
 
+/// The value of a `--cfg feature=<f>` flag (quotes optional).
+#[must_use]
+pub fn feature_of(flag: &str) -> Option<&str> {
+    let (k, v) = flag.split_once('=')?;
+    (k.trim() == "feature").then(|| v.trim().trim_matches('"'))
+}
+
 /// The target's cfg keys (spec 6.3.2); `target_family` / `target_env`
 /// only when the target has one.
 pub fn add_target(env: &mut CfgEnv, target: &rokc_mir::Target) {

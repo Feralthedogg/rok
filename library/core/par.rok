@@ -45,7 +45,7 @@ fn chunking(n: usize) -> (usize, usize) {
     (chunks, (n + chunks - 1) / chunks)
 }
 
-fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
+const fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
     let items: List<I::Item> = [];
     for x in iter {
         items.push(x);

@@ -1444,11 +1444,13 @@ fn main() -> i32 {
         ],
     );
     assert!(!out.status.success());
-    assert!(
-        text(&out.stderr).contains("no librokmissing.a in the -L directories"),
-        "{}",
-        text(&out.stderr)
-    );
+    // ld64 has no -Bstatic: rokc looks for the archive itself there.
+    let want = if cfg!(target_os = "macos") {
+        "no librokmissing.a in the -L directories"
+    } else {
+        "unable to find library -lrokmissing"
+    };
+    assert!(text(&out.stderr).contains(want), "{}", text(&out.stderr));
 }
 
 /// `-l` links a library the source does not name; `--native-runtime`
@@ -1515,8 +1517,6 @@ typedef __builtin_va_list va_list;
 typedef __SIZE_TYPE__ usize;
 #define long long long
 typedef struct { const char *p; usize n; } RokStr;
-__declspec(thread) unsigned char rok_tls_yield_flag, rok_tls_mutator_state;
-__declspec(thread) void *rok_tls_tlab_cursor, *rok_tls_tlab_limit, *rok_tls_shadow_stack_top;
 __declspec(thread) __attribute__((aligned(8))) unsigned char rok_tls[13 * sizeof(void *) + 16];
 int _write(int, const void *, unsigned);
 void *calloc(usize, usize);

@@ -32,14 +32,14 @@ pub(pkg) struct IntMag {
 }
 
 impl IntMag {
-    fn zero() -> IntMag {
+    const fn zero() -> IntMag {
         unsafe {
             IntMag { d: buf_new(0), n: 0 }
         }
     }
 
     /// `d[0..n]` without its leading zero limbs (shares `d`).
-    fn trim(d: GcBuf<u32>, n: usize) -> IntMag {
+    const fn trim(d: GcBuf<u32>, n: usize) -> IntMag {
         unsafe {
             let k = n;
             while k > 0 && d[k - 1] == 0u32 { k -= 1; }
@@ -47,7 +47,7 @@ impl IntMag {
         }
     }
 
-    fn from_u64(v: u64) -> IntMag {
+    const fn from_u64(v: u64) -> IntMag {
         unsafe {
             let d: GcBuf<u32> = buf_new(2);
             d[0] = v as u32;
@@ -57,17 +57,17 @@ impl IntMag {
     }
 
     /// Limb `i`, zero past the top.
-    fn limb(self, i: usize) -> u64 {
+    const fn limb(self, i: usize) -> u64 {
         unsafe {
             if i < self.n { self.d[i] as u64 } else { 0u64 }
         }
     }
 
     /// The low 64 bits.
-    fn low64(self) -> u64 { (self.limb(1) << 32u64) | self.limb(0) }
+    const fn low64(self) -> u64 { (self.limb(1) << 32u64) | self.limb(0) }
 
     /// Number of significant bits (0 for zero).
-    fn bits(self) -> u64 {
+    const fn bits(self) -> u64 {
         unsafe {
             if self.n == 0 { return 0u64; }
             (self.n as u64) * 32u64 - (self.d[self.n - 1].leading_zeros() as u64)
@@ -75,7 +75,7 @@ impl IntMag {
     }
 
     /// `self` vs `b`: -1, 0 or 1.
-    fn cmp3(self, b: IntMag) -> i32 {
+    const fn cmp3(self, b: IntMag) -> i32 {
         unsafe {
             if self.n != b.n { return if self.n < b.n { -1 } else { 1 }; }
             let i = self.n;
@@ -87,7 +87,7 @@ impl IntMag {
         }
     }
 
-    fn plus(self, b: IntMag) -> IntMag {
+    const fn plus(self, b: IntMag) -> IntMag {
         unsafe {
             if self.n < b.n { return b.plus(self); }
             let r: GcBuf<u32> = buf_new(self.n + 1);
@@ -105,7 +105,7 @@ impl IntMag {
     }
 
     /// `self - b`, `self >= b`.
-    fn minus(self, b: IntMag) -> IntMag {
+    const fn minus(self, b: IntMag) -> IntMag {
         unsafe {
             let r: GcBuf<u32> = buf_new(self.n);
             let borrow = 0u64;
@@ -127,7 +127,7 @@ impl IntMag {
     }
 
     /// `r[off..] += self` (`r` has room for the carry).
-    fn add_to(self, r: GcBuf<u32>, off: usize) {
+    const fn add_to(self, r: GcBuf<u32>, off: usize) {
         unsafe {
             let carry = 0u64;
             let i = 0usize;
@@ -141,7 +141,7 @@ impl IntMag {
     }
 
     /// Limbs `lo..hi` (a copy).
-    fn slice(self, lo: usize, hi: usize) -> IntMag {
+    const fn slice(self, lo: usize, hi: usize) -> IntMag {
         unsafe {
             let h = if hi < self.n { hi } else { self.n };
             if lo >= h { return IntMag::zero(); }
@@ -193,7 +193,7 @@ impl IntMag {
     }
 
     /// `self << s` bits.
-    fn shl(self, s: u64) -> IntMag {
+    const fn shl(self, s: u64) -> IntMag {
         unsafe {
             if self.n == 0 { return self; }
             let limbs = (s / 32u64) as usize;
@@ -213,7 +213,7 @@ impl IntMag {
     }
 
     /// `self >> s` bits (floor).
-    fn shr(self, s: u64) -> IntMag {
+    const fn shr(self, s: u64) -> IntMag {
         unsafe {
             let limbs = s / 32u64;
             if limbs >= self.n as u64 { return IntMag::zero(); }
@@ -271,7 +271,7 @@ pub struct Int {
 
 /// `(10^9, 9)` for base 10: the largest power of `radix` below 2^32 and
 /// its digit count.
-fn radix_chunk(radix: u32) -> (u32, u32) {
+const fn radix_chunk(radix: u32) -> (u32, u32) {
     let p = radix;
     let k = 1u32;
     while (p as u64) * (radix as u64) < 0x1_0000_0000u64 {
@@ -282,7 +282,7 @@ fn radix_chunk(radix: u32) -> (u32, u32) {
 }
 
 /// Digit value of an ASCII digit or letter (either case).
-fn digit_of(c: u8) -> u32 {
+const fn digit_of(c: u8) -> u32 {
     let v = c as u32;
     if v >= 48u32 && v <= 57u32 { return v - 48u32; }
     if v >= 97u32 && v <= 122u32 { return v - 87u32; }
@@ -291,21 +291,25 @@ fn digit_of(c: u8) -> u32 {
 
 impl Int {
     /// Zero.
-    pub fn new() -> Int { Int::from_i64(0) }
-    pub fn from_i64(n: i64) -> Int { Int { small: n, neg: false, big: none } }
-    pub fn from_i32(n: i32) -> Int { Int::from_i64(n as i64) }
-    pub fn from_u64(n: u64) -> Int { Int::from_parts(false, IntMag::from_u64(n)) }
+    pub const fn new() -> Int { Int::from_i64(0) }
+    pub const fn from_i64(n: i64) -> Int { Int { small: n, neg: false, big: none } }
+    pub const fn from_i32(n: i32) -> Int { Int::from_i64(n as i64) }
+    pub const fn from_u64(n: u64) -> Int { Int::from_parts(false, IntMag::from_u64(n)) }
 
     /// An integer literal's digits (`_`, `0x` / `0o` / `0b` allowed):
     /// what an unsuffixed literal too big for `i64` in an `int` slot
     /// lowers to.
     pub fn from_literal(s: str) -> Int {
-        let t = s.replace("_", "");
+        let t = if s.contains("_") { s.replace("_", "") } else { s };
         let radix = 10u32;
-        if t.starts_with("0x") || t.starts_with("0X") { radix = 16u32; }
-        if t.starts_with("0o") || t.starts_with("0O") { radix = 8u32; }
-        if t.starts_with("0b") || t.starts_with("0B") { radix = 2u32; }
-        if radix != 10u32 { t = t[2:]; }
+        if t.len() > 2 && t.as_bytes()[0] == 48u8 {
+            // `0x` / `0o` / `0b`, either case.
+            let c = t.as_bytes()[1] | 32u8;
+            if c == 120u8 { radix = 16u32; }
+            if c == 111u8 { radix = 8u32; }
+            if c == 98u8 { radix = 2u32; }
+            if radix != 10u32 { t = t[2:]; }
+        }
         match Int::parse_radix(t, radix) {
             v: Int => v,
             none => panic(f"malformed integer literal `{s}`"),
@@ -409,18 +413,18 @@ impl Int {
         }
     }
 
-    pub fn to_i32(self) -> i32 | none {
+    pub const fn to_i32(self) -> i32 | none {
         let v = self.to_i64()?;
         if v < -2147483648 || v > 2147483647 { return none; }
         v as i32
     }
 
-    pub fn to_i64(self) -> i64 | none {
+    pub const fn to_i64(self) -> i64 | none {
         if self.big is none { return self.small; }
         none
     }
 
-    pub fn to_u64(self) -> u64 | none {
+    pub const fn to_u64(self) -> u64 | none {
         if self.big is none {
             if self.small < 0 { return none; }
             return self.small as u64;
@@ -436,25 +440,25 @@ impl Int {
         rok::core::num::bigfloat::Float::from_int(self).to_f64()
     }
 
-    pub fn is_zero(self) -> bool { self.big is none && self.small == 0 }
-    pub fn is_negative(self) -> bool {
+    pub const fn is_zero(self) -> bool { self.big is none && self.small == 0 }
+    pub const fn is_negative(self) -> bool {
         if self.big is none { self.small < 0 } else { self.neg }
     }
-    pub fn is_positive(self) -> bool { !self.is_zero() && !self.is_negative() }
+    pub const fn is_positive(self) -> bool { !self.is_zero() && !self.is_negative() }
 
     /// `-1`, `0` or `1`.
-    pub fn signum(self) -> Int {
+    pub const fn signum(self) -> Int {
         if self.is_zero() { return Int::from_i64(0); }
         if self.is_negative() { Int::from_i64(-1) } else { Int::from_i64(1) }
     }
 
-    pub fn abs(self) -> Int {
+    pub const fn abs(self) -> Int {
         if self.is_negative() { -self } else { self }
     }
 
     /// Bits of `|self|` without leading zeros (0 for zero; Python's
     /// `bit_length`).
-    pub fn bit_length(self) -> u64 {
+    pub const fn bit_length(self) -> u64 {
         let (_, m) = self.parts();
         m.bits()
     }
@@ -499,14 +503,14 @@ impl Int {
     }
 
     /// Sign and magnitude.
-    pub(pkg) fn parts(self) -> (bool, IntMag) {
+    pub(pkg) const fn parts(self) -> (bool, IntMag) {
         if let m: IntMag = self.big { return (self.neg, m); }
         let v = self.small;
         if v < 0 { (true, IntMag::from_u64(0u64.wrapping_sub(v as u64))) } else { (false, IntMag::from_u64(v as u64)) }
     }
 
     /// The canonical `int` of sign `neg` and magnitude `m`.
-    pub(pkg) fn from_parts(neg: bool, m: IntMag) -> Int {
+    pub(pkg) const fn from_parts(neg: bool, m: IntMag) -> Int {
         if m.n <= 2 {
             let v = m.low64();
             if v <= 0x7FFF_FFFF_FFFF_FFFFu64 { return Int::from_i64(if neg { -(v as i64) } else { v as i64 }); }
@@ -516,7 +520,7 @@ impl Int {
     }
 
     /// `self` vs `rhs`: -1, 0 or 1.
-    fn cmp3(self, rhs: Int) -> i32 {
+    const fn cmp3(self, rhs: Int) -> i32 {
         if self.big is none && rhs.big is none {
             if self.small < rhs.small { return -1; }
             return if self.small > rhs.small { 1 } else { 0 };
@@ -529,7 +533,7 @@ impl Int {
     }
 
     /// Two's complement limbs over `n` limbs (`n` past the magnitude).
-    fn twos(self, n: usize) -> GcBuf<u32> {
+    const fn twos(self, n: usize) -> GcBuf<u32> {
         unsafe {
             let (neg, m) = self.parts();
             let r: GcBuf<u32> = buf_new(n);
@@ -551,7 +555,7 @@ impl Int {
     }
 
     /// The `int` of two's complement limbs `r[0..n]` (top bit = sign).
-    fn from_twos(r: GcBuf<u32>, n: usize) -> Int {
+    const fn from_twos(r: GcBuf<u32>, n: usize) -> Int {
         unsafe {
             if r[n - 1] & 0x8000_0000u32 == 0u32 { return Int::from_parts(false, IntMag::trim(r, n)); }
             let m: GcBuf<u32> = buf_new(n);
@@ -569,7 +573,7 @@ impl Int {
 
     /// A bitwise op (`op`: 0 and, 1 or, 2 xor) on infinite two's
     /// complement (Python semantics).
-    fn bitwise(self, rhs: Int, op: i32) -> Int {
+    const fn bitwise(self, rhs: Int, op: i32) -> Int {
         unsafe {
             if self.big is none && rhs.big is none {
                 let a = self.small;
@@ -594,7 +598,7 @@ impl Int {
 
 impl Add for Int {
     type Output = Int;
-    fn add(self, rhs: Int) -> Int {
+    const fn add(self, rhs: Int) -> Int {
         if self.big is none && rhs.big is none {
             if let s: i64 = self.small.checked_add(rhs.small) { return Int::from_i64(s); }
         }
@@ -604,7 +608,7 @@ impl Add for Int {
     }
 }
 
-fn add_signed(an: bool, am: IntMag, bn: bool, bm: IntMag) -> Int {
+const fn add_signed(an: bool, am: IntMag, bn: bool, bm: IntMag) -> Int {
     if an == bn { return Int::from_parts(an, am.plus(bm)); }
     let c = am.cmp3(bm);
     if c == 0 { return Int::from_i64(0); }
@@ -613,7 +617,7 @@ fn add_signed(an: bool, am: IntMag, bn: bool, bm: IntMag) -> Int {
 
 impl Sub for Int {
     type Output = Int;
-    fn sub(self, rhs: Int) -> Int {
+    const fn sub(self, rhs: Int) -> Int {
         if self.big is none && rhs.big is none {
             if let s: i64 = self.small.checked_sub(rhs.small) { return Int::from_i64(s); }
         }
@@ -664,7 +668,7 @@ impl Modulo for Int {
 
 impl Neg for Int {
     type Output = Int;
-    fn neg(self) -> Int {
+    const fn neg(self) -> Int {
         if self.big is none {
             if let s: i64 = self.small.checked_neg() { return Int::from_i64(s); }
         }
@@ -675,29 +679,29 @@ impl Neg for Int {
 
 impl BitAnd for Int {
     type Output = Int;
-    fn bitand(self, rhs: Int) -> Int { self.bitwise(rhs, 0) }
+    const fn bitand(self, rhs: Int) -> Int { self.bitwise(rhs, 0) }
 }
 
 impl BitOr for Int {
     type Output = Int;
-    fn bitor(self, rhs: Int) -> Int { self.bitwise(rhs, 1) }
+    const fn bitor(self, rhs: Int) -> Int { self.bitwise(rhs, 1) }
 }
 
 impl BitXor for Int {
     type Output = Int;
-    fn bitxor(self, rhs: Int) -> Int { self.bitwise(rhs, 2) }
+    const fn bitxor(self, rhs: Int) -> Int { self.bitwise(rhs, 2) }
 }
 
 /// `~x == -x - 1`.
 impl BitNot for Int {
     type Output = Int;
-    fn bitnot(self) -> Int { -self - Int::from_i64(1) }
+    const fn bitnot(self) -> Int { -self - Int::from_i64(1) }
 }
 
 /// `x << n == x * 2^n`.
 impl Shl<u32> for Int {
     type Output = Int;
-    fn shl(self, n: u32) -> Int {
+    const fn shl(self, n: u32) -> Int {
         let (neg, m) = self.parts();
         Int::from_parts(neg, m.shl(n as u64))
     }
@@ -706,7 +710,7 @@ impl Shl<u32> for Int {
 /// `x >> n == floor(x / 2^n)` (an arithmetic shift).
 impl Shr<u32> for Int {
     type Output = Int;
-    fn shr(self, n: u32) -> Int {
+    const fn shr(self, n: u32) -> Int {
         if self.big is none {
             if n >= 63u32 { return Int::from_i64(if self.small < 0 { -1 } else { 0 }); }
             return Int::from_i64(self.small >> (n as i64));
@@ -720,21 +724,21 @@ impl Shr<u32> for Int {
 }
 
 impl PartialEq for Int {
-    fn eq(self, rhs: Int) -> bool { self.cmp3(rhs) == 0 }
-    fn ne(self, rhs: Int) -> bool { self.cmp3(rhs) != 0 }
+    const fn eq(self, rhs: Int) -> bool { self.cmp3(rhs) == 0 }
+    const fn ne(self, rhs: Int) -> bool { self.cmp3(rhs) != 0 }
 }
 
 impl Eq for Int {}
 
 impl PartialOrd for Int {
-    fn lt(self, rhs: Int) -> bool { self.cmp3(rhs) < 0 }
-    fn gt(self, rhs: Int) -> bool { self.cmp3(rhs) > 0 }
-    fn le(self, rhs: Int) -> bool { self.cmp3(rhs) <= 0 }
-    fn ge(self, rhs: Int) -> bool { self.cmp3(rhs) >= 0 }
+    const fn lt(self, rhs: Int) -> bool { self.cmp3(rhs) < 0 }
+    const fn gt(self, rhs: Int) -> bool { self.cmp3(rhs) > 0 }
+    const fn le(self, rhs: Int) -> bool { self.cmp3(rhs) <= 0 }
+    const fn ge(self, rhs: Int) -> bool { self.cmp3(rhs) >= 0 }
 }
 
 impl Ord for Int {
-    fn cmp(self, rhs: Int) -> Ordering {
+    const fn cmp(self, rhs: Int) -> Ordering {
         let c = self.cmp3(rhs);
         if c < 0 { Ordering::Less } else if c > 0 { Ordering::Greater } else { Ordering::Equal }
     }
@@ -742,7 +746,7 @@ impl Ord for Int {
 
 /// Equal to `i64`'s hash for values in `i64` range.
 impl Hash for Int {
-    fn hash(self) -> u64 {
+    const fn hash(self) -> u64 {
         unsafe {
             if let m: IntMag = self.big {
                 let h = if self.neg { 0x9E37_79B9_7F4A_7C15u64 } else { 0u64 };
@@ -759,21 +763,21 @@ impl Hash for Int {
 }
 
 impl Clone for Int {
-    fn clone(self) -> Int { self }
+    const fn clone(self) -> Int { self }
 }
 
 impl Copy for Int {}
 
 impl Default for Int {
-    fn default() -> Int { Int::from_i64(0) }
+    const fn default() -> Int { Int::from_i64(0) }
 }
 
 impl Zero for Int {
-    fn zero() -> Int { Int::from_i64(0) }
+    const fn zero() -> Int { Int::from_i64(0) }
 }
 
 impl One for Int {
-    fn one() -> Int { Int::from_i64(1) }
+    const fn one() -> Int { Int::from_i64(1) }
 }
 
 /// `b o x X` show the sign and magnitude: `int` has no width for a
@@ -807,33 +811,33 @@ impl FromStr for Int {
 
 // ---- conversions (stdlib 2.11.8, 2.1.7) ----
 
-fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty: ty } }
+const fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty: ty } }
 
 /// The low 64 bits of the two's complement form (`wrapping_into`).
-fn low_bits(v: Int) -> u64 {
+const fn low_bits(v: Int) -> u64 {
     if v.big is none { return v.small as u64; }
     let (neg, m) = v.parts();
     let low = m.low64();
     if neg { low.wrapping_neg() } else { low }
 }
 
-impl From<i8> for Int { fn from(value: i8) -> Int { Int::from_i64(value as i64) } }
-impl From<i16> for Int { fn from(value: i16) -> Int { Int::from_i64(value as i64) } }
-impl From<i32> for Int { fn from(value: i32) -> Int { Int::from_i64(value as i64) } }
-impl From<i64> for Int { fn from(value: i64) -> Int { Int::from_i64(value) } }
-impl From<isize> for Int { fn from(value: isize) -> Int { Int::from_i64(value as i64) } }
-impl From<u8> for Int { fn from(value: u8) -> Int { Int::from_i64(value as i64) } }
-impl From<u16> for Int { fn from(value: u16) -> Int { Int::from_i64(value as i64) } }
-impl From<u32> for Int { fn from(value: u32) -> Int { Int::from_i64(value as i64) } }
-impl From<u64> for Int { fn from(value: u64) -> Int { Int::from_u64(value) } }
-impl From<usize> for Int { fn from(value: usize) -> Int { Int::from_u64(value as u64) } }
+impl From<i8> for Int { const fn from(value: i8) -> Int { Int::from_i64(value as i64) } }
+impl From<i16> for Int { const fn from(value: i16) -> Int { Int::from_i64(value as i64) } }
+impl From<i32> for Int { const fn from(value: i32) -> Int { Int::from_i64(value as i64) } }
+impl From<i64> for Int { const fn from(value: i64) -> Int { Int::from_i64(value) } }
+impl From<isize> for Int { const fn from(value: isize) -> Int { Int::from_i64(value as i64) } }
+impl From<u8> for Int { const fn from(value: u8) -> Int { Int::from_i64(value as i64) } }
+impl From<u16> for Int { const fn from(value: u16) -> Int { Int::from_i64(value as i64) } }
+impl From<u32> for Int { const fn from(value: u32) -> Int { Int::from_i64(value as i64) } }
+impl From<u64> for Int { const fn from(value: u64) -> Int { Int::from_u64(value) } }
+impl From<usize> for Int { const fn from(value: usize) -> Int { Int::from_u64(value as u64) } }
 
 /// Lossy (rounds to nearest), as spec 2.11.8 allows for `int → f64`.
 impl From<Int> for f64 { fn from(value: Int) -> f64 { value.to_f64() } }
 
 impl TryFrom<Int> for i8 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> i8 {
+    const fn try_from(value: Int) throws (OverflowError) -> i8 {
         let v = value.to_i64() ?? 128;
         if v < -128 || v > 127 { throw overflow("i8"); }
         v as i8
@@ -841,7 +845,7 @@ impl TryFrom<Int> for i8 {
 }
 impl TryFrom<Int> for i16 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> i16 {
+    const fn try_from(value: Int) throws (OverflowError) -> i16 {
         let v = value.to_i64() ?? 32768;
         if v < -32768 || v > 32767 { throw overflow("i16"); }
         v as i16
@@ -849,7 +853,7 @@ impl TryFrom<Int> for i16 {
 }
 impl TryFrom<Int> for i32 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> i32 {
+    const fn try_from(value: Int) throws (OverflowError) -> i32 {
         match value.to_i32() {
             v: i32 => v,
             none => throw overflow("i32"),
@@ -858,7 +862,7 @@ impl TryFrom<Int> for i32 {
 }
 impl TryFrom<Int> for i64 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> i64 {
+    const fn try_from(value: Int) throws (OverflowError) -> i64 {
         match value.to_i64() {
             v: i64 => v,
             none => throw overflow("i64"),
@@ -867,7 +871,7 @@ impl TryFrom<Int> for i64 {
 }
 impl TryFrom<Int> for isize {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> isize {
+    const fn try_from(value: Int) throws (OverflowError) -> isize {
         match value.to_i64() {
             v: i64 => v as isize,
             none => throw overflow("isize"),
@@ -876,7 +880,7 @@ impl TryFrom<Int> for isize {
 }
 impl TryFrom<Int> for u8 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> u8 {
+    const fn try_from(value: Int) throws (OverflowError) -> u8 {
         let v = value.to_u64() ?? 256u64;
         if v > 255u64 { throw overflow("u8"); }
         v as u8
@@ -884,7 +888,7 @@ impl TryFrom<Int> for u8 {
 }
 impl TryFrom<Int> for u16 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> u16 {
+    const fn try_from(value: Int) throws (OverflowError) -> u16 {
         let v = value.to_u64() ?? 65536u64;
         if v > 65535u64 { throw overflow("u16"); }
         v as u16
@@ -892,7 +896,7 @@ impl TryFrom<Int> for u16 {
 }
 impl TryFrom<Int> for u32 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> u32 {
+    const fn try_from(value: Int) throws (OverflowError) -> u32 {
         let v = value.to_u64() ?? 0x1_0000_0000u64;
         if v > 0xFFFF_FFFFu64 { throw overflow("u32"); }
         v as u32
@@ -900,7 +904,7 @@ impl TryFrom<Int> for u32 {
 }
 impl TryFrom<Int> for u64 {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> u64 {
+    const fn try_from(value: Int) throws (OverflowError) -> u64 {
         match value.to_u64() {
             v: u64 => v,
             none => throw overflow("u64"),
@@ -909,7 +913,7 @@ impl TryFrom<Int> for u64 {
 }
 impl TryFrom<Int> for usize {
     type Error = OverflowError;
-    fn try_from(value: Int) throws (OverflowError) -> usize {
+    const fn try_from(value: Int) throws (OverflowError) -> usize {
         match value.to_u64() {
             v: u64 => v as usize,
             none => throw overflow("usize"),
@@ -918,14 +922,14 @@ impl TryFrom<Int> for usize {
 }
 
 /// `value` clamped to `lo..=hi` as an `i64`.
-fn clamp_i64(value: Int, lo: i64, hi: i64) -> i64 {
+const fn clamp_i64(value: Int, lo: i64, hi: i64) -> i64 {
     if value < Int::from_i64(lo) { return lo; }
     if value > Int::from_i64(hi) { return hi; }
     value.small
 }
 
 /// `value` clamped to `0..=hi` as a `u64`.
-fn clamp_u64(value: Int, hi: u64) -> u64 {
+const fn clamp_u64(value: Int, hi: u64) -> u64 {
     if value.is_negative() { return 0u64; }
     match value.to_u64() {
         v: u64 => if v > hi { hi } else { v },
@@ -933,39 +937,39 @@ fn clamp_u64(value: Int, hi: u64) -> u64 {
     }
 }
 
-impl SaturatingFrom<Int> for i8 { fn saturating_from(value: Int) -> i8 { clamp_i64(value, -128, 127) as i8 } }
-impl SaturatingFrom<Int> for i16 { fn saturating_from(value: Int) -> i16 { clamp_i64(value, -32768, 32767) as i16 } }
+impl SaturatingFrom<Int> for i8 { const fn saturating_from(value: Int) -> i8 { clamp_i64(value, -128, 127) as i8 } }
+impl SaturatingFrom<Int> for i16 { const fn saturating_from(value: Int) -> i16 { clamp_i64(value, -32768, 32767) as i16 } }
 impl SaturatingFrom<Int> for i32 {
-    fn saturating_from(value: Int) -> i32 { clamp_i64(value, -2147483648, 2147483647) as i32 }
+    const fn saturating_from(value: Int) -> i32 { clamp_i64(value, -2147483648, 2147483647) as i32 }
 }
 impl SaturatingFrom<Int> for i64 {
-    fn saturating_from(value: Int) -> i64 { clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) }
+    const fn saturating_from(value: Int) -> i64 { clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) }
 }
 impl SaturatingFrom<Int> for isize {
-    fn saturating_from(value: Int) -> isize {
+    const fn saturating_from(value: Int) -> isize {
         clamp_i64(value, -9223372036854775807 - 1, 9223372036854775807) as isize
     }
 }
-impl SaturatingFrom<Int> for u8 { fn saturating_from(value: Int) -> u8 { clamp_u64(value, 255u64) as u8 } }
-impl SaturatingFrom<Int> for u16 { fn saturating_from(value: Int) -> u16 { clamp_u64(value, 65535u64) as u16 } }
-impl SaturatingFrom<Int> for u32 { fn saturating_from(value: Int) -> u32 { clamp_u64(value, 0xFFFF_FFFFu64) as u32 } }
+impl SaturatingFrom<Int> for u8 { const fn saturating_from(value: Int) -> u8 { clamp_u64(value, 255u64) as u8 } }
+impl SaturatingFrom<Int> for u16 { const fn saturating_from(value: Int) -> u16 { clamp_u64(value, 65535u64) as u16 } }
+impl SaturatingFrom<Int> for u32 { const fn saturating_from(value: Int) -> u32 { clamp_u64(value, 0xFFFF_FFFFu64) as u32 } }
 impl SaturatingFrom<Int> for u64 {
-    fn saturating_from(value: Int) -> u64 { clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) }
+    const fn saturating_from(value: Int) -> u64 { clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) }
 }
 impl SaturatingFrom<Int> for usize {
-    fn saturating_from(value: Int) -> usize { clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) as usize }
+    const fn saturating_from(value: Int) -> usize { clamp_u64(value, 0xFFFF_FFFF_FFFF_FFFFu64) as usize }
 }
 
 // `wrapping_into` / `as`: the low bits of the two's complement form.
-impl WrappingFrom<Int> for i8 { fn wrapping_from(value: Int) -> i8 { low_bits(value) as i8 } }
-impl WrappingFrom<Int> for i16 { fn wrapping_from(value: Int) -> i16 { low_bits(value) as i16 } }
-impl WrappingFrom<Int> for i32 { fn wrapping_from(value: Int) -> i32 { low_bits(value) as i32 } }
-impl WrappingFrom<Int> for i64 { fn wrapping_from(value: Int) -> i64 { low_bits(value) as i64 } }
-impl WrappingFrom<Int> for isize { fn wrapping_from(value: Int) -> isize { low_bits(value) as isize } }
-impl WrappingFrom<Int> for u8 { fn wrapping_from(value: Int) -> u8 { low_bits(value) as u8 } }
-impl WrappingFrom<Int> for u16 { fn wrapping_from(value: Int) -> u16 { low_bits(value) as u16 } }
-impl WrappingFrom<Int> for u32 { fn wrapping_from(value: Int) -> u32 { low_bits(value) as u32 } }
-impl WrappingFrom<Int> for u64 { fn wrapping_from(value: Int) -> u64 { low_bits(value) } }
-impl WrappingFrom<Int> for usize { fn wrapping_from(value: Int) -> usize { low_bits(value) as usize } }
+impl WrappingFrom<Int> for i8 { const fn wrapping_from(value: Int) -> i8 { low_bits(value) as i8 } }
+impl WrappingFrom<Int> for i16 { const fn wrapping_from(value: Int) -> i16 { low_bits(value) as i16 } }
+impl WrappingFrom<Int> for i32 { const fn wrapping_from(value: Int) -> i32 { low_bits(value) as i32 } }
+impl WrappingFrom<Int> for i64 { const fn wrapping_from(value: Int) -> i64 { low_bits(value) as i64 } }
+impl WrappingFrom<Int> for isize { const fn wrapping_from(value: Int) -> isize { low_bits(value) as isize } }
+impl WrappingFrom<Int> for u8 { const fn wrapping_from(value: Int) -> u8 { low_bits(value) as u8 } }
+impl WrappingFrom<Int> for u16 { const fn wrapping_from(value: Int) -> u16 { low_bits(value) as u16 } }
+impl WrappingFrom<Int> for u32 { const fn wrapping_from(value: Int) -> u32 { low_bits(value) as u32 } }
+impl WrappingFrom<Int> for u64 { const fn wrapping_from(value: Int) -> u64 { low_bits(value) } }
+impl WrappingFrom<Int> for usize { const fn wrapping_from(value: Int) -> usize { low_bits(value) as usize } }
 /// `n as f64`: rounds to nearest.
 impl WrappingFrom<Int> for f64 { fn wrapping_from(value: Int) -> f64 { value.to_f64() } }

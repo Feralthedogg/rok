@@ -123,6 +123,27 @@ fn main() {
     }
 }
 
+/// An item's `#[allow]` covers its variants even after a `#[derive]`
+/// (whose impls carry the attribute's span); an `_` between digits is
+/// still camel case (rustc's rule).
+#[test]
+fn lint_camel_case_allow_and_digit_underscores() {
+    let src = "#[derive(Clone, PartialEq)]\n#[allow(non_camel_case_types)]\n\
+               pub enum A { A_x }\n\
+               #[allow(non_camel_case_types)]\n#[derive(Clone, PartialEq)]\n\
+               pub enum B { B_x }\n\
+               pub enum Ver { V1_0, V1_1, Bad_c, X__1 }\n\
+               fn main() { let _ = A::A_x; let _ = B::B_x; let _ = Ver::V1_0; \
+               let _ = Ver::V1_1; let _ = Ver::Bad_c; let _ = Ver::X__1; }\n";
+    let dir = package("lint_camel", &[("main.rok", src)]);
+    let (_, err) = exit(&rokc(&dir, &["lint"]), 0);
+    let flagged: Vec<&str> = err
+        .lines()
+        .filter_map(|l| l.split("variant `").nth(1)?.split('`').next())
+        .collect();
+    assert_eq!(flagged, ["Bad_c", "X__1"], "{err}");
+}
+
 #[test]
 fn lint_finds_each_kind_and_honors_levels() {
     let dir = package("lint", &[("main.rok", LINTED)]);

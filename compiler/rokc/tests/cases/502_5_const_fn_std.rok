@@ -1,0 +1,27 @@
+// spec: 005.02-const
+// expect-exit: 0
+// expect-stdout: 12 7 3 true 5 ab-cd 6 2 3
+
+// Spec 5.2.5: the standard library marks its pure functions `const fn`,
+// so a `const` can use them; `const unsafe fn` is a `const fn` too.
+const fn total(xs: List<i32>) -> i32 {
+    let t = 0;
+    for x in xs { t += x; }
+    t
+}
+const unsafe fn raw_twice(x: i32) -> i32 { x * 2 }
+
+const SUM: i32 = total([3, 4, 5]);
+const BIG: i32 = 7.max(-2);
+const LEN: usize = (1..4).count();
+const HAS: bool = [1, 2, 3].contains(2);
+const ABS: i64 = (-5i64).abs();
+const JOINED: str = "ab" + "-" + "cd";
+const TWICE: i32 = unsafe { raw_twice(3) };
+const KEYS: usize = {"a": 1, "b": 2}.len();
+const CLAMP: i32 = 9.clamp(0, 3);
+
+fn main() -> i32 {
+    println(f"{SUM} {BIG} {LEN} {HAS} {ABS} {JOINED} {TWICE} {KEYS} {CLAMP}");
+    return 0;
+}

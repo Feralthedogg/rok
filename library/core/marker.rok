@@ -15,25 +15,25 @@ pub trait Default {
 
 /// `T::default()` where only the expected type names `T`
 /// (`#[derive(Default)]` field initializers).
-pub fn default_of<T: Default>() -> T {
+pub const fn default_of<T: Default>() -> T {
     T::default()
 }
 
-impl Default for i8 { fn default() -> i8 { 0 } }
-impl Default for i16 { fn default() -> i16 { 0 } }
-impl Default for i32 { fn default() -> i32 { 0 } }
-impl Default for i64 { fn default() -> i64 { 0 } }
-impl Default for isize { fn default() -> isize { 0 } }
-impl Default for u8 { fn default() -> u8 { 0 } }
-impl Default for u16 { fn default() -> u16 { 0 } }
-impl Default for u32 { fn default() -> u32 { 0 } }
-impl Default for u64 { fn default() -> u64 { 0 } }
-impl Default for usize { fn default() -> usize { 0 } }
-impl Default for f32 { fn default() -> f32 { 0.0 } }
-impl Default for f64 { fn default() -> f64 { 0.0 } }
-impl Default for bool { fn default() -> bool { false } }
-impl Default for char { fn default() -> char { '\0' } }
-impl Default for str { fn default() -> str { "" } }
+impl Default for i8 { const fn default() -> i8 { 0 } }
+impl Default for i16 { const fn default() -> i16 { 0 } }
+impl Default for i32 { const fn default() -> i32 { 0 } }
+impl Default for i64 { const fn default() -> i64 { 0 } }
+impl Default for isize { const fn default() -> isize { 0 } }
+impl Default for u8 { const fn default() -> u8 { 0 } }
+impl Default for u16 { const fn default() -> u16 { 0 } }
+impl Default for u32 { const fn default() -> u32 { 0 } }
+impl Default for u64 { const fn default() -> u64 { 0 } }
+impl Default for usize { const fn default() -> usize { 0 } }
+impl Default for f32 { const fn default() -> f32 { 0.0 } }
+impl Default for f64 { const fn default() -> f64 { 0.0 } }
+impl Default for bool { const fn default() -> bool { false } }
+impl Default for char { const fn default() -> char { '\0' } }
+impl Default for str { const fn default() -> str { "" } }
 
 /// Bitwise copy is a correct duplicate (stdlib 2.13.3). A marker: every
 /// value already copies on `let y = x;`; `#[derive(Copy)]` checks that
@@ -44,67 +44,67 @@ pub trait Copy: Clone {}
 // copying.
 impl Clone for i8 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> i8 { self }
+    const fn clone(self) -> i8 { self }
 }
 impl Clone for i16 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> i16 { self }
+    const fn clone(self) -> i16 { self }
 }
 impl Clone for i32 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> i32 { self }
+    const fn clone(self) -> i32 { self }
 }
 impl Clone for i64 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> i64 { self }
+    const fn clone(self) -> i64 { self }
 }
 impl Clone for isize {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> isize { self }
+    const fn clone(self) -> isize { self }
 }
 impl Clone for u8 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> u8 { self }
+    const fn clone(self) -> u8 { self }
 }
 impl Clone for u16 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> u16 { self }
+    const fn clone(self) -> u16 { self }
 }
 impl Clone for u32 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> u32 { self }
+    const fn clone(self) -> u32 { self }
 }
 impl Clone for u64 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> u64 { self }
+    const fn clone(self) -> u64 { self }
 }
 impl Clone for usize {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> usize { self }
+    const fn clone(self) -> usize { self }
 }
 impl Clone for f32 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> f32 { self }
+    const fn clone(self) -> f32 { self }
 }
 impl Clone for f64 {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> f64 { self }
+    const fn clone(self) -> f64 { self }
 }
 impl Clone for bool {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> bool { self }
+    const fn clone(self) -> bool { self }
 }
 impl Clone for char {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> char { self }
+    const fn clone(self) -> char { self }
 }
 impl Clone for c_char {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> c_char { self }
+    const fn clone(self) -> c_char { self }
 }
 impl Clone for str {
     #[intrinsic("rok.clone.copy")]
-    fn clone(self) -> str { self }
+    const fn clone(self) -> str { self }
 }
 
 impl Copy for i8 {}
@@ -159,11 +159,11 @@ pub struct Handoff<T> {
 impl<T> Handoff<T> {
     /// The caller guarantees the protocol: no two threads use `value`
     /// (or another copy of its handle) at the same time.
-    pub unsafe fn new(value: T) -> Handoff<T> {
+    pub const unsafe fn new(value: T) -> Handoff<T> {
         Handoff { value }
     }
 
-    pub fn get(self) -> T {
+    pub const fn get(self) -> T {
         self.value
     }
 }

@@ -61,8 +61,8 @@ pub struct Resolved {
     pub entry: Entry,
     /// What relative artifact urls are relative to (a file's directory).
     pub base: Option<String>,
-    /// Reached only through the root's `dev_deps`.
-    pub dev: bool,
+    /// The packages that need it (by key; `""` the root).
+    pub users: Vec<String>,
 }
 
 /// A native package's file in an index.
@@ -733,7 +733,7 @@ pub fn publish(
             name: e.name.clone(),
             entry: e.clone(),
             base: None,
-            dev: false,
+            users: Vec::new(),
         };
         let spec = TargetSpec::builtin(t).ok_or_else(|| format!("{t}: not a built-in target"))?;
         let (dir, _) = unpack(home, &n, &spec, false, true)?;
@@ -898,7 +898,7 @@ mod tests {
             name: "zz".into(),
             entry: parse_one(&line, "f").unwrap(),
             base: None,
-            dev: false,
+            users: Vec::new(),
         };
         let home = Path::new("/nonexistent-rok-home");
         let spec = TargetSpec::builtin(t).unwrap();

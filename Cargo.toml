@@ -106,3 +106,12 @@ panic = "abort"
 # unoptimized, ~20 KB at opt-level 1 (`PARSER_STACK`).
 [profile.dev.package.rokc_parser]
 opt-level = 1
+
+# The runtime is linked into every program a dev rokc builds: unoptimized,
+# its collector is ~6x slower and GC-heavy programs (tests included) crawl.
+[profile.dev.package.rokr]
+opt-level = 2
+[profile.dev.package.rokr_gc]
+opt-level = 2
+[profile.dev.package.rokr_common]
+opt-level = 2

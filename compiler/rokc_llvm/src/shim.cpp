@@ -98,7 +98,7 @@ struct RokCompile {
   const char *features;
   int opt;
   int emit;
-  // rok_tls (the TLS block) and rok_tls_* globals use the initial-exec
+  // rok_tls (the TLS block) uses the initial-exec
   // TLS model (spec 8.3.8).
   int tls_initial_exec;
   // A textual MLIR pass pipeline on builtin.module, mlir-opt syntax

@@ -37,7 +37,7 @@ mod mono;
 mod pattern;
 mod reflect;
 mod resolve;
-pub use resolve::{CORE_PREFIX, is_dependency, root_path, set_packages};
+pub use resolve::{CORE_PREFIX, is_dependency, root_path, set_packages, visible_from};
 pub use resolve::{hidden_module, hidden_module_msg, module_visibility, visibility_rank};
 mod send_check;
 mod throws;
@@ -62,7 +62,7 @@ use pattern::{int_fits, lower_match, lower_pattern};
 use resolve::{
     COPY_TRAIT, DEFAULT_TRAIT, EQ_TRAIT, GC_BUF, impl_module, item_module, leaf_name, mangle_inst,
     method_target_for, module_display, module_of, package_of, resolve_name,
-    resolve_ty_with_structs, substitute_params, ty_mangle, visible_from,
+    resolve_ty_with_structs, substitute_params, ty_mangle,
 };
 use throws::{
     ErrFrame, adapt_fn_value, adapt_never_fn, erase_unbound_errors, exit_through,
@@ -141,6 +141,9 @@ struct TypeNames<'a> {
     /// signatures and fields (`[i32; N]`).
     consts: HashMap<String, (Ty, rokc_ast::Expr)>,
     const_leaves: std::cell::OnceCell<Leaves>,
+    /// `pub use` alias key → the `const` / `static` its re-export chain
+    /// ends at (both keys are in the const / static tables).
+    value_reexports: HashMap<String, String>,
 }
 
 /// Keys by their last `::` segment.
@@ -613,6 +616,7 @@ impl TypeNames<'_> {
         resolve_name(segments, module, &[], self.uses, &set)
             .ok()
             .flatten()
+            .map(|k| self.value_reexports.get(&k).cloned().unwrap_or(k))
     }
 
     fn trait_key(&self, segments: &[&str], module: &str, at: Span) -> String {
@@ -1929,6 +1933,10 @@ struct LowerCtx<'a> {
     /// Narrowed rebinding (spec 2.2.6) → (original local, its type);
     /// assignments to the rebinding also store into the original.
     narrowed: HashMap<LocalId, (LocalId, HirTy)>,
+    /// Narrowings ended by an assignment (spec 2.2.6), in order: (name,
+    /// rebinding, index of the scope it was removed from). Branches undo
+    /// and rejoin them (`expr::branch_unnarrowings`).
+    unnarrowed: Vec<(String, LocalId, usize)>,
     /// Lock guards bound by `let` or a pattern that no `using` has
     /// released yet (local, scope depth, binding span, binder, guard
     /// type): an error when their scope ends (stdlib 2.16.3).
@@ -2005,6 +2013,7 @@ impl<'a> LowerCtx<'a> {
         self.value_captured.retain(kept);
         self.narrowed.retain(|l, _| kept(l));
         self.guard_lets.retain(|g| kept(&g.0));
+        self.unnarrowed.retain(|u| kept(&u.1));
         let sink = &self.env.sink;
         let old = |id: &FunctionId| id.0 < mark.next_id;
         let dropped = sink.diagnostics.borrow_mut().split_off(mark.diagnostics);
@@ -2091,6 +2100,7 @@ impl<'a> LowerCtx<'a> {
             throwing_calls: 0,
             next_synth: 0,
             narrowed: HashMap::new(),
+            unnarrowed: Vec::new(),
             guard_lets: Vec::new(),
             ty_bounds: HashMap::new(),
             ty_bound_args: HashMap::new(),

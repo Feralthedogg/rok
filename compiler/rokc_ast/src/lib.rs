@@ -91,6 +91,8 @@ pub enum Literal {
     Bool(bool),
     Str(String),
     RawStr(String),
+    /// `b"..."`: the body as written.
+    ByteStr(String),
     FStr(String),
     Char(String),
     CChar(String),
