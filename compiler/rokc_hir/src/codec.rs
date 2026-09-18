@@ -383,6 +383,10 @@ impl Codec for HirTy {
                 e.u(21);
                 t.enc(e);
             }
+            Self::Param(n) => {
+                e.u(22);
+                n.enc(e);
+            }
         }
     }
 
@@ -417,6 +421,7 @@ impl Codec for HirTy {
             19 => Self::GcBuf(Codec::dec(d)?),
             20 => Self::Never,
             21 => Self::Mlir(Codec::dec(d)?),
+            22 => Self::Param(Codec::dec(d)?),
             _ => return None,
         })
     }

@@ -1,15 +1,19 @@
 // The TLS 1.3 engine (RFC 8446): record layer, key schedule and the
-// client and server handshakes over a blocking `TcpStream`.
+// client and server handshakes over a `TcpStream`. The handshake is a
+// state machine fed one peer message at a time, so a caller that does
+// not block (`nb`, the `*_async` methods) can stop when input runs out
+// and resume when more arrived.
 //
 // Supported: the three TLS 1.3 cipher suites, X25519 and the
 // X25519MLKEM768 hybrid, HelloRetryRequest (both sides), ALPN, SNI,
 // KeyUpdate, close_notify, server authentication with the signature
-// schemes `x509` verifies (the server signs with Ed25519). Not
+// schemes `x509` verifies (the server signs with Ed25519, ECDSA P-256 /
+// P-384 or RSA-PSS). Not
 // supported: PSK / session resumption and 0-RTT (session tickets are
 // ignored), client certificates (a CertificateRequest is answered with
 // an empty Certificate), TLS 1.2 and below.
 
-use sup::{TlsError, TlsErrorKind, Certificate, CipherSuite, PrivateKey};
+use sup::{TlsError, TlsErrorKind, Certificate, CipherSuite, PrivateKey, KeyKind};
 use sup::x509;
 use sup::x509::{CertInfo, PubKey, SigAlg};
 use rok::std::net::TcpStream;
@@ -22,6 +26,7 @@ use rok::core::crypto::aead::{Aead, AeadAlgorithm};
 use rok::core::crypto::x25519::X25519;
 use rok::core::crypto::mlkem::MlKem768;
 use rok::core::crypto::ed25519::Ed25519;
+use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
 use rok::core::crypto::constant_time_eq;
 
 // Content types.
@@ -89,6 +94,13 @@ const HRR_RANDOM: [u8; 32] = [
 ];
 
 const MAX_PLAINTEXT: usize = 16384;
+
+// `Conn::step` operations.
+pub(pkg) const OP_HANDSHAKE: u8 = 1u8;
+pub(pkg) const OP_READ: u8 = 2u8;
+pub(pkg) const OP_WRITE: u8 = 3u8;
+pub(pkg) const OP_CLOSE_NOTIFY: u8 = 4u8;
+pub(pkg) const OP_KEY_UPDATE: u8 = 5u8;
 /// Records written under one key before a KeyUpdate (AES-GCM's limit
 /// is 2^24.5 full records).
 const UPDATE_AFTER: u64 = 0x100_0000u64;
@@ -312,6 +324,16 @@ pub(pkg) struct Conn {
     closed: bool;
     /// A fatal error ended the connection.
     pub(pkg) failed: str | none;
+    /// The handshake in progress.
+    x: Hs;
+    /// Records not yet written: `send_record` writes them at once, or,
+    /// without blocking (`nb`), leaves them to the caller.
+    pub(pkg) out: List<u8>;
+    /// Non-blocking: `fill` sets `need` and throws instead of reading.
+    pub(pkg) nb: bool;
+    pub(pkg) need: bool;
+    /// The peer closed the socket (seen by a non-blocking caller).
+    pub(pkg) rx_eof: bool;
 }
 
 pub(pkg) fn new_conn(sock: TcpStream, is_client: bool) -> Conn {
@@ -332,10 +354,19 @@ pub(pkg) fn new_conn(sock: TcpStream, is_client: bool) -> Conn {
         eof: false,
         closed: false,
         failed: none,
+        x: new_hs(0u8),
+        out: [],
+        nb: false,
+        need: false,
+        rx_eof: false,
     }
 }
 
-fn io_tls(e: IoError) -> TlsError {
+fn closed_early() -> TlsError {
+    TlsError { kind: TlsErrorKind::Io, msg: "connection closed without close_notify", alert: ALERT_CLOSE_NOTIFY }
+}
+
+pub(pkg) fn io_tls(e: IoError) -> TlsError {
     TlsError { kind: TlsErrorKind::Io, msg: e.message, alert: ALERT_INTERNAL_ERROR }
 }
 
@@ -344,12 +375,15 @@ impl Conn {
 
     /// Read more bytes from the socket into `inbuf`.
     fn fill(ref self) throws (TlsError) {
+        if self.rx_eof { throw closed_early(); }
+        if self.nb {
+            self.need = true;
+            throw TlsError { kind: TlsErrorKind::Io, msg: "would block", alert: ALERT_INTERNAL_ERROR };
+        }
         let buf = byte_buf(MAX_PLAINTEXT + 2048);
         let s = self.sock;
         let n = try s.read(buf) catch e { throw io_tls(e); };
-        if n == 0 {
-            throw TlsError { kind: TlsErrorKind::Io, msg: "connection closed without close_notify", alert: ALERT_CLOSE_NOTIFY };
-        }
+        if n == 0 { throw closed_early(); }
         let inb = self.inbuf;
         put(inb, buf[0:n]);
     }
@@ -407,7 +441,9 @@ impl Conn {
     /// Write one record of `typ` (encrypted once keys are set).
     fn send_record(ref self, typ: u8, data: Slice<u8>) throws (TlsError) {
         let out: List<u8> = [];
-        match self.wr.aead {
+        // ChangeCipherSpec stays plaintext (RFC 8446 5).
+        let enc: Aead | none = if typ == CHANGE_CIPHER_SPEC { none } else { self.wr.aead };
+        match enc {
             a: Aead => {
                 let inner = data.to_list();
                 inner.push(typ);
@@ -430,6 +466,25 @@ impl Conn {
                 put(out, data);
             },
         }
+        put_list(self.out, out);
+        if !self.nb { try self.flush_out(); }
+    }
+
+    /// Received bytes `b` (none: the peer closed the socket), for a
+    /// caller that reads the socket itself.
+    pub(pkg) fn feed(ref self, b: Slice<u8>) {
+        if b.len() == 0 {
+            self.rx_eof = true;
+        } else {
+            let inb = self.inbuf;
+            put(inb, b);
+        }
+    }
+
+    /// Write `out` to the socket.
+    fn flush_out(ref self) throws (TlsError) {
+        let out = self.out;
+        self.out = [];
         let s = self.sock;
         try s.write_all(out) catch e { throw io_tls(e); };
     }
@@ -575,218 +630,295 @@ impl Conn {
         }
     }
 
+    /// `op` for a caller that does not block (`nb`): `need` set and an
+    /// error thrown means more input is wanted, and the call is repeated
+    /// once it arrived; records to send are left in `out`.
+    pub(pkg) fn step(ref self, op: u8, buf: List<u8>, data: Slice<u8>) throws (TlsError) -> usize {
+        if op == OP_HANDSHAKE {
+            try self.handshake();
+            return 0;
+        }
+        if op == OP_READ { return try self.read_app(buf); }
+        if op == OP_WRITE {
+            try self.write_app(data);
+            return data.len();
+        }
+        if op == OP_CLOSE_NOTIFY {
+            try self.close_notify();
+            return 0;
+        }
+        try self.key_update(true);
+        0
+    }
+
     pub(pkg) fn close_notify(ref self) throws (TlsError) {
         if self.closed { return; }
         self.closed = true;
         try self.send_record(ALERT, [1u8, ALERT_CLOSE_NOTIFY][0:2]);
     }
 
+    // ---- handshake ----
+
+    /// Run the handshake to completion, one peer message at a time
+    /// (`client_on` / `server_on`). Without blocking (`nb`), it stops
+    /// with `need` set when input runs out and resumes on the next call.
+    pub(pkg) fn handshake(ref self) throws (TlsError) {
+        while !self.done {
+            let (t, body, all) = try self.message();
+            if self.is_client { try self.client_on(t, body, all); } else { try self.server_on(t, body, all); }
+        }
+    }
+
     // ---- client handshake ----
 
-    pub(pkg) fn client_handshake(ref self, host: str, ip: List<u8> | none, roots: List<Certificate>, suites: List<CipherSuite>, alpn: List<List<u8>>, pq: bool) throws (TlsError) {
+    /// Send the ClientHello; `handshake` does the rest.
+    pub(pkg) fn client_start(ref self, host: str, ip: List<u8> | none, roots: List<Certificate>, suites: List<CipherSuite>, alpn: List<List<u8>>, pq: bool) throws (TlsError) {
         if suites.len() == 0 { throw proto("no cipher suites configured", ALERT_INTERNAL_ERROR); }
-        let random32 = random::bytes(32);
-        let session_id = random::bytes(32);
-        let groups: List<u16> = if pq { [HYBRID_GROUP, X25519_GROUP] } else { [X25519_GROUP] };
+        let x = new_hs(C_HELLO);
+        x.host = host;
+        x.ip = ip;
+        x.roots = roots;
+        x.suites = suites;
+        x.alpn = alpn;
+        x.random32 = random::bytes(32);
+        x.session_id = random::bytes(32);
+        x.groups = if pq { [HYBRID_GROUP, X25519_GROUP] } else { [X25519_GROUP] };
         // Key shares: the first group's (and X25519's, so a server
         // without the hybrid needs no HelloRetryRequest).
-        let shares = Shares::new(groups);
-        let cookie: List<u8> | none = none;
-        let ch = client_hello(random32, session_id, suites, groups, shares, host, ip, alpn, cookie);
-        try self.send(HANDSHAKE, ch);
-        let (sbody, sh) = try self.expect(SERVER_HELLO, "ServerHello");
-        let hello = try parse_server_hello(sbody, session_id);
-        let transcript = Digest::new(HashAlgorithm::Sha256);
-        let retried = hello.hrr;
-        if hello.hrr {
-            // HelloRetryRequest (RFC 8446 4.1.4): one retry with the
-            // group the server asked for and / or its cookie.
-            let suite = try pick_offered(hello.suite, suites);
+        let shares = Shares::new(x.groups);
+        x.shares = shares;
+        x.ch = client_hello(x.random32, x.session_id, suites, x.groups, shares, host, ip, alpn, none);
+        self.x = x;
+        try self.send(HANDSHAKE, x.ch);
+    }
+
+    /// The client's handling of the server message `(t, body, all)`.
+    fn client_on(ref self, t: u8, body: List<u8>, all: List<u8>) throws (TlsError) {
+        let x = self.x;
+        let tr = x.transcript;
+        if x.state == C_HELLO || x.state == C_HELLO2 {
+            if t != SERVER_HELLO { throw proto(f"expected ServerHello, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+            let hello = try parse_server_hello(body, x.session_id);
+            let suite = try pick_offered(hello.suite, x.suites);
             let h = suite_hash(suite);
-            let g = hello.group;
-            if g != 0u16 {
-                if !groups.contains(g) || shares.has(g) { throw proto("HelloRetryRequest for an unusable group", ALERT_ILLEGAL_PARAMETER); }
-                shares = Shares::new([g]);
-            } else if hello.cookie is none {
-                throw proto("HelloRetryRequest that changes nothing", ALERT_ILLEGAL_PARAMETER);
-            }
-            transcript = Digest::new(h);
-            transcript.update(message(MESSAGE_HASH, h.digest(ch)));
-            transcript.update(sh);
-            cookie = hello.cookie;
-            ch = client_hello(random32, session_id, suites, groups, shares, host, ip, alpn, cookie);
-            try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]);
-            try self.send(HANDSHAKE, ch);
-            let (b2, sh2) = try self.expect(SERVER_HELLO, "ServerHello");
-            hello = try parse_server_hello(b2, session_id);
-            if hello.hrr { throw proto("second HelloRetryRequest", ALERT_UNEXPECTED_MESSAGE); }
-            if hello.suite != suite_code(suite) { throw proto("cipher suite changed after HelloRetryRequest", ALERT_ILLEGAL_PARAMETER); }
-            transcript.update(ch);
-            transcript.update(sh2);
-        } else {
-            let suite = try pick_offered(hello.suite, suites);
-            transcript = Digest::new(suite_hash(suite));
-            transcript.update(ch);
-            transcript.update(sh);
-        }
-        let suite = try pick_offered(hello.suite, suites);
-        self.suite = suite;
-        let h = suite_hash(suite);
-        let shared = try shares.finish(hello.group, hello.share);
-
-        let early = Hkdf::extract(h, "", zeros(h.output_len()));
-        let empty = Digest::new(h);
-        let hs_secret = Hkdf::extract(h, derive_secret(h, early, "derived", empty), shared);
-        let c_hs = derive_secret(h, hs_secret, "c hs traffic", transcript);
-        let s_hs = derive_secret(h, hs_secret, "s hs traffic", transcript);
-        try self.boundary();
-        self.rd = dir_of(suite, s_hs);
-
-        // EncryptedExtensions
-        let (ee, ee_all) = try self.expect(ENCRYPTED_EXTENSIONS, "EncryptedExtensions");
-        transcript.update(ee_all);
-        let er = Rd::new(ee[0:ee.len()], "EncryptedExtensions");
-        let eexts = try extensions(try er.vec16(), "EncryptedExtensions");
-        try er.end();
-        match find_ext(eexts, EXT_ALPN) {
-            b: Slice<u8> => {
-                let r = Rd::new(b, "ALPN");
-                let list = Rd::new(try r.vec16(), "ALPN");
-                let p = (try list.vec8()).to_list();
-                try list.end();
-                try r.end();
-                let offered = false;
-                for a in alpn {
-                    if a == p { offered = true; }
+            let shares: Shares = x.shares else { throw proto("no key shares", ALERT_INTERNAL_ERROR); };
+            if x.state == C_HELLO && hello.hrr {
+                // HelloRetryRequest (RFC 8446 4.1.4): one retry with the
+                // group the server asked for and / or its cookie.
+                let g = hello.group;
+                if g != 0u16 {
+                    if !x.groups.contains(g) || shares.has(g) { throw proto("HelloRetryRequest for an unusable group", ALERT_ILLEGAL_PARAMETER); }
+                    shares = Shares::new([g]);
+                    x.shares = shares;
+                } else if hello.cookie is none {
+                    throw proto("HelloRetryRequest that changes nothing", ALERT_ILLEGAL_PARAMETER);
                 }
-                if !offered || p.len() == 0 { throw proto("server chose an ALPN protocol not offered", ALERT_ILLEGAL_PARAMETER); }
-                self.alpn = p;
-            },
-            none => {},
-        }
-
-        // CertificateRequest (answered with no certificate), Certificate.
-        let (t, body, all) = try self.message();
-        let cert_requested: List<u8> | none = none;
-        if t == CERTIFICATE_REQUEST {
-            transcript.update(all);
+                tr = Digest::new(h);
+                tr.update(message(MESSAGE_HASH, h.digest(x.ch)));
+                tr.update(all);
+                x.ch = client_hello(x.random32, x.session_id, x.suites, x.groups, shares, x.host, x.ip, x.alpn, hello.cookie);
+                tr.update(x.ch);
+                x.transcript = tr;
+                x.retried = true;
+                x.state = C_HELLO2;
+                self.suite = suite;
+                self.x = x;
+                try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]);
+                try self.send(HANDSHAKE, x.ch);
+                return;
+            }
+            if hello.hrr { throw proto("second HelloRetryRequest", ALERT_UNEXPECTED_MESSAGE); }
+            if x.retried {
+                if suite != self.suite { throw proto("cipher suite changed after HelloRetryRequest", ALERT_ILLEGAL_PARAMETER); }
+            } else {
+                tr = Digest::new(h);
+                tr.update(x.ch);
+            }
+            tr.update(all);
+            self.suite = suite;
+            let shared = try shares.finish(hello.group, hello.share);
+            let early = Hkdf::extract(h, "", zeros(h.output_len()));
+            x.hs_secret = Hkdf::extract(h, derive_secret(h, early, "derived", Digest::new(h)), shared);
+            x.c_hs = derive_secret(h, x.hs_secret, "c hs traffic", tr);
+            x.s_hs = derive_secret(h, x.hs_secret, "s hs traffic", tr);
+            try self.boundary();
+            self.rd = dir_of(suite, x.s_hs);
+            // Write keys now too, so that an alert is encrypted.
+            self.wr = dir_of(suite, x.c_hs);
+            x.state = C_EE;
+        } else if x.state == C_EE {
+            if t != ENCRYPTED_EXTENSIONS { throw proto(f"expected EncryptedExtensions, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+            tr.update(all);
+            let er = Rd::new(body[0:body.len()], "EncryptedExtensions");
+            let eexts = try extensions(try er.vec16(), "EncryptedExtensions");
+            try er.end();
+            match find_ext(eexts, EXT_ALPN) {
+                b: Slice<u8> => {
+                    let r = Rd::new(b, "ALPN");
+                    let list = Rd::new(try r.vec16(), "ALPN");
+                    let p = (try list.vec8()).to_list();
+                    try list.end();
+                    try r.end();
+                    let offered = false;
+                    for a in x.alpn {
+                        if a == p { offered = true; }
+                    }
+                    if !offered || p.len() == 0 { throw proto("server chose an ALPN protocol not offered", ALERT_ILLEGAL_PARAMETER); }
+                    self.alpn = p;
+                },
+                none => {},
+            }
+            x.state = C_CERT;
+        } else if x.state == C_CERT && t == CERTIFICATE_REQUEST {
+            // Answered with an empty Certificate.
+            tr.update(all);
             let cr = Rd::new(body[0:body.len()], "CertificateRequest");
-            cert_requested = (try cr.vec8()).to_list();
+            x.cert_requested = (try cr.vec8()).to_list();
             let _ = try cr.vec16();
             try cr.end();
-            let (t2, b2, a2) = try self.message();
-            t = t2;
-            body = b2;
-            all = a2;
+            x.state = C_CERT2;
+        } else if x.state == C_CERT || x.state == C_CERT2 {
+            if t != CERTIFICATE { throw proto(f"expected Certificate, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+            tr.update(all);
+            let certs = try parse_certificate_msg(body);
+            self.peer = certs;
+            let infos: List<CertInfo> = [];
+            for c in certs { infos.push(c.info); }
+            let anchors: List<CertInfo> = [];
+            for r in x.roots { anchors.push(r.info); }
+            let now = (try SystemTime::now().unix_seconds() catch _ { 0i64 });
+            try x509::verify_server(infos, anchors, now, x.host, x.ip) catch e {
+                throw TlsError { kind: TlsErrorKind::Certificate, msg: e.msg, alert: ALERT_BAD_CERTIFICATE };
+            };
+            x.infos = infos;
+            x.state = C_CV;
+        } else if x.state == C_CV {
+            if t != CERTIFICATE_VERIFY { throw proto(f"expected CertificateVerify, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+            let signed = verify_input("TLS 1.3, server CertificateVerify", tr.finish());
+            try check_cert_verify(body, x.infos[0].key, signed);
+            tr.update(all);
+            x.state = C_FIN;
+        } else {
+            if t != FINISHED { throw proto(f"expected Finished, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+            let suite = self.suite;
+            let h = suite_hash(suite);
+            let fk = expand_label(h, x.s_hs, "finished", [], h.output_len());
+            if !constant_time_eq(Hmac::mac(h, fk, tr.finish()), body) {
+                throw proto("bad server Finished", ALERT_DECRYPT_ERROR);
+            }
+            tr.update(all);
+            let master = Hkdf::extract(h, derive_secret(h, x.hs_secret, "derived", Digest::new(h)), zeros(h.output_len()));
+            let c_ap = derive_secret(h, master, "c ap traffic", tr);
+            let s_ap = derive_secret(h, master, "s ap traffic", tr);
+            // Client flight.
+            try self.boundary();
+            if !x.retried { try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]); }
+            match x.cert_requested {
+                ctx: List<u8> => {
+                    let cm: List<u8> = [];
+                    vec8(cm, ctx);
+                    put_u24(cm, 0);
+                    let m = message(CERTIFICATE, cm);
+                    try self.send(HANDSHAKE, m);
+                    tr.update(m);
+                },
+                none => {},
+            }
+            let cfk = expand_label(h, x.c_hs, "finished", [], h.output_len());
+            try self.send(HANDSHAKE, message(FINISHED, Hmac::mac(h, cfk, tr.finish())));
+            self.wr = dir_of(suite, c_ap);
+            self.rd = dir_of(suite, s_ap);
+            self.done = true;
+            x = new_hs(DONE);
         }
-        if t != CERTIFICATE { throw proto(f"expected Certificate, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
-        transcript.update(all);
-        let certs = try parse_certificate_msg(body);
-        self.peer = certs;
-        let infos: List<CertInfo> = [];
-        for c in certs { infos.push(c.info); }
-        let anchors: List<CertInfo> = [];
-        for r in roots { anchors.push(r.info); }
-        let now = (try SystemTime::now().unix_seconds() catch _ { 0i64 });
-        try x509::verify_server(infos, anchors, now, host, ip) catch e {
-            throw TlsError { kind: TlsErrorKind::Certificate, msg: e.msg, alert: ALERT_BAD_CERTIFICATE };
-        };
-
-        // CertificateVerify
-        let (cv, cv_all) = try self.expect(CERTIFICATE_VERIFY, "CertificateVerify");
-        let signed = verify_input("TLS 1.3, server CertificateVerify", transcript.finish());
-        try check_cert_verify(cv, infos[0].key, signed);
-        transcript.update(cv_all);
-
-        // Finished
-        let (fin, fin_all) = try self.expect(FINISHED, "Finished");
-        let fk = expand_label(h, s_hs, "finished", [], h.output_len());
-        if !constant_time_eq(Hmac::mac(h, fk, transcript.finish()), fin) {
-            throw proto("bad server Finished", ALERT_DECRYPT_ERROR);
-        }
-        transcript.update(fin_all);
-        let master = Hkdf::extract(h, derive_secret(h, hs_secret, "derived", empty), zeros(h.output_len()));
-        let c_ap = derive_secret(h, master, "c ap traffic", transcript);
-        let s_ap = derive_secret(h, master, "s ap traffic", transcript);
-
-        // Client flight.
-        try self.boundary();
-        if !retried { try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]); }
-        self.wr = dir_of(suite, c_hs);
-        match cert_requested {
-            ctx: List<u8> => {
-                let cm: List<u8> = [];
-                vec8(cm, ctx);
-                put_u24(cm, 0);
-                let m = message(CERTIFICATE, cm);
-                try self.send(HANDSHAKE, m);
-                transcript.update(m);
-            },
-            none => {},
-        }
-        let cfk = expand_label(h, c_hs, "finished", [], h.output_len());
-        try self.send(HANDSHAKE, message(FINISHED, Hmac::mac(h, cfk, transcript.finish())));
-        self.wr = dir_of(suite, c_ap);
-        self.rd = dir_of(suite, s_ap);
-        self.done = true;
+        x.transcript = tr;
+        self.x = x;
     }
 
     // ---- server handshake ----
 
-    pub(pkg) fn server_handshake(ref self, chain: List<Certificate>, key: PrivateKey, suites: List<CipherSuite>, alpn: List<List<u8>>) throws (TlsError) {
-        let (body, ch_all) = try self.expect(CLIENT_HELLO, "ClientHello");
-        let hello = try parse_client_hello(body);
-        let suite = try pick_suite(suites, hello.suites);
-        let h = suite_hash(suite);
-        self.suite = suite;
-        if !hello.sig_algs.contains(ED25519_SCHEME) {
-            throw proto("client does not accept Ed25519 signatures", ALERT_HANDSHAKE_FAILURE);
+    /// Wait for the ClientHello; `handshake` does the rest.
+    pub(pkg) fn server_start(ref self, chain: List<Certificate>, key: PrivateKey, suites: List<CipherSuite>, alpn: List<List<u8>>) {
+        let x = new_hs(S_HELLO);
+        x.chain = chain;
+        x.key = key;
+        x.suites = suites;
+        x.alpn = alpn;
+        self.x = x;
+    }
+
+    /// The server's handling of the client message `(t, body, all)`.
+    fn server_on(ref self, t: u8, body: List<u8>, all: List<u8>) throws (TlsError) {
+        let x = self.x;
+        if x.state == S_FIN {
+            if t == CERTIFICATE { throw proto("client certificates are not supported", ALERT_UNEXPECTED_MESSAGE); }
+            if t != FINISHED { throw proto(f"expected Finished, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+            let h = suite_hash(self.suite);
+            let cfk = expand_label(h, x.c_hs, "finished", [], h.output_len());
+            if !constant_time_eq(Hmac::mac(h, cfk, x.transcript.finish()), body) {
+                throw proto("bad client Finished", ALERT_DECRYPT_ERROR);
+            }
+            try self.boundary();
+            self.rd = dir_of(self.suite, x.c_ap);
+            self.done = true;
+            self.x = new_hs(DONE);
+            return;
         }
-        self.sni = hello.sni;
-        let transcript = Digest::new(h);
-        let group = choose_group(hello);
-        if group == 0u16 { throw proto("no common key exchange group", ALERT_HANDSHAKE_FAILURE); }
-        let share: Slice<u8> | none = hello.share_for(group);
-        let retried = false;
-        let missing = share is none;
-        if missing {
-            // HelloRetryRequest for a group the client supports.
-            transcript.update(message(MESSAGE_HASH, h.digest(ch_all)));
-            let hrr = server_hello(HRR_RANDOM[0:32].to_list(), hello.session_id, suite, group, none);
-            transcript.update(hrr);
-            try self.send(HANDSHAKE, hrr);
-            try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]);
-            let (b2, ch2) = try self.expect(CLIENT_HELLO, "ClientHello");
-            let hello2 = try parse_client_hello(b2);
-            if hello2.session_id != hello.session_id || !hello2.suites.contains(suite_code(suite)) {
+        if t != CLIENT_HELLO { throw proto(f"expected ClientHello, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
+        let hello = try parse_client_hello(body);
+        let tr = x.transcript;
+        if x.state == S_HELLO {
+            let suite = try pick_suite(x.suites, hello.suites);
+            let h = suite_hash(suite);
+            self.suite = suite;
+            let key: PrivateKey = x.key else { throw proto("no server key", ALERT_INTERNAL_ERROR); };
+            x.scheme = try server_scheme(key, hello.sig_algs);
+            self.sni = hello.sni;
+            x.group = choose_group(hello);
+            if x.group == 0u16 { throw proto("no common key exchange group", ALERT_HANDSHAKE_FAILURE); }
+            tr = Digest::new(h);
+            if hello.share_for(x.group) is none {
+                // HelloRetryRequest for a group the client supports.
+                tr.update(message(MESSAGE_HASH, h.digest(all)));
+                let hrr = server_hello(HRR_RANDOM[0:32].to_list(), hello.session_id, suite, x.group, none);
+                tr.update(hrr);
+                x.transcript = tr;
+                x.first = hello;
+                x.retried = true;
+                x.state = S_HELLO2;
+                self.x = x;
+                try self.send(HANDSHAKE, hrr);
+                try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]);
+                return;
+            }
+        } else {
+            let first = x.first ?? hello;
+            if hello.session_id != first.session_id || !hello.suites.contains(suite_code(self.suite)) {
                 throw proto("second ClientHello does not match", ALERT_ILLEGAL_PARAMETER);
             }
-            share = hello2.share_for(group);
-            if share is none { throw proto("second ClientHello without the requested key share", ALERT_ILLEGAL_PARAMETER); }
-            transcript.update(ch2);
-            retried = true;
-            hello = hello2;
-        } else {
-            transcript.update(ch_all);
+            if hello.share_for(x.group) is none { throw proto("second ClientHello without the requested key share", ALERT_ILLEGAL_PARAMETER); }
         }
-        let (reply, shared) = try server_share(group, share ?? body[0:0]);
-        let sh = server_hello(random::bytes(32), hello.session_id, suite, group, reply);
-        transcript.update(sh);
+        tr.update(all);
+        let share = hello.share_for(x.group) ?? body[0:0];
+        let suite = self.suite;
+        let h = suite_hash(suite);
+        let (reply, shared) = try server_share(x.group, share);
+        let sh = server_hello(random::bytes(32), hello.session_id, suite, x.group, reply);
+        tr.update(sh);
         try self.send(HANDSHAKE, sh);
-        if !retried { try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]); }
+        if !x.retried { try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]); }
 
         let early = Hkdf::extract(h, "", zeros(h.output_len()));
-        let empty = Digest::new(h);
-        let hs_secret = Hkdf::extract(h, derive_secret(h, early, "derived", empty), shared);
-        let c_hs = derive_secret(h, hs_secret, "c hs traffic", transcript);
-        let s_hs = derive_secret(h, hs_secret, "s hs traffic", transcript);
+        let hs_secret = Hkdf::extract(h, derive_secret(h, early, "derived", Digest::new(h)), shared);
+        let c_hs = derive_secret(h, hs_secret, "c hs traffic", tr);
+        let s_hs = derive_secret(h, hs_secret, "s hs traffic", tr);
         self.wr = dir_of(suite, s_hs);
 
         // EncryptedExtensions with the ALPN choice (server preference).
         let ee_exts: List<u8> = [];
-        if hello.alpn.len() > 0 && alpn.len() > 0 {
+        if hello.alpn.len() > 0 && x.alpn.len() > 0 {
             let pick: List<u8> | none = none;
-            for mine in alpn {
+            for mine in x.alpn {
                 let open = pick is none;
                 if open {
                     for theirs in hello.alpn {
@@ -810,12 +942,12 @@ impl Conn {
         vec16(ee_body, ee_exts);
         let flight: List<u8> = [];
         let ee = message(ENCRYPTED_EXTENSIONS, ee_body);
-        transcript.update(ee);
+        tr.update(ee);
         put_list(flight, ee);
 
         // Certificate
         let cl: List<u8> = [];
-        for c in chain {
+        for c in x.chain {
             put_u24(cl, c.der.len());
             put_list(cl, c.der);
             put_u16(cl, 0);
@@ -824,44 +956,112 @@ impl Conn {
         put_u24(cb, cl.len());
         put_list(cb, cl);
         let cm = message(CERTIFICATE, cb);
-        transcript.update(cm);
+        tr.update(cm);
         put_list(flight, cm);
 
-        // CertificateVerify (Ed25519)
-        let signed = verify_input("TLS 1.3, server CertificateVerify", transcript.finish());
-        let sig = try Ed25519::sign(key.seed, signed) catch _ { throw proto("bad server key", ALERT_INTERNAL_ERROR); };
+        // CertificateVerify
+        let signed = verify_input("TLS 1.3, server CertificateVerify", tr.finish());
+        let key: PrivateKey = x.key else { throw proto("no server key", ALERT_INTERNAL_ERROR); };
+        let sig = try sign_scheme(key, x.scheme, signed);
         let cvb: List<u8> = [];
-        put_u16(cvb, ED25519_SCHEME as usize);
+        put_u16(cvb, x.scheme as usize);
         vec16(cvb, sig);
         let cv = message(CERTIFICATE_VERIFY, cvb);
-        transcript.update(cv);
+        tr.update(cv);
         put_list(flight, cv);
 
         // Finished
         let sfk = expand_label(h, s_hs, "finished", [], h.output_len());
-        let fin = message(FINISHED, Hmac::mac(h, sfk, transcript.finish()));
-        transcript.update(fin);
+        let fin = message(FINISHED, Hmac::mac(h, sfk, tr.finish()));
+        tr.update(fin);
         put_list(flight, fin);
         try self.send(HANDSHAKE, flight);
 
-        let master = Hkdf::extract(h, derive_secret(h, hs_secret, "derived", empty), zeros(h.output_len()));
-        let c_ap = derive_secret(h, master, "c ap traffic", transcript);
-        let s_ap = derive_secret(h, master, "s ap traffic", transcript);
+        let master = Hkdf::extract(h, derive_secret(h, hs_secret, "derived", Digest::new(h)), zeros(h.output_len()));
+        x.c_ap = derive_secret(h, master, "c ap traffic", tr);
+        let s_ap = derive_secret(h, master, "s ap traffic", tr);
         self.wr = dir_of(suite, s_ap);
 
-        // The client's Finished.
+        // The client's Finished comes under its handshake key.
         try self.boundary();
         self.rd = dir_of(suite, c_hs);
-        let (t, cfin, _) = try self.message();
-        if t == CERTIFICATE { throw proto("client certificates are not supported", ALERT_UNEXPECTED_MESSAGE); }
-        if t != FINISHED { throw proto(f"expected Finished, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
-        let cfk = expand_label(h, c_hs, "finished", [], h.output_len());
-        if !constant_time_eq(Hmac::mac(h, cfk, transcript.finish()), cfin) {
-            throw proto("bad client Finished", ALERT_DECRYPT_ERROR);
-        }
-        try self.boundary();
-        self.rd = dir_of(suite, c_ap);
-        self.done = true;
+        x.c_hs = c_hs;
+        x.transcript = tr;
+        x.state = S_FIN;
+        self.x = x;
+    }
+}
+
+// ---- handshake state ----
+
+const C_HELLO: u8 = 1u8;
+const C_HELLO2: u8 = 2u8;
+const C_EE: u8 = 3u8;
+const C_CERT: u8 = 4u8;
+const C_CERT2: u8 = 5u8;
+const C_CV: u8 = 6u8;
+const C_FIN: u8 = 7u8;
+const S_HELLO: u8 = 11u8;
+const S_HELLO2: u8 = 12u8;
+const S_FIN: u8 = 13u8;
+const DONE: u8 = 20u8;
+
+/// What the handshake carries from one peer message to the next.
+struct Hs {
+    state: u8;
+    transcript: Digest;
+    retried: bool;
+    suites: List<CipherSuite>;
+    alpn: List<List<u8>>;
+    hs_secret: List<u8>;
+    c_hs: List<u8>;
+    s_hs: List<u8>;
+    c_ap: List<u8>;
+    // Client.
+    host: str;
+    ip: List<u8> | none;
+    roots: List<Certificate>;
+    random32: List<u8>;
+    session_id: List<u8>;
+    groups: List<u16>;
+    shares: Shares | none;
+    ch: List<u8>;
+    cert_requested: List<u8> | none;
+    infos: List<CertInfo>;
+    // Server.
+    chain: List<Certificate>;
+    key: PrivateKey | none;
+    first: ClientHelloInfo | none;
+    group: u16;
+    scheme: u16;
+}
+
+fn new_hs(state: u8) -> Hs {
+    Hs {
+        state,
+        transcript: Digest::new(HashAlgorithm::Sha256),
+        retried: false,
+        suites: [],
+        alpn: [],
+        hs_secret: [],
+        c_hs: [],
+        s_hs: [],
+        c_ap: [],
+        host: "",
+        ip: none,
+        roots: [],
+        random32: [],
+        session_id: [],
+        groups: [],
+        shares: none,
+        ch: [],
+        cert_requested: none,
+        infos: [],
+        chain: [],
+        key: none,
+        first: none,
+        group: 0u16,
+        scheme: 0u16,
     }
 }
 
@@ -1127,6 +1327,35 @@ fn check_cert_verify(body: List<u8>, key: PubKey, signed: List<u8>) throws (TlsE
     }
     if !curve_ok || !x509::verify_sig(key, alg, signed[0:signed.len()], sig) {
         throw proto("bad CertificateVerify signature", ALERT_DECRYPT_ERROR);
+    }
+}
+
+/// The CertificateVerify scheme for `key` that the client offers.
+fn server_scheme(key: PrivateKey, offered: List<u16>) throws (TlsError) -> u16 {
+    let want: List<u16> = match key.key {
+        KeyKind::Ed25519(_) => [ED25519_SCHEME],
+        KeyKind::Ec(c, _) => [if c == EcCurve::P256 { ECDSA_P256_SHA256 } else { ECDSA_P384_SHA384 }],
+        KeyKind::Rsa(_) => [RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512],
+    };
+    for w in want {
+        if offered.contains(w) { return w; }
+    }
+    throw proto("client accepts no signature scheme for the server key", ALERT_HANDSHAKE_FAILURE);
+}
+
+/// `msg` signed with `key` under `scheme` (from `server_scheme`).
+fn sign_scheme(key: PrivateKey, scheme: u16, msg: List<u8>) throws (TlsError) -> List<u8> {
+    let bad = proto("bad server key", ALERT_INTERNAL_ERROR);
+    match key.key {
+        KeyKind::Ed25519(seed) => try Ed25519::sign(seed, msg) catch _ { throw bad; },
+        KeyKind::Ec(c, d) => {
+            let h = if c == EcCurve::P256 { HashAlgorithm::Sha256 } else { HashAlgorithm::Sha384 };
+            try Ecdsa::sign(c, h, d, msg) catch _ { throw bad; }
+        },
+        KeyKind::Rsa(k) => {
+            let h = if scheme == RSA_PSS_SHA256 { HashAlgorithm::Sha256 } else if scheme == RSA_PSS_SHA384 { HashAlgorithm::Sha384 } else { HashAlgorithm::Sha512 };
+            try k.sign_pss(h, msg, random::bytes(h.output_len())) catch _ { throw bad; }
+        },
     }
 }
 

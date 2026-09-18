@@ -15,8 +15,8 @@ use rok::core::num::Zero;
 trait Bag {
     type Elem;
     fn first(self) -> Elem;
-    fn zero_elem(self) -> Elem { Elem::zero() }
-    fn zero_elem2(self) -> Self::Elem { Self::Elem::zero() }
+    fn zero_elem(self) -> Elem where Elem: Zero { Elem::zero() }
+    fn zero_elem2(self) -> Self::Elem where Self::Elem: Zero { Self::Elem::zero() }
 }
 
 struct B { v: i32; }
@@ -40,9 +40,9 @@ impl Bag for S {
     fn first(self) -> Seven { Seven }
 }
 
-fn z<T: Bag>(t: T) -> T::Elem { T::Elem::zero() }
+fn z<T: Bag>(t: T) -> T::Elem where T::Elem: Zero { T::Elem::zero() }
 
-fn made<T: Bag>(t: T) -> i32 { T::Elem::make() }
+fn made<T: Bag<Elem = Seven>>(t: T) -> i32 { T::Elem::make() }
 
 fn main() -> i32 {
     let b = B { v: 3 };

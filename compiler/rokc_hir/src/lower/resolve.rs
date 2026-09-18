@@ -721,6 +721,7 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
         HirTy::NoThrow => "Path_#nothrow".to_owned(),
         HirTy::OpenConst(n) => format!("Path_#{n}"),
         HirTy::Var(v) => format!("Path_#var_{v}"),
+        HirTy::Param(v) => format!("Path_#param_{v}"),
         HirTy::Closure { args, ret, env } => {
             let inner: Vec<String> = args.iter().map(ty_mangle).collect();
             format!(

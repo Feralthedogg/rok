@@ -1,12 +1,12 @@
 // spec: 002.10.5-generic-default-strict
 // expect-exit: 0
 // expect-stdout:
-// 5
+// 4
 
 // T appears only in the return type, so only the default `i32` can fill it:
 // the default must not depend on argument inference.
-fn make_one<T = i32>() -> T {
-    return 1 as T;
+fn make_one<T: Default = i32>() -> T {
+    return T::default();
 }
 
 fn main() -> i32 {

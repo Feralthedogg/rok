@@ -1057,6 +1057,28 @@ pub fn lower_full(
                         .collect(),
                     module,
                     params: params.iter().map(|p| (*p).to_owned()).collect(),
+                    generics: t.generics.clone(),
+                    super_tys: t.supertraits.clone(),
+                    assoc: t
+                        .items
+                        .iter()
+                        .filter_map(|i| match i {
+                            rokc_ast::TraitItem::AssocType { name, bounds, .. } => {
+                                Some((name.clone(), bounds.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                    consts: t
+                        .items
+                        .iter()
+                        .filter_map(|i| match i {
+                            rokc_ast::TraitItem::Const { name, ty, .. } => {
+                                Some((name.clone(), ty.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
                 },
             )
         })
@@ -1219,7 +1241,13 @@ pub fn lower_full(
         recursive_ret: std::cell::RefCell::default(),
         call_sites: std::cell::RefCell::default(),
         tentative_ret: std::cell::RefCell::default(),
+        params: std::cell::RefCell::default(),
+        failed: std::cell::RefCell::default(),
+        bodies: std::cell::RefCell::default(),
+        assumed: std::cell::RefCell::default(),
+        const_names: std::cell::RefCell::default(),
     };
+    let (bound_methods, bound_traits) = super::bounds::templates(&trait_info);
     let mut env = Env {
         sources,
         infer_ret: std::collections::HashSet::new(),
@@ -1275,6 +1303,8 @@ pub fn lower_full(
                 _ => None,
             })
             .collect(),
+        bound_methods,
+        bound_traits,
     };
     // Impl targets and trait arguments, now that every item is
     // registered; then each impl's methods, keyed by them.
@@ -1922,6 +1952,18 @@ pub fn lower_full(
         rokc_diagnostic::time("hir interface", || {
             super::incr::Incr::new(&env, &*b.0, program, raw_uses, input)
         })
+    });
+    // Spec 2.10.9: the package's own generic bodies (a dependency's when
+    // it is built prebuilt); every library's with `--check-library`.
+    rokc_diagnostic::time("hir generic bodies", || {
+        super::bounds::check_all(&env, |module| {
+            let pkg = package_of(module);
+            pkg.is_empty()
+                || check_library
+                || lib_pkg
+                    .as_ref()
+                    .is_some_and(|p| p != "rok" && within(&pkg, p))
+        });
     });
     let (mut functions, unlowered) = rokc_diagnostic::time("hir bodies", || {
         lower_bodies(&env, &decl_roots, &prebuilt, &inline_copies, incr.as_ref())
@@ -6151,7 +6193,7 @@ fn warn_assoc_shadowing(
     }
 }
 
-fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
+pub(super) fn subst_assoc_sig(def: &mut FnDef, assoc: &HashMap<String, Ty>) {
     if assoc.is_empty() {
         return;
     }

@@ -1,0 +1,171 @@
+// needs: threads net
+// expect-exit: 0
+// expect-stdout:
+// p256 (PKCS #8) -> localhost|p256
+// p384 (SEC1) -> localhost|p384
+// rsa (PKCS #1) -> localhost|rsa
+// server saw 3 connections
+// bad key: Certificate bad EC private key
+// no key block: Certificate no PRIVATE KEY, EC PRIVATE KEY or RSA PRIVATE KEY block
+
+// Stdlib 3.2.5: server keys other than Ed25519: ECDSA P-256 (PKCS #8),
+// P-384 (RFC 5915 `EC PRIVATE KEY`) and RSA (PKCS #1 `RSA PRIVATE KEY`,
+// signing RSA-PSS), each certificate issued by the test CA, and the
+// client checking the CertificateVerify against the leaf's key.
+use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
+use rok::std::net::tls;
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};
+use rok::std::thread;
+use rok::std::io::byte_buf;
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBUzCCAQWgAwIBAgIUHuDQmdyLUvVYGHs5rDw1vYU8bIIwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAWMRQwEgYDVQQDDAtyb2sgdGVzdCBDQTAqMAUGAytlcAMhAPEMYwkJArdk
+aV3E4nOSir4hNCOt5rCjhq6U1sYe6lTWo2MwYTAdBgNVHQ4EFgQUqTSORZgmA5IP
+oVjCUMKRtKdC4BkwHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwDwYD
+VR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQwBQYDK2VwA0EAp7tJ5xbNuoRw
+zTq/y0kOz917MctSi+O2E5DLqAoAjtPGehC8163+j0KTLVeOwoTW1dtCRoWHyyYj
+gDBrha3fDQ==
+-----END CERTIFICATE-----
+";
+
+const P256_CERT: str = "-----BEGIN CERTIFICATE-----
+MIIBuTCCAWugAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJUwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZEFaEpq/6UIdEL3wPK3Oj3v+97CWRf
+3SsIe8X0/ZpoW+ppyMMO58QOQHyVo4GbMIGYMCYGA1UdEQQfMB2CCWxvY2FsaG9z
+dIIKKi5yb2sudGVzdIcEfwAAATATBgNVHSUEDDAKBggrBgEFBQcDATAOBgNVHQ8B
+Af8EBAMCB4AwCQYDVR0TBAIwADAdBgNVHQ4EFgQU+2+6RW+JViHg6KgvFa5XUjSQ
+rA8wHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwBQYDK2VwA0EAukE7
+pzRC2g3t6ouc4acMO0OmyO0MjbYSFNJm/1YtvDDcyD0wdOLGa2h0yIV88yXy0+08
+tk985FEEIDyk5wcNDg==
+-----END CERTIFICATE-----
+";
+
+const P256_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcgH7+8UZOnSmYIn9
+1ftUi+QOk+yiBJQf//N6N0MgirqhRANCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZE
+FaEpq/6UIdEL3wPK3Oj3v+97CWRf3SsIe8X0/ZpoW+ppyMMO58QOQHyV
+-----END PRIVATE KEY-----
+";
+
+const P384_CERT: str = "-----BEGIN CERTIFICATE-----
+MIIB1jCCAYigAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJYwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwdjAQBgcqhkjOPQIBBgUrgQQAIgNi
+AAR3ikv/LoBhTU8KTvK7hTqAp2u5AG8cgilH6Gj34o4yXqtj0B00bnKf72oFBX/I
+6Imy7fFfvL5wJqZB5mAh57ZleJZnoOVjcySQpCJtq8tkTbikoF0mRcuIoOWkZpGp
+LrmjgZswgZgwJgYDVR0RBB8wHYIJbG9jYWxob3N0ggoqLnJvay50ZXN0hwR/AAAB
+MBMGA1UdJQQMMAoGCCsGAQUFBwMBMA4GA1UdDwEB/wQEAwIHgDAJBgNVHRMEAjAA
+MB0GA1UdDgQWBBQSm45G7DXwKmA9gdNlOwu8x+e9vjAfBgNVHSMEGDAWgBSpNI5F
+mCYDkg+hWMJQwpG0p0LgGTAFBgMrZXADQQDGOr8nrWRVWN4kivvDmpXrS0YyPmN3
+ofteJEldWRE17Kw01UNquUXwjwnNbuBRI8MvnUwOSshteTeNbKuwTsgN
+-----END CERTIFICATE-----
+";
+
+const P384_KEY: str = "-----BEGIN EC PRIVATE KEY-----
+MIGkAgEBBDDF1BRpDwEL7biaI7fBEmhIjae7H0t0XHlyUxl1Or18WMgn/CcjqdOt
+JVsYRkRNGqSgBwYFK4EEACKhZANiAAR3ikv/LoBhTU8KTvK7hTqAp2u5AG8cgilH
+6Gj34o4yXqtj0B00bnKf72oFBX/I6Imy7fFfvL5wJqZB5mAh57ZleJZnoOVjcySQ
+pCJtq8tkTbikoF0mRcuIoOWkZpGpLrk=
+-----END EC PRIVATE KEY-----
+";
+
+const RSA_CERT: str = "-----BEGIN CERTIFICATE-----
+MIIChDCCAjagAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJcwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IB
+DwAwggEKAoIBAQCqziYK+HiQmfMyPr/zb7v9+T/yhTCKl+0+IsCuWeaaSxO1XOK8
+hviq5yaC5j+8Q4qF21CHcAvTfUf4qloK9kettOOtfQiq7vARBM7TST866HZb8puR
+6wy6qobBaYViyMX8uaXzriS/T1d4bVbKUS2nOpxES3nrJcq0tClIEpU1kELM1aR1
+NtEL7TaDHlcOhSttJrG71pgbAh8oai+26ST2xR9VS549wJi2iN9L4upYZKuq5RhZ
+rka8P/sXek7fO9dMCigYP3Q2tjYH+p9pydvg100pUjFBzkGmS+pb45WUxg+QnDSf
+NyBhSkxsUHhKdyzi2wFPf9l7OYtgPeBljSuLAgMBAAGjgZswgZgwJgYDVR0RBB8w
+HYIJbG9jYWxob3N0ggoqLnJvay50ZXN0hwR/AAABMBMGA1UdJQQMMAoGCCsGAQUF
+BwMBMA4GA1UdDwEB/wQEAwIHgDAJBgNVHRMEAjAAMB0GA1UdDgQWBBRhgolivir9
+ZbnO/qoamZeNHQCauDAfBgNVHSMEGDAWgBSpNI5FmCYDkg+hWMJQwpG0p0LgGTAF
+BgMrZXADQQAU0QyCbRJT6gwjvAxbXsLIztU9KrkGEFhT7jbWrPHVqqUTOWK6XGb5
+oSiGqvPQ+5Q1ngLZY+xxW+HLz6IoQ1IH
+-----END CERTIFICATE-----
+";
+
+const RSA_KEY: str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAqs4mCvh4kJnzMj6/82+7/fk/8oUwipftPiLArlnmmksTtVzi
+vIb4qucmguY/vEOKhdtQh3AL031H+KpaCvZHrbTjrX0Iqu7wEQTO00k/Ouh2W/Kb
+kesMuqqGwWmFYsjF/Lml864kv09XeG1WylEtpzqcREt56yXKtLQpSBKVNZBCzNWk
+dTbRC+02gx5XDoUrbSaxu9aYGwIfKGovtukk9sUfVUuePcCYtojfS+LqWGSrquUY
+Wa5GvD/7F3pO3zvXTAooGD90NrY2B/qfacnb4NdNKVIxQc5BpkvqW+OVlMYPkJw0
+nzcgYUpMbFB4Sncs4tsBT3/ZezmLYD3gZY0riwIDAQABAoIBAEH+HjK055gu8wih
+t/YtYHvzFmL0VNnnczFDqiBy+ab5hObYuX3PxDn7zyRaI5vwmI+5ObbqcpdG20zX
+PKzplK4nqqP4ICYy5SweKG736Ocws7I43SSWpTdl9WS7CV8uZViMvfKVgPstg4Uy
+8Yp/rNzkx0WXx8Yztsr0pNKE44Nq1L0NcJlz45h+WWSZDoYcW3Q6PI2pZKGTyW+i
+lvmk33ZAvnkdJyKrpgrF+MC3i5kFw0PeBSRLSh0ljwpv5uIRB0WIUMB5Rk1RXet7
+A383ybUdFQDhyrVf8sKbAffABX2niHRQ33+Ni8Ws24RuxU47in2ZWkK9nOHRl4Cn
+ROMCV4kCgYEA2bKQJyTaYOGNRp434EwviI995Wn4MD8Nt/TiOAk7YbAE2iA4XeGZ
+ZAbxjTlErnZ1ZD0QMqET02CnSD0OtMyWVZE5BjF19/VkjRWGjdCGI4mdN6mGiAhK
+wuhMdv6iMOFR/L15h+G6oeBJOqtHzoukBgP7KV4PDwfi2stIMX3oBtcCgYEAyNt8
+QojNIsnVSYLoZMqoCeH6w3wJ9RlJ+cEX+x0Qb+gRLMCRt5nttktRcZwK9z0f+hRq
+DYWQEDaBabntQGqBQiGKY3pyL6odSWrgYR+BM2xRoSGfCe/f4W6lNiEcLOLMlkyT
+X/gf+5COsN19uLAv0xigFxH3YaTdF2E31CXhjm0CgYEAnRomu4j165p6OK8vhbeV
+Sgi7gxbRXAf0339izauj5eB/7+X2p5GJ/8ye/xqH/RtRplAG43Ko+w8ySYh+l21Z
+RFD0BQsmphW6RbJ2EtucIgNKqQO3KW5KfZPksq8Z3wqL/0fBb5Uv+WgBkMxQmrbd
+XNX8qCLP3ToEtX6kD8tb6asCgYBspZzveIRN/xMqMm92pdCDmANG3r+cHtPPD03j
+fXM4tTUlGf04bUESTGd/psKfviaf5Y8ARXEJ9BHImNPm9jV5Ch+Lc950PfadkfxR
+TPNcV4lIOaGHhIN7s5gWUY6mEQBNhJprXRIfx7AHp6er0VHtQ/LEx+kinkUhsmq6
+jMsXeQKBgQCHvtAWsySccEdt3i3YJbBhtP+iGsjTfijbpk+dVByODMP4bg8dYkQ4
+jxqQtuzdjnwTyxFdqDo9OqgHnfKNCvSAkxZCcJpiTcnPoGYumenoxxjC3soe9ctN
+V6zLJHZlQcHWjWL1lHtwcFbKukWxfjN5BynkEdYTPGKAYseWAKzZOA==
+-----END RSA PRIVATE KEY-----
+";
+
+fn config(cert: str, key: str) -> ServerConfig {
+    ServerConfig::new(try! Certificate::from_pem(cert), try! PrivateKey::from_pem(key))
+}
+
+fn key_error(pem: str) -> str {
+    let _ = try PrivateKey::from_pem(pem) catch e { return f"{e.kind:?} {e.msg}"; };
+    "ok"
+}
+
+fn serve(l: TcpListener) -> i32 {
+    let cfgs = [config(P256_CERT, P256_KEY), config(P384_CERT, P384_KEY), config(RSA_CERT, RSA_KEY)];
+    let names = ["p256", "p384", "rsa"];
+    let n = 0;
+    for i in 0..3 {
+        let (s, _) = try! l.accept();
+        let srv = try Server::new(s, cfgs[i]) catch e { println(f"server: {e}"); continue; };
+        n += 1;
+        let buf = byte_buf(64);
+        let k = try! srv.read(buf);
+        try! srv.write_all(f"{srv.server_name() ?? "none"}|{names[i]}|{try! str::from_utf8(buf[0:k])}");
+        srv.close();
+    }
+    l.close();
+    n
+}
+
+fn main() {
+    let l = try! tcp_listen("127.0.0.1:0");
+    let port = (try! l.local_addr()).port();
+    let t = thread::spawn(|| serve(l));
+    let roots = try! Certificate::from_pem(CA);
+    for what in ["p256 (PKCS #8)", "p384 (SEC1)", "rsa (PKCS #1)"] {
+        let cfg = ClientConfig::new();
+        cfg.root_certs = roots;
+        let c = try! Client::with_config(try! tcp_connect(f"127.0.0.1:{port}"), "localhost", cfg);
+        try! c.write_all("x");
+        let back = try! str::from_utf8(try! c.read_to_end());
+        println(f"{what} -> {back[0:back.len() - 2]}");
+        c.close();
+    }
+    println(f"server saw {try t.join() catch _ { -1 }} connections");
+
+    // A P-256 key of zero, PKCS #8 wrapped; text without a key.
+    let zero = "-----BEGIN PRIVATE KEY-----\nMEECAQAwEwYHKoZIzj0CAQYIKoZIzj0DAQcEJzAlAgEBBCAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\n-----END PRIVATE KEY-----\n";
+    println(f"bad key: {key_error(zero)}");
+    println(f"no key block: {key_error(CA)}");
+}
+
+// spec: std 302-net §3.2.5

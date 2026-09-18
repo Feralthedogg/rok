@@ -492,7 +492,7 @@ impl<T> IndexSet<usize> for List<T> {
 
 /// `it.collect()` into a list (2.9.9).
 impl<T> FromIterator<T> for List<T> {
-    const fn from_iter<I>(it: I) -> List<T> {
+    const fn from_iter<I: IntoIterator<Item = T>>(it: I) -> List<T> {
         let out: List<T> = List::new();
         for x in it {
             out.push(x);

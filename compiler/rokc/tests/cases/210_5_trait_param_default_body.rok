@@ -1,12 +1,13 @@
 // spec: 002.10.5
 // A trait default body sees the trait parameters bound by the impl, or
 // their defaults (`Self` = the impl target) when the impl omits them.
+// The body itself is checked once, its parameters opaque (2.10.9).
 // expect-exit: 0
 // expect-stdout: 5 5 1 true
 
 trait Tr<T = i64> {
-    fn make(self) -> T { let x: T = 5; x }
-    fn size(self) -> i32 { let v: List<T> = []; v.push(7); v.len() as i32 }
+    fn make(self, v: T) -> T { let x: T = v; x }
+    fn size(self, x: T) -> i32 { let v: List<T> = []; v.push(x); v.len() as i32 }
 }
 trait Same<Rhs = Self> { fn same(self, o: Rhs) -> bool { let r: Rhs = o; true } }
 struct S {}
@@ -16,8 +17,8 @@ struct U {}
 impl Tr<i32> for U {}
 fn main() {
     let s = S {};
-    let a: i64 = s.make();
-    let b: i32 = U {}.make();
+    let a: i64 = s.make(5);
+    let b: i32 = U {}.make(5);
     let ok = s.same(S {});
-    println(f"{a} {b} {s.size()} {ok}");
+    println(f"{a} {b} {s.size(7)} {ok}");
 }

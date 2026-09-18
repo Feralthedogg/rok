@@ -827,6 +827,10 @@ pub enum HirTy {
     NoThrow,
     /// An inference variable of an un-annotated `let` (`lower::infer`).
     Var(u32),
+    /// A type parameter while its generic body is checked against its
+    /// bounds (spec 2.10.9, `lower::bounds`): opaque, it has only what
+    /// its bounds give.
+    Param(u32),
     Sum(Vec<HirTy>),
     Tuple(Vec<HirTy>),
     // Resolved struct (Path → known def).

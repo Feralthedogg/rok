@@ -674,7 +674,8 @@ impl Flow<'_> {
             | HirTy::Const(..)
             | HirTy::OpenConst(_)
             | HirTy::NoThrow
-            | HirTy::Var(_) => true,
+            | HirTy::Var(_)
+            | HirTy::Param(_) => true,
         }
     }
 

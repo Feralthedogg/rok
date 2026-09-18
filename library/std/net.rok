@@ -1166,13 +1166,13 @@ impl UnixStream {
 
     pub fn read_to_end(self) throws (IoError) -> List<u8> { try self.sock.read_to_end() }
 
-    pub fn write<B: AsBytes>(self, buf: B) throws (IoError) -> usize { try self.sock.write(buf.as_bytes()) }
+    pub fn write<B: AsBytes>(self, buf: B) throws (IoError) -> usize { try self.sock.write(buf.byte_slice()) }
 
     pub async fn write_async<B: AsBytes>(self, buf: B) throws (IoError) -> usize {
-        try await self.sock.write_async(buf.as_bytes())
+        try await self.sock.write_async(buf.byte_slice())
     }
 
-    pub fn write_all<B: AsBytes>(self, buf: B) throws (IoError) { try self.sock.write_all(buf.as_bytes()); }
+    pub fn write_all<B: AsBytes>(self, buf: B) throws (IoError) { try self.sock.write_all(buf.byte_slice()); }
 
     pub fn write_str(self, s: str) throws (IoError) { try self.sock.write_all(s.as_bytes()); }
 
@@ -1180,7 +1180,7 @@ impl UnixStream {
 
     /// `buf` with fd `fd` alongside (`SCM_RIGHTS`): the bytes sent.
     pub fn send_with_fd<B: AsBytes>(self, buf: B, fd: RawFd) throws (IoError) -> usize {
-        let (b, at, n) = unsafe { buf.as_bytes().raw_parts() };
+        let (b, at, n) = unsafe { buf.byte_slice().raw_parts() };
         loop {
             let r = unsafe { rok_net_send_fd(try self.sock.live(), b, at, n, fd) } as i64;
             if !would_block(r) { return (try check(r, "sendmsg")) as usize; }
@@ -1267,7 +1267,7 @@ impl UnixDatagram {
         (UnixDatagram { sock: a }, UnixDatagram { sock: b })
     }
 
-    pub fn send<B: AsBytes>(self, buf: B) throws (IoError) -> usize { try self.sock.write(buf.as_bytes()) }
+    pub fn send<B: AsBytes>(self, buf: B) throws (IoError) -> usize { try self.sock.write(buf.byte_slice()) }
 
     pub fn recv(self, buf: List<u8>) throws (IoError) -> usize { try self.sock.read(buf) }
 

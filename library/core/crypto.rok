@@ -9,6 +9,7 @@ pub(pkg) mod aes;
 pub(pkg) mod chacha;
 pub mod aead;
 pub(pkg) mod bignum;
+pub(pkg) mod ecfield;
 pub(pkg) mod curve25519;
 pub mod x25519;
 pub mod ed25519;

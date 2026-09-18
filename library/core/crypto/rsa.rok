@@ -1,9 +1,10 @@
-// RSA signature verification (RFC 8017): PKCS #1 v1.5 and PSS (MGF1
+// RSA (RFC 8017): PKCS #1 v1.5 and PSS verification, PSS signing (MGF1
 // with the message hash, salt as long as the hash), moduli of 2048 to
 // 4096 bits.
 
 use sup::{view, Bytes, constant_time_eq};
 use sup::sha2::{HashAlgorithm, Digest};
+use sup::hmac::Hkdf;
 use sup::bignum::{Nat, Modulus};
 
 /// An RSA public key `(n, e)`.
@@ -181,5 +182,135 @@ impl RsaPublicKey {
         d.update(hash.digest(msg));
         d.update(db[db_len - sl:db_len]);
         constant_time_eq(d.finish(), h)
+    }
+}
+
+/// An RSA private key with its CRT parameters (RFC 8017 3.2, two
+/// primes).
+pub struct RsaPrivateKey {
+    public: RsaPublicKey;
+    fp: Modulus;
+    fq: Modulus;
+    dp: List<u8>;
+    dq: List<u8>;
+    /// `q^-1 mod p`, Montgomery form mod p.
+    qinv: List<u32>;
+}
+
+/// A prime factor as a modulus: odd, at most `nlimbs` limbs.
+fn factor(b: Slice<u8>, nlimbs: usize) throws (ValueError) -> Modulus {
+    let bad = ValueError { msg: "bad RSA private key" };
+    if b.len() == 0 { throw bad; }
+    let m: List<u32> = Nat::from_be(b, (b.len() + 3) / 4) else { throw bad; };
+    if m[0] & 1u32 == 0u32 || m.len() > nlimbs { throw bad; }
+    Modulus::new(m)
+}
+
+impl RsaPrivateKey {
+    /// From a DER `RSAPrivateKey` (RFC 8017 A.1.2, version 0: n, e, d,
+    /// p, q, d mod (p - 1), d mod (q - 1), q^-1 mod p).
+    pub fn from_pkcs1_der(der: Bytes) throws (ValueError) -> RsaPrivateKey {
+        let s = view(der);
+        let bad = ValueError { msg: "malformed RSAPrivateKey" };
+        if s.len() < 2 || s[0] != 0x30u8 { throw bad; }
+        let t: (usize, usize) = der_len(s, 1) else { throw bad; };
+        let (len, start) = t;
+        if start + len != s.len() { throw bad; }
+        let fields: List<Slice<u8>> = [];
+        let at = start;
+        while at < s.len() {
+            let f: (Slice<u8>, usize) = der_uint(s, at) else { throw bad; };
+            let (v, next) = f;
+            fields.push(v);
+            at = next;
+        }
+        // Version 0 strips to an empty magnitude.
+        if fields.len() != 9 || fields[0].len() != 0 { throw bad; }
+        let public = try RsaPublicKey::new(fields[1], fields[2]);
+        let n = public.md.n;
+        let fp = try factor(fields[4], n);
+        let fq = try factor(fields[5], n);
+        let qi: List<u32> = Nat::from_be(fields[8], fp.n) else { throw bad; };
+        if !Nat::lt(qi, fp.m) || fields[6].len() > 4 * fp.n || fields[7].len() > 4 * fq.n { throw bad; }
+        RsaPrivateKey {
+            public,
+            qinv: fp.to_mont(qi),
+            dp: fields[6].to_list(),
+            dq: fields[7].to_list(),
+            fp,
+            fq,
+        }
+    }
+
+    pub fn public_key(self) -> RsaPublicKey { self.public }
+
+    pub fn bits(self) -> usize { self.public.bits }
+
+    /// `m^d mod n` for `m < n` by the CRT, blinded with `r` (`r^e`
+    /// multiplied in, `r^-1` taken out per prime), then checked against
+    /// `s^e = m`: a fault in either half would reveal a factor.
+    fn private_op(self, m: List<u32>, r: List<u32>) throws (ValueError) -> List<u32> {
+        let md = self.public.md;
+        let fp = self.fp;
+        let fq = self.fq;
+        let e = self.public.e[0:self.public.e.len()];
+        let blinded = md.from_mont(md.mul(md.to_mont(m), md.pow(md.to_mont(r), e)));
+        // Per prime: (m r^e)^dp = m^dp r, times r^-1.
+        let rp: List<u32> = fp.inv(fp.reduce(r)) else { throw ValueError { msg: "RSA blinding factor not invertible" }; };
+        let rq: List<u32> = fq.inv(fq.reduce(r)) else { throw ValueError { msg: "RSA blinding factor not invertible" }; };
+        let sp = fp.mul(fp.pow(fp.to_mont(fp.reduce(blinded)), self.dp[0:self.dp.len()]), fp.to_mont(rp));
+        let sq = fq.mul(fq.pow(fq.to_mont(fq.reduce(blinded)), self.dq[0:self.dq.len()]), fq.to_mont(rq));
+        // Garner: s = sq + q ((sp - sq) q^-1 mod p); q h < n, so the
+        // product and the sum mod n are exact.
+        let sq_plain = fq.from_mont(sq);
+        let h = fp.from_mont(fp.mul(fp.sub(sp, fp.to_mont(fp.reduce(sq_plain))), self.qinv));
+        let qh = md.from_mont(md.mul(md.to_mont(Nat::resize(fq.m, md.n)), md.to_mont(Nat::resize(h, md.n))));
+        let s = md.add(qh, Nat::resize(sq_plain, md.n));
+        let back = md.from_mont(md.pow(md.to_mont(s), e));
+        if !Nat::eq(back, m) { throw ValueError { msg: "RSA private key is inconsistent" }; }
+        s
+    }
+
+    /// An RSASSA-PSS signature of `msg`: MGF1 with `hash`, `salt` as
+    /// long as the hash. `salt` must be fresh random bytes; the
+    /// blinding factor is derived from it, the message and the key.
+    pub fn sign_pss(self, hash: HashAlgorithm, msg: Bytes, salt: Bytes) throws (ValueError) -> List<u8> {
+        let hl = hash.output_len();
+        let sb = view(salt);
+        if sb.len() != hl { throw ValueError { msg: "PSS salt must be as long as the hash" }; }
+        let bits = self.public.bits;
+        let k = (bits + 7) / 8;
+        let em_bits = bits - 1;
+        let em_len = (em_bits + 7) / 8;
+        let mh = hash.digest(msg);
+        let d = Digest::new(hash);
+        d.update([0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
+        d.update(mh);
+        d.update(sb);
+        let h = d.finish();
+        // DB = PS || 0x01 || salt, masked with MGF1(H).
+        let db_len = em_len - hl - 1;
+        let db = mgf1(hash, h[0:hl], db_len);
+        let ps = db_len - hl - 1;
+        db[ps] = db[ps] ^ 1u8;
+        for i in 0..hl { db[ps + 1 + i] = db[ps + 1 + i] ^ sb[i]; }
+        let top = 8 * em_len - em_bits;
+        if top > 0 { db[0] = db[0] & (0xffu8 >> top as u8); }
+        let em: List<u8> = [];
+        for _ in em_len..k { em.push(0u8); }
+        for x in db { em.push(x); }
+        for x in h { em.push(x); }
+        em.push(0xbcu8);
+        let n = self.public.md.n;
+        let m: List<u32> = Nat::from_be(em[0:k], n) else { throw ValueError { msg: "PSS encoding" }; };
+        // The blinding factor, below 2^(8 (k - 1)) <= 2^(bits - 1) < n.
+        let ikm = self.dp.clone();
+        for x in self.dq { ikm.push(x); }
+        let info = "rok rsa blinding".as_bytes().to_list();
+        for x in mh { info.push(x); }
+        let rb = try Hkdf::expand(HashAlgorithm::Sha512, Hkdf::extract(HashAlgorithm::Sha512, sb, ikm), info, k);
+        rb[0] = 0u8;
+        let r: List<u32> = Nat::from_be(rb[0:k], n) else { throw ValueError { msg: "PSS blinding" }; };
+        Nat::to_be(try self.private_op(m, r), k)
     }
 }

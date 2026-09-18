@@ -1,0 +1,128 @@
+// expect-exit: 0
+// expect-stdout:
+// ok rfc6979 (14 cases)
+// ok roundtrip p256
+// ok roundtrip p384
+// rejected: zero true, order true, long true
+// rejected: forged false
+
+// rok::core::crypto::ecdsa signing: RFC 6979 deterministic signatures
+// (A.2.5 P-256 and A.2.6 P-384 with SHA-256/384/512; the DER encodings
+// of the RFC's r and s), public keys, sign / verify round trips and
+// invalid private keys.
+
+use rok::core::crypto::sha2::HashAlgorithm;
+use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
+
+fn nib(c: u8) -> u8 {
+    if c >= 0x30u8 && c <= 0x39u8 { return c - 0x30u8; }
+    if c >= 0x61u8 && c <= 0x66u8 { return c - 0x61u8 + 10u8; }
+    c - 0x41u8 + 10u8
+}
+
+fn unhex(s: str) -> List<u8> {
+    let out: List<u8> = [];
+    let b = s.as_bytes();
+    let i = 0usize;
+    while i + 1 < b.len() {
+        out.push((nib(b[i]) << 4) | nib(b[i + 1]));
+        i += 2;
+    }
+    out
+}
+
+fn hex(b: List<u8>) -> str {
+    let digits = "0123456789abcdef".as_bytes();
+    let out: List<u8> = [];
+    for x in b {
+        out.push(digits[(x >> 4) as usize]);
+        out.push(digits[(x & 15u8) as usize]);
+    }
+    try str::from_utf8(out) catch _ { "" }
+}
+
+fn vectors() -> List<str> {
+    [
+        "P256 - c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721 0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb67903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299",
+        "P256 sha256 sample 3046022100efd48b2aacb6a8fd1140dd9cd45e81d69d2c877b56aaf991c34d0ea84eaf3716022100f7cb1c942d657c41d436c7a1b6e29f65f3e900dbb9aff4064dc4ab2f843acda8",
+        "P256 sha256 test 3045022100f1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d383670220019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083",
+        "P256 sha384 sample 304402200eafea039b20e9b42309fb1d89e213057cbf973dc0cfc8f129edddc800ef771902204861f0491e6998b9455193e34e7b0d284ddd7149a74b95b9261f13abde940954",
+        "P256 sha384 test 304602210083910e8b48bb0c74244ebdf7f07a1c5413d61472bd941ef3920e623fbccebeb60221008ddbec54cf8cd5874883841d712142a56a8d0f218f5003cb0296b6b509619f2c",
+        "P256 sha512 sample 30450221008496a60b5e9b47c825488827e0495b0e3fa109ec4568fd3f8d1097678eb97f0002202362ab1adbe2b8adf9cb9edab740ea6049c028114f2460f96554f61fae3302fe",
+        "P256 sha512 test 30440220461d93f31b6540894788fd206c07cfa0cc35f46fa3c91816fff1040ad1581a04022039af9f15de0db8d97e72719c74820d304ce5226e32dedae67519e840d1194e55",
+        "P384 - 6b9d3dad2e1b8c1c05b19875b6659f4de23c3b667bf297ba9aa47740787137d896d5724e4c70a825f872c9ea60d2edf5 04ec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc138015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720",
+        "P384 sha256 sample 3065023021b13d1e013c7fa1392d03c5f99af8b30c570c6f98d4ea8e354b63a21d3daa33bde1e888e63355d92fa2b3c36d8fb2cd023100f3aa443fb107745bf4bd77cb3891674632068a10ca67e3d45db2266fa7d1feebefdc63eccd1ac42ec0cb8668a4fa0ab0",
+        "P384 sha256 test 306402306d6defac9ab64dabafe36c6bf510352a4cc27001263638e5b16d9bb51d451559f918eedaf2293be5b475cc8f0188636b02302d46f3becbcc523d5f1a1256bf0c9b024d879ba9e838144c8ba6baeb4b53b47d51ab373f9845c0514eefb14024787265",
+        "P384 sha384 sample 306602310094edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe4602310099ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8",
+        "P384 sha384 test 30660231008203b63d3c853e8d77227fb377bcf7b7b772e97892a80f36ab775d509d7a5feb0542a7f0812998da8f1dd3ca3cf023db023100ddd0760448d42d8a43af45af836fce4de8be06b485e9b61b827c2f13173923e06a739f040649a667bf3b828246baa5a5",
+        "P384 sha512 sample 3065023100ed0959d5880ab2d869ae7f6c2915c6d60f96507f9cb3e047c0046861da4a799cfe30f35cc900056d7c99cd78824337090230512c8cceee3890a84058ce1e22dbc2198f42323ce8aca9135329f03c068e5112dc7cc3ef3446defceb01a45c2667fdd5",
+        "P384 sha512 test 3066023100a0d5d090c9980faf3c2ce57b7ae951d31977dd11c775d314af55f76c676447d06fb6495cd21b4b6e340fc236584fb277023100976984e59b4c77b0e8e4460dca3d9f20e07b9bb1f63beefaf576f6b2e8b224634a2092cd3792e0159ad9cee37659c736",
+    ]
+}
+
+fn curve(s: str) -> EcCurve { if s == "P256" { EcCurve::P256 } else { EcCurve::P384 } }
+
+fn hash(s: str) -> HashAlgorithm {
+    if s == "sha256" { return HashAlgorithm::Sha256; }
+    if s == "sha384" { return HashAlgorithm::Sha384; }
+    HashAlgorithm::Sha512
+}
+
+fn main() {
+    let bad = 0;
+    let n = 0;
+    let key: List<u8> = [];
+    for v in vectors() {
+        let f: List<str> = [];
+        for x in v.split(" ") { f.push(x); }
+        let c = curve(f[0]);
+        if f[1] == "-" {
+            key = unhex(f[2]);
+            let pk = try Ecdsa::public_key(c, key) catch _ { [] };
+            if hex(pk) != f[3] { bad += 1; println(f"FAIL public key {f[0]}"); }
+            n += 1;
+            continue;
+        }
+        let sig = try Ecdsa::sign(c, hash(f[1]), key, f[2]) catch _ { [] };
+        if hex(sig) != f[3] { bad += 1; println(f"FAIL {v}: {hex(sig)}"); }
+        n += 1;
+    }
+    if bad == 0 { println(f"ok rfc6979 ({n} cases)"); }
+
+    // Round trips with a few keys.
+    for c in [EcCurve::P256, EcCurve::P384] {
+        let size = if c == EcCurve::P256 { 32 } else { 48 };
+        let ok = true;
+        for i in 1..5 {
+            let d: List<u8> = [];
+            for j in 0..size { d.push(((i * 37 + j * 11) % 251) as u8); }
+            let pk = try Ecdsa::public_key(c, d) catch _ { [] };
+            for h in [HashAlgorithm::Sha256, HashAlgorithm::Sha384, HashAlgorithm::Sha512] {
+                let sig = try Ecdsa::sign(c, h, d, f"message {i}") catch _ { [] };
+                if !Ecdsa::verify(c, h, pk, f"message {i}", sig) { ok = false; }
+                if Ecdsa::verify(c, h, pk, f"message {i + 1}", sig) { ok = false; }
+            }
+        }
+        println(f"{if ok { "ok" } else { "FAIL" }} roundtrip {if c == EcCurve::P256 { "p256" } else { "p384" }}");
+    }
+
+    // Invalid private keys: zero, the group order, too long.
+    let zero: List<u8> = [];
+    for _ in 0..32 { zero.push(0u8); }
+    let order = unhex("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
+    let long: List<u8> = [1u8];
+    for _ in 0..32 { long.push(1u8); }
+    let z = (try Ecdsa::sign(EcCurve::P256, HashAlgorithm::Sha256, zero, "m") catch _ { [] }).len() == 0;
+    let o = (try Ecdsa::sign(EcCurve::P256, HashAlgorithm::Sha256, order, "m") catch _ { [] }).len() == 0;
+    let l = (try Ecdsa::public_key(EcCurve::P256, long) catch _ { [] }).len() == 0;
+    println(f"rejected: zero {z}, order {o}, long {l}");
+
+    // A signature under one key does not verify under another.
+    let k1 = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721");
+    let k2 = unhex("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6722");
+    let sig = try Ecdsa::sign(EcCurve::P256, HashAlgorithm::Sha256, k1, "m") catch _ { [] };
+    let pk2 = try Ecdsa::public_key(EcCurve::P256, k2) catch _ { [] };
+    println(f"rejected: forged {Ecdsa::verify(EcCurve::P256, HashAlgorithm::Sha256, pk2, "m", sig)}");
+}
+
+// spec: std 221-crypto §2.21.4

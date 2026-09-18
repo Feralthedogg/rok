@@ -21,6 +21,7 @@ use crate::{
 };
 
 mod bignum;
+mod bounds;
 mod broadcast;
 mod caller;
 mod collect;
@@ -992,6 +993,11 @@ struct Env<'a> {
     decls: Vec<MethodOrFn<'a>>,
     /// `#[non_exhaustive]` structs and enums (spec 6.2.10), by name.
     non_exhaustive: std::collections::HashSet<String>,
+    /// Per `(trait, method)`: the template a call on a type parameter
+    /// bounded by the trait goes through (`bounds::templates`).
+    bound_methods: HashMap<(String, String), GenericMethod>,
+    /// A `bound_methods` template's name → its trait.
+    bound_traits: HashMap<String, String>,
 }
 
 /// A handler registered with a built-in shape's pattern (`[..]` etc.).
@@ -1018,6 +1024,14 @@ struct TraitInfo {
     module: String,
     /// The trait's type parameters, in order (`Index<K>` → `[K]`).
     params: Vec<String>,
+    /// Its generic parameters as declared (defaults included).
+    generics: rokc_ast::Generics,
+    /// Its supertraits as written.
+    super_tys: Vec<Ty>,
+    /// Its associated types and their declared bounds.
+    assoc: Vec<(String, Vec<Ty>)>,
+    /// Its associated consts and their declared types.
+    consts: Vec<(String, Ty)>,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -1836,6 +1850,20 @@ struct ClosureSink {
     /// Inferred return types that depend on a fn still being inferred:
     /// dropped once it is done.
     tentative_ret: std::cell::RefCell<Vec<FunctionId>>,
+    /// Type parameters of the generic bodies being checked
+    /// (`HirTy::Param`, `bounds`).
+    params: std::cell::RefCell<Vec<bounds::ParamInfo>>,
+    /// Templates whose definition check failed, by span: their
+    /// instances (and a trait default's copies) report nothing more.
+    failed: std::cell::RefCell<std::collections::HashSet<Span>>,
+    /// The declarations whose bodies are being lowered, innermost last.
+    bodies: std::cell::RefCell<Vec<Span>>,
+    /// The `where` clauses on other types than a parameter of the body
+    /// being checked.
+    assumed: std::cell::RefCell<Vec<(HirTy, TraitRef)>>,
+    /// The `const` parameters of the body being checked, by the value
+    /// standing for each (`bounds`).
+    const_names: std::cell::RefCell<Vec<(i128, String)>>,
 }
 
 /// Per-function lowering state: scoped name → local-id map plus the
@@ -1957,9 +1985,6 @@ struct LowerCtx<'a> {
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
-    /// Parameters typed by a bare type parameter of the function being
-    /// lowered (`x: T`): their operators need `T`'s bounds (spec 2.10.9).
-    ty_param_locals: HashMap<LocalId, String>,
     /// Type parameter → its direct bounds as written (`T: TryFrom<S>`):
     /// `T::Error` takes the impl of `TryFrom<S>`, not every `TryFrom`
     /// impl of `T`.
@@ -2119,7 +2144,6 @@ impl<'a> LowerCtx<'a> {
             unnarrowed: Vec::new(),
             guard_lets: Vec::new(),
             ty_bounds: HashMap::new(),
-            ty_param_locals: HashMap::new(),
             ty_bound_args: HashMap::new(),
             coro: None,
             assoc_names: Vec::new(),
@@ -2151,6 +2175,9 @@ impl<'a> LowerCtx<'a> {
 
     /// An error at `at`.
     fn emit_error_at(&self, kind: rokc_diagnostic::ErrorKind, at: Span, msg: String) {
+        if bounds::in_failed(self.env) {
+            return;
+        }
         let mut d = rokc_diagnostic::RokDiagnostic::error(kind, at, msg);
         if let Some((callee, at)) = self.env.sink.call_sites.borrow().first() {
             d = d.with_secondary(*at, format!("in this call of `{}`", leaf_name(callee)));
@@ -2316,6 +2343,12 @@ impl<'a> LowerCtx<'a> {
 
     /// User-facing type name (no internal `Struct0` / mangled names).
     fn ty_name(&self, ty: &HirTy) -> String {
+        if let Some(n) = ty
+            .as_const()
+            .and_then(|(v, _)| bounds::const_name(self.env, v))
+        {
+            return n;
+        }
         if let Some((v, p)) = ty.as_const() {
             return match u32::try_from(v).ok().and_then(char::from_u32) {
                 Some(c) if p == Some(PrimTy::Char) => format!("{c:?}"),
@@ -2371,6 +2404,7 @@ impl<'a> LowerCtx<'a> {
             }
             HirTy::Unknown => "{unknown}".to_owned(),
             HirTy::Var(_) => "_".to_owned(),
+            HirTy::Param(p) => self.env.sink.params.borrow()[*p as usize].name.clone(),
             HirTy::Path(p) => p.join("::"),
             HirTy::None => "none".to_owned(),
             HirTy::OpenConst(n) => format!("#{n}"),
@@ -2381,7 +2415,11 @@ impl<'a> LowerCtx<'a> {
                 format!("({})", inner.join(", "))
             }
             HirTy::Sum(_) => ty.sum_name(|t| self.ty_name(t)),
-            HirTy::Array(e, n) => format!("[{}; {n}]", self.ty_name(e)),
+            HirTy::Array(e, n) => format!(
+                "[{}; {}]",
+                self.ty_name(e),
+                bounds::const_name(self.env, i128::from(*n)).unwrap_or_else(|| n.to_string())
+            ),
             HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
                 let inner: Vec<String> = args.iter().map(|t| self.ty_name(t)).collect();
                 let kw = if matches!(ty, HirTy::Fn(..)) {
@@ -2542,6 +2580,8 @@ impl<'a> LowerCtx<'a> {
             | HirTy::OpenConst(_)
             | HirTy::NoThrow
             | HirTy::Var(_) => true,
+            // Only through its bounds (`has_impl`).
+            HirTy::Param(_) => false,
         };
         seen.pop();
         ok
@@ -2649,6 +2689,14 @@ impl<'a> LowerCtx<'a> {
     /// bounds, operator and method dispatch, projections — go through
     /// here, `concrete_impls` and `generic_impls`.
     fn has_impl(&self, ty: &HirTy, want: &TraitRef, depth: u32) -> bool {
+        if let HirTy::Param(p) = ty {
+            if bounds::has(self, *p, want) {
+                return true;
+            }
+        }
+        if bounds::assumed(self.env, ty, want) {
+            return true;
+        }
         self.concrete_impls(ty).any(|r| r.satisfies(want))
             || self
                 .generic_impls(ty, |gi| gi.trait_key == want.path, depth)
@@ -3603,6 +3651,9 @@ impl<'a> LowerCtx<'a> {
         traits: Option<&[String]>,
         args: &[TraitRef],
     ) -> Option<HirTy> {
+        if let HirTy::Param(p) = base {
+            return bounds::project(self, *p, name, traits);
+        }
         let key = (
             base.clone(),
             name.to_owned(),

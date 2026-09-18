@@ -1,8 +1,9 @@
 // expect-error: mismatched types: the return value expects `i32`, found `str`
 
 // A generic instance first lowered while a throwing closure is probed
-// for its types still reports its errors.
-fn bad<T>(x: T) -> i32 {
+// for its types still reports its errors (an implicit parameter: its
+// body is checked per instance, spec 4.2.2).
+fn bad(x) -> i32 {
     return x;
 }
 

@@ -4,10 +4,11 @@
 // expect-stdout:
 // handle 7
 // thread 12
+// list 3
 
 // 2.20.5: `await` goes through `IntoFuture`: a `Future` (a `Task`) is
 // its own future, and a thread's `JoinHandle` is awaited in the blocking
-// pool.
+// pool, whatever `Send` result it has (a `List` is not `Sync`).
 use rok::std::thread;
 
 async fn seven() -> i32 { 7 }
@@ -17,4 +18,6 @@ async fn main() {
     println(f"handle {await t}");
     let h = thread::spawn(|| 3 * 4);
     println(f"thread {await h}");
+    let l = thread::spawn(|| [1, 2, 3]);
+    println(f"list {(await l).len()}");
 }

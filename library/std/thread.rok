@@ -143,7 +143,9 @@ impl<T: Send> IntoFuture for JoinHandle<T> {
     type Output = T;
     type IntoFuture = Blocking<T>;
     fn into_future(self) -> Blocking<T> {
-        rok::core::task::spawn_blocking(|| try! self.join())
+        // Handed to the lane, not shared: only `T: Send` is needed.
+        let h = unsafe { rok::core::marker::Handoff::new(self) };
+        rok::core::task::spawn_blocking(|| try! h.get().join())
     }
 }
 

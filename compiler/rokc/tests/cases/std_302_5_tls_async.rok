@@ -1,0 +1,101 @@
+// needs: net
+// expect-exit: 0
+// expect-stdout:
+// handshake: alpn h2, sni localhost
+// server got 300000 bytes, intact true
+// client got 300000 bytes back, intact true
+// wrong name: Certificate certificate is not valid for example.com
+// server saw: PeerAlert peer sent alert 42
+
+// Stdlib 3.2.0 / 3.2.5: the `*_async` TLS methods on tasks: handshakes
+// (`Client::with_config_async`, `Server::new_async`), a 300 KB echo
+// through `write_all_async` / `read_to_end_async` with a key update and
+// close_notify on the way, and a failed handshake on both sides. With
+// tasks only, a method that blocked its worker would stall the other
+// side (the server task is local to the client's worker).
+use rok::std::net::{TcpListener, TcpStream, SocketAddr};
+use rok::std::net;
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBUzCCAQWgAwIBAgIUHuDQmdyLUvVYGHs5rDw1vYU8bIIwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAWMRQwEgYDVQQDDAtyb2sgdGVzdCBDQTAqMAUGAytlcAMhAPEMYwkJArdk
+aV3E4nOSir4hNCOt5rCjhq6U1sYe6lTWo2MwYTAdBgNVHQ4EFgQUqTSORZgmA5IP
+oVjCUMKRtKdC4BkwHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwDwYD
+VR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQwBQYDK2VwA0EAp7tJ5xbNuoRw
+zTq/y0kOz917MctSi+O2E5DLqAoAjtPGehC8163+j0KTLVeOwoTW1dtCRoWHyyYj
+gDBrha3fDQ==
+-----END CERTIFICATE-----
+";
+
+const CERT: str = "-----BEGIN CERTIFICATE-----
+MIIBuTCCAWugAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJUwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZEFaEpq/6UIdEL3wPK3Oj3v+97CWRf
+3SsIe8X0/ZpoW+ppyMMO58QOQHyVo4GbMIGYMCYGA1UdEQQfMB2CCWxvY2FsaG9z
+dIIKKi5yb2sudGVzdIcEfwAAATATBgNVHSUEDDAKBggrBgEFBQcDATAOBgNVHQ8B
+Af8EBAMCB4AwCQYDVR0TBAIwADAdBgNVHQ4EFgQU+2+6RW+JViHg6KgvFa5XUjSQ
+rA8wHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwBQYDK2VwA0EAukE7
+pzRC2g3t6ouc4acMO0OmyO0MjbYSFNJm/1YtvDDcyD0wdOLGa2h0yIV88yXy0+08
+tk985FEEIDyk5wcNDg==
+-----END CERTIFICATE-----
+";
+
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcgH7+8UZOnSmYIn9
+1ftUi+QOk+yiBJQf//N6N0MgirqhRANCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZE
+FaEpq/6UIdEL3wPK3Oj3v+97CWRf3SsIe8X0/ZpoW+ppyMMO58QOQHyV
+-----END PRIVATE KEY-----
+";
+
+async fn connect(s: TcpStream, name: str, cfg: ClientConfig) -> str {
+    let c = try await Client::with_config_async(s, name, cfg) catch e { return f"{e.kind:?} {e.msg}"; };
+    c.close();
+    "unexpected success"
+}
+
+fn data() -> List<u8> {
+    let d: List<u8> = [];
+    for i in 0..300000 { d.push((i % 251) as u8); }
+    d
+}
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+let l = try! TcpListener::bind(any);
+let addr = try! l.local_addr();
+let cfg = ServerConfig::new(try! Certificate::from_pem(CERT), try! PrivateKey::from_pem(KEY));
+cfg.alpn_protocols = ["h2".as_bytes().to_list()];
+let server = task::spawn_local(async {
+    let (s, _) = try! await l.accept_async();
+    let srv = try! await Server::new_async(s, cfg);
+    let got = try! await srv.read_to_end_async();
+    println(f"server got {got.len()} bytes, intact {got == data()}");
+    try! await srv.write_all_async(got);
+    try! await srv.close_notify_async();
+    srv.close();
+    // The second client rejects the certificate.
+    let (s2, _) = try! await l.accept_async();
+    l.close();
+    let _ = try await Server::new_async(s2, cfg) catch e { return f"{e.kind:?} {e.msg}"; };
+    "unexpected success"
+});
+let ccfg = ClientConfig::new();
+ccfg.root_certs = try! Certificate::from_pem(CA);
+ccfg.alpn_protocols = ["h2".as_bytes().to_list()];
+let s = try! await net::tcp_connect_async(f"{addr}");
+let c = try! await Client::with_config_async(s, "localhost", ccfg);
+println(f"handshake: alpn {try! str::from_utf8(c.negotiated_alpn() ?? [])}, sni localhost");
+try! await c.write_all_async(data()[0:100000]);
+try! await c.key_update_async();
+try! await c.write_all_async(data()[100000:300000]);
+try! await c.close_notify_async();
+let back = try! await c.read_to_end_async();
+println(f"client got {back.len()} bytes back, intact {back == data()}");
+c.close();
+
+let s2 = try! await net::tcp_connect_async(f"{addr}");
+println(f"wrong name: {await connect(s2, "example.com", ccfg)}");
+println(f"server saw: {await server}");
+// spec: std 302-net §3.2.0 §3.2.5

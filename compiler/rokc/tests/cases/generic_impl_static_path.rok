@@ -16,7 +16,7 @@ struct Box<T> { v: T; }
 
 impl Origin for i32 { fn origin() -> i32 { return 3; } }
 impl<T: Origin> Origin for Box<T> { fn origin() -> Box<T> { return Box { v: T::origin() }; } }
-impl<T> Make for Box<T> { fn make(n: i32) -> Box<T> { return Box { v: T::origin() }; } }
+impl<T: Origin> Make for Box<T> { fn make(n: i32) -> Box<T> { return Box { v: T::origin() }; } }
 
 fn origin_of<T: Origin>() -> T { return T::origin(); }
 

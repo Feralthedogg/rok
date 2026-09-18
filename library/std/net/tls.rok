@@ -2,12 +2,14 @@
 // rok on `rok::core::crypto`: no OS or external TLS library.
 //
 // `Client` / `Server` wrap a `TcpStream`; after the handshake they read
-// and write application data like the stream itself. Server
-// certificates are validated against `ClientConfig::root_certs` (by
-// default the OS trust store: the macOS keychain anchors, the Windows
-// ROOT store, the Linux CA bundle files; none on wasm). Key exchange is
-// X25519, or the X25519MLKEM768 hybrid when `enable_pq` is on. A server
-// signs with Ed25519. A connection is used by one thread at a time.
+// and write application data like the stream itself, blocking or, with
+// the `*_async` methods, suspending only the task. Server certificates
+// are validated against `ClientConfig::root_certs` (by default the OS
+// trust store: the macOS keychain anchors, the Windows ROOT store, the
+// Linux CA bundle files; none on wasm). Key exchange is X25519, or the
+// X25519MLKEM768 hybrid when `enable_pq` is on. A server signs with
+// Ed25519, ECDSA P-256 / P-384 or RSA-PSS. A connection is used by one
+// thread, and one operation, at a time.
 
 pub(pkg) mod der;
 pub(pkg) mod pem;
@@ -20,8 +22,10 @@ use rok::std::io::{IoError, IoErrorKind, AsBytes, Reader, Writer, byte_buf};
 use rok::std::fs;
 use rok::std::env;
 use rok::std::net::tls::x509::CertInfo;
-use rok::std::net::tls::conn::{Conn, new_conn};
+use rok::std::net::tls::conn::{Conn, new_conn, io_tls, OP_HANDSHAKE, OP_READ, OP_WRITE, OP_CLOSE_NOTIFY, OP_KEY_UPDATE};
 use rok::std::net::tls::der::{Der, SEQUENCE, INTEGER, OCTET_STRING, OID};
+use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
+use rok::core::crypto::rsa::RsaPrivateKey;
 
 /// What failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -108,13 +112,53 @@ impl Certificate {
     pub fn not_after(self) -> i64 { self.info.not_after }
 }
 
-/// A server's private key: Ed25519 (PKCS #8, RFC 8410).
+/// A server's private key: Ed25519, ECDSA P-256 / P-384 or RSA.
 pub struct PrivateKey {
-    pub(pkg) seed: List<u8>;
+    pub(pkg) key: KeyKind;
+}
+
+pub(pkg) enum KeyKind {
+    /// The 32-byte seed.
+    Ed25519(List<u8>),
+    /// The big-endian scalar.
+    Ec(EcCurve, List<u8>),
+    Rsa(RsaPrivateKey),
+}
+
+fn curve_of_oid(oid: str) throws (TlsError) -> EcCurve {
+    if oid == "1.2.840.10045.3.1.7" { return EcCurve::P256; }
+    if oid == "1.3.132.0.34" { return EcCurve::P384; }
+    throw TlsError::certificate(f"unsupported EC private key curve {oid} (P-256 and P-384 only)");
+}
+
+/// An `ECPrivateKey` (RFC 5915); its curve from `curve` or, if none,
+/// from its own parameters.
+fn ec_key(b: Slice<u8>, curve: EcCurve | none) throws (TlsError) -> PrivateKey {
+    let top = Der::new(b);
+    let k = try top.enter(SEQUENCE);
+    try top.finish();
+    if (try der::small_int(try k.expect(INTEGER))) != 1 { throw TlsError::certificate("unsupported ECPrivateKey version"); }
+    let d = try k.expect(OCTET_STRING);
+    let c: EcCurve | none = curve;
+    match try k.optional(0xa0u8) {
+        p: Slice<u8> => { c = try curve_of_oid(try der::oid_text(try Der::new(p).expect(OID))); },
+        none => {},
+    }
+    if c is none { throw TlsError::certificate("ECPrivateKey without a curve"); }
+    let cv = c ?? EcCurve::P256;
+    // Check the scalar now rather than at the first handshake.
+    try Ecdsa::public_key(cv, d) catch _ { throw TlsError::certificate("bad EC private key"); };
+    PrivateKey { key: KeyKind::Ec(cv, d.to_list()) }
+}
+
+fn rsa_key(b: Slice<u8>) throws (TlsError) -> PrivateKey {
+    let k = try RsaPrivateKey::from_pkcs1_der(b) catch e { throw TlsError::certificate(f"bad RSA private key: {e.msg}"); };
+    PrivateKey { key: KeyKind::Rsa(k) }
 }
 
 impl PrivateKey {
-    /// A PKCS #8 `PrivateKeyInfo` / `OneAsymmetricKey`.
+    /// A PKCS #8 `PrivateKeyInfo` / `OneAsymmetricKey`: Ed25519 (RFC
+    /// 8410), EC (RFC 5915) or rsaEncryption (RFC 8017).
     pub fn from_der(der: List<u8> | Slice<u8>) throws (TlsError) -> PrivateKey {
         let s: Slice<u8> = match der {
             l: List<u8> => l[0:l.len()],
@@ -127,20 +171,36 @@ impl PrivateKey {
         if version > 1 { throw TlsError::certificate("unsupported PKCS #8 version"); }
         let alg = try k.enter(SEQUENCE);
         let oid = try der::oid_text(try alg.expect(OID));
-        if oid != "1.3.101.112" { throw TlsError::certificate(f"unsupported private key algorithm {oid} (Ed25519 only)"); }
-        try alg.finish();
-        let inner = Der::new(try k.expect(OCTET_STRING));
-        let seed = try inner.expect(OCTET_STRING);
-        try inner.finish();
-        if seed.len() != 32 { throw TlsError::certificate("bad Ed25519 private key"); }
-        PrivateKey { seed: seed.to_list() }
+        let inner = try k.expect(OCTET_STRING);
+        if oid == "1.3.101.112" {
+            try alg.finish();
+            let seed = try Der::new(inner).expect(OCTET_STRING);
+            if seed.len() != 32 { throw TlsError::certificate("bad Ed25519 private key"); }
+            return PrivateKey { key: KeyKind::Ed25519(seed.to_list()) };
+        }
+        if oid == "1.2.840.10045.2.1" {
+            let curve = try curve_of_oid(try der::oid_text(try alg.expect(OID)));
+            try alg.finish();
+            return try ec_key(inner, curve);
+        }
+        if oid == "1.2.840.113549.1.1.1" {
+            let _ = try alg.optional(der::NULL);
+            try alg.finish();
+            return try rsa_key(inner);
+        }
+        throw TlsError::certificate(f"unsupported private key algorithm {oid} (Ed25519, EC, rsaEncryption)");
     }
 
-    /// The first `PRIVATE KEY` block of PEM text.
+    /// The first private key of PEM text: `PRIVATE KEY` (PKCS #8),
+    /// `EC PRIVATE KEY` (RFC 5915) or `RSA PRIVATE KEY` (PKCS #1).
     pub fn from_pem(text: str) throws (TlsError) -> PrivateKey {
-        let blocks = try pem::blocks(text, "PRIVATE KEY");
-        if blocks.len() == 0 { throw TlsError::certificate("no PRIVATE KEY block"); }
-        try PrivateKey::from_der(blocks[0])
+        let p8 = try pem::blocks(text, "PRIVATE KEY");
+        if p8.len() > 0 { return try PrivateKey::from_der(p8[0]); }
+        let ec = try pem::blocks(text, "EC PRIVATE KEY");
+        if ec.len() > 0 { return try ec_key(ec[0][0:ec[0].len()], none); }
+        let rsa = try pem::blocks(text, "RSA PRIVATE KEY");
+        if rsa.len() > 0 { return try rsa_key(rsa[0][0:rsa[0].len()]); }
+        throw TlsError::certificate("no PRIVATE KEY, EC PRIVATE KEY or RSA PRIVATE KEY block");
     }
 }
 
@@ -362,6 +422,97 @@ impl Shared {
     }
 
     fn conn(self) -> Conn { unsafe { self.c[0] } }
+
+    /// Run `op` (`Conn::step`) without blocking: the connection's
+    /// records are written and more input read asynchronously until the
+    /// operation completes. A failure sends its alert first.
+    async fn pump(self, op: u8, buf: List<u8>, data: Slice<u8>) throws (TlsError) -> usize {
+        loop {
+            let c = unsafe { self.c[0] };
+            match c.failed {
+                m: str => throw TlsError { kind: TlsErrorKind::Protocol, msg: f"connection failed: {m}", alert: 0u8 },
+                none => {},
+            }
+            c.nb = true;
+            c.need = false;
+            let failure: TlsError | none = none;
+            let r: usize | none = try c.step(op, buf, data) catch e {
+                if !c.need {
+                    c.fail(e);
+                    failure = e;
+                }
+                none
+            };
+            c.nb = false;
+            let out = c.out;
+            c.out = [];
+            unsafe { self.c[0] = c; }
+            if out.len() > 0 {
+                let werr: TlsError | none = none;
+                try await c.sock.write_all_async(out) catch e { werr = io_tls(e); };
+                match werr {
+                    e: TlsError => {
+                        if failure is none {
+                            unsafe {
+                                let cur = self.c[0];
+                                cur.fail(e);
+                                self.c[0] = cur;
+                            }
+                            throw e;
+                        }
+                    },
+                    none => {},
+                }
+            }
+            match failure {
+                e: TlsError => throw e,
+                none => {},
+            }
+            match r {
+                n: usize => return n,
+                none => {},
+            }
+            // More input.
+            let b = byte_buf(16384 + 2048);
+            let n = try await c.sock.read_async(b) catch e {
+                let t = io_tls(e);
+                unsafe {
+                    let cur = self.c[0];
+                    cur.fail(t);
+                    self.c[0] = cur;
+                }
+                throw t;
+            };
+            unsafe {
+                let cur = self.c[0];
+                cur.feed(b[0:n]);
+                self.c[0] = cur;
+            }
+        }
+    }
+
+    async fn op_async(self, op: u8, buf: List<u8>, data: Slice<u8>) throws (IoError) -> usize {
+        try self.check();
+        try await self.pump(op, buf, data) catch e { throw io_err(e); }
+    }
+
+    async fn read_async(self, buf: List<u8>) throws (IoError) -> usize { try await self.op_async(OP_READ, buf, nothing()) }
+
+    async fn read_to_end_async(self) throws (IoError) -> List<u8> {
+        let out: List<u8> = [];
+        let buf = byte_buf(16384);
+        loop {
+            let n = try await self.read_async(buf);
+            if n == 0 { return out; }
+            for i in 0..n { out.push(buf[i]); }
+        }
+    }
+}
+
+/// An empty view, for operations without data.
+fn nothing() -> Slice<u8> {
+    let e: List<u8> = [];
+    e[0:0]
 }
 
 /// A TLS client connection. Copies share the connection.
@@ -381,12 +532,33 @@ impl Client {
     /// against the certificate's IP addresses; no SNI is sent for one).
     pub fn with_config(stream: TcpStream, server_name: str, cfg: ClientConfig) throws (TlsError) -> Client {
         let c = new_conn(stream, true);
-        let ip = ip_bytes(server_name);
-        try c.client_handshake(server_name, ip, cfg.root_certs, cfg.cipher_suites, cfg.alpn_protocols, cfg.enable_pq) catch e {
+        try c.client_start(server_name, ip_bytes(server_name), cfg.root_certs, cfg.cipher_suites, cfg.alpn_protocols, cfg.enable_pq) catch e {
+            c.fail(e);
+            throw e;
+        };
+        try c.handshake() catch e {
             c.fail(e);
             throw e;
         };
         Client { s: Shared::new(c) }
+    }
+
+    /// `new` without blocking the worker.
+    pub async fn new_async(stream: TcpStream, server_name: str) throws (TlsError) -> Client {
+        try await Client::with_config_async(stream, server_name, ClientConfig::new())
+    }
+
+    /// `with_config` without blocking the worker.
+    pub async fn with_config_async(stream: TcpStream, server_name: str, cfg: ClientConfig) throws (TlsError) -> Client {
+        let c = new_conn(stream, true);
+        c.nb = true;
+        try c.client_start(server_name, ip_bytes(server_name), cfg.root_certs, cfg.cipher_suites, cfg.alpn_protocols, cfg.enable_pq) catch e {
+            c.fail(e);
+            throw e;
+        };
+        let s = Shared::new(c);
+        try await s.pump(OP_HANDSHAKE, [], nothing());
+        Client { s }
     }
 
     /// Read up to `buf.len()` bytes of application data into `buf`; 0
@@ -413,6 +585,20 @@ impl Client {
 
     /// Switch to the next write key and ask the peer to do the same.
     pub fn key_update(self) throws (IoError) { try self.s.key_update(); }
+
+    pub async fn read_async(self, buf: List<u8>) throws (IoError) -> usize { try await self.s.read_async(buf) }
+    pub async fn read_to_end_async(self) throws (IoError) -> List<u8> { try await self.s.read_to_end_async() }
+
+    pub async fn write_async<B: AsBytes>(self, buf: B) throws (IoError) -> usize {
+        let b = buf.byte_slice();
+        try await self.s.op_async(OP_WRITE, [], b);
+        b.len()
+    }
+
+    pub async fn write_all_async<B: AsBytes>(self, buf: B) throws (IoError) { try await self.s.op_async(OP_WRITE, [], buf.byte_slice()); }
+    pub async fn flush_async(self) throws (IoError) {}
+    pub async fn close_notify_async(self) throws (IoError) { try await self.s.op_async(OP_CLOSE_NOTIFY, [], nothing()); }
+    pub async fn key_update_async(self) throws (IoError) { try await self.s.op_async(OP_KEY_UPDATE, [], nothing()); }
 
     /// close_notify (if the connection is healthy), then close the socket.
     pub fn close(self) { self.s.close(); }
@@ -454,11 +640,22 @@ impl Server {
     pub fn new(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
         if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
         let c = new_conn(stream, false);
-        try c.server_handshake(cfg.cert_chain, cfg.private_key, cfg.cipher_suites, cfg.alpn_protocols) catch e {
+        c.server_start(cfg.cert_chain, cfg.private_key, cfg.cipher_suites, cfg.alpn_protocols);
+        try c.handshake() catch e {
             c.fail(e);
             throw e;
         };
         Server { s: Shared::new(c) }
+    }
+
+    /// `new` without blocking the worker.
+    pub async fn new_async(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
+        if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
+        let c = new_conn(stream, false);
+        c.server_start(cfg.cert_chain, cfg.private_key, cfg.cipher_suites, cfg.alpn_protocols);
+        let s = Shared::new(c);
+        try await s.pump(OP_HANDSHAKE, [], nothing());
+        Server { s }
     }
 
     pub fn read(self, buf: List<u8>) throws (IoError) -> usize { try self.s.read(buf) }
@@ -474,6 +671,20 @@ impl Server {
     pub fn flush(self) throws (IoError) {}
     pub fn close_notify(self) throws (IoError) { try self.s.close_notify(); }
     pub fn key_update(self) throws (IoError) { try self.s.key_update(); }
+
+    pub async fn read_async(self, buf: List<u8>) throws (IoError) -> usize { try await self.s.read_async(buf) }
+    pub async fn read_to_end_async(self) throws (IoError) -> List<u8> { try await self.s.read_to_end_async() }
+
+    pub async fn write_async<B: AsBytes>(self, buf: B) throws (IoError) -> usize {
+        let b = buf.byte_slice();
+        try await self.s.op_async(OP_WRITE, [], b);
+        b.len()
+    }
+
+    pub async fn write_all_async<B: AsBytes>(self, buf: B) throws (IoError) { try await self.s.op_async(OP_WRITE, [], buf.byte_slice()); }
+    pub async fn flush_async(self) throws (IoError) {}
+    pub async fn close_notify_async(self) throws (IoError) { try await self.s.op_async(OP_CLOSE_NOTIFY, [], nothing()); }
+    pub async fn key_update_async(self) throws (IoError) { try await self.s.op_async(OP_KEY_UPDATE, [], nothing()); }
     pub fn close(self) { self.s.close(); }
     pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
 

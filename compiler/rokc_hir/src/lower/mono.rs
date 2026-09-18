@@ -291,6 +291,9 @@ pub(super) fn bind_self(
         })
         .collect();
     unify_param_ty_with(self_ty, hint, &names, subst, ctx);
+    if let HirTy::Param(p) = hint {
+        super::bounds::bind_trait_args(ctx, fn_def, *p, subst);
+    }
 }
 
 /// `monomorphize` with `Self` known up front (see `bind_self`).
@@ -422,49 +425,18 @@ pub(super) fn monomorphize_on(
     let self_hir = self_hint
         .cloned()
         .or_else(|| self_ty.map(|t| resolve_in_mono(ctx, fn_def, &subst, None, t)));
-    // Each `T: Bound` (or `where` predicate, `where Item: Ord` on a trait
-    // default method too) needs an impl for the bound type.
-    let mut goals: Vec<(HirTy, &Vec<rokc_ast::Ty>)> = Vec::new();
-    for gp in &fn_def.generics.params {
-        if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
-            if let Some(concrete) = subst.get(name) {
-                goals.push((concrete.clone(), bounds));
-            }
-        }
-    }
-    for w in &fn_def.where_clause {
-        goals.push((
-            resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &w.ty),
-            &w.bounds,
-        ));
-    }
-    for (concrete, bounds) in goals {
-        let concrete = &concrete;
-        if method_target_for(concrete).is_none() {
-            continue;
-        }
-        for bound in bounds {
-            // `T: Iterator<Item = i32>` also checks the impl's arguments
-            // and associated types.
-            let Some(want) = ctx.bound_ref(bound, &fn_module, |t| {
-                resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), t)
-            }) else {
-                continue;
-            };
-            if !ctx.implements_trait(concrete, &want, 0) {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!(
-                        "type `{}` does not satisfy trait bound `{}` required by `{}`",
-                        ctx.ty_name(concrete),
-                        ctx.trait_name(&want),
-                        fn_def.name
-                    ),
-                );
-            }
-        }
-    }
+    check_call_bounds(ctx, fn_def, &subst, self_hir.as_ref(), &fn_module);
 
+    // A generic body being checked (`bounds`): the callee's signature
+    // only, unless its return type comes from its body.
+    if !infers_ret(fn_def, &ctx.env.may_diverge)
+        && subst_tys
+            .iter()
+            .chain(&self_hir)
+            .any(|t| super::bounds::has_param(ctx, t))
+    {
+        return Some(var_instance(ctx, fn_def, self_ty, self_hint, &subst));
+    }
     let key = (
         fn_def.name.clone(),
         subst_tys.iter().map(ty_mangle).collect::<Vec<_>>(),
@@ -585,6 +557,58 @@ pub(super) fn monomorphize_on(
     );
     ctx.env.sink.extras.borrow_mut().push(mono_fn);
     Some((new_id, ret_ty))
+}
+
+/// Each `T: Bound` (or `where` predicate, `where Item: Ord` on a trait
+/// default method too) of a call of `fn_def` under `subst` needs an
+/// impl for the bound type.
+fn check_call_bounds(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    subst: &HashMap<String, HirTy>,
+    self_hir: Option<&HirTy>,
+    fn_module: &str,
+) {
+    let mut goals: Vec<(HirTy, &Vec<rokc_ast::Ty>)> = Vec::new();
+    for gp in &fn_def.generics.params {
+        if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
+            if let Some(concrete) = subst.get(name) {
+                goals.push((concrete.clone(), bounds));
+            }
+        }
+    }
+    for w in &fn_def.where_clause {
+        goals.push((
+            resolve_in_mono(ctx, fn_def, subst, self_hir.cloned(), &w.ty),
+            &w.bounds,
+        ));
+    }
+    for (concrete, bounds) in goals {
+        let concrete = &concrete;
+        if method_target_for(concrete).is_none() {
+            continue;
+        }
+        for bound in bounds {
+            // `T: Iterator<Item = i32>` also checks the impl's arguments
+            // and associated types.
+            let Some(want) = ctx.bound_ref(bound, fn_module, |t| {
+                resolve_in_mono(ctx, fn_def, subst, self_hir.cloned(), t)
+            }) else {
+                continue;
+            };
+            if !ctx.implements_trait(concrete, &want, 0) {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "type `{}` does not satisfy trait bound `{}` required by `{}`",
+                        ctx.ty_name(concrete),
+                        ctx.trait_name(&want),
+                        fn_def.name
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Is `id`'s return type being inferred (a call of it from its own
@@ -995,6 +1019,7 @@ fn lower_fn_with(
         env.sink.instance_warns.borrow_mut().instance(t, id);
     }
     env.sink.instances.borrow_mut().push(instance);
+    env.sink.bodies.borrow_mut().push(fn_def.span);
     let is_const = fn_def
         .attrs
         .iter()
@@ -1048,15 +1073,6 @@ fn lower_fn_with(
     for p in &fn_def.params {
         params.push(lower_param(&mut ctx, p));
     }
-    for (p, ap) in params.iter().zip(&fn_def.params) {
-        if let Some(t) = ap
-            .ty
-            .as_ref()
-            .and_then(|t| own_type_param(&fn_def.generics, t))
-        {
-            ctx.ty_param_locals.insert(p.local, t);
-        }
-    }
     // A `[ref]`-captured parameter moves into a cell (`let x = x;`).
     let mut prelude = Vec::new();
     for (p, ap) in params.iter().zip(&fn_def.params) {
@@ -1101,6 +1117,7 @@ fn lower_fn_with(
         *out = ctx.ret_tys.take().unwrap_or_default();
     }
     env.sink.instances.borrow_mut().pop();
+    env.sink.bodies.borrow_mut().pop();
     // `ref` parameters: the function hands their values back too.
     let ref_tys: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
     ret_ty = ref_packed(&ret_ty, &ref_tys);
@@ -1118,23 +1135,6 @@ fn lower_fn_with(
         span: fn_def.span,
         facts: rokc_ir_common::FnFacts::default(),
     }
-}
-
-/// `T` when `ty` is exactly one of `generics`' type parameters.
-fn own_type_param(generics: &rokc_ast::Generics, ty: &rokc_ast::Ty) -> Option<String> {
-    let rokc_ast::TyKind::Path(p) = &ty.kind else {
-        return None;
-    };
-    let [seg] = p.segments.as_slice() else {
-        return None;
-    };
-    // An implicit parameter (`fn f(x)`, `T#x`) is checked per instance
-    // (spec 4.2.2).
-    let own = generics
-        .params
-        .iter()
-        .any(|gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if *name == seg.name));
-    (own && !seg.name.contains('#')).then(|| seg.name.clone())
 }
 
 /// `{T → arg}` for a generic item's type parameters.

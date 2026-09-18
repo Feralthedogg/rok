@@ -18,11 +18,17 @@ use rok::std::fs;
 use rok::std::env;
 use rok::std::path::Path;
 use rok::std::thread;
-use rok::std::io::{IoError, byte_buf};
+use rok::std::io::{AsBytes, IoError, byte_buf};
+
+/// Any `AsBytes` value writes, not only the library's own.
+struct Msg { s: str; }
+impl AsBytes for Msg {
+    fn byte_slice(self) -> Slice<u8> { self.s.as_bytes() }
+}
 
 fn main() throws (IoError) {
     let (a, b) = try UnixStream::pair();
-    try a.write_all("ping");
+    try a.write_all(Msg { s: "ping" });
     let buf: List<u8> = byte_buf(16);
     let n = try b.read(buf);
     println(f"pair {n} {try str::from_utf8(buf[0:n])}");

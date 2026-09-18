@@ -380,13 +380,14 @@ pub(super) fn lower_let(
 }
 
 /// Struct / enum instances over inference variables (made by probes)
-/// are never used: empty them so nothing lays them out.
+/// or checked type parameters (`bounds`) are never used: empty them so
+/// nothing lays them out.
 pub(super) fn drop_var_instances(structs: &mut [HirStructDef], enums: &mut [HirEnumDef]) {
     let open = |args: &[HirTy], s: &[bool], e: &[bool]| {
         fn walk(ty: &HirTy, open_s: &[bool], open_e: &[bool]) -> bool {
             let rec = |t: &HirTy| walk(t, open_s, open_e);
             match ty {
-                HirTy::Var(_) => true,
+                HirTy::Var(_) | HirTy::Param(_) => true,
                 HirTy::Struct(id) => open_s.get(id.0 as usize).copied().unwrap_or(false),
                 HirTy::Enum(id) => open_e.get(id.0 as usize).copied().unwrap_or(false),
                 HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),

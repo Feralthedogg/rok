@@ -1,4 +1,4 @@
-// Fixed-width natural numbers for RSA and elliptic curves: little-endian
+// Fixed-width natural numbers for RSA: little-endian
 // 32-bit limbs (`List<u32>`, products in `u64`, so 32-bit targets need
 // no wide multiply), a width fixed per modulus. Arithmetic runs in time
 // that depends only on the width (and, for `pow`, the exponent's
@@ -253,5 +253,94 @@ impl Modulus {
         two[0] = 2u32;
         let (e, _) = Nat::sub(self.m, two);
         self.pow(a, Nat::to_be(e, 4 * self.n)[0:4 * self.n])
+    }
+}
+
+impl Modulus {
+    /// `x mod m` for `x` of any width (plain values): Horner over
+    /// `n`-limb chunks, `acc R + chunk`, each step a Montgomery product.
+    pub(pkg) fn reduce(self, x: List<u32>) -> List<u32> {
+        let n = self.n;
+        let acc = Nat::zero(n);
+        let chunks = (x.len() + n - 1) / n;
+        let i = chunks;
+        while i > 0 {
+            i -= 1;
+            let c = Nat::zero(n);
+            for j in 0..n {
+                if i * n + j < x.len() { c[j] = x[i * n + j]; }
+            }
+            // acc R mod m, and the chunk (below R) mod m.
+            acc = self.add(self.to_mont(acc), self.from_mont(self.to_mont(c)));
+        }
+        acc
+    }
+
+    /// `x^-1 mod m` (plain values, `x < m`), `none` if `x` and `m` are
+    /// not coprime. Binary extended GCD in constant time: a fixed
+    /// `64 n` steps, each a masked swap, subtraction and halving.
+    /// Invariants: `a = u x`, `b = v x` (mod m), `b` odd.
+    pub(pkg) fn inv(self, x: List<u32>) -> List<u32> | none {
+        let n = self.n;
+        let m = self.m;
+        let a = Nat::resize(x, n);
+        let b = Nat::resize(m, n);
+        let u = Nat::zero(n);
+        u[0] = 1u32;
+        let v = Nat::zero(n);
+        for _ in 0..64 * n {
+            // If a is odd and a < b: swap (a, u) with (b, v).
+            let odd = 0u32.wrapping_sub(a[0] & 1u32);
+            let borrow = 0u64;
+            for i in 0..n {
+                borrow = ((a[i] as u64).wrapping_sub(b[i] as u64).wrapping_sub(borrow)) >> 63u64;
+            }
+            let sw = odd & 0u32.wrapping_sub(borrow as u32);
+            for i in 0..n {
+                let t = (a[i] ^ b[i]) & sw;
+                a[i] = a[i] ^ t;
+                b[i] = b[i] ^ t;
+                let w = (u[i] ^ v[i]) & sw;
+                u[i] = u[i] ^ w;
+                v[i] = v[i] ^ w;
+            }
+            // If a is odd: a -= b, u -= v (mod m). Then a is even.
+            let br = 0u64;
+            let bu = 0u64;
+            for i in 0..n {
+                let t = (a[i] as u64).wrapping_sub((b[i] & odd) as u64).wrapping_sub(br);
+                a[i] = t as u32;
+                br = t >> 63u64;
+                let s = (u[i] as u64).wrapping_sub((v[i] & odd) as u64).wrapping_sub(bu);
+                u[i] = s as u32;
+                bu = s >> 63u64;
+            }
+            let fix = 0u32.wrapping_sub(bu as u32);
+            let c = 0u64;
+            for i in 0..n {
+                let t = (u[i] as u64) + ((m[i] & fix) as u64) + c;
+                u[i] = t as u32;
+                c = t >> 32u64;
+            }
+            // a /= 2; u /= 2 (mod m): add m first when u is odd.
+            let uo = 0u32.wrapping_sub(u[0] & 1u32);
+            let c2 = 0u64;
+            for i in 0..n {
+                let t = (u[i] as u64) + ((m[i] & uo) as u64) + c2;
+                u[i] = t as u32;
+                c2 = t >> 32u64;
+            }
+            for i in 0..n {
+                let hi_a = if i + 1 < n { a[i + 1] << 31u32 } else { 0u32 };
+                a[i] = (a[i] >> 1u32) | hi_a;
+                let hi_u = if i + 1 < n { u[i + 1] << 31u32 } else { (c2 as u32) << 31u32 };
+                u[i] = (u[i] >> 1u32) | hi_u;
+            }
+        }
+        // gcd(x, m) is b; 1 when invertible.
+        let one = Nat::zero(n);
+        one[0] = 1u32;
+        if !Nat::eq(b, one) { return none; }
+        v
     }
 }

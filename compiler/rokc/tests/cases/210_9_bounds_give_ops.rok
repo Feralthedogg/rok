@@ -1,0 +1,114 @@
+// spec: §2.10.9
+// expect-exit: 0
+// expect-stdout:
+// 14 6 2.5
+// circle 12 12
+// 6 [1, 4] 10
+// first 7 0 0
+// 3 sides, 4 sides
+// 101 3
+// 6 9
+// i64 8 true true
+// done
+
+// Generic bodies are checked once, against their bounds: everything
+// below uses only what its bounds (with supertraits, `where` clauses,
+// associated types and trait parameters) give, so each body checks
+// before any call instantiates it.
+
+use rok::core::ops::{Add, AddAssign, Mul};
+
+trait Shape {
+    fn area(self) -> i32;
+}
+trait Named: Shape {
+    fn name(self) -> str;
+    // A default body: `Self` is opaque, bounded by the trait.
+    fn describe(self) -> str { f"{self.name()} {self.area()}" }
+}
+struct Circle { r: i32; }
+impl Shape for Circle { fn area(self) -> i32 { 3 * self.r * self.r } }
+impl Named for Circle { fn name(self) -> str { "circle" } }
+
+trait Bag {
+    type Elem;
+    fn first(self) -> Elem;
+}
+struct Ints { v: List<i32>; }
+impl Bag for Ints {
+    type Elem = i32;
+    fn first(self) -> i32 { self.v[0] }
+}
+
+trait Sides { const SIDES: i32; }
+struct Tri;
+struct Sq;
+impl Sides for Tri { const SIDES: i32 = 3; }
+impl Sides for Sq { const SIDES: i32 = 4; }
+
+// Operators through `Add` with its `Output` bound; compound assignment
+// through `AddAssign`, or `Add` when that is all there is.
+fn sum3<T: Add<T, Output = T> + Copy>(a: T, b: T, c: T) -> T { a + b + c }
+fn acc<T: AddAssign<T>>(x: T, y: T) -> T {
+    let z = x;
+    z += y;
+    z
+}
+fn acc_add<T: Add<T, Output = T>>(x: T, y: T) -> T {
+    let z = x;
+    z += y;
+    z
+}
+
+// Supertraits, `where` clauses.
+fn area_of<T: Named>(x: T) -> i32 { x.area() }
+fn twice<T>(x: T) -> i32 where T: Shape { x.area() * 2 }
+
+// Generic impl methods and closures inside generic bodies.
+struct Wrap<T> { items: List<T>; }
+impl<T: Mul<T, Output = T> + Copy> Wrap<T> {
+    fn squares(self) -> List<T> {
+        self.items.iter().map(|x| x * x).collect()
+    }
+}
+fn total<I: Iterator<Item = i32>>(it: I) -> i32 {
+    let s = 0;
+    for x in it { s += x; }
+    s
+}
+
+// Associated types: a bound's binding, or an opaque projection bounded
+// by `where`.
+fn first_of<B: Bag>(b: B) -> B::Elem { b.first() }
+fn shown<B: Bag>(b: B) -> str where B::Elem: Display { f"{b.first()}" }
+fn zero_of<T: Default>() -> T { T::default() }
+
+// Associated consts and const parameters.
+fn sides<T: Sides>(x: T) -> i32 { T::SIDES }
+fn last<T: Copy, const N: usize>(a: [T; N]) -> T { a[N - 1] }
+fn pad<T: Copy, const N: usize>(a: [T; N], x: T) -> [T; N + 1] {
+    let out: [T; N + 1] = [x; N + 1];
+    for i in 0..N { out[i] = a[i]; }
+    out
+}
+
+// What every type has needs no bound: `Reflect` (spec 6.10.1), an
+// `any` slot, a sum with `none`.
+fn kind<T>(x: T) -> str { f"{T::type_name()} {x.size_of()}" }
+fn boxed<T>(x: T) -> any { x }
+fn maybe<T>(x: T, keep: bool) -> T | none { if keep { x } else { none } }
+
+fn main() {
+    println(f"{sum3(3, 5, 6)} {acc(2, 4)} {acc_add(1.0, 1.5)}");
+    let c = Circle { r: 2 };
+    println(f"{c.describe()} {twice(Circle { r: 1 }) * 2}");
+    let w = Wrap { items: [1, 2] };
+    println(f"{total([1, 2, 3].iter())} {w.squares():?} {area_of(Circle { r: 1 }) + 7}");
+    let z: i32 = zero_of();
+    println(f"first {first_of(Ints { v: [7] })} {z} {shown(Ints { v: [0] })}");
+    println(f"{sides(Tri)} sides, {sides(Sq)} sides");
+    println(f"{last([1, 101])} {pad([1, 2], 3)[2]}");
+    println(f"{sum3(1, 2, 3)} {last(pad([4, 5, 6, 7, 8], 9))}");
+    println(f"{kind(1i64)} {boxed(2) is i32} {maybe(3, false) is none}");
+    println("done");
+}

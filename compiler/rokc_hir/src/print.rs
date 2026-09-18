@@ -632,6 +632,7 @@ fn ty_str(t: &HirTy) -> String {
         HirTy::OpenConst(n) => format!("#{n}"),
         HirTy::NoThrow => "#nothrow".to_owned(),
         HirTy::Var(v) => format!("#var::{v}"),
+        HirTy::Param(v) => format!("#param::{v}"),
         HirTy::Sum(_) => t.sum_name(ty_str),
         HirTy::Tuple(parts) => {
             let inner = parts.iter().map(ty_str).collect::<Vec<_>>().join(", ");

@@ -223,7 +223,7 @@ fn ty_text(hir: &HirModule, ty: &HirTy, full: bool) -> String {
         HirTy::None => "none".to_owned(),
         HirTy::Const(v, _) => v.to_string(),
         HirTy::OpenConst(n) => n.clone(),
-        HirTy::NoThrow | HirTy::Var(_) => "_".to_owned(),
+        HirTy::NoThrow | HirTy::Var(_) | HirTy::Param(_) => "_".to_owned(),
         HirTy::Sum(_) => ty.sum_name(rec),
         HirTy::Tuple(ts) => format!("({})", list(ts)),
         HirTy::Struct(id) => hir.structs.iter().find(|s| s.id == *id).map_or_else(

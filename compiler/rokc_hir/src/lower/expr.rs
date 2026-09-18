@@ -506,10 +506,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                     rhs: Box::new(value.clone()),
                 },
             };
-            // The `*Assign` bound that let `T` here also covers the op.
-            let params = std::mem::take(&mut ctx.ty_param_locals);
             let a = lower_assign(ctx, target, &combined, stmt.span);
-            ctx.ty_param_locals = params;
             write_through(ctx, a, stmt.span)
         }
         StmtKind::LetTuple { .. } | StmtKind::LetStruct { .. } | StmtKind::LetPattern { .. } => {
@@ -4198,6 +4195,13 @@ pub(super) fn bind_explicit(
             | rokc_ast::GenericParam::Const { name, .. }) = gp;
             name
         })
+        // A bound template's trait parameters come from the bound.
+        .skip(
+            ctx.env
+                .bound_traits
+                .get(&def.name)
+                .map_or(0, |k| ctx.env.trait_info[k].generics.params.len()),
+        )
         .filter(|n| !self_ty.is_some_and(|t| ast_ty_mentions(t, n)))
         .collect();
     if targs.len() > own.len() {
@@ -5007,6 +5011,9 @@ pub(super) fn method_call_on(
             Err(r) => r,
         };
         let ty = ctx.ty_name(&recv_h.ty);
+        if let HirTy::Param(p) = recv_h.ty {
+            return super::bounds::no_method(ctx, p, method, span);
+        }
         let e = ctx.error_expr(span, format!("no method `{method}` found for type `{ty}`"));
         let help = ctx.method_help(&recv_h.ty, method).unwrap_or_else(|| {
             format!(
@@ -5880,6 +5887,12 @@ pub(super) fn pick_method<'e>(
     trait_key: Option<&str>,
 ) -> Result<Option<MethodPick<'e>>, String> {
     let env = ctx.env;
+    // A type parameter's bound declares it (spec 2.10.9).
+    if let HirTy::Param(p) = ty {
+        if let Some(gm) = super::bounds::bound_method(ctx, *p, method, trait_key) {
+            return Ok(Some(MethodPick::Generic(gm)));
+        }
+    }
     let mut cands: Vec<(Option<&'e str>, MethodPick<'e>)> = Vec::new();
     if let Some(ids) =
         method_target_for(ty).and_then(|t| env.method_table.get(&(t, method.to_owned())))
@@ -6370,6 +6383,8 @@ fn call_generic_positional(
         .filter(|_| self_hint.is_none() && self_ty.is_some())
         .map(|r| r.ty.clone());
     let self_hint = self_hint.or(recv_ty.as_ref());
+    // A bound template's signature names `Self` (a type parameter).
+    let hint_self = self_hint.filter(|_| ctx.env.bound_traits.contains_key(&def.name));
     // Explicit `::<..>` arguments apply to this call only, not to the
     // generic calls inside its arguments.
     let explicit = std::mem::take(&mut ctx.explicit_generics);
@@ -6423,7 +6438,7 @@ fn call_generic_positional(
         if !is_ref {
             reads.push((i, crate::walk::free_names(&[], e)));
         }
-        let hint = generic_arg_hint(ctx, def, &subst, i, e);
+        let hint = generic_arg_hint(ctx, def, &subst, hint_self, i, e);
         // An untyped literal for a still-open `T` waits for the other
         // arguments: `range(0, n)` with `n: i64` binds `T = i64`.
         // ... only when a sibling argument of the same bare `T` can bind
@@ -6476,7 +6491,7 @@ fn call_generic_positional(
         lowered.push(h);
     }
     for (i, e) in deferred {
-        let hint = generic_arg_hint(ctx, def, &subst, i, e);
+        let hint = generic_arg_hint(ctx, def, &subst, hint_self, i, e);
         let h = lower_expected(ctx, e, hint);
         bind_from_arg(ctx, def, self_ty, i, &h.ty, &mut subst);
         lowered[i] = h;
@@ -6495,7 +6510,14 @@ fn call_generic_positional(
     }
     if let Some(tail) = tail.filter(|_| lowered.len() + 1 == def.params.len()) {
         let i = lowered.len();
-        let hint = generic_arg_hint(ctx, def, &subst, i, &super::throws::path_expr("#", span));
+        let hint = generic_arg_hint(
+            ctx,
+            def,
+            &subst,
+            hint_self,
+            i,
+            &super::throws::path_expr("#", span),
+        );
         let mut elem = variadic_elem(ctx, &hint);
         // `...[T; N]` with `N` unbound: the first array literal's length
         // is `N` (as for a `[T; N]` parameter).
@@ -6509,7 +6531,7 @@ fn call_generic_positional(
                         _ => None,
                     });
             if let (Some(t), CallArg::Positional(e)) = (slice_elem, first) {
-                elem = ty_hint(ctx, def, &subst, Some(t), e);
+                elem = ty_hint(ctx, def, &subst, hint_self, Some(t), e);
             }
         }
         let parts = tail
@@ -6586,6 +6608,7 @@ fn generic_arg_hint(
     ctx: &LowerCtx<'_>,
     def: &FnDef,
     subst: &HashMap<String, HirTy>,
+    self_ty: Option<&HirTy>,
     i: usize,
     e: &Expr,
 ) -> HirTy {
@@ -6593,6 +6616,7 @@ fn generic_arg_hint(
         ctx,
         def,
         subst,
+        self_ty,
         def.params.get(i).and_then(|p| p.ty.as_ref()),
         e,
     )
@@ -6604,6 +6628,7 @@ fn ty_hint(
     ctx: &LowerCtx<'_>,
     def: &FnDef,
     subst: &HashMap<String, HirTy>,
+    self_ty: Option<&HirTy>,
     param: Option<&Ty>,
     e: &Expr,
 ) -> HirTy {
@@ -6626,7 +6651,7 @@ fn ty_hint(
                 }
             }
         }
-        let mut ty = resolve_in_mono(ctx, def, &partial, None, t);
+        let mut ty = resolve_in_mono(ctx, def, &partial, self_ty.cloned(), t);
         erase_unbound_errors(&mut ty);
         let mut leftover = Vec::new();
         collect_unknown_paths(&ty, &mut leftover);
@@ -8513,6 +8538,8 @@ fn lower_atomic_intrinsic(
         HirTy::GcBuf(e) if matches!(**e, HirTy::Prim(p) if p.is_int() || p == PrimTy::Bool) => {
             (**e).clone()
         }
+        // A type parameter: checked per instance.
+        HirTy::GcBuf(e) if matches!(**e, HirTy::Param(_)) => (**e).clone(),
         HirTy::Unknown => {
             discard_args(ctx, &args[1..]);
             return buf;
@@ -8830,9 +8857,6 @@ pub(super) fn lower_infix(
     } else {
         HirTy::Unknown
     };
-    if let Some(e) = unbounded_param_op(ctx, op, Fixity::Infix, &[lhs, rhs], span) {
-        return e;
-    }
     let (lhs_h, rhs_h) = lower_sibling_pair(ctx, lhs, rhs, lhs_expected);
     if lhs_h.ty == HirTy::Unknown || rhs_h.ty == HirTy::Unknown {
         return poison(span);
@@ -8884,6 +8908,7 @@ pub(super) fn lower_infix(
             | HirTy::Prim(PrimTy::Str)
             | HirTy::Tuple(_)
             | HirTy::Array(..)
+            | HirTy::Param(_)
     ) || !op.is_ascii()
     {
         return dispatch_user_op_lit(ctx, op, Fixity::Infix, lhs_h, Some(rhs_h), Some(rhs), span);
@@ -9191,14 +9216,15 @@ pub(super) fn lower_prefix(
                 .unwrap_or_else(|| lower_literal(ctx, lit, true, span));
         }
     }
-    if let Some(e) = unbounded_param_op(ctx, op, Fixity::Prefix, &[operand], span) {
-        return e;
-    }
     let operand_h = lower_expr(ctx, operand);
     if operand_h.ty == HirTy::Unknown {
         return operand_h;
     }
-    if matches!(operand_h.ty, HirTy::Struct(_) | HirTy::Enum(_)) || !op.is_ascii() {
+    if matches!(
+        operand_h.ty,
+        HirTy::Struct(_) | HirTy::Enum(_) | HirTy::Param(_)
+    ) || !op.is_ascii()
+    {
         return dispatch_user_op(ctx, op, Fixity::Prefix, operand_h, None, span);
     }
     if matches!(operand_h.ty, HirTy::AnyTrait(_)) {
@@ -9223,36 +9249,6 @@ pub(super) fn lower_prefix(
             ctx.ty_name(&operand_h.ty)
         ),
     )
-}
-
-/// Spec 2.10.9: a generic body uses only what its bounds give. An
-/// operator on a parameter typed by a bare type parameter `T` needs the
-/// operator's trait among `T`'s bounds (or their supertraits), whatever
-/// `T` is in this instance.
-fn unbounded_param_op(
-    ctx: &LowerCtx<'_>,
-    op: &str,
-    fixity: Fixity,
-    operands: &[&Expr],
-    span: rokc_diagnostic::Span,
-) -> Option<HirExpr> {
-    let t = operands.iter().find_map(|e| match &e.kind {
-        ExprKind::Path(p) if p.segments.len() == 1 => ctx
-            .lookup(&p.segments[0].name)
-            .and_then(|l| ctx.ty_param_locals.get(&l).cloned()),
-        _ => None,
-    })?;
-    let tr = ctx.env.prec.lookup(op, fixity)?.trait_name.clone();
-    if ctx.ty_bounds.get(&t).is_some_and(|b| b.contains(&tr)) {
-        return None;
-    }
-    Some(ctx.error_expr(
-        span,
-        format!(
-            "operator `{op}` on a `{t}` value needs a `{}` bound on `{t}` (spec 2.10.9)",
-            leaf_name(&tr)
-        ),
-    ))
 }
 
 /// Dispatch an operator on a user type to its operator-trait method
@@ -9316,6 +9312,9 @@ pub(super) fn dispatch_user_op_lit(
     // full path), not another trait that happens to share its name.
     let is_op_trait = |t: &str| t == op_trait;
     let shown = leaf_name(op_trait);
+    if let HirTy::Param(p) = lhs.ty {
+        return param_op(ctx, p, sym, &method, op_trait, lhs, rhs, lit_rhs, span);
+    }
     let impls: Vec<FunctionId> = method_target_for(&lhs.ty)
         .and_then(|t| ctx.env.method_table.get(&(t, method.clone())))
         .map(|ids| {
@@ -9425,6 +9424,59 @@ pub(super) fn dispatch_user_op_lit(
             args,
         },
         ty: sig.ret_ty,
+        span,
+    }
+}
+
+/// Operator `sym` on a type parameter (spec 2.10.9): its bound on the
+/// operator's trait gives the method; the right operand takes the
+/// bound's `Rhs`.
+#[allow(clippy::too_many_arguments)]
+fn param_op(
+    ctx: &mut LowerCtx<'_>,
+    p: u32,
+    sym: &str,
+    method: &str,
+    op_trait: &str,
+    lhs: HirExpr,
+    rhs: Option<HirExpr>,
+    lit_rhs: Option<&Expr>,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let t = ctx.ty_name(&lhs.ty);
+    let bound = super::bounds::traits_of(ctx, p)
+        .into_iter()
+        .find(|r| r.path == op_trait);
+    let gm = super::bounds::bound_method(ctx, p, method, Some(op_trait));
+    let (Some(bound), Some(gm)) = (bound, gm) else {
+        return ctx.error_expr(
+            span,
+            format!(
+                "operator `{sym}` on `{t}` needs a `{}` bound on `{t}` (spec 2.10.9)",
+                leaf_name(op_trait)
+            ),
+        );
+    };
+    let mut args = vec![lhs];
+    if let Some(r) = rhs {
+        let want = bound.args.first().cloned().unwrap_or(HirTy::Unknown);
+        let r = match lit_rhs {
+            Some(e) if is_untyped_literal(e) => lower_expected(ctx, e, want.clone()),
+            _ => r,
+        };
+        args.push(coerce(ctx, &want, r, &|| {
+            format!("the right operand of `{sym}`")
+        }));
+    }
+    let self_ty = args[0].ty.clone();
+    let Some((callee, ty)) =
+        monomorphize_on(ctx, &gm.def, Some(&gm.self_ty), Some(&self_ty), &args, span)
+    else {
+        return poison(span);
+    };
+    HirExpr {
+        kind: HirExprKind::Call { callee, args },
+        ty,
         span,
     }
 }
@@ -9579,6 +9631,9 @@ fn lower_assoc_const(
     name: &str,
     traits: Option<&[String]>,
 ) -> Option<HirExpr> {
+    if let HirTy::Param(p) = ty {
+        return super::bounds::assoc_const(ctx, *p, name, traits);
+    }
     let env = ctx.env;
     let mut hits = assoc_const_hits(ctx, ty, name, traits);
     // An inherent const shadows the trait ones (`i8::BITS`).

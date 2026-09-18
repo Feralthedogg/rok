@@ -3,18 +3,18 @@
 // 15 55 1
 // 4.5
 
-fn sum_down<T: PartialOrd + Add<T, Output = T> + Sub<T, Output = T>>(n: T) -> T {
-    if n <= 1 {
+fn sum_down<T: PartialOrd + Add<T, Output = T> + Sub<T, Output = T>>(n: T, one: T) -> T {
+    if n <= one {
         return n;
     }
-    return n + sum_down(n - 1);
+    return n + sum_down(n - one, one);
 }
 
 fn main() -> i32 {
-    println(f"{sum_down(5)} {sum_down(10i64)} {sum_down(1u8)}");
+    println(f"{sum_down(5, 1)} {sum_down(10i64, 1)} {sum_down(1u8, 1)}");
     // 2.5 + 1.5 + 0.5
-    println(f"{sum_down(2.5)}");
-    return sum_down(5);
+    println(f"{sum_down(2.5, 1.0)}");
+    return sum_down(5, 1);
 }
 
 // spec: 002.10-generics

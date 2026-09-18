@@ -1,13 +1,21 @@
-// ECDSA verification (FIPS 186-5) on P-256 and P-384. Points are
-// projective (X : Y : Z) with the complete addition formula of Renes,
-// Costello and Batina (2016, algorithm 4, a = -3), which also doubles
-// and handles the identity (0 : 1 : 0), so there are no special cases.
-// Verification sees public data only: the scalar multiplication
-// indexes its table by scalar bits.
+// ECDSA (FIPS 186-5) on P-256 and P-384: verification, and signing
+// with RFC 6979 deterministic nonces. Field elements are fixed arrays
+// of 32-bit limbs (`[u32; 12]`, P-256 uses the low 8) in Montgomery
+// form, so arithmetic allocates nothing. Points are projective
+// (X : Y : Z) with the complete formulas of Renes, Costello and Batina
+// (2016, algorithms 4 and 6, a = -3), which handle doubling and the
+// identity (0 : 1 : 0) without special cases.
+//
+// Signing runs in constant time: the scalar multiplication reads its
+// table with a masked scan, inversions are Fermat powers with a public
+// exponent, carries and reductions are masks. Verification sees public
+// data only and indexes its tables by scalar digits.
 
 use sup::{view, Bytes};
 use sup::sha2::HashAlgorithm;
-use sup::bignum::{Nat, Modulus};
+use sup::hmac::Hmac;
+use sup::bignum::Nat;
+use sup::ecfield::{Fe, fe_zero, mul_p256, add_p256, sub_p256, mul_p384, add_p384, sub_p384};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EcCurve {
@@ -15,128 +23,455 @@ pub enum EcCurve {
     P384,
 }
 
-/// A curve's field (`fp`, Montgomery form) and group order (`fn`).
+fn fe_small(v: u32) -> Fe {
+    let r = fe_zero();
+    r[0] = v;
+    r
+}
+
+fn fe_hex(s: str) -> Fe {
+    let l = Nat::from_hex(s);
+    let r = fe_zero();
+    for i in 0..l.len() { r[i] = l[i]; }
+    r
+}
+
+/// Big-endian bytes; `none` if the value needs more than `n` limbs.
+fn fe_from_be(b: Slice<u8>, n: usize) -> Fe | none {
+    let l: List<u32> = Nat::from_be(b, n) else { return none; };
+    let r = fe_zero();
+    for i in 0..n { r[i] = l[i]; }
+    r
+}
+
+/// The low `len` bytes, big-endian.
+fn fe_to_be(a: Fe, len: usize) -> List<u8> {
+    let out: List<u8> = List::with_capacity(len);
+    for i in 0..len {
+        let k = len - 1 - i;
+        out.push((a[k / 4] >> (8 * (k % 4)) as u32) as u8);
+    }
+    out
+}
+
+/// `a - b` over `n` limbs and the borrow (0 or 1).
+fn fe_sub(a: Fe, b: Fe, n: usize) -> (Fe, u32) {
+    let r = fe_zero();
+    let borrow = 0u64;
+    for i in 0..n {
+        let t = (a[i] as u64).wrapping_sub(b[i] as u64).wrapping_sub(borrow);
+        r[i] = t as u32;
+        borrow = t >> 63u64;
+    }
+    (r, borrow as u32)
+}
+
+/// `a` where `mask` is all ones, `b` where it is zero.
+fn fe_select(mask: u32, a: Fe, b: Fe) -> Fe {
+    let r = fe_zero();
+    for i in 0usize..12 { r[i] = (a[i] & mask) | (b[i] & ~mask); }
+    r
+}
+
+fn fe_is_zero(a: Fe) -> bool {
+    let d = 0u32;
+    for i in 0usize..12 { d = d | a[i]; }
+    d == 0u32
+}
+
+fn fe_eq(a: Fe, b: Fe) -> bool {
+    let d = 0u32;
+    for i in 0usize..12 { d = d | (a[i] ^ b[i]); }
+    d == 0u32
+}
+
+/// Whether `a < b` (constant time).
+fn fe_lt(a: Fe, b: Fe, n: usize) -> bool {
+    let (_, borrow) = fe_sub(a, b, n);
+    borrow == 1u32
+}
+
+/// Arithmetic mod an odd `m` of `n` limbs, in Montgomery form
+/// (`R = 2^(32 n)`).
+struct Field {
+    m: Fe;
+    n: usize;
+    inv: u32;
+    /// A base field's `k` (`fmul`), 0 for a scalar field.
+    kind: u8;
+    one: Fe;
+    r2: Fe;
+}
+
+impl Field {
+    /// `m` and `R^2 mod m` in hex, `kind` as for `fmul`.
+    fn new(m: str, r2: str, n: usize, kind: u8) -> Field {
+        let m = fe_hex(m);
+        // -m^-1 mod 2^32 by Newton's iteration (m0 is its own inverse
+        // to 3 bits).
+        let m0 = m[0];
+        let x = m0;
+        for _ in 0..4 { x = x.wrapping_mul(2u32.wrapping_sub(m0.wrapping_mul(x))); }
+        let f = Field { m, n, inv: 0u32.wrapping_sub(x), kind, one: fe_zero(), r2: fe_hex(r2) };
+        // R mod m = REDC(R^2).
+        f.one = f.from_mont(f.r2);
+        f
+    }
+
+    /// `(a + b) mod m` for `a, b < m`.
+    fn add(self, a: Fe, b: Fe) -> Fe {
+        if self.kind != 0u8 { return fadd(self.kind, a, b); }
+        let n = self.n;
+        let s = fe_zero();
+        let d = fe_zero();
+        let carry = 0u64;
+        let borrow = 0u64;
+        for i in 0..n {
+            let t = (a[i] as u64) + (b[i] as u64) + carry;
+            s[i] = t as u32;
+            carry = t >> 32u64;
+            let u = (t & 0xffffffffu64).wrapping_sub(self.m[i] as u64).wrapping_sub(borrow);
+            d[i] = u as u32;
+            borrow = u >> 63u64;
+        }
+        // The difference when the sum overflowed or reached m.
+        let mask = 0u32.wrapping_sub((carry as u32) | ((borrow as u32) ^ 1u32));
+        for i in 0..n { d[i] = (d[i] & mask) | (s[i] & ~mask); }
+        d
+    }
+
+    /// `(a - b) mod m` for `a, b < m`.
+    fn sub(self, a: Fe, b: Fe) -> Fe {
+        if self.kind != 0u8 { return fsub(self.kind, a, b); }
+        let n = self.n;
+        let (d, borrow) = fe_sub(a, b, n);
+        let mask = 0u32.wrapping_sub(borrow);
+        let carry = 0u64;
+        for i in 0..n {
+            let t = (d[i] as u64) + ((self.m[i] & mask) as u64) + carry;
+            d[i] = t as u32;
+            carry = t >> 32u64;
+        }
+        d
+    }
+
+    /// `a mod m` for `a < 2m`.
+    fn reduce_once(self, a: Fe) -> Fe {
+        let (d, borrow) = fe_sub(a, self.m, self.n);
+        fe_select(0u32.wrapping_sub(borrow ^ 1u32), d, a)
+    }
+
+    /// Montgomery product `a b R^-1 mod m` (FIOS: multiplication and
+    /// reduction in one pass) for `a, b < m`.
+    fn mul(self, a: Fe, b: Fe) -> Fe {
+        if self.kind != 0u8 { return fmul(self.kind, a, b); }
+        let n = self.n;
+        let m = self.m;
+        let inv = self.inv;
+        let t: [u32; 13] = [0u32; 13];
+        for i in 0..n {
+            let bi = b[i] as u64;
+            let q = ((t[0] as u64) + (a[0] as u64) * bi) as u32;
+            let qm = q.wrapping_mul(inv) as u64;
+            let c1 = 0u64;
+            let c2 = 0u64;
+            for j in 0..n {
+                let s1 = (t[j] as u64) + (a[j] as u64) * bi + c1;
+                c1 = s1 >> 32u64;
+                let s2 = (s1 & 0xffffffffu64) + qm * (m[j] as u64) + c2;
+                c2 = s2 >> 32u64;
+                if j > 0 { t[j - 1] = s2 as u32; }
+            }
+            let s = (t[n] as u64) + c1 + c2;
+            t[n - 1] = s as u32;
+            t[n] = (s >> 32u64) as u32;
+        }
+        // t < 2m: subtract m once if t[n] is set or t >= m.
+        let d = fe_zero();
+        let borrow = 0u64;
+        for i in 0..n {
+            let u = (t[i] as u64).wrapping_sub(m[i] as u64).wrapping_sub(borrow);
+            d[i] = u as u32;
+            borrow = u >> 63u64;
+        }
+        let mask = 0u32.wrapping_sub(t[n] | ((borrow as u32) ^ 1u32));
+        for i in 0..n { d[i] = (d[i] & mask) | (t[i] & ~mask); }
+        d
+    }
+
+    fn to_mont(self, a: Fe) -> Fe { self.mul(a, self.r2) }
+
+    fn from_mont(self, a: Fe) -> Fe { self.mul(a, fe_small(1u32)) }
+
+    /// `a^-1` (Montgomery form in and out) by Fermat, `m` prime: 4-bit
+    /// fixed windows over the public exponent `m - 2`, the table read
+    /// with a masked scan.
+    fn inv(self, a: Fe) -> Fe {
+        let (e, _) = fe_sub(self.m, fe_small(2u32), self.n);
+        let table: List<Fe> = [self.one, a];
+        for i in 2..16 { table.push(self.mul(table[i - 1], a)); }
+        let r = self.one;
+        let w = 8 * self.n;
+        while w > 0 {
+            w -= 1;
+            for _ in 0..4 { r = self.mul(r, r); }
+            let d = (e[w / 8] >> (4 * (w % 8)) as u32) & 15u32;
+            let t = fe_zero();
+            for i in 0..16 {
+                let hit = 0u32.wrapping_sub(((i as u32) ^ d).wrapping_sub(1u32) >> 31u32);
+                t = fe_select(hit, table[i], t);
+            }
+            r = self.mul(r, t);
+        }
+        r
+    }
+}
+
+/// Base-field arithmetic: `k` 1 for P-256, 2 for P-384 (`ecfield`).
+fn fmul(k: u8, a: Fe, b: Fe) -> Fe { if k == 1u8 { mul_p256(a, b) } else { mul_p384(a, b) } }
+
+fn fadd(k: u8, a: Fe, b: Fe) -> Fe { if k == 1u8 { add_p256(a, b) } else { add_p384(a, b) } }
+
+fn fsub(k: u8, a: Fe, b: Fe) -> Fe { if k == 1u8 { sub_p256(a, b) } else { sub_p384(a, b) } }
+
+/// A projective point, coordinates in Montgomery form.
+struct Point {
+    x: Fe;
+    y: Fe;
+    z: Fe;
+}
+
+/// A curve's field (`fp`), group order (`fq`) and constants (Montgomery
+/// form).
 struct Curve {
-    fp: Modulus;
-    fq: Modulus;
+    fp: Field;
+    fq: Field;
+    k: u8;
     size: usize;
-    b: List<u32>;
-    gx: List<u32>;
-    gy: List<u32>;
+    b: Fe;
+    g: Point;
 }
 
 fn curve_of(c: EcCurve) -> Curve {
-    let (p, q, b, gx, gy) = match c {
+    let (fp, fq, b, gx, gy) = match c {
         EcCurve::P256 => (
-            "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
-            "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+            Field::new(
+                "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+                "4fffffffdfffffffffffffffefffffffbffffffff0000000000000003",
+                8,
+                1u8,
+            ),
+            Field::new(
+                "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+                "66e12d94f3d956202845b2392b6bec594699799c49bd6fa683244c95be79eea2",
+                8,
+                0u8,
+            ),
             "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
             "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296",
             "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
         ),
         EcCurve::P384 => (
-            "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
-            "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+            Field::new(
+                "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
+                "10000000200000000fffffffe000000000000000200000000fffffffe00000001",
+                12,
+                2u8,
+            ),
+            Field::new(
+                "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973",
+                "c84ee012b39bf213fb05b7a28266895d40d49174aab1cc5bc3e483afcb82947ff3d81e5df1aa4192d319b2419b409a9",
+                12,
+                0u8,
+            ),
             "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef",
             "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7",
             "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f",
         ),
     };
-    let fp = Modulus::new(Nat::from_hex(p));
     Curve {
-        size: fp.n * 4,
-        b: fp.to_mont(Nat::from_hex(b)),
-        gx: fp.to_mont(Nat::from_hex(gx)),
-        gy: fp.to_mont(Nat::from_hex(gy)),
-        fq: Modulus::new(Nat::from_hex(q)),
+        size: 4 * fp.n,
+        k: fp.kind,
+        b: fp.to_mont(fe_hex(b)),
+        g: Point { x: fp.to_mont(fe_hex(gx)), y: fp.to_mont(fe_hex(gy)), z: fp.one },
+        fq,
         fp,
     }
 }
 
-/// A projective point, coordinates in Montgomery form.
-struct Point {
-    x: List<u32>;
-    y: List<u32>;
-    z: List<u32>;
-}
-
 impl Curve {
-    fn identity(self) -> Point {
-        Point { x: Nat::zero(self.fp.n), y: self.fp.one(), z: Nat::zero(self.fp.n) }
-    }
+    fn identity(self) -> Point { Point { x: fe_zero(), y: self.fp.one, z: fe_zero() } }
 
-    /// `p + q`, complete (any inputs, doubling included).
+    /// `p + q`, complete (algorithm 4).
     fn add(self, p: Point, q: Point) -> Point {
-        let f = self.fp;
-        let t0 = f.mul(p.x, q.x);
-        let t1 = f.mul(p.y, q.y);
-        let t2 = f.mul(p.z, q.z);
-        let t3 = f.add(p.x, p.y);
-        let t4 = f.add(q.x, q.y);
-        t3 = f.mul(t3, t4);
-        t4 = f.add(t0, t1);
-        t3 = f.sub(t3, t4);
-        t4 = f.add(p.y, p.z);
-        let x3 = f.add(q.y, q.z);
-        t4 = f.mul(t4, x3);
-        x3 = f.add(t1, t2);
-        t4 = f.sub(t4, x3);
-        x3 = f.add(p.x, p.z);
-        let y3 = f.add(q.x, q.z);
-        x3 = f.mul(x3, y3);
-        y3 = f.add(t0, t2);
-        y3 = f.sub(x3, y3);
-        let z3 = f.mul(self.b, t2);
-        x3 = f.sub(y3, z3);
-        z3 = f.add(x3, x3);
-        x3 = f.add(x3, z3);
-        z3 = f.sub(t1, x3);
-        x3 = f.add(t1, x3);
-        y3 = f.mul(self.b, y3);
-        t1 = f.add(t2, t2);
-        t2 = f.add(t1, t2);
-        y3 = f.sub(y3, t2);
-        y3 = f.sub(y3, t0);
-        t1 = f.add(y3, y3);
-        y3 = f.add(t1, y3);
-        t1 = f.add(t0, t0);
-        t0 = f.add(t1, t0);
-        t0 = f.sub(t0, t2);
-        t1 = f.mul(t4, y3);
-        t2 = f.mul(t0, y3);
-        y3 = f.mul(x3, z3);
-        y3 = f.add(y3, t2);
-        x3 = f.mul(t3, x3);
-        x3 = f.sub(x3, t1);
-        z3 = f.mul(t4, z3);
-        t1 = f.mul(t3, t0);
-        z3 = f.add(z3, t1);
+        let k = self.k;
+        let b = self.b;
+        let t0 = fmul(k, p.x, q.x);
+        let t1 = fmul(k, p.y, q.y);
+        let t2 = fmul(k, p.z, q.z);
+        let t3 = fadd(k, p.x, p.y);
+        let t4 = fadd(k, q.x, q.y);
+        t3 = fmul(k, t3, t4);
+        t4 = fadd(k, t0, t1);
+        t3 = fsub(k, t3, t4);
+        t4 = fadd(k, p.y, p.z);
+        let x3 = fadd(k, q.y, q.z);
+        t4 = fmul(k, t4, x3);
+        x3 = fadd(k, t1, t2);
+        t4 = fsub(k, t4, x3);
+        x3 = fadd(k, p.x, p.z);
+        let y3 = fadd(k, q.x, q.z);
+        x3 = fmul(k, x3, y3);
+        y3 = fadd(k, t0, t2);
+        y3 = fsub(k, x3, y3);
+        let z3 = fmul(k, b, t2);
+        x3 = fsub(k, y3, z3);
+        z3 = fadd(k, x3, x3);
+        x3 = fadd(k, x3, z3);
+        z3 = fsub(k, t1, x3);
+        x3 = fadd(k, t1, x3);
+        y3 = fmul(k, b, y3);
+        t1 = fadd(k, t2, t2);
+        t2 = fadd(k, t1, t2);
+        y3 = fsub(k, y3, t2);
+        y3 = fsub(k, y3, t0);
+        t1 = fadd(k, y3, y3);
+        y3 = fadd(k, t1, y3);
+        t1 = fadd(k, t0, t0);
+        t0 = fadd(k, t1, t0);
+        t0 = fsub(k, t0, t2);
+        t1 = fmul(k, t4, y3);
+        t2 = fmul(k, t0, y3);
+        y3 = fmul(k, x3, z3);
+        y3 = fadd(k, y3, t2);
+        x3 = fmul(k, t3, x3);
+        x3 = fsub(k, x3, t1);
+        z3 = fmul(k, t4, z3);
+        t1 = fmul(k, t3, t0);
+        z3 = fadd(k, z3, t1);
         Point { x: x3, y: y3, z: z3 }
     }
 
+    /// `2p`, complete (algorithm 6).
+    fn dbl(self, p: Point) -> Point {
+        let k = self.k;
+        let b = self.b;
+        let t0 = fmul(k, p.x, p.x);
+        let t1 = fmul(k, p.y, p.y);
+        let t2 = fmul(k, p.z, p.z);
+        let t3 = fmul(k, p.x, p.y);
+        t3 = fadd(k, t3, t3);
+        let z3 = fmul(k, p.x, p.z);
+        z3 = fadd(k, z3, z3);
+        let y3 = fmul(k, b, t2);
+        y3 = fsub(k, y3, z3);
+        let x3 = fadd(k, y3, y3);
+        y3 = fadd(k, x3, y3);
+        x3 = fsub(k, t1, y3);
+        y3 = fadd(k, t1, y3);
+        y3 = fmul(k, x3, y3);
+        x3 = fmul(k, x3, t3);
+        t3 = fadd(k, t2, t2);
+        t2 = fadd(k, t2, t3);
+        z3 = fmul(k, b, z3);
+        z3 = fsub(k, z3, t2);
+        z3 = fsub(k, z3, t0);
+        t3 = fadd(k, z3, z3);
+        z3 = fadd(k, z3, t3);
+        t3 = fadd(k, t0, t0);
+        t0 = fadd(k, t3, t0);
+        t0 = fsub(k, t0, t2);
+        t0 = fmul(k, t0, z3);
+        y3 = fadd(k, y3, t0);
+        t0 = fmul(k, p.y, p.z);
+        t0 = fadd(k, t0, t0);
+        z3 = fmul(k, t0, z3);
+        x3 = fsub(k, x3, z3);
+        z3 = fmul(k, t0, t1);
+        z3 = fadd(k, z3, z3);
+        z3 = fadd(k, z3, z3);
+        Point { x: x3, y: y3, z: z3 }
+    }
+
+    /// `0 P, 1 P, ..., 15 P`.
+    fn table(self, p: Point) -> List<Point> {
+        let t: List<Point> = [self.identity(), p, self.dbl(p)];
+        for i in 3..16 { t.push(self.add(t[i - 1], p)); }
+        t
+    }
+
     /// Whether affine `(x, y)` (Montgomery form) is on `y^2 = x^3 - 3x + b`.
-    fn on_curve(self, x: List<u32>, y: List<u32>) -> bool {
+    fn on_curve(self, x: Fe, y: Fe) -> bool {
         let f = self.fp;
         let lhs = f.mul(y, y);
         let x3 = f.mul(f.mul(x, x), x);
         let tx = f.add(f.add(x, x), x);
-        let rhs = f.add(f.sub(x3, tx), self.b);
-        Nat::eq(lhs, rhs)
+        fe_eq(lhs, f.add(f.sub(x3, tx), self.b))
     }
 
-    /// `u1 G + u2 Q` (Shamir's trick), `u1`, `u2` plain scalars.
-    fn mul2(self, u1: List<u32>, q: Point, u2: List<u32>) -> Point {
-        let g = Point { x: self.gx, y: self.gy, z: self.fp.one() };
-        let table = [self.identity(), g, q, self.add(g, q)];
+    /// `u1 G + u2 Q` (Straus, 4-bit windows) for public scalars.
+    fn mul2(self, u1: Fe, q: Point, u2: Fe) -> Point {
+        let tg = self.table(self.g);
+        let tq = self.table(q);
         let r = self.identity();
-        let i = 32 * u1.len();
-        while i > 0 {
-            i -= 1;
-            r = self.add(r, r);
-            let k = ((u1[i / 32] >> (i % 32) as u32) & 1u32) | (((u2[i / 32] >> (i % 32) as u32) & 1u32) << 1);
-            r = self.add(r, table[k as usize]);
+        let w = 8 * self.fp.n;
+        while w > 0 {
+            w -= 1;
+            for _ in 0..4 { r = self.dbl(r); }
+            let d1 = (u1[w / 8] >> (4 * (w % 8)) as u32) & 15u32;
+            let d2 = (u2[w / 8] >> (4 * (w % 8)) as u32) & 15u32;
+            if d1 != 0u32 { r = self.add(r, tg[d1 as usize]); }
+            if d2 != 0u32 { r = self.add(r, tq[d2 as usize]); }
         }
         r
+    }
+
+    /// `k G` for a secret `k`: 4-bit windows, each table entry read with
+    /// a masked scan.
+    fn mul_base(self, k: Fe) -> Point {
+        let t = self.table(self.g);
+        let r = self.identity();
+        let w = 8 * self.fp.n;
+        while w > 0 {
+            w -= 1;
+            for _ in 0..4 { r = self.dbl(r); }
+            let d = (k[w / 8] >> (4 * (w % 8)) as u32) & 15u32;
+            let s = self.identity();
+            for i in 0..16 {
+                let hit = 0u32.wrapping_sub(((i as u32) ^ d).wrapping_sub(1u32) >> 31u32);
+                let e = t[i];
+                s = Point { x: fe_select(hit, e.x, s.x), y: fe_select(hit, e.y, s.y), z: fe_select(hit, e.z, s.z) };
+            }
+            r = self.add(r, s);
+        }
+        r
+    }
+
+    /// Affine `(x, y)`, not in Montgomery form; `none` for the identity.
+    fn affine(self, p: Point) -> (Fe, Fe) | none {
+        if fe_is_zero(p.z) { return none; }
+        let f = self.fp;
+        let zi = f.inv(p.z);
+        (f.from_mont(f.mul(p.x, zi)), f.from_mont(f.mul(p.y, zi)))
+    }
+
+    /// The hash's leftmost bits as wide as the order, reduced mod `q`
+    /// (bits2int then mod q; the orders have whole bytes).
+    fn hash_int(self, hash: HashAlgorithm, msg: Bytes) -> Fe {
+        let h = hash.digest(msg);
+        let hb = if h.len() > self.size { h[0:self.size] } else { h[0:h.len()] };
+        let e = fe_from_be(hb, self.fp.n) ?? fe_zero();
+        self.fq.reduce_once(e)
+    }
+
+    /// The secret scalar `d` from big-endian bytes: `1 <= d < q`.
+    fn scalar(self, b: Bytes) throws (ValueError) -> Fe {
+        let s = view(b);
+        let bad = ValueError { msg: "bad ECDSA private key" };
+        if s.len() > self.size { throw bad; }
+        let d: Fe = fe_from_be(s, self.fp.n) else { throw bad; };
+        if fe_is_zero(d) || !fe_lt(d, self.fq.m, self.fp.n) { throw bad; }
+        d
     }
 }
 
@@ -176,9 +511,99 @@ fn parse_sig(sig: Slice<u8>, size: usize) -> (Slice<u8>, Slice<u8>) | none {
     (r, s)
 }
 
+/// A DER INTEGER of the big-endian magnitude `v`.
+fn der_int(out: List<u8>, v: List<u8>) {
+    let i = 0usize;
+    while i + 1 < v.len() && v[i] == 0u8 { i += 1; }
+    let pad = v[i] >= 0x80u8;
+    out.push(0x02u8);
+    out.push((v.len() - i + if pad { 1 } else { 0 }) as u8);
+    if pad { out.push(0u8); }
+    for j in i..v.len() { out.push(v[j]); }
+}
+
 pub struct Ecdsa;
 
 impl Ecdsa {
+    /// The SEC1 uncompressed public key of `private_key` (a big-endian
+    /// scalar of at most the curve's size).
+    pub fn public_key(curve: EcCurve, private_key: Bytes) throws (ValueError) -> List<u8> {
+        let c = curve_of(curve);
+        let d = try c.scalar(private_key);
+        let (x, y) = c.affine(c.mul_base(d)) ?? (fe_zero(), fe_zero());
+        let out: List<u8> = [0x04u8];
+        for v in fe_to_be(x, c.size) { out.push(v); }
+        for v in fe_to_be(y, c.size) { out.push(v); }
+        out
+    }
+
+    /// A DER signature of `msg`, hashed with `hash`, by `private_key`;
+    /// the nonce is derived per RFC 6979 (HMAC-DRBG with `hash`).
+    pub fn sign(curve: EcCurve, hash: HashAlgorithm, private_key: Bytes, msg: Bytes) throws (ValueError) -> List<u8> {
+        let c = curve_of(curve);
+        let q = c.fq;
+        let n = c.fp.n;
+        let size = c.size;
+        let d = try c.scalar(private_key);
+        let e = c.hash_int(hash, msg);
+        // RFC 6979 3.2: K and V from int2octets(d) || bits2octets(h1).
+        let seed = fe_to_be(d, size);
+        for v in fe_to_be(e, size) { seed.push(v); }
+        let hl = hash.output_len();
+        let kk: List<u8> = [];
+        let vv: List<u8> = [];
+        for _ in 0..hl {
+            kk.push(0u8);
+            vv.push(1u8);
+        }
+        for b in [0u8, 1u8] {
+            let m = vv.clone();
+            m.push(b);
+            for v in seed { m.push(v); }
+            kk = Hmac::mac(hash, kk, m);
+            vv = Hmac::mac(hash, kk, vv);
+        }
+        let dm = q.to_mont(d);
+        let em = q.to_mont(e);
+        loop {
+            let t: List<u8> = [];
+            while t.len() < size {
+                vv = Hmac::mac(hash, kk, vv);
+                for v in vv { t.push(v); }
+            }
+            // bits2int: the leftmost qlen = 8 size bits. Rejecting k
+            // reveals only that a candidate was out of range.
+            let k = fe_from_be(t[0:size], n) ?? fe_zero();
+            if !fe_is_zero(k) && fe_lt(k, q.m, n) {
+                let pt: (Fe, Fe) | none = c.affine(c.mul_base(k));
+                match pt {
+                    xy: (Fe, Fe) => {
+                        let (x, _) = xy;
+                        let r = q.reduce_once(x);
+                        // s = k^-1 (e + r d) mod q.
+                        let kinv = q.inv(q.to_mont(k));
+                        let s = q.from_mont(q.mul(kinv, q.add(em, q.mul(q.to_mont(r), dm))));
+                        if !fe_is_zero(r) && !fe_is_zero(s) {
+                            let body: List<u8> = [];
+                            der_int(body, fe_to_be(r, size));
+                            der_int(body, fe_to_be(s, size));
+                            let out: List<u8> = [0x30u8];
+                            if body.len() >= 0x80 { out.push(0x81u8); }
+                            out.push(body.len() as u8);
+                            for v in body { out.push(v); }
+                            return out;
+                        }
+                    },
+                    none => {},
+                }
+            }
+            let m = vv.clone();
+            m.push(0u8);
+            kk = Hmac::mac(hash, kk, m);
+            vv = Hmac::mac(hash, kk, vv);
+        }
+    }
+
     /// Whether `signature` (DER) is a signature of `msg`, hashed with
     /// `hash`, under `public_key` (SEC1 uncompressed point).
     pub fn verify(curve: EcCurve, hash: HashAlgorithm, public_key: Bytes, msg: Bytes, signature: Bytes) -> bool {
@@ -187,34 +612,28 @@ impl Ecdsa {
         let n = c.fp.n;
         let pk = view(public_key);
         if pk.len() != 1 + 2 * size || pk[0] != 0x04u8 { return false; }
-        let qx: List<u32> = Nat::from_be(pk[1:1 + size], n) else { return false; };
-        let qy: List<u32> = Nat::from_be(pk[1 + size:1 + 2 * size], n) else { return false; };
-        if !Nat::lt(qx, c.fp.m) || !Nat::lt(qy, c.fp.m) { return false; }
+        let qx: Fe = fe_from_be(pk[1:1 + size], n) else { return false; };
+        let qy: Fe = fe_from_be(pk[1 + size:1 + 2 * size], n) else { return false; };
+        if !fe_lt(qx, c.fp.m, n) || !fe_lt(qy, c.fp.m, n) { return false; }
         let qxm = c.fp.to_mont(qx);
         let qym = c.fp.to_mont(qy);
         if !c.on_curve(qxm, qym) { return false; }
 
         let t3: (Slice<u8>, Slice<u8>) = parse_sig(view(signature), size) else { return false; };
-
         let (rb, sb) = t3;
-        let r: List<u32> = Nat::from_be(rb, n) else { return false; };
-        let s: List<u32> = Nat::from_be(sb, n) else { return false; };
+        let r: Fe = fe_from_be(rb, n) else { return false; };
+        let s: Fe = fe_from_be(sb, n) else { return false; };
         let q = c.fq;
-        if Nat::is_zero(r) || Nat::is_zero(s) || !Nat::lt(r, q.m) || !Nat::lt(s, q.m) { return false; }
+        if fe_is_zero(r) || fe_is_zero(s) || !fe_lt(r, q.m, n) || !fe_lt(s, q.m, n) { return false; }
 
-        // e: the hash's leftmost bits as wide as the order, below 2n.
-        let h = hash.digest(msg);
-        let hb = if h.len() > size { h[0:size] } else { h[0:h.len()] };
-        let e0: List<u32> = Nat::from_be(hb, n) else { return false; };
-        let e = q.reduce_once(e0);
-
-        let w = q.inv_prime(q.to_mont(s));
+        let e = c.hash_int(hash, msg);
+        let w = q.inv(q.to_mont(s));
         let u1 = q.from_mont(q.mul(q.to_mont(e), w));
         let u2 = q.from_mont(q.mul(q.to_mont(r), w));
-        let pt = c.mul2(u1, Point { x: qxm, y: qym, z: c.fp.one() }, u2);
-        if Nat::is_zero(pt.z) { return false; }
-        let x = c.fp.from_mont(c.fp.mul(pt.x, c.fp.inv_prime(pt.z)));
-        // x < p < 2n.
-        Nat::eq(q.reduce_once(x), r)
+        let pt = c.mul2(u1, Point { x: qxm, y: qym, z: c.fp.one }, u2);
+        if fe_is_zero(pt.z) { return false; }
+        // x = X / Z; compare x mod q with r (x < p < 2q).
+        let x = c.fp.from_mont(c.fp.mul(pt.x, c.fp.inv(pt.z)));
+        fe_eq(q.reduce_once(x), r)
     }
 }

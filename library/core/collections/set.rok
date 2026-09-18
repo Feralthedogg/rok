@@ -122,7 +122,7 @@ impl<T: Hash> IntoIterator for Set<T> {
 
 /// `it.collect()` into a set (2.9.9).
 impl<T: Hash> FromIterator<T> for Set<T> {
-    const fn from_iter<I>(it: I) -> Set<T> {
+    const fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Set<T> {
         let out: Set<T> = Set::new();
         for x in it {
             out.insert(x);

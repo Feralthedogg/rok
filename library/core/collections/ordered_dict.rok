@@ -153,7 +153,7 @@ impl<K: Hash, V> IntoIterator for OrderedDict<K, V> {
 }
 
 impl<K: Hash, V> FromIterator<(K, V)> for OrderedDict<K, V> {
-    const fn from_iter<I>(it: I) -> OrderedDict<K, V> {
+    const fn from_iter<I: IntoIterator<Item = (K, V)>>(it: I) -> OrderedDict<K, V> {
         let out: OrderedDict<K, V> = OrderedDict::new();
         for (k, v) in it {
             out.insert(k, v);

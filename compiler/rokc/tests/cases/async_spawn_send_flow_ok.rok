@@ -8,7 +8,10 @@
 // `spawn_local`) and non-`Send` values dropped before an `await` are
 // fine.
 
-fn launch<F: Future + Send>(f: F) -> Task<F::Output> {
+fn launch<F: Future + Send>(f: F) -> Task<F::Output>
+where
+    F::Output: Send,
+{
     task::spawn(f)
 }
 

@@ -440,6 +440,55 @@ fn front_end_reuses_parses_and_bodies() {
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
 }
 
+/// 2.10.9 / 902.16: a generic body is checked against its bounds in
+/// every build, incremental or not: breaking it fails the build while
+/// the plain bodies replay, and fixing it builds again.
+#[test]
+fn incremental_checks_generic_bodies() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("incr-generic");
+    let app = dir.join("app");
+    fs::create_dir_all(&app).unwrap();
+    let main = "mod m;\n\nfn main() {\n    println(f\"{m::twice(3)} {m::one()}\");\n}\n";
+    fs::write(app.join("main.rok"), main).unwrap();
+    let ok = "use rok::core::ops::Add;\n\n\
+              pub fn twice<T: Add<T, Output = T> + Copy>(x: T) -> T {\n    x + x\n}\n\n\
+              pub fn one() -> i64 {\n    1\n}\n";
+    fs::write(app.join("m.rok"), ok).unwrap();
+    let check = || {
+        let out = Command::new(ROKC)
+            .current_dir(&app)
+            .env("ROK_HOME", workspace())
+            .env("ROKC_INCR_VERIFY", "1")
+            .args(["check"])
+            .arg("--rokr")
+            .arg(&env.rokr)
+            .output()
+            .unwrap();
+        (out.status.success(), text(&out.stderr))
+    };
+    assert!(check().0, "{}", check().1);
+    // The bound gone: the body no longer checks.
+    fs::write(
+        app.join("m.rok"),
+        ok.replace(": Add<T, Output = T> + Copy", ""),
+    )
+    .unwrap();
+    let want = "operator `+` on `T` needs a `Add` bound on `T` (spec 2.10.9)";
+    let (pass, err) = check();
+    assert!(!pass && err.contains(want), "{err}");
+    // Another body edited: still reported.
+    fs::write(app.join("main.rok"), main.replace("one()}", "one() + 1}")).unwrap();
+    let (pass, err) = check();
+    assert!(!pass && err.contains(want), "{err}");
+    fs::write(app.join("m.rok"), ok).unwrap();
+    let (pass, err) = check();
+    assert!(pass, "{err}");
+    let out = rokc(Some(&env), &app, &["run", "-q"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "6 2\n");
+}
+
 /// A library package builds by units: an edit recompiles its unit
 /// alone, the archive is a clean build's, and two such libraries with
 /// copies of the same instances link into one program.

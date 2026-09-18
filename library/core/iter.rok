@@ -430,7 +430,7 @@ pub struct Chain<I, J> {
     first: bool;
 }
 
-impl<I: Iterator, J: Iterator> Iterator for Chain<I, J> {
+impl<I: Iterator, J: Iterator<Item = I::Item>> Iterator for Chain<I, J> {
     type Item = I::Item;
     const fn next(ref self) -> I::Item | none {
         if self.first {
@@ -525,7 +525,10 @@ pub struct Flatten<I> {
     cur: <I::Item as IntoIterator>::IntoIter | none;
 }
 
-impl<I: Iterator> Iterator for Flatten<I> {
+impl<I: Iterator> Iterator for Flatten<I>
+where
+    I::Item: IntoIterator,
+{
     type Item = <I::Item as IntoIterator>::Item;
     const fn next(ref self) -> <I::Item as IntoIterator>::Item | none {
         while true {

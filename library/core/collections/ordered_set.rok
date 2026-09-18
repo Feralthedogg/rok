@@ -112,7 +112,7 @@ impl<T: Hash> IntoIterator for OrderedSet<T> {
 }
 
 impl<T: Hash> FromIterator<T> for OrderedSet<T> {
-    const fn from_iter<I>(it: I) -> OrderedSet<T> {
+    const fn from_iter<I: IntoIterator<Item = T>>(it: I) -> OrderedSet<T> {
         let out: OrderedSet<T> = OrderedSet::new();
         for x in it {
             out.insert(x);

@@ -55,7 +55,8 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
         | HirTy::Const(..)
         | HirTy::OpenConst(_)
         | HirTy::NoThrow
-        | HirTy::Var(_) => MirTy::Any,
+        | HirTy::Var(_)
+        | HirTy::Param(_) => MirTy::Any,
         // `!` has no values; a diverging call returns nothing.
         HirTy::Unit | HirTy::Never => MirTy::Unit,
         HirTy::Prim(p) => MirTy::Prim(*p),
