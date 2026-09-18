@@ -4,8 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use rokc_ast::{AttrArg, AttrBody, Attribute, EnumVariantKind, Item, Literal, StructKind};
-use rokc_diagnostic::{ErrorKind, RokDiagnostic};
+use rokc_ast::{AttrArg, AttrBody, Attribute, Literal};
 
 /// Bare flags (`test`, `debug_assertions`) and `key = "value"` pairs
 /// (`target_os = "macos"`).
@@ -151,40 +150,11 @@ pub fn expand_cfg_attr(env: &CfgEnv, a: Attribute, out: &mut Vec<Attribute>) {
     }
 }
 
-/// Spec 6.3.3: drop the fields and variants of `item` whose `#[cfg]` is
-/// false. A dropped one's malformed predicate is reported here; the
-/// kept ones' are checked with their item.
-pub fn drop_cfg_members(env: &CfgEnv, item: &mut Item) -> Vec<RokDiagnostic> {
-    let mut diags = Vec::new();
-    let mut keep = |attrs: &[Attribute]| {
-        if env.attrs_pass(attrs) {
-            return true;
-        }
-        for a in attrs.iter().filter(|a| a.path == ["cfg"]) {
-            let why = match &a.body {
-                AttrBody::Args(xs) if xs.len() == 1 => check_pred(&xs[0]),
-                _ => Some("`#[cfg]` takes exactly one predicate (spec 6.3)".to_owned()),
-            };
-            diags.extend(why.map(|m| RokDiagnostic::error(ErrorKind::Meta, a.span, m)));
-        }
-        false
-    };
-    match item {
-        Item::Struct(s) => match &mut s.kind {
-            StructKind::Named(fs) => fs.retain(|f| keep(&f.attrs)),
-            StructKind::Tuple(fs) => fs.retain(|f| keep(&f.attrs)),
-            StructKind::Unit => {}
-        },
-        Item::Enum(e) => {
-            e.variants.retain(|v| keep(&v.attrs));
-            for v in &mut e.variants {
-                if let EnumVariantKind::Named(fs) = &mut v.kind {
-                    fs.retain(|f| keep(&f.attrs));
-                }
-            }
-        }
-        Item::Union(u) => u.fields.retain(|f| keep(&f.attrs)),
-        _ => {}
+/// What is wrong with `#[cfg(..)]` attribute `a`, if anything.
+#[must_use]
+pub fn attr_problem(a: &Attribute) -> Option<String> {
+    match &a.body {
+        AttrBody::Args(xs) if xs.len() == 1 => check_pred(&xs[0]),
+        _ => Some("`#[cfg]` takes exactly one predicate (spec 6.3)".to_owned()),
     }
-    diags
 }

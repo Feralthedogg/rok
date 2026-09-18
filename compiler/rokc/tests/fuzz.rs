@@ -75,7 +75,7 @@ fn corpus() -> Vec<String> {
         .filter_map(|e| {
             let p = e.ok()?.path();
             if p.is_dir() {
-                Some(p.join("main.rok")).filter(|m| m.exists())
+                Some(p.join("src/main.rok")).filter(|m| m.exists())
             } else {
                 Some(p).filter(|p| p.extension().is_some_and(|x| x == "rok"))
             }

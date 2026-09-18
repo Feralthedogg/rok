@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{Env, ROKC, assert_exit, scratch, setup, text, workspace};
+use common::{Env, ROKC, assert_exit, put, scratch, setup, text, workspace};
 use rokc_target::{Libc, ObjectFormat, TargetSpec};
 
 /// `rokc <args>` in `cwd`, with the repo's library and (when given) the
@@ -22,16 +22,17 @@ fn rokc(env: Option<&Env>, cwd: &Path, args: &[&str]) -> Output {
     cmd.output().unwrap()
 }
 
-/// `dir/name/main.rok` (or `lib.rok` with a test), as `rok new` makes it.
+/// `dir/name/src/main.rok` (or `src/lib.rok` with a test), as `rok new`
+/// makes it.
 fn new_package(dir: &Path, name: &str, lib: bool) -> PathBuf {
     let pkg = dir.join(name);
     fs::create_dir_all(&pkg).unwrap();
     if lib {
         let src = "pub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n\n#[test]\n\
                    fn adds() {\n    if add(2, 2) != 4 {\n        panic(\"add(2, 2) != 4\");\n    }\n}\n";
-        fs::write(pkg.join("lib.rok"), src).unwrap();
+        put(pkg.join("src/lib.rok"), src).unwrap();
     } else {
-        fs::write(pkg.join("main.rok"), "println(\"Hello, world!\");\n").unwrap();
+        put(pkg.join("src/main.rok"), "println(\"Hello, world!\");\n").unwrap();
     }
     pkg
 }
@@ -48,9 +49,8 @@ fn new_bin_package_runs_from_its_directory() {
 
     // A file inside the package builds the package (902.2), and `-q`
     // silences progress.
-    fs::create_dir_all(app.join("util")).unwrap();
-    fs::write(app.join("util/x.rok"), "fn unused() {}\n").unwrap();
-    let out = rokc(Some(&env), &dir, &["-q", "build", "app/util/x.rok"]);
+    put(app.join("src/util/x.rok"), "fn unused() {}\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["-q", "build", "app/src/util/x.rok"]);
     assert_exit(&out, 0);
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
     assert!(app.join("target/debug/app").is_file());
@@ -59,13 +59,52 @@ fn new_bin_package_runs_from_its_directory() {
     assert!(!app.join("target").exists());
 }
 
+/// 0.3.1: the package is `src/`; `.rok` files beside it are not part of
+/// it (not compiled, not build inputs, not formatted), and one of them
+/// runs as a script of its own.
+#[test]
+fn files_outside_src_are_not_the_package() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("stray");
+    let app = new_package(&dir, "app", false);
+    put(app.join("old.rok"), "fn (\n").unwrap();
+    put(app.join("scratch.rok"), "println(\"scratch\");\n").unwrap();
+    put(app.join("tests/t.rok"), "fn t() {\n  1;\n}\n").unwrap();
+    let out = rokc(Some(&env), &app, &["run"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "Hello, world!\n");
+    put(app.join("old.rok"), "fn ((\n").unwrap();
+    assert!(text(&rokc(Some(&env), &app, &["build"]).stderr).contains("Fresh app"));
+    let out = rokc(Some(&env), &app, &["run", "scratch.rok"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "scratch\n");
+    // `fmt` of a package: `src/` and `tests/`, not `old.rok`.
+    let out = rokc(None, &app, &["fmt", "--check"]);
+    assert_exit(&out, 1);
+    assert!(text(&out.stdout).contains("t.rok"), "{}", text(&out.stdout));
+    assert!(
+        !text(&out.stderr).contains("old.rok"),
+        "{}",
+        text(&out.stderr)
+    );
+    // Both roots is an error.
+    put(app.join("src/lib.rok"), "").unwrap();
+    let out = rokc(None, &app, &["build"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("has both `src/main.rok` and `src/lib.rok`"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 /// `--emit=ast` (9.9.10): the package after meta expansion, as rok
 /// source (derived impls, `if let` as `match`; no comments).
 #[test]
 fn emit_ast_shows_derives_and_desugaring() {
     let dir = scratch("ast");
-    fs::write(
-        dir.join("main.rok"),
+    put(
+        dir.join("src/main.rok"),
         "// gone\n#[derive(Clone)]\nstruct P { x: i32; }\n\
          fn main() {\n    let v: i32 | none = 3;\n    if let n: i32 = v { println(f\"{n}\"); }\n}\n",
     )
@@ -90,8 +129,8 @@ fn library_build_drops_code_its_package_does_not_reach() {
     let dir = scratch("libprune");
     let lib = dir.join("plib");
     fs::create_dir_all(&lib).unwrap();
-    fs::write(
-        lib.join("lib.rok"),
+    put(
+        lib.join("src/lib.rok"),
         "pub fn f() -> f64 { 2.0.sqrt() }\nfn unused_private() -> i32 { 2 }\n",
     )
     .unwrap();
@@ -123,26 +162,26 @@ fn unchanged_package_is_fresh() {
     };
     assert!(built(&["build"]).0);
     assert_eq!(built(&["run"]), (false, "Hello, world!\n".to_owned()));
-    fs::write(app.join("main.rok"), "println(\"changed\");\n").unwrap();
+    put(app.join("src/main.rok"), "println(\"changed\");\n").unwrap();
     assert_eq!(built(&["run"]), (true, "changed\n".to_owned()));
     assert!(!built(&["build"]).0);
     assert!(built(&["build", "-g"]).0);
     assert!(!built(&["build", "-g"]).0);
     // A file the package does not use is still one of its sources.
-    fs::write(app.join("other.rok"), "fn f() {}\n").unwrap();
+    put(app.join("src/other.rok"), "fn f() {}\n").unwrap();
     assert!(built(&["build", "-g"]).0);
-    fs::write(app.join("target/debug/app"), "").unwrap();
+    put(app.join("target/debug/app"), "").unwrap();
     assert!(built(&["build", "-g"]).0);
     // A `#[path]` module outside the package is a source too.
-    fs::write(dir.join("shared.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
-    fs::write(
-        app.join("main.rok"),
-        "#[path(\"../shared.rok\")]\nmod shared;\n\nprintln(f\"{shared::v()}\");\n",
+    put(dir.join("shared.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
+    put(
+        app.join("src/main.rok"),
+        "#[path(\"../../shared.rok\")]\nmod shared;\n\nprintln(f\"{shared::v()}\");\n",
     )
     .unwrap();
     assert_eq!(built(&["run"]), (true, "1\n".to_owned()));
     assert_eq!(built(&["run"]), (false, "1\n".to_owned()));
-    fs::write(dir.join("shared.rok"), "pub fn v() -> i32 {\n    2\n}\n").unwrap();
+    put(dir.join("shared.rok"), "pub fn v() -> i32 {\n    2\n}\n").unwrap();
     assert_eq!(built(&["run"]), (true, "2\n".to_owned()));
 }
 
@@ -155,20 +194,20 @@ fn included_file_is_a_build_input() {
     let dir = scratch("include-input");
     let app = dir.join("app");
     fs::create_dir_all(app.join("res")).unwrap();
-    fs::write(
-        app.join("main.rok"),
+    put(
+        app.join("src/main.rok"),
         "mod a;\nmod b;\n\nfn main() {\n    println(f\"{a::text()} {a::BYTES.len()} {b::two()}\");\n}\n",
     )
     .unwrap();
-    fs::write(
-        app.join("a.rok"),
+    put(
+        app.join("src/a.rok"),
         "pub const BYTES: [u8; 2] = include_bytes!(\"res/b.bin\");\n\n\
          pub fn text() -> str {\n    include_str!(\"res/t.txt\")\n}\n",
     )
     .unwrap();
-    fs::write(app.join("b.rok"), "pub fn two() -> i64 {\n    2\n}\n").unwrap();
-    fs::write(app.join("res/t.txt"), "one").unwrap();
-    fs::write(app.join("res/b.bin"), [0u8, 255]).unwrap();
+    put(app.join("src/b.rok"), "pub fn two() -> i64 {\n    2\n}\n").unwrap();
+    put(app.join("src/res/t.txt"), "one").unwrap();
+    put(app.join("src/res/b.bin"), [0u8, 255]).unwrap();
     // (rebuilt, files parsed afresh, units compiled, output).
     let build = || {
         let out = rokc(Some(&env), &app, &["build", "-vv"]);
@@ -197,12 +236,12 @@ fn included_file_is_a_build_input() {
     assert_eq!(build().2, "one 2 2\n");
     let (parsed, units, out) = build();
     assert_eq!((parsed, units.len(), out.as_str()), (None, 0, "one 2 2\n"));
-    fs::write(app.join("res/t.txt"), "two").unwrap();
+    put(app.join("src/res/t.txt"), "two").unwrap();
     assert_eq!(
         build(),
         (Some(1), vec!["a".to_owned()], "two 2 2\n".to_owned())
     );
-    fs::write(app.join("res/b.bin"), b"").unwrap();
+    put(app.join("src/res/b.bin"), b"").unwrap();
     let out = rokc(Some(&env), &app, &["build"]);
     assert!(
         text(&out.stderr).contains("expects `[u8; 2]`, found `[u8; 0]`"),
@@ -222,14 +261,14 @@ fn edited_module_recompiles_its_unit_alone() {
         let dir = scratch(&format!("units{opt}"));
         let app = dir.join("app");
         fs::create_dir_all(&app).unwrap();
-        fs::write(
-            app.join("main.rok"),
+        put(
+            app.join("src/main.rok"),
             "mod a;\nmod b;\n\nfn main() -> i32 {\n    let xs: List<i64> = [b::three(), 4];\n    \
              println(f\"{a::twice(xs[0])} {b::greet()} {xs.len()}\");\n    return 0;\n}\n",
         )
         .unwrap();
-        fs::write(
-            app.join("a.rok"),
+        put(
+            app.join("src/a.rok"),
             "pub fn twice(x: i64) -> i64 {\n    x * 2\n}\n",
         )
         .unwrap();
@@ -238,7 +277,7 @@ fn edited_module_recompiles_its_unit_alone() {
         let b = "struct B { v: i64; }\n\nimpl B {\n    fn get(self) -> i64 { self.v }\n}\n\n\
                  pub fn three() -> i64 {\n    B { v: 3 }.get()\n}\n\n\
                  pub fn greet() -> str {\n    let f = |s: str| s;\n    f(\"hi\")\n}\n";
-        fs::write(app.join("b.rok"), b).unwrap();
+        put(app.join("src/b.rok"), b).unwrap();
         // The units compiled, and what the program prints.
         let build = || {
             let out = rokc(Some(&env), &app, &["build", "-vv", opt]);
@@ -262,8 +301,8 @@ fn edited_module_recompiles_its_unit_alone() {
         assert_eq!(out, "6 hi 2\n");
         // A body, and a new struct, method and closure (lowered before
         // `b`'s).
-        fs::write(
-            app.join("a.rok"),
+        put(
+            app.join("src/a.rok"),
             "struct A { v: i64; }\n\nimpl A {\n    fn one(self) -> i64 { self.v }\n}\n\n\
              pub fn extra() -> i64 {\n    let f = |y: i64| y * 2;\n    f(A { v: 1 }.one())\n}\n\n\
              pub fn twice(x: i64) -> i64 {\n    x * 2 + 1\n}\n",
@@ -275,15 +314,15 @@ fn edited_module_recompiles_its_unit_alone() {
             "{opt}"
         );
         // A signature: its callers' unit too.
-        fs::write(
-            app.join("b.rok"),
+        put(
+            app.join("src/b.rok"),
             b.replace("three() -> i64", "three(k: i64) -> i64")
                 .replace("B { v: 3 }.get()", "B { v: 3 }.get() * k"),
         )
         .unwrap();
-        let main = fs::read_to_string(app.join("main.rok")).unwrap();
-        fs::write(
-            app.join("main.rok"),
+        let main = fs::read_to_string(app.join("src/main.rok")).unwrap();
+        put(
+            app.join("src/main.rok"),
             main.replace("b::three()", "b::three(1)"),
         )
         .unwrap();
@@ -292,9 +331,9 @@ fn edited_module_recompiles_its_unit_alone() {
         assert_eq!(out, "7 hi 2\n");
         // A new GC type, then gone again: the type ids are a clean
         // build's.
-        let a = fs::read_to_string(app.join("a.rok")).unwrap();
-        fs::write(
-            app.join("a.rok"),
+        let a = fs::read_to_string(app.join("src/a.rok")).unwrap();
+        put(
+            app.join("src/a.rok"),
             format!(
                 "{a}\npub fn rows() -> i64 {{\n    \
                  let t: List<(str, str, i64, str, i64)> = [(\"x\", \"y\", 1, \"z\", 2)];\n    \
@@ -302,15 +341,15 @@ fn edited_module_recompiles_its_unit_alone() {
             ),
         )
         .unwrap();
-        let main = fs::read_to_string(app.join("main.rok")).unwrap();
-        fs::write(
-            app.join("main.rok"),
+        let main = fs::read_to_string(app.join("src/main.rok")).unwrap();
+        put(
+            app.join("src/main.rok"),
             main.replace("{xs.len()}", "{xs.len()} {a::rows()}"),
         )
         .unwrap();
         assert_eq!(build().1, "7 hi 2 1\n");
-        fs::write(app.join("a.rok"), a).unwrap();
-        fs::write(app.join("main.rok"), main).unwrap();
+        put(app.join("src/a.rok"), a).unwrap();
+        put(app.join("src/main.rok"), main).unwrap();
         assert_eq!(build().1, "7 hi 2\n");
         // The same executable as a clean build's.
         let exe = |name: &str| {
@@ -340,15 +379,15 @@ fn front_end_reuses_parses_and_bodies() {
     let dir = scratch("incr-front");
     let app = dir.join("app");
     fs::create_dir_all(&app).unwrap();
-    fs::write(
-        app.join("main.rok"),
+    put(
+        app.join("src/main.rok"),
         "mod m;\n\nfn pure(x: i64) -> i64 { x }\n\nfn main() {\n    \
          let a = try pure(1) catch _ { 0 };\n    println(f\"{a} {m::f(2)} {m::g()}\");\n}\n",
     )
     .unwrap();
     let m = "pub fn f(x: i64) -> i64 {\n    x * 2\n}\n\n\
              pub fn g() -> str {\n    let h = |s: str| s;\n    h(\"g\")\n}\n";
-    fs::write(app.join("m.rok"), m).unwrap();
+    put(app.join("src/m.rok"), m).unwrap();
     let rokc_with = |vars: &[(&str, &str)], args: &[&str]| {
         let mut cmd = Command::new(ROKC);
         cmd.current_dir(&app)
@@ -407,8 +446,8 @@ fn front_end_reuses_parses_and_bodies() {
     assert_eq!(warnings, clean());
     // A body, with a closure more: that file is parsed and that body
     // lowered again, all else is taken.
-    fs::write(
-        app.join("m.rok"),
+    put(
+        app.join("src/m.rok"),
         m.replace("x * 2", "let k = |y: i64| y + 1;\n    k(x * 2)"),
     )
     .unwrap();
@@ -425,13 +464,13 @@ fn front_end_reuses_parses_and_bodies() {
     let sig = m
         .replace("-> i64 {", "-> i32 {")
         .replace("x * 2", "(x * 2) as i32");
-    fs::write(app.join("m.rok"), &sig).unwrap();
+    put(app.join("src/m.rok"), &sig).unwrap();
     let (n, w, out) = build();
     assert_eq!((n.0, n.1, n.3, bodies - n.2), (files - 1, files, bodies, 3));
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
     // Another item: every body is lowered again.
-    fs::write(
-        app.join("m.rok"),
+    put(
+        app.join("src/m.rok"),
         sig + "\npub struct S {\n    v: i64;\n}\n",
     )
     .unwrap();
@@ -448,13 +487,14 @@ fn incremental_checks_generic_bodies() {
     let Some(env) = setup() else { return };
     let dir = scratch("incr-generic");
     let app = dir.join("app");
-    fs::create_dir_all(&app).unwrap();
+    let src = app.join("src");
+    fs::create_dir_all(&src).unwrap();
     let main = "mod m;\n\nfn main() {\n    println(f\"{m::twice(3)} {m::one()}\");\n}\n";
-    fs::write(app.join("main.rok"), main).unwrap();
+    fs::write(src.join("main.rok"), main).unwrap();
     let ok = "use rok::core::ops::Add;\n\n\
               pub fn twice<T: Add<T, Output = T> + Copy>(x: T) -> T {\n    x + x\n}\n\n\
               pub fn one() -> i64 {\n    1\n}\n";
-    fs::write(app.join("m.rok"), ok).unwrap();
+    fs::write(src.join("m.rok"), ok).unwrap();
     let check = || {
         let out = Command::new(ROKC)
             .current_dir(&app)
@@ -470,7 +510,7 @@ fn incremental_checks_generic_bodies() {
     assert!(check().0, "{}", check().1);
     // The bound gone: the body no longer checks.
     fs::write(
-        app.join("m.rok"),
+        src.join("m.rok"),
         ok.replace(": Add<T, Output = T> + Copy", ""),
     )
     .unwrap();
@@ -478,10 +518,10 @@ fn incremental_checks_generic_bodies() {
     let (pass, err) = check();
     assert!(!pass && err.contains(want), "{err}");
     // Another body edited: still reported.
-    fs::write(app.join("main.rok"), main.replace("one()}", "one() + 1}")).unwrap();
+    fs::write(src.join("main.rok"), main.replace("one()}", "one() + 1}")).unwrap();
     let (pass, err) = check();
     assert!(!pass && err.contains(want), "{err}");
-    fs::write(app.join("m.rok"), ok).unwrap();
+    fs::write(src.join("m.rok"), ok).unwrap();
     let (pass, err) = check();
     assert!(pass, "{err}");
     let out = rokc(Some(&env), &app, &["run", "-q"]);
@@ -502,8 +542,8 @@ fn library_builds_by_units() {
         for d in [&a, &b, &app] {
             fs::create_dir_all(d).unwrap();
         }
-        fs::write(
-            a.join("lib.rok"),
+        put(
+            a.join("src/lib.rok"),
             "mod util;\n\nstatic NAMES: List<str> = [\"x\", \"yy\"];\n\n\
              pub fn total(n: i64) -> i64 {\n    let t: i64 = 0;\n    for i in 0..n {\n        \
              t += util::weight(f\"p{i}\");\n    }\n    t + NAMES.len() as i64\n}\n",
@@ -511,15 +551,15 @@ fn library_builds_by_units() {
         .unwrap();
         let util = "pub fn weight(s: str) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
                     d[s] = s.len() as i64;\n    d.get(s) ?? 0\n}\n";
-        fs::write(a.join("util.rok"), util).unwrap();
-        fs::write(
-            b.join("lib.rok"),
+        put(a.join("src/util.rok"), util).unwrap();
+        put(
+            b.join("src/lib.rok"),
             "pub fn words(n: i64) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
              for i in 0..n {\n        d[f\"w{i}\"] = i;\n    }\n    d.get(\"w2\") ?? 0\n}\n",
         )
         .unwrap();
-        fs::write(
-            app.join("main.rok"),
+        put(
+            app.join("src/main.rok"),
             "use liba::total;\nuse libb::words;\n\nprintln(f\"{total(3)} {words(4)}\");\n",
         )
         .unwrap();
@@ -558,7 +598,11 @@ fn library_builds_by_units() {
         // Built after `liba`: its GC types follow `liba`'s.
         build(&["libb", "--extern", &extern_a]);
         assert_eq!(run(), "8 2\n");
-        fs::write(a.join("util.rok"), util.replace("as i64;", "as i64 + 1;")).unwrap();
+        put(
+            a.join("src/util.rok"),
+            util.replace("as i64;", "as i64 + 1;"),
+        )
+        .unwrap();
         assert_eq!(build(&["liba"]), ["liba::util"], "{opt}");
         assert_eq!(run(), "11 2\n");
         let incremental = fs::read(&lib_a).unwrap();
@@ -578,7 +622,7 @@ fn library_builds_by_units() {
 fn anonymous_file_reuses_its_units() {
     let Some(env) = setup() else { return };
     let dir = scratch("units_anon");
-    fs::write(dir.join("hello.rok"), "println(f\"{[1, 2].len()}\");\n").unwrap();
+    put(dir.join("hello.rok"), "println(f\"{[1, 2].len()}\");\n").unwrap();
     let cache = dir.join("cache");
     let run = || {
         let out = Command::new(ROKC)
@@ -615,9 +659,13 @@ fn new_file_under_debug_info_recompiles_its_importers() {
     let app = scratch("units_g").join("app");
     fs::create_dir_all(&app).unwrap();
     let main = "fn main() -> i32 {\n    println(f\"{a::one()} {b::two()}\");\n    return 0;\n}\n";
-    fs::write(app.join("main.rok"), format!("mod a;\nmod b;\n\n{main}")).unwrap();
-    fs::write(app.join("a.rok"), "pub fn one() -> i64 {\n    1\n}\n").unwrap();
-    fs::write(app.join("b.rok"), "pub fn two() -> i64 {\n    2\n}\n").unwrap();
+    put(
+        app.join("src/main.rok"),
+        format!("mod a;\nmod b;\n\n{main}"),
+    )
+    .unwrap();
+    put(app.join("src/a.rok"), "pub fn one() -> i64 {\n    1\n}\n").unwrap();
+    put(app.join("src/b.rok"), "pub fn two() -> i64 {\n    2\n}\n").unwrap();
     let build = || {
         let out = rokc(Some(&env), &app, &["build", "-vv", "-g"]);
         assert_exit(&out, 0);
@@ -631,10 +679,14 @@ fn new_file_under_debug_info_recompiles_its_importers() {
     };
     assert!(build().len() > 3);
     // `a` < `aa` < `b`: the new file comes between the others.
-    fs::write(app.join("aa.rok"), "pub fn three() -> i64 {\n    3\n}\n").unwrap();
+    put(
+        app.join("src/aa.rok"),
+        "pub fn three() -> i64 {\n    3\n}\n",
+    )
+    .unwrap();
     let main = main.replace("b::two()}", "b::two()} {aa::three()}");
-    fs::write(
-        app.join("main.rok"),
+    put(
+        app.join("src/main.rok"),
         format!("mod a;\nmod aa;\nmod b;\n\n{main}"),
     )
     .unwrap();
@@ -649,15 +701,15 @@ fn very_verbose_lists_files_and_instances() {
     let dir = scratch("very_verbose");
     let app = dir.join("app");
     fs::create_dir_all(&app).unwrap();
-    fs::write(
-        app.join("main.rok"),
+    put(
+        app.join("src/main.rok"),
         "fn id<T>(x: T) -> T {\n    x\n}\n\nprintln(f\"{id(1)}\");\n",
     )
     .unwrap();
     let out = rokc(None, &app, &["emit", "-vv", "--emit=hir"]);
     assert_exit(&out, 0);
     let stderr = text(&out.stderr);
-    assert!(stderr.contains("     Reading main.rok\n"), "{stderr}");
+    assert!(stderr.contains("     Reading src/main.rok\n"), "{stderr}");
     assert!(
         stderr.contains(" Specialized id(x: i32) -> i32\n"),
         "{stderr}"
@@ -671,8 +723,8 @@ fn very_verbose_lists_files_and_instances() {
 #[test]
 fn nested_fn_item_names() {
     let dir = scratch("nested_fn_names");
-    fs::write(
-        dir.join("main.rok"),
+    put(
+        dir.join("src/main.rok"),
         "struct S {}\nimpl S {\n    fn m(self) -> i32 {\n        fn h() -> i32 { 1 }\n        h()\n    }\n}\n\
          fn f() -> i32 {\n    let a = { fn g() -> i32 { 2 } g() };\n    let b = { fn g() -> i32 { 3 } g() };\n    a + b\n}\n\
          fn main() {\n    println(f\"{S {}.m() + f()}\");\n}\n",
@@ -703,12 +755,12 @@ fn lib_package_builds_archive_and_runs_tests() {
     assert!(stdout.contains("test adds ... ok"), "{stdout}");
     assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
 
-    let mut src = fs::read_to_string(lib.join("lib.rok")).unwrap();
+    let mut src = fs::read_to_string(lib.join("src/lib.rok")).unwrap();
     src.push_str(
         "\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn boom() {\n        \
          println(\"from boom\");\n        panic(\"boom\");\n    }\n}\n",
     );
-    fs::write(lib.join("lib.rok"), src).unwrap();
+    put(lib.join("src/lib.rok"), src).unwrap();
     let out = rokc(Some(&env), &lib, &["test"]);
     assert_exit(&out, 1);
     let stdout = text(&out.stdout);
@@ -730,14 +782,14 @@ fn tests_in_private_modules_run() {
     let Some(env) = setup() else { return };
     let dir = scratch("privtests");
     let lib = new_package(&dir, "privlib", true);
-    let mut src = fs::read_to_string(lib.join("lib.rok")).unwrap();
+    let mut src = fs::read_to_string(lib.join("src/lib.rok")).unwrap();
     src.push_str(
         "mod util;\nmod inner {\n    mod deeper {\n        #[test]\n        fn f() {}\n    }\n\
          \x20   #[test]\n    fn g() {\n        panic(\"g\");\n    }\n}\n",
     );
-    fs::write(lib.join("lib.rok"), src).unwrap();
-    fs::write(
-        lib.join("util.rok"),
+    put(lib.join("src/lib.rok"), src).unwrap();
+    put(
+        lib.join("src/util.rok"),
         "mod checks {\n    #[test]\n    fn h() {}\n}\n",
     )
     .unwrap();
@@ -754,8 +806,8 @@ fn tests_in_private_modules_run() {
     }
 
     // User code in a test build keeps the visibility rules.
-    fs::write(
-        lib.join("util.rok"),
+    put(
+        lib.join("src/util.rok"),
         "mod checks {\n    #[test]\n    fn h() {}\n}\npub fn leak() { checks::h(); }\n",
     )
     .unwrap();
@@ -768,7 +820,7 @@ fn tests_in_private_modules_run() {
 fn lone_file_is_an_anonymous_package() {
     let Some(env) = setup() else { return };
     let dir = scratch("anon");
-    fs::write(dir.join("hello.rok"), "println(\"hi\");\n").unwrap();
+    put(dir.join("hello.rok"), "println(\"hi\");\n").unwrap();
     let out = rokc(Some(&env), &dir, &["run", "hello.rok"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "hi\n");
@@ -778,8 +830,8 @@ fn lone_file_is_an_anonymous_package() {
     assert!(dir.join("target/debug/hello").is_file());
 
     // Spec 4.16.8: no file submodules.
-    fs::write(dir.join("m.rok"), "fn f() {}\n").unwrap();
-    fs::write(dir.join("sub.rok"), "mod m;\nprintln(\"x\");\n").unwrap();
+    put(dir.join("m.rok"), "fn f() {}\n").unwrap();
+    put(dir.join("sub.rok"), "mod m;\nprintln(\"x\");\n").unwrap();
     let out = rokc(Some(&env), &dir, &["build", "sub.rok"]);
     assert_exit(&out, 1);
     assert!(
@@ -788,7 +840,7 @@ fn lone_file_is_an_anonymous_package() {
         text(&out.stderr)
     );
 
-    // A directory without main.rok / lib.rok is not a package.
+    // A directory without src/main.rok / src/lib.rok is not a package.
     assert_exit(&rokc(Some(&env), &dir, &["build"]), 1);
 }
 
@@ -796,7 +848,7 @@ fn lone_file_is_an_anonymous_package() {
 fn json_and_colored_diagnostics() {
     let Some(env) = setup() else { return };
     let dir = scratch("diag");
-    fs::write(dir.join("bad.rok"), "let x: i32 = nope;\n").unwrap();
+    put(dir.join("bad.rok"), "let x: i32 = nope;\n").unwrap();
     let out = rokc(
         Some(&env),
         &dir,
@@ -824,8 +876,8 @@ fn fmt_check_and_rewrite() {
     let messy = "fn f() {\n  // keep me\n      let x = 1;   \n\n\n  x;\n}\n";
     let clean = "fn f() {\n    // keep me\n    let x = 1;\n\n    x;\n}\n";
     fs::create_dir_all(dir.join("target")).unwrap();
-    fs::write(dir.join("a.rok"), messy).unwrap();
-    fs::write(dir.join("target/skip.rok"), messy).unwrap();
+    put(dir.join("a.rok"), messy).unwrap();
+    put(dir.join("target/skip.rok"), messy).unwrap();
 
     let out = rokc(None, &dir, &["fmt", "--check"]);
     assert_exit(&out, 1);
@@ -841,13 +893,13 @@ fn fmt_check_and_rewrite() {
     assert_exit(&rokc(None, &dir, &["fmt", "--check", "a.rok"]), 0);
 
     // `.rokon` data files too: re-indented, and checked to be ROKON.
-    fs::write(dir.join("rok.rokon"), "Package {\n  deps: {}, // none\n}\n").unwrap();
+    put(dir.join("rok.rokon"), "Package {\n  deps: {}, // none\n}\n").unwrap();
     assert_exit(&rokc(None, &dir, &["fmt"]), 0);
     assert_eq!(
         fs::read_to_string(dir.join("rok.rokon")).unwrap(),
         "Package {\n    deps: {}, // none\n}\n"
     );
-    fs::write(dir.join("bad.rokon"), "Package { name: x }\n").unwrap();
+    put(dir.join("bad.rokon"), "Package { name: x }\n").unwrap();
     let out = rokc(None, &dir, &["fmt", "--check"]);
     assert_exit(&out, 1);
     assert!(
@@ -864,7 +916,7 @@ fn fmt_check_and_rewrite() {
 fn fmt_writes_lf_and_keeps_literal_crlf() {
     let dir = scratch("fmt-crlf");
     let crlf = "fn f() {\r\n    let s = \"a\r\nb\";\r\n}\r\n";
-    fs::write(dir.join("w.rok"), crlf).unwrap();
+    put(dir.join("w.rok"), crlf).unwrap();
     assert_exit(&rokc(None, &dir, &["fmt", "--check", "w.rok"]), 1);
     assert_exit(&rokc(None, &dir, &["fmt", "w.rok"]), 0);
     assert_eq!(
@@ -897,7 +949,11 @@ fn symbols_follow_the_mangling_scheme() {
         ("b", "println(f\"{geom::ident(5)}\");\n"),
     ] {
         fs::create_dir_all(dir.join(name)).unwrap();
-        fs::write(dir.join(name).join("main.rok"), format!("{ident}{body}")).unwrap();
+        put(
+            dir.join(name).join("src/main.rok"),
+            format!("{ident}{body}"),
+        )
+        .unwrap();
         assert_exit(&rokc(Some(&env), &dir, &["-q", "build", name, "-O0"]), 0);
     }
     // `(pkg hash, typehash)` of each `geom::ident` instance, and every
@@ -990,8 +1046,8 @@ fn sysroot_is_beside_rokc() {
         .join("bin")
         .join(format!("rokc{}", std::env::consts::EXE_SUFFIX));
     fs::copy(ROKC, &rokc_exe).unwrap();
-    fs::write(sys.join("lib/rok/core/lib.rok"), "fn (\n").unwrap();
-    fs::write(dir.join("x.rok"), "let x = 1;\n").unwrap();
+    put(sys.join("lib/rok/core/lib.rok"), "fn (\n").unwrap();
+    put(dir.join("x.rok"), "let x = 1;\n").unwrap();
     let run = |args: &[&str]| {
         Command::new(&rokc_exe)
             .current_dir(&dir)
@@ -1005,7 +1061,7 @@ fn sysroot_is_beside_rokc() {
     let out = run(&["check", "x.rok"]);
     assert_exit(&out, 1);
     assert!(stderr(&out).contains("sys/lib/rok/core/lib.rok"));
-    fs::write(sys.join("lib/rok/core/lib.rok"), "").unwrap();
+    put(sys.join("lib/rok/core/lib.rok"), "").unwrap();
     let out = run(&["run", "x.rok"]);
     assert_exit(&out, 1);
     let err = stderr(&out);
@@ -1030,7 +1086,7 @@ fn sysroot_is_beside_rokc() {
 #[test]
 fn cross_targets_link_from_the_sysroot() {
     let dir = scratch("cross");
-    fs::write(
+    put(
         dir.join("h.rok"),
         "fn main() -> i32 {\n    println(\"ok\");\n    0\n}\n",
     )
@@ -1197,7 +1253,7 @@ fn browser_module_exports_to_js() {
         eprintln!("skipped: no {} (targets/build.sh)", t.display());
         return;
     }
-    fs::write(
+    put(
         dir.join("app.rok"),
         "extern \"C\" { fn rok_gc_collect(); }\n\
          \n\
@@ -1376,25 +1432,25 @@ fn extern_dependencies_are_top_level_names() {
     // `greet` (a library with a submodule and a `pkg::` import) and
     // `app`, which uses it from its root and from a submodule.
     fs::create_dir_all(dir.join("greet")).unwrap();
-    fs::write(
-        dir.join("greet/lib.rok"),
+    put(
+        dir.join("greet/src/lib.rok"),
         "pub mod words;\nuse pkg::words::hello;\n\
          pub fn greet(n: i32) -> i32 { return hello() + n; }\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("greet/words.rok"),
+    put(
+        dir.join("greet/src/words.rok"),
         "pub fn hello() -> i32 { return 40; }\n",
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "mod sub;\nuse greet::greet;\nprintln(f\"{greet(1)} {sub::two()}\");\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("app/sub.rok"),
+    put(
+        dir.join("app/src/sub.rok"),
         "use greet::words::hello;\npub fn two() -> i32 { return hello() + 2; }\n",
     )
     .unwrap();
@@ -1405,11 +1461,17 @@ fn extern_dependencies_are_top_level_names() {
     for f in ["libgreet.a", "greet.rokhir", "greet.fp"] {
         assert!(dir.join("app/target/debug/deps").join(f).is_file(), "{f}");
     }
-    // `--extern=name=path/lib.rok` works too; a missing prebuilt one fails.
+    // `--extern=name=path/src/lib.rok` works too; a missing prebuilt one
+    // fails.
     let out = rokc(
         Some(&env),
         &dir,
-        &["build", "--release", "app", "--extern=greet=greet/lib.rok"],
+        &[
+            "build",
+            "--release",
+            "app",
+            "--extern=greet=greet/src/lib.rok",
+        ],
     );
     assert_exit(&out, 0);
     assert!(dir.join("app/target/release/app").is_file());
@@ -1425,28 +1487,28 @@ fn extern_dependency_is_a_package_boundary() {
     // `pkg::` inside `dep` is `dep`; `dep::..` expression paths work in a
     // submodule; `pub(pkg)` / private items of `dep` stay inside it.
     fs::create_dir_all(dir.join("dep")).unwrap();
-    fs::write(
-        dir.join("dep/lib.rok"),
+    put(
+        dir.join("dep/src/lib.rok"),
         "pub mod words;\nfn secret() -> i32 { return 1; }\n\
          pub(pkg) fn internal() -> i32 { return 2; }\n\
          pub fn via_pkg() -> i32 { return pkg::words::deep() + secret(); }\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("dep/words.rok"),
+    put(
+        dir.join("dep/src/words.rok"),
         "pub fn hello() -> i32 { return 40; }\n\
          pub fn deep() -> i32 { return pkg::internal() * 10; }\n",
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "mod sub;\nfn internal() -> i32 { return 7; }\n\
          println(f\"{sub::two()} {dep::via_pkg()} {pkg::internal()}\");\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("app/sub.rok"),
+    put(
+        dir.join("app/src/sub.rok"),
         "pub fn two() -> i32 { return dep::words::hello() + 2; }\n",
     )
     .unwrap();
@@ -1455,8 +1517,8 @@ fn extern_dependency_is_a_package_boundary() {
     assert_eq!(text(&out.stdout), "42 21 7\n");
 
     fs::create_dir_all(dir.join("bad")).unwrap();
-    fs::write(
-        dir.join("bad/main.rok"),
+    put(
+        dir.join("bad/src/main.rok"),
         "println(f\"{dep::secret()} {dep::internal()}\");\n",
     )
     .unwrap();
@@ -1468,13 +1530,13 @@ fn extern_dependency_is_a_package_boundary() {
 
     // A user module may not take a dependency's name.
     fs::create_dir_all(dir.join("clash")).unwrap();
-    fs::write(
-        dir.join("clash/main.rok"),
+    put(
+        dir.join("clash/src/main.rok"),
         "mod dep;\nprintln(f\"{dep::own()}\");\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("clash/dep.rok"),
+    put(
+        dir.join("clash/src/dep.rok"),
         "pub fn own() -> i32 { return 3; }\n",
     )
     .unwrap();
@@ -1500,8 +1562,8 @@ fn defaults_resolve_in_the_declaring_package() {
     let Some(env) = setup() else { return };
     let dir = scratch("extern-defaults");
     fs::create_dir_all(dir.join("dep")).unwrap();
-    fs::write(
-        dir.join("dep/lib.rok"),
+    put(
+        dir.join("dep/src/lib.rok"),
         "fn one() -> i32 { 1 }\n\
          const LIMIT: i32 = 9;\n\
          pub struct S {\n    pub n: i32 = 5;\n}\n\
@@ -1512,8 +1574,8 @@ fn defaults_resolve_in_the_declaring_package() {
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "fn one() -> i32 { 100 }\nconst LIMIT: i32 = 200;\nstruct S {}\n\
          let c = dep::Cfg {};\n\
          println(f\"{(c.f)()} {c.k} {dep::use_s()} {dep::lim()} {dep::via_one(0)}\");\n",
@@ -1532,8 +1594,8 @@ fn prebuilt_dependency_sums_keep_their_tags() {
     let Some(env) = setup() else { return };
     let dir = scratch("prebuilt-sums");
     fs::create_dir_all(dir.join("dep")).unwrap();
-    fs::write(
-        dir.join("dep/lib.rok"),
+    put(
+        dir.join("dep/src/lib.rok"),
         "pub struct Zebra { pub n: i32; }\n\
          pub fn pick(b: bool) -> List<i32> | Dict<str, i32> {\n\
              if b { let xs: List<i32> = [1, 2, 3]; return xs; }\n\
@@ -1551,8 +1613,8 @@ fn prebuilt_dependency_sums_keep_their_tags() {
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "struct Mine { a: i32; }\n\
          let early: Dict<str, i32> = Dict::new();\n\
          let m = Mine { a: early.len() as i32 };\n\
@@ -1580,8 +1642,8 @@ fn prebuilt_dependency_passes_large_aggregates_by_address() {
     let Some(env) = setup() else { return };
     let dir = scratch("prebuilt-big");
     fs::create_dir_all(dir.join("dep")).unwrap();
-    fs::write(
-        dir.join("dep/lib.rok"),
+    put(
+        dir.join("dep/src/lib.rok"),
         "pub struct Big { pub a: [i64; 12]; pub tag: u8; }\n\
          pub fn make(k: i64) -> Big {\n\
              let b = Big { a: [0; 12], tag: 7 };\n\
@@ -1594,8 +1656,8 @@ fn prebuilt_dependency_passes_large_aggregates_by_address() {
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "fn inc(b: dep::Big) -> dep::Big { let c = b; c.a[11] += 1; c.tag += 1; return c; }\n\
          let b = dep::make(2);\n\
          let c = dep::twice(inc, b);\n\
@@ -1624,8 +1686,8 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let Some(env) = setup() else { return };
     let dir = scratch("prebuilt");
     fs::create_dir_all(dir.join("geo")).unwrap();
-    fs::write(
-        dir.join("geo/lib.rok"),
+    put(
+        dir.join("geo/src/lib.rok"),
         "pub mod shapes;\n\
          static COUNT: Atomic<i32> = Atomic::new(0);\n\
          pub fn bump() -> i32 { return COUNT.fetch_add(1) + 1; }\n\
@@ -1647,8 +1709,8 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
          }\n",
     )
     .unwrap();
-    fs::write(
-        dir.join("geo/shapes.rok"),
+    put(
+        dir.join("geo/src/shapes.rok"),
         "pub trait Shape { fn area(self) -> i32; }\n\
          pub struct Sq { pub s: i32; }\n\
          impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }\n\
@@ -1656,8 +1718,8 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "use geo::shapes::{Shape, sq};\n\
          struct Rect { w: i32; h: i32; }\n\
          impl Shape for Rect { fn area(self) -> i32 { return self.w * self.h; } }\n\
@@ -1689,7 +1751,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "1 2\ncaught bad -3\n18\n");
     // The `.a` names it too; the build used the archive, not the source.
-    fs::write(dir.join("geo/lib.rok"), "this is not rok\n").unwrap();
+    put(dir.join("geo/src/lib.rok"), "this is not rok\n").unwrap();
     let out = rokc(
         Some(&env),
         &dir,
@@ -1736,13 +1798,17 @@ fn stale_rokhir_is_rejected() {
     let Some(env) = setup() else { return };
     let dir = scratch("stale-rokhir");
     fs::create_dir_all(dir.join("dep")).unwrap();
-    fs::write(
-        dir.join("dep/lib.rok"),
+    put(
+        dir.join("dep/src/lib.rok"),
         "pub fn one() -> i32 { return 1; }\n",
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(dir.join("app/main.rok"), "println(f\"{dep::one()}\");\n").unwrap();
+    put(
+        dir.join("app/src/main.rok"),
+        "println(f\"{dep::one()}\");\n",
+    )
+    .unwrap();
     assert_exit(&rokc(Some(&env), &dir, &["build", "dep"]), 0);
     let rokhir = dir.join("dep/target/debug/dep.rokhir");
     let ext = format!("dep={}", rokhir.display());
@@ -1762,7 +1828,7 @@ fn stale_rokhir_is_rejected() {
     let good = fs::read(&rokhir).unwrap();
     let mut bad = good.clone();
     bad[4] = 99; // format version
-    fs::write(&rokhir, &bad).unwrap();
+    put(&rokhir, &bad).unwrap();
     let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &ext]);
     assert_exit(&out, 1);
     let err = text(&out.stderr);
@@ -1775,7 +1841,7 @@ fn stale_rokhir_is_rejected() {
     // header and its length byte) differs.
     let mut bad = good;
     bad[17 + 5] ^= 1; // inside "rokc 0.."
-    fs::write(&rokhir, &bad).unwrap();
+    put(&rokhir, &bad).unwrap();
     let out = rokc(Some(&env), &dir, &["check", "app", "--extern", &ext]);
     assert_exit(&out, 1);
     let err = text(&out.stderr);
@@ -1790,7 +1856,7 @@ fn stale_rokhir_is_rejected() {
 #[test]
 fn check_library_checks_every_body() {
     let dir = scratch("check-lib");
-    fs::write(dir.join("main.rok"), "fn main() {}\n").unwrap();
+    put(dir.join("main.rok"), "fn main() {}\n").unwrap();
     assert_exit(
         &rokc(None, &dir, &["check", "--check-library", "main.rok"]),
         0,
@@ -1812,7 +1878,7 @@ fn emit_expanded_prints_meta_expansions() {
                pub @attribute {\n    @item\n    #[derive(Named)]\n    struct Tag {}\n}\n\
                #[with_tag]\nfn f() -> i32 { 1 }\n\
                println(Tag::type_name());\n";
-    fs::write(dir.join("m.rok"), src).unwrap();
+    put(dir.join("m.rok"), src).unwrap();
     let out = rokc(
         None,
         &dir,
@@ -1833,7 +1899,7 @@ fn emit_expanded_prints_meta_expansions() {
 fn overflow_checks_option_overrides_the_opt_level() {
     let Some(env) = setup() else { return };
     let dir = scratch("ovf");
-    fs::write(
+    put(
         dir.join("ovf.rok"),
         "fn add(a: i32, b: i32) -> i32 { return a + b; }\nprintln(f\"{add(2147483647, 1)}\");\n",
     )
@@ -1850,14 +1916,18 @@ fn dependency_trait_is_not_the_current_package() {
     let dir = scratch("clash");
     // Spec 4.9.6: a dependency's trait ranks with core's unless `use`d.
     fs::create_dir_all(dir.join("dz")).unwrap();
-    fs::write(
-        dir.join("dz/lib.rok"),
+    put(
+        dir.join("dz/src/lib.rok"),
         "pub trait DepZero { fn zero() -> Self; }\n\
          impl DepZero for i32 { fn zero() -> i32 { return 7; } }\n",
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(dir.join("app/main.rok"), "println(f\"{i32::zero()}\");\n").unwrap();
+    put(
+        dir.join("app/src/main.rok"),
+        "println(f\"{i32::zero()}\");\n",
+    )
+    .unwrap();
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dz=dz"]);
     assert_exit(&out, 1);
     assert!(
@@ -1865,8 +1935,8 @@ fn dependency_trait_is_not_the_current_package() {
         "{}",
         text(&out.stderr)
     );
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "use dz::DepZero;\nprintln(f\"{i32::zero()}\");\n",
     )
     .unwrap();
@@ -1882,8 +1952,8 @@ fn meta_block_pkg_names_its_package() {
     let Some(env) = setup() else { return };
     let dir = scratch("meta_pkg");
     fs::create_dir_all(dir.join("dl")).unwrap();
-    fs::write(
-        dir.join("dl/lib.rok"),
+    put(
+        dir.join("dl/src/lib.rok"),
         "pub trait Named { fn nm(self) -> str; }\n\
          pub fn tag(s: str) -> str { f\"<{s}>\" }\n\
          #[impl_derive(Named)]\n\
@@ -1893,8 +1963,8 @@ fn meta_block_pkg_names_its_package() {
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         "use dl::Named;\n\
          fn tag(s: str) -> str { \"wrong\" }\n\
          #[derive(Named)]\nstruct Outer {}\n\
@@ -1914,8 +1984,8 @@ fn dependency_blanket_impl_overlaps_user_impl() {
     let Some(env) = setup() else { return };
     let dir = scratch("overlap_dep");
     fs::create_dir_all(dir.join("dd")).unwrap();
-    fs::write(
-        dir.join("dd/lib.rok"),
+    put(
+        dir.join("dd/src/lib.rok"),
         "pub trait Shape {}\n\
          pub trait Describe { fn d(self) -> i32; }\n\
          impl<T: Shape> Describe for T { fn d(self) -> i32 { return 1; } }\n",
@@ -1926,12 +1996,12 @@ fn dependency_blanket_impl_overlaps_user_impl() {
                 struct Mine<T> { v: T; }\n\
                 impl<T> Describe for Mine<T> { fn d(self) -> i32 { return 2; } }\n\
                 println(f\"{Mine { v: 1 }.d()}\");\n";
-    fs::write(dir.join("app/main.rok"), main).unwrap();
+    put(dir.join("app/src/main.rok"), main).unwrap();
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "dd=dd"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "2\n");
-    fs::write(
-        dir.join("app/main.rok"),
+    put(
+        dir.join("app/src/main.rok"),
         format!("{main}impl<T> Shape for Mine<T> {{}}\n"),
     )
     .unwrap();
@@ -1948,7 +2018,7 @@ fn dependency_blanket_impl_overlaps_user_impl() {
 fn missing_mlir_plugins_are_errors() {
     // Stdlib bare 1.10.3: a missing plugin is a clean error up front.
     let dir = scratch("mlir-plugin");
-    fs::write(dir.join("p.rok"), "println(\"hi\");\n").unwrap();
+    put(dir.join("p.rok"), "println(\"hi\");\n").unwrap();
     let out = rokc(
         None,
         &dir,
@@ -2015,7 +2085,7 @@ fn mlir_plugin_binds_to_rokcs_mlir() {
     let out = cxx.output().unwrap();
     assert_exit(&out, 0);
 
-    fs::write(
+    put(
         dir.join("p.rok"),
         "use rok::bare::mlir::__mlir_op;\n\nfn main() -> i32 {\n    \
          let x: i32 = unsafe { __mlir_op::<\"rokt.answer\", i32>() };\n    \
@@ -2105,12 +2175,12 @@ fn print_target_list_and_spec() {
 fn custom_target_file() {
     let Some(env) = setup() else { return };
     let dir = scratch("custom_target");
-    fs::write(
+    put(
         dir.join("h.rok"),
         "fn main() -> i32 {\n    println(\"ok\");\n    0\n}\n",
     )
     .unwrap();
-    fs::write(dir.join("mine.rokon"), TargetSpec::host().to_rokon()).unwrap();
+    put(dir.join("mine.rokon"), TargetSpec::host().to_rokon()).unwrap();
     for kind in ["llvm-ir", "obj"] {
         let emit = |extra: &[&str], out: &str| {
             let mut args = vec!["-q", "emit", "h.rok", "--emit", kind, "-o", out];
@@ -2151,7 +2221,7 @@ fn custom_target_file() {
         TargetSpec::host()
             .to_rokon()
             .replacen("TargetSpec {", "TargetSpec {\n    tier: 1,", 1);
-    fs::write(dir.join("bad.rokon"), bad).unwrap();
+    put(dir.join("bad.rokon"), bad).unwrap();
     let out = rokc(
         None,
         &dir,
@@ -2171,7 +2241,7 @@ fn custom_target_file() {
 fn pointer_sized_limits_follow_the_target() {
     let Some(env) = setup() else { return };
     let dir = scratch("pointer_width_limits");
-    fs::write(
+    put(
         dir.join("w.rok"),
         "#[export_name(\"t_max\")]\npub fn t_max() -> i64 { usize::MAX as i64 + \
          usize::BITS as i64 + isize::MIN as i64 }\nfn main() {}\n",
@@ -2208,7 +2278,7 @@ fn pointer_sized_limits_follow_the_target() {
 #[test]
 fn cfg_on_impl_members_follows_the_target() {
     let dir = scratch("cfg_impl_member");
-    fs::write(
+    put(
         dir.join("p.rok"),
         "use rok::std::process::Command;\nfn main() {\n    \
          let c = try Command::new(\"true\").spawn() catch _ { return; };\n    \
@@ -2229,16 +2299,16 @@ fn cfg_on_impl_members_follows_the_target() {
 fn non_exhaustive_needs_a_catch_all_across_packages() {
     let dir = scratch("non-exhaustive");
     fs::create_dir_all(dir.join("dep")).unwrap();
-    fs::write(
-        dir.join("dep/lib.rok"),
+    put(
+        dir.join("dep/src/lib.rok"),
         "#[non_exhaustive]\npub enum E { A, B }\n\
          pub fn n(e: E) -> i32 { return match e { E::A => 1, E::B => 2 }; }\n",
     )
     .unwrap();
     fs::create_dir_all(dir.join("app")).unwrap();
     let main = |arms: &str| {
-        fs::write(
-            dir.join("app/main.rok"),
+        put(
+            dir.join("app/src/main.rok"),
             format!("use dep::E;\nlet v = match E::A {{ {arms} }};\nprintln(f\"{{v}}\");\n"),
         )
         .unwrap();
@@ -2264,7 +2334,7 @@ fn non_exhaustive_needs_a_catch_all_across_packages() {
 fn o3_compiles_std_from_source() {
     let Some(env) = setup() else { return };
     let dir = scratch("o3-std");
-    fs::write(dir.join("main.rok"), "println(\"hi\");\n").unwrap();
+    put(dir.join("main.rok"), "println(\"hi\");\n").unwrap();
     for (opt, std) in [("-O2", "Std prebuilt ("), ("-O3", "Std from source")] {
         let out = rokc(Some(&env), &dir, &["run", opt, "-v", "main.rok"]);
         assert_exit(&out, 0);
@@ -2292,7 +2362,7 @@ fn profile_guided_optimization_round_trip() {
              fn main() {{\n    let s: i64 = 0;\n    for i in 0i64..100000i64 {{\n        s += classify(i);{extra}\n    }}\n    \
              println(f\"{{s}}\");\n}}\n"
         );
-        fs::write(dir.join("main.rok"), src).unwrap();
+        put(dir.join("src/main.rok"), src).unwrap();
     };
     main("");
     let refused = |args: &[&str], code: i32, msg: &str| {
@@ -2423,7 +2493,7 @@ const PGO_MAIN: &str = "fn classify(n: i64) -> i64 {\n    if n % 7 == 0 { 3 } el
 fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
     let dir = scratch("pgo-cs");
     let max = 1u64 << 63;
-    fs::write(
+    put(
         dir.join("big.proftext"),
         format!("# IR level Instrumentation Flag\n:ir\nhot\n1\n2\n{max}\n5\n\ncold\n2\n1\n7\n"),
     )
@@ -2476,7 +2546,7 @@ fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
         eprintln!("skipped: no {} (targets/build.sh)", rt.display());
         return;
     }
-    fs::write(dir.join("main.rok"), PGO_MAIN).unwrap();
+    put(dir.join("src/main.rok"), PGO_MAIN).unwrap();
     let build = |args: &[&str]| {
         let out = rokc(Some(&env), &dir, &[&["-q", "build", "-O2"], args].concat());
         assert_exit(&out, 0);
@@ -2537,7 +2607,7 @@ fn profile_guided_optimization_on_wasm32_wasi() {
         eprintln!("skipped: no wasm32-wasi profile runtime (targets/build.sh)");
         return;
     }
-    fs::write(dir.join("main.rok"), PGO_MAIN).unwrap();
+    put(dir.join("src/main.rok"), PGO_MAIN).unwrap();
     let build = |args: &[&str]| {
         let base = ["-q", "build", "--target", "wasm32-wasi", "-O2"];
         let out = rokc(None, &dir, &[&base[..], args].concat());
@@ -2575,19 +2645,19 @@ fn rok_cc_links_wit_components() {
         return;
     }
     let dir = scratch("rok-cc-wit");
-    fs::write(
+    put(
         dir.join("calc.wit"),
         "package test:calc;\n\nworld calc {\n    export add: func(a: s32, b: s32) -> s32;\n}\n",
     )
     .unwrap();
-    fs::write(
+    put(
         dir.join("main.rok"),
         "ffi::wit::export { \"calc.wit\" }\n\n#[wit::export]\nfn add(a: i32, b: i32) -> i32 { a + b }\n",
     )
     .unwrap();
     let cc = dir.join("cc.sh");
     let args = dir.join("args");
-    fs::write(
+    put(
         &cc,
         format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nexit 1\n",

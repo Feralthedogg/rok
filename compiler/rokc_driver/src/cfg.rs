@@ -2,8 +2,9 @@
 //!
 //! The cfg environment is the `--cfg` flags plus the target's keys
 //! (`target_os`, `target_arch`, `target_pointer_width`, `target_family`,
-//! `target_endian`, `target_env`); an item (or impl member) whose `#[cfg(p)]` is false
-//! is dropped, an excluded inline `mod` with its whole subtree.
+//! `target_endian`, `target_env`); an item whose `#[cfg(p)]` is false
+//! is dropped, an excluded inline `mod` with its whole subtree. Members
+//! and statements are dropped by the parser as they are read.
 
 use rokc_ast::{Attribute, Item};
 
@@ -49,15 +50,6 @@ pub fn filter_items(items: Vec<Item>, env: &CfgEnv) -> Vec<Item> {
                     m.items = Some(filter_items(inner, env));
                 }
                 Item::Mod(m)
-            }
-            // Methods and consts carry their own `#[cfg]` (`fn pidfd`).
-            Item::Impl(mut i) => {
-                i.items.retain(|it| match it {
-                    rokc_ast::ImplItem::Method(f) => attrs_pass(&f.attrs, env),
-                    rokc_ast::ImplItem::Const(c) => attrs_pass(&c.attrs, env),
-                    rokc_ast::ImplItem::AssocType { .. } => true,
-                });
-                Item::Impl(i)
             }
             other => other,
         };

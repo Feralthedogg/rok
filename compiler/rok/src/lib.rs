@@ -47,7 +47,8 @@ usage: rok [options] <command> [args]
        rok [options]                same as `rok repl`
 
 packages:
-  new [--lib|--bin] <name>     create a package (with rok.rokon)
+  new [--lib|--bin] <name>     create a package (src/main.rok or src/lib.rok,
+                               rok.rokon)
   init [--lib|--bin] [dir]     make a directory a package
   add <name>[@<req>] [--registry <url>]
                                add a stone (default: ^ the newest version)
@@ -104,7 +105,7 @@ compiler commands (rokc, with the dependencies; see `rokc help`):
 
   The path, if any, comes first after the command; it picks the project
   (or script) whose dependencies and `lints` apply. A .rok file inside a
-  project (the nearest directory above it with main.rok, lib.rok or
+  project (the nearest directory above it with src/main.rok, src/lib.rok or
   rok.rokon) uses that project's.
 
   feature options (rok.rokon's `features`; before any `--`):
@@ -380,14 +381,14 @@ fn usage(msg: &str) -> i32 {
 }
 
 /// The package directory `start` belongs to: the nearest directory at
-/// or above it holding `main.rok`, `lib.rok` or `rok.rokon`.
+/// or above it holding `src/main.rok`, `src/lib.rok` or `rok.rokon`.
 fn package_dir(start: &Path) -> Option<PathBuf> {
     let abs = std::path::absolute(start).ok()?;
     let from = if abs.is_file() { abs.parent()? } else { &abs };
     from.ancestors()
         .find(|d| {
-            d.join("main.rok").is_file()
-                || d.join("lib.rok").is_file()
+            d.join("src/main.rok").is_file()
+                || d.join("src/lib.rok").is_file()
                 || manifest::find(d).is_some()
         })
         .map(Path::to_path_buf)
@@ -563,8 +564,8 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
         && !stdin
     {
         return Err(format!(
-            "not inside a package: no main.rok or lib.rok in {} or above (make one with `rok new \
-             <name>` or `rok init`, or name a .rok file)",
+            "not inside a package: no src/main.rok or src/lib.rok in {} or above (make one with \
+             `rok new <name>` or `rok init`, or name a .rok file)",
             std::path::absolute(start)
                 .unwrap_or_else(|_| start.to_path_buf())
                 .display()
@@ -717,9 +718,9 @@ fn adds() {
 }
 ";
 
-/// `rok new [--lib|--bin] <name>`: a new directory with `main.rok` (or
-/// `lib.rok`) and `rok.rokon`. `init [--lib|--bin] [dir]`: the directory
-/// may exist, but not its root file.
+/// `rok new [--lib|--bin] <name>`: a new directory with `src/main.rok`
+/// (or `src/lib.rok`) and `rok.rokon`. `init [--lib|--bin] [dir]`: the
+/// directory may exist, but not its root file.
 fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
     let mut lib = false;
     let mut pos = Vec::new();
@@ -739,7 +740,7 @@ fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
         _ => return Err(format!("usage: rok {cmd} [--lib | --bin] <name>")),
     };
     if init {
-        for f in ["main.rok", "lib.rok"] {
+        for f in ["src/main.rok", "src/lib.rok"] {
             if dir.join(f).exists() {
                 return Err(format!("`{}` already exists", dir.join(f).display()));
             }
@@ -774,11 +775,12 @@ fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
         manifest::check_name(dir_name)?;
         dir_name.to_owned()
     };
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).map_err(|e| format!("{}: {e}", src.display()))?;
     let (file, text) = if lib {
-        ("lib.rok", LIB_TEMPLATE)
+        ("src/lib.rok", LIB_TEMPLATE)
     } else {
-        ("main.rok", MAIN_TEMPLATE)
+        ("src/main.rok", MAIN_TEMPLATE)
     };
     let root = dir.join(file);
     std::fs::write(&root, text).map_err(|e| format!("{}: {e}", root.display()))?;
@@ -991,8 +993,8 @@ fn manifest_to_edit(g: &Global) -> Result<(PathBuf, bool), String> {
         return Ok((dir.join(MANIFEST), true));
     }
     let dir = package_dir(Path::new(".")).ok_or(
-        "not inside a package (no main.rok, lib.rok or rok.rokon here or above); run `rok init`, \
-         or pass `--env <name>`",
+        "not inside a package (no src/main.rok, src/lib.rok or rok.rokon here or above); run \
+         `rok init`, or pass `--env <name>`",
     )?;
     Ok((
         manifest::find(&dir).unwrap_or_else(|| dir.join(MANIFEST)),

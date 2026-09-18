@@ -32,10 +32,13 @@ use super::expr::AnyDispatch;
 use super::{AliasUse, Env, FnSig, MethodOrFn, RefOut, mangle_inst, ty_mangle};
 use crate::{EnumId, HirEnumDef, HirFunction, HirStructDef, HirTy, StructId};
 
-/// Where an embedder keeps units between builds.
+/// Where an embedder keeps units between builds, and the errors of
+/// generic body checks (`bounds`).
 pub trait BodyCache {
     fn get(&self, key: u64) -> Option<Unit>;
     fn put(&self, key: u64, unit: &Unit);
+    fn get_check(&self, key: u64) -> Option<Vec<RokDiagnostic>>;
+    fn put_check(&self, key: u64, errors: &[RokDiagnostic]);
 }
 
 /// A `BodyCache` for `HirInput::bodies`.
@@ -469,6 +472,42 @@ impl<'a> Incr<'a> {
         let k = table.partition_point(|(at, _)| *at < end);
         let found = *table.get(k)?;
         (!exact || found.0 == end).then_some(found)
+    }
+
+    /// The errors of checking generic body `f` (`owner`: its impl's
+    /// target or its trait), from the store or from `check`. They follow
+    /// from the interface and the body (positions in), so they are kept
+    /// unless one points outside the body.
+    pub(super) fn checked(
+        &self,
+        env: &Env<'_>,
+        f: &FnDef,
+        owner: &[u8],
+        check: impl FnOnce() -> Vec<RokDiagnostic>,
+    ) -> Vec<RokDiagnostic> {
+        let mut e = Enc::new(true);
+        f.enc(&mut e);
+        let path = env.sources.path(f.span.file).unwrap_or_default();
+        let key = [b"check".as_slice(), path.as_bytes(), owner, &e.buf]
+            .iter()
+            .fold(self.interface, |h, part| rokc_core::hash::fast_add(h, part));
+        if let Some(errors) = self.cache.get_check(key) {
+            return errors;
+        }
+        let errors = check();
+        let inside =
+            |s: &Span| s.file == f.span.file && s.start >= f.span.start && s.end <= f.span.end;
+        let local = errors.iter().all(|d| {
+            d.primary
+                .iter()
+                .map(|l| &l.span)
+                .chain(d.secondary.iter().map(|l| &l.span))
+                .all(inside)
+        });
+        if local {
+            self.cache.put_check(key, &errors);
+        }
+        errors
     }
 
     /// Lower declaration `i` (not a stub): replayed from its unit, or

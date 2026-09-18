@@ -1,16 +1,21 @@
 //! Generic bodies checked at their definition (spec 2.10.9).
 //!
-//! Each template (generic fn, generic impl method, generic method) is
-//! lowered once with its type parameters bound to opaque
-//! `HirTy::Param`s. A `Param` has only what its bounds give — with
-//! their supertraits, defaults filled, associated types (bound by the
-//! bound or opaque projections) and `where` clauses: methods and
-//! static calls resolve through the bound traits' declarations
-//! (`bound_methods`), operators through the operator trait's bound,
-//! trait questions (`has_impl`) through the bound list. Instances over
-//! a `Param` are signatures only (`mono::var_instance`), as for `let`
-//! inference variables, so a check lowers its own body alone. Then
-//! everything the lowering made is rolled back; only its errors stay.
+//! Each generic body (generic fn, generic impl method, generic method,
+//! trait default method) is lowered once with its type parameters (and
+//! a default's `Self`) bound to opaque `HirTy::Param`s. A `Param` has
+//! only what its bounds give — with their supertraits, defaults
+//! filled, associated types (bound by the bound or opaque projections)
+//! and `where` clauses: methods and static calls resolve through the
+//! bound traits' declarations (`bound_methods`), operators through the
+//! operator trait's bound, trait questions (`has_impl`) through the
+//! bound list. Instances over a `Param` are signatures only
+//! (`mono::var_instance`), as for `let` inference variables, so a check
+//! lowers its own body alone. Then everything the lowering made is
+//! undone (functions, type instances, ids, recorded uses); only its
+//! errors stay. A check thus adds nothing to the build but its errors,
+//! and an incremental build takes them from the store
+//! (`incr::Incr::checked`) while the interface and the body are
+//! unchanged.
 //!
 //! Monomorphization stays the code path. An instance of a template
 //! that failed its check reports nothing more (`failed`). Implicit
@@ -356,7 +361,11 @@ fn implicit(f: &FnDef) -> bool {
 /// Check every generic body whose module `wanted` picks: generic fns,
 /// generic impl methods and generic methods, and trait default methods
 /// (once, with an opaque `Self`; a copy in an impl is not checked).
-pub(super) fn check_all(env: &Env<'_>, wanted: impl Fn(&str) -> bool) {
+pub(super) fn check_all(
+    env: &Env<'_>,
+    incr: Option<&super::incr::Incr<'_>>,
+    wanted: impl Fn(&str) -> bool,
+) {
     let defaults: std::collections::HashSet<Span> = env
         .trait_info
         .values()
@@ -394,7 +403,21 @@ pub(super) fn check_all(env: &Env<'_>, wanted: impl Fn(&str) -> bool) {
             _ => Vec::new(),
         };
         let generics: Vec<_> = generics.into_iter().chain(&f.generics.params).collect();
-        check_one(env, f, module, &generics, &self_of);
+        let mut owner = rokc_core::codec::Enc::new(true);
+        match &self_of {
+            SelfOf::None => {}
+            SelfOf::Impl(t) => rokc_core::codec::Codec::enc(*t, &mut owner),
+            SelfOf::Trait(k) => owner.buf.extend_from_slice(k.as_bytes()),
+        }
+        let run = || check_one(env, f, module.clone(), &generics, &self_of);
+        let errors = match incr {
+            Some(incr) => incr.checked(env, f, &owner.buf, run),
+            None => run(),
+        };
+        if !errors.is_empty() {
+            env.sink.failed.borrow_mut().insert(f.span);
+            env.sink.diagnostics.borrow_mut().extend(errors);
+        }
     }
 }
 
@@ -407,15 +430,77 @@ enum SelfOf<'a> {
     Trait(&'a str),
 }
 
+/// What a check may leave in the shared state, to be undone after it.
+struct Snapshot {
+    next_id: u32,
+    structs: usize,
+    enums: usize,
+    params: usize,
+    infer_vars: usize,
+    name_diags: usize,
+    alias_uses: usize,
+    unknown: std::collections::HashSet<String>,
+    /// Return types inferred so far: one inferred during the check may
+    /// name a type instance the check made.
+    inferred_ret: HashMap<FunctionId, Option<HirTy>>,
+    recursive_ret: usize,
+    tentative_ret: usize,
+}
+
+impl Snapshot {
+    fn take(env: &Env<'_>) -> Self {
+        let sink = &env.sink;
+        Self {
+            next_id: sink.next_id.get(),
+            structs: env.defs.structs.borrow().len(),
+            enums: env.defs.enums.borrow().len(),
+            params: sink.params.borrow().len(),
+            infer_vars: sink.infer_vars.borrow().len(),
+            name_diags: env.names.diags.borrow().len(),
+            alias_uses: env.names.alias_uses.borrow().len(),
+            unknown: env.names.unknown_spans.borrow().keys().cloned().collect(),
+            inferred_ret: sink.inferred_ret.borrow().clone(),
+            recursive_ret: sink.recursive_ret.borrow().len(),
+            tentative_ret: sink.tentative_ret.borrow().len(),
+        }
+    }
+
+    /// Back to the snapshot (after `LowerCtx::rollback`); the name
+    /// diagnostics reported since.
+    fn restore(self, env: &Env<'_>) -> Vec<rokc_diagnostic::RokDiagnostic> {
+        let sink = &env.sink;
+        let old = |id: &FunctionId| id.0 < self.next_id;
+        sink.fn_origin.borrow_mut().retain(|id, _| old(id));
+        sink.track_caller.borrow_mut().retain(old);
+        *sink.inferred_ret.borrow_mut() = self.inferred_ret;
+        sink.recursive_ret.borrow_mut().truncate(self.recursive_ret);
+        sink.tentative_ret.borrow_mut().truncate(self.tentative_ret);
+        sink.next_id.set(self.next_id);
+        env.defs.truncate(self.structs, self.enums);
+        sink.params.borrow_mut().truncate(self.params);
+        sink.infer_vars.borrow_mut().truncate(self.infer_vars);
+        sink.const_names.borrow_mut().clear();
+        sink.assumed.borrow_mut().clear();
+        env.names.alias_uses.borrow_mut().truncate(self.alias_uses);
+        env.names
+            .unknown_spans
+            .borrow_mut()
+            .retain(|k, _| self.unknown.contains(k));
+        env.names.diags.borrow_mut().split_off(self.name_diags)
+    }
+}
+
 /// Lower body `f` with `generics` (the impl's, or the trait's, then its
-/// own) as opaque type parameters; keep its errors only.
+/// own) as opaque type parameters: its errors. The shared state is left
+/// as it was.
 fn check_one(
     env: &Env<'_>,
     f: &FnDef,
     module: String,
     generics: &[&rokc_ast::GenericParam],
     self_of: &SelfOf<'_>,
-) {
+) -> Vec<rokc_diagnostic::RokDiagnostic> {
+    let snapshot = Snapshot::take(env);
     let mut subst = TySubst::new();
     let mut consts = Vec::new();
     for gp in generics {
@@ -426,7 +511,6 @@ fn check_one(
             rokc_ast::GenericParam::Const { name, ty } => consts.push((name, ty)),
         }
     }
-    env.sink.const_names.borrow_mut().clear();
     for (name, ty) in consts {
         let p = match LowerCtx::new(env, &subst, None, f.span).resolve_ast_ty(ty) {
             HirTy::Prim(p) => p,
@@ -502,17 +586,10 @@ fn check_one(
     let id = FunctionId(env.sink.next_id.get());
     env.sink.next_id.set(id.0 + 1);
     mono::lower_fn_inner(env, f, id, f.name.clone(), self_hir, module, &subst);
-    let errors: Vec<_> = ctx
-        .rollback(&mark)
-        .into_iter()
-        .filter(rokc_diagnostic::RokDiagnostic::is_error)
-        .collect();
-    if !errors.is_empty() {
-        env.sink.failed.borrow_mut().insert(f.span);
-        env.sink.diagnostics.borrow_mut().extend(errors);
-    }
-    env.sink.const_names.borrow_mut().clear();
-    env.sink.assumed.borrow_mut().clear();
+    let mut errors = ctx.rollback(&mark);
+    errors.extend(snapshot.restore(env));
+    errors.retain(rokc_diagnostic::RokDiagnostic::is_error);
+    errors
 }
 
 /// Does a `where` clause of the body being checked give `ty` `want`?

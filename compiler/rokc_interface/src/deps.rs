@@ -28,7 +28,7 @@ pub struct DepBuild<'a> {
 }
 
 impl DepBuild<'_> {
-    /// `externs` with every source dependency (a `lib.rok`) replaced by
+    /// `externs` with every source dependency (a `src/lib.rok`) replaced by
     /// its prebuilt `<name>.rokhir`; dependency errors are reported.
     pub fn prebuild(
         &self,
@@ -119,7 +119,13 @@ impl DepBuild<'_> {
         before: &[(String, PathBuf)],
     ) -> Result<(Vec<PathBuf>, String), String> {
         if !self.quiet {
+            // The package directory, above `src/lib.rok`.
             let dir = root.parent().unwrap_or(root);
+            let dir = if dir.ends_with("src") {
+                dir.parent().unwrap_or(dir)
+            } else {
+                dir
+            };
             eprintln!("   Compiling {name} ({})", dir.display());
         }
         let mut s = Session::new();

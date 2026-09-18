@@ -874,7 +874,10 @@ impl<'a> FnBuilder<'a> {
                         args: args.iter().map(|a| self.lower_expr_to_operand(a)).collect(),
                         arg_tys: args.iter().map(|a| self.ty(&a.ty)).collect(),
                         ret_ty: self.ty(ret_ty),
-                        abi: Abi::C { variadic: false },
+                        abi: Abi::C {
+                            variadic: false,
+                            system: false,
+                        },
                     };
                 }
                 self.call_fn_value(callee_op, args, ret_ty)

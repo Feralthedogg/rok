@@ -63,7 +63,7 @@ pub struct Context {
 #[derive(Clone)]
 pub struct Resolved {
     pub name: String,
-    /// The package's `lib.rok`.
+    /// The package's `src/lib.rok`.
     pub root: PathBuf,
     /// Its enabled features, sorted.
     pub features: Vec<String>,
@@ -510,10 +510,10 @@ impl Resolver<'_> {
                     dep.name
                 ));
             }
-            let root = dir.join("lib.rok");
+            let root = dir.join("src/lib.rok");
             if !root.is_file() {
                 return Err(format!(
-                    "dependency `{}` ({id}) is not a library package: no lib.rok in {}",
+                    "dependency `{}` ({id}) is not a library package: no src/lib.rok in {}",
                     dep.name,
                     dir.display()
                 ));

@@ -1,0 +1,74 @@
+// spec: 008.06-calling-convention §8.6.6
+// gc-stress: 3
+// expect-exit: 0
+// expect-stdout:
+// 300 0 100 4096
+// 7 32768 16384 255
+// 3 9 12 3
+// 107 1 0 122 101
+// 6 6 [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+// 8.6.6: an aggregate over 64 bytes moves through memory (copies,
+// fields, arguments, results, GC objects, statics), never as one SSA
+// value: a struct holding a 4 KiB array, a 16 KiB static, a 128-byte
+// byte string local (one copy from constant data).
+struct Buf {
+    data: [u8; 4096];
+    len: usize;
+    name: str;
+}
+
+struct Pair { a: Buf; b: Buf; }
+
+static BIG: [u8; 16384] = [7u8; 16384];
+
+fn fill(b: Buf, v: u8) -> Buf {
+    let c = b;
+    for i in 0..c.len {
+        c.data[i] = v;
+    }
+    c
+}
+
+fn sum(b: Buf) -> u64 {
+    let s = 0u64;
+    for i in 0..b.len {
+        s += b.data[i] as u64;
+    }
+    s
+}
+
+fn make(n: usize) -> Buf { Buf { data: [0u8; 4096], len: n, name: f"buf{n}" } }
+
+fn total(xs: [u8; 16384]) -> u64 {
+    let s = 0u64;
+    for x in xs { s += x as u64; }
+    s
+}
+
+fn main() {
+    let b = make(100);
+    let c = fill(b, 3);
+    let d = c;
+    println(f"{sum(d)} {sum(b)} {d.len} {d.data.len()}");
+
+    println(f"{BIG[100]} {total(BIG) / 2u64 - 8192u64 * 6u64 + 8192u64 * 3u64} {BIG.len()} {[255u8; 100][99]}");
+
+    let p = Pair { a: fill(make(3), 1), b: fill(make(3), 3) };
+    let q = p;
+    q.a = fill(q.b, 4);
+    println(f"{sum(p.a)} {sum(p.b)} {sum(q.a)} {q.b.len}");
+
+    let s = b"klmnopqrstuvwxyzklmnopqrstuvwxyzklmnopqrstuvwxyzklmnopqrstuvwxyzklmnopqrstuvwxyzklmnopqrstuvwxyzklmnopqrstuvwxyzklmnopqrstuvwxyz";
+    let t = s;
+    t[1] = 0u8;
+    println(f"{s[0]} {s[1] - 107u8} {t[1]} {s[127]} {make(1).name.len() + 97}");
+
+    let bufs: List<Buf> = [];
+    for i in 0..6 {
+        bufs.push(make(i as usize + 1));
+    }
+    let last = bufs[5];
+    let xs: List<[u64; 10]> = [[1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10]];
+    println(f"{bufs.len()} {last.len} {xs[0]:?}");
+}

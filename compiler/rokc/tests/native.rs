@@ -693,18 +693,18 @@ fn elf_debug_info_of_several_objects() {
         return;
     }
     let dir = scratch("elf-debug");
-    fs::create_dir_all(dir.join("greet")).unwrap();
+    fs::create_dir_all(dir.join("greet/src")).unwrap();
     fs::write(
-        dir.join("greet/lib.rok"),
+        dir.join("greet/src/lib.rok"),
         "pub fn greet(n: i32) -> i32 {\n    let s = 0;\n    for i in 0..n {\n        \
          if i % 2 == 0 {\n            let d = i * 3;\n            s += d;\n        } else {\n            \
          let e = i + 7;\n            s -= e;\n        }\n    }\n    return s;\n}\n\
          pub fn unused(n: i32) -> i32 { return n * 9; }\n",
     )
     .unwrap();
-    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::create_dir_all(dir.join("app/src")).unwrap();
     fs::write(
-        dir.join("app/main.rok"),
+        dir.join("app/src/main.rok"),
         "use greet::greet;\nstruct Node { id: i32; kids: List<Node>; }\n\
          enum Shape { Circle(f64), Rect(i32, i32), Empty }\n\
          fn kids(k: i32) -> i64 {\n    let n = Node { id: k, kids: [] };\n    \
@@ -740,7 +740,7 @@ fn elf_debug_info_of_several_objects() {
             .split("DW_TAG_subprogram")
             .find(|s| s.contains("(\"greet::greet\")"))
             .unwrap_or_else(|| panic!("{t} {opt}: no `greet` subprogram:\n{info}"));
-        assert!(sub.contains("greet/lib.rok\")"), "{t} {opt}: {sub}");
+        assert!(sub.contains("greet/src/lib.rok\")"), "{t} {opt}: {sub}");
         // Optimized code keeps no dead locals (nor their types).
         let o0 = opt == "-O0";
         assert!(
@@ -769,9 +769,9 @@ fn elf_debug_info_of_several_objects() {
         let lines = text(&lines.stdout);
         // Directories and names are separate entries (LLVM's DWARF 4
         // leaves the unit's own directory implicit).
-        for f in ["/greet\"", "/app\"", "\"lib.rok\"", "\"main.rok\""] {
+        for f in ["/greet/src\"", "/app/src\"", "\"lib.rok\"", "\"main.rok\""] {
             assert!(
-                !o0 && f == "/app\"" || lines.contains(f),
+                !o0 && f == "/app/src\"" || lines.contains(f),
                 "{t} {opt}: no line table names {f}"
             );
         }
@@ -793,16 +793,16 @@ fn unused_dependency_code_is_dropped() {
     }
     let targets = Path::new(ROKC).parent().unwrap().join("../lib/rok/targets");
     let dir = scratch("gc-sections");
-    fs::create_dir_all(dir.join("dep")).unwrap();
+    fs::create_dir_all(dir.join("dep/src")).unwrap();
     fs::write(
-        dir.join("dep/lib.rok"),
+        dir.join("dep/src/lib.rok"),
         "pub fn used() -> str {\n    return \"marker-of-used-code\";\n}\n\n\
          pub fn unused() -> str {\n    return \"marker-of-unused-code\";\n}\n",
     )
     .unwrap();
-    fs::create_dir_all(dir.join("app")).unwrap();
+    fs::create_dir_all(dir.join("app/src")).unwrap();
     fs::write(
-        dir.join("app/main.rok"),
+        dir.join("app/src/main.rok"),
         "use dep::used;\nprintln(used());\n",
     )
     .unwrap();
@@ -1673,8 +1673,8 @@ fn windows_executables() {
     let dir = scratch("windows");
     fs::write(dir.join("side.c"), WIN_C_SIDE).unwrap();
     let pkg = dir.join("winpkg");
-    fs::create_dir_all(&pkg).unwrap();
-    fs::write(pkg.join("main.rok"), WIN_ROK_SIDE).unwrap();
+    fs::create_dir_all(pkg.join("src")).unwrap();
+    fs::write(pkg.join("src/main.rok"), WIN_ROK_SIDE).unwrap();
     let wine = std::env::var_os("ROK_TEST_WINE").filter(|w| !w.is_empty());
     for (triple, machine, builds) in [
         ("x86_64-pc-windows-msvc", 0x8664, &["-O0", "-O2"][..]),

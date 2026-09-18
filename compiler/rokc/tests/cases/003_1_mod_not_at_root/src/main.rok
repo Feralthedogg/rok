@@ -1,0 +1,9 @@
+// spec: §0.3.1 §5.4.4
+// expect-error: module `helper` body not found at
+// expect-error: helper.rok`
+
+// `mod helper;` maps to `src/helper.rok`; the `helper.rok` beside
+// `src/` is not looked at.
+mod helper;
+
+println(f"{helper::one()}");

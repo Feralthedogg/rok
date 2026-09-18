@@ -694,6 +694,16 @@ pub(crate) fn clear_type_names() {
     TYPE_NAMES.with(|n| *n.borrow_mut() = [Vec::new(), Vec::new()]);
 }
 
+/// Forget the names of the structs and enums from `structs` / `enums`
+/// on (their ids are handed out again).
+pub(crate) fn truncate_type_names(structs: usize, enums: usize) {
+    TYPE_NAMES.with(|n| {
+        let mut n = n.borrow_mut();
+        n[0].truncate(structs);
+        n[1].truncate(enums);
+    });
+}
+
 /// Name struct (or `enum_`) `id`: its full path, and a generic
 /// instance's arguments by their own stable keys. Called when the id is
 /// handed out, before any type names it.

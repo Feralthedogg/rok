@@ -86,8 +86,8 @@ pub fn item(pkg: &str, qualified: &str, typehash: &str) -> String {
 /// A string literal's global, named by its content: the same literal
 /// has the same name in every module, so a REPL cell's function text
 /// compares equal to an earlier cell's (`crate::repl`).
-pub fn str_global(text: &str) -> String {
-    format!("rok.str.{}", &hex(&sha256(text.as_bytes()))[..16])
+pub fn str_global(bytes: &[u8]) -> String {
+    format!("rok.str.{}", &hex(&sha256(bytes))[..16])
 }
 
 /// 8-hex-digit package hash over the package's content.

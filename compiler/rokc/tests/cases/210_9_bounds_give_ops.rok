@@ -8,6 +8,7 @@
 // 3 sides, 4 sides
 // 101 3
 // 6 9
+// [5, 6]
 // i64 8 true true
 // done
 
@@ -82,6 +83,8 @@ fn total<I: Iterator<Item = i32>>(it: I) -> i32 {
 fn first_of<B: Bag>(b: B) -> B::Elem { b.first() }
 fn shown<B: Bag>(b: B) -> str where B::Elem: Display { f"{b.first()}" }
 fn zero_of<T: Default>() -> T { T::default() }
+// A clause on another type than a parameter holds in the body.
+fn listed<T>(xs: List<T>) -> str where List<T>: Debug { f"{xs:?}" }
 
 // Associated consts and const parameters.
 fn sides<T: Sides>(x: T) -> i32 { T::SIDES }
@@ -109,6 +112,7 @@ fn main() {
     println(f"{sides(Tri)} sides, {sides(Sq)} sides");
     println(f"{last([1, 101])} {pad([1, 2], 3)[2]}");
     println(f"{sum3(1, 2, 3)} {last(pad([4, 5, 6, 7, 8], 9))}");
+    println(listed([5, 6]));
     println(f"{kind(1i64)} {boxed(2) is i32} {maybe(3, false) is none}");
     println("done");
 }

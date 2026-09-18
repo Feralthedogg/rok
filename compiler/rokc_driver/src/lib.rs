@@ -1777,7 +1777,6 @@ fn settle(
     let items = cfg::filter_items(program.items, &metas.cfg);
     attrs::check(&program.attrs, &items, &metas.table, &mut diags);
     let no_implicit = program.attrs.iter().any(|a| a.path == ["no_implicit_rok"]);
-    stdcall_check(&items, &metas.cfg, &mut diags);
     let kept = keep.then(|| SourceFile {
         path: path.to_path_buf(),
         file_id,
@@ -1795,35 +1794,6 @@ fn settle(
         kept,
         diags,
         includes: Vec::new(),
-    }
-}
-
-/// `extern "system"` is `stdcall` on 32-bit x86 Windows (spec 5.9.2),
-/// which the backends do not emit: an error there. Elsewhere it is
-/// `"C"`.
-fn stdcall_check(items: &[rokc_ast::Item], cfg_env: &CfgEnv, diags: &mut Vec<RokDiagnostic>) {
-    let pair = |k: &str, v: &str| {
-        cfg_env.eval(&rokc_ast::AttrArg::KeyValue(
-            k.to_owned(),
-            rokc_ast::Literal::Str(v.to_owned()),
-        ))
-    };
-    if !(pair("target_os", "windows") && pair("target_arch", "x86")) {
-        return;
-    }
-    for item in items {
-        match item {
-            rokc_ast::Item::Extern(b) if b.abi == "system" => diags.push(RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Type,
-                b.span,
-                "`extern \"system\"` is `stdcall` on 32-bit x86 Windows, which is not \
-                 supported yet (spec 5.9.2)",
-            )),
-            rokc_ast::Item::Mod(m) => {
-                stdcall_check(m.items.as_deref().unwrap_or_default(), cfg_env, diags);
-            }
-            _ => {}
-        }
     }
 }
 

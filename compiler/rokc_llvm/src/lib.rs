@@ -117,6 +117,7 @@ pub fn mlir_pipeline(optimize: bool, extra: &[String]) -> String {
         "any(convert-math-to-llvm)",
         "convert-math-to-libm",
         "convert-func-to-llvm",
+        "any(convert-index-to-llvm)",
         "any(convert-arith-to-llvm)",
         "convert-cf-to-llvm",
         "finalize-memref-to-llvm",

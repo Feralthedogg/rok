@@ -14,7 +14,7 @@ use common::{ROKC, scratch, setup, text, workspace};
 fn package(name: &str, files: &[(&str, &str)]) -> PathBuf {
     let dir = scratch(name);
     for (path, text) in files {
-        let p = dir.join(path);
+        let p = dir.join("src").join(path);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
         fs::write(p, text).unwrap();
     }
@@ -189,19 +189,23 @@ fn lint_finds_each_kind_and_honors_levels() {
 
     // Attributes beat the command line, innermost first.
     fs::write(
-        dir.join("main.rok"),
+        dir.join("src/main.rok"),
         "#![deny(unused)]\nmod m;\n#[warn(unused_variables)]\nfn f() { let a = 1; }\n\
          fn main() { f(); let b = 1; }\n",
     )
     .unwrap();
-    fs::write(dir.join("m.rok"), "#![allow(dead_code)]\nfn hidden() {}\n").unwrap();
+    fs::write(
+        dir.join("src/m.rok"),
+        "#![allow(dead_code)]\nfn hidden() {}\n",
+    )
+    .unwrap();
     let (_, err) = exit(&rokc(&dir, &["lint", "-A", "unused_variables"]), 1);
     assert!(
-        err.contains("warning[E503]: unused variable `a`\n  --> main.rok:4:10"),
+        err.contains("warning[E503]: unused variable `a`\n  --> src/main.rok:4:10"),
         "{err}"
     );
     assert!(
-        err.contains("error[E503]: unused variable `b`\n  --> main.rok:5:18"),
+        err.contains("error[E503]: unused variable `b`\n  --> src/main.rok:5:18"),
         "{err}"
     );
     assert!(
@@ -224,7 +228,7 @@ fn lint_finds_each_kind_and_honors_levels() {
     // No false hits: a method reached only through `?.`, an import used
     // only as the head of a later `use`.
     fs::write(
-        dir.join("main.rok"),
+        dir.join("src/main.rok"),
         "mod a { pub mod inner { pub fn f() -> i32 { 1 } } }\n\
          use a::inner;\nuse inner::f;\n\
          struct V { x: i32; }\nimpl V { fn get(self) -> i32 { self.x } }\n\

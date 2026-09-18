@@ -267,6 +267,12 @@ impl rokc_hir::BodyCache for BodyStore {
     fn put(&self, key: u64, unit: &rokc_hir::Unit) {
         self.0.bodies.put(key, unit, &self.1);
     }
+    fn get_check(&self, key: u64) -> Option<Vec<rokc_diagnostic::RokDiagnostic>> {
+        self.0.bodies.get(key, &self.1)
+    }
+    fn put_check(&self, key: u64, errors: &[rokc_diagnostic::RokDiagnostic]) {
+        self.0.bodies.put(key, &errors.to_vec(), &self.1);
+    }
 }
 
 pub fn bodies(i: std::sync::Arc<Incr>, files: &rokc_diagnostic::SourceMap) -> rokc_hir::Bodies {

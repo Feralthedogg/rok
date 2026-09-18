@@ -82,7 +82,7 @@ fn in_archive(f: &FnDef) -> bool {
         && !f
             .attrs
             .iter()
-            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_C_FN_ATTR])
+            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_FN_ATTR])
 }
 
 /// A body small enough to copy into a program for inlining
@@ -830,6 +830,8 @@ pub fn lower_full(
     let mut unsafe_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut c_variadic: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
+    // `extern "system"` declarations and definitions.
+    let mut system_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut no_safepoint: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
     let mut wasm_imports: HashMap<FunctionId, (String, String)> = HashMap::new();
     let mut extern_symbols: HashMap<FunctionId, String> = HashMap::new();
@@ -961,6 +963,9 @@ pub fn lower_full(
                         }
                     } else {
                         extern_fn_ids.insert(id);
+                        if blk.abi == "system" {
+                            system_fns.insert(id);
+                        }
                     }
                     if fn_def
                         .attrs
@@ -1698,11 +1703,11 @@ pub fn lower_full(
         if f.is_unsafe {
             unsafe_fns.insert(id);
         }
-        if f.attrs
-            .iter()
-            .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR])
-        {
-            check_extern_c_fn(f, &mut pre_diags);
+        if let Some(abi) = rokc_ast::extern_fn_abi(&f.attrs) {
+            check_extern_fn(f, abi, &mut pre_diags);
+            if abi == "system" {
+                system_fns.insert(id);
+            }
             c_defs.push(id);
         }
         if !c_variadic.contains(&id)
@@ -1762,11 +1767,8 @@ pub fn lower_full(
         }
     }
     for f in env.generic_fns.values() {
-        if f.attrs
-            .iter()
-            .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR])
-        {
-            check_extern_c_fn(f, &mut pre_diags);
+        if let Some(abi) = rokc_ast::extern_fn_abi(&f.attrs) {
+            check_extern_fn(f, abi, &mut pre_diags);
         }
         if export_name(f).is_some() {
             err(
@@ -1956,7 +1958,7 @@ pub fn lower_full(
     // Spec 2.10.9: the package's own generic bodies (a dependency's when
     // it is built prebuilt); every library's with `--check-library`.
     rokc_diagnostic::time("hir generic bodies", || {
-        super::bounds::check_all(&env, |module| {
+        super::bounds::check_all(&env, incr.as_ref(), |module| {
             let pkg = package_of(module);
             pkg.is_empty()
                 || check_library
@@ -2044,7 +2046,10 @@ pub fn lower_full(
         let variadic = c_variadic.contains(id);
         set(id, &|f| {
             f.linkage = Linkage::Extern;
-            f.abi = Abi::C { variadic };
+            f.abi = Abi::C {
+                variadic,
+                system: system_fns.contains(id),
+            };
         });
     }
     for id in &rok_externs {
@@ -2063,7 +2068,13 @@ pub fn lower_full(
         set(id, &|f| f.linkage = Linkage::Prebuilt);
     }
     for id in &c_defs {
-        set(id, &|f| f.abi = Abi::C { variadic: false });
+        let system = system_fns.contains(id);
+        set(id, &|f| {
+            f.abi = Abi::C {
+                variadic: false,
+                system,
+            };
+        });
     }
     for (id, sym) in &exports {
         set(id, &|f| f.export_name = Some(sym.clone()));
@@ -5405,17 +5416,20 @@ fn check_auto_impl(
 /// captures (it is an item), no generics, no `throws` (an error can't
 /// cross into C; a panic aborts the process), and FFI types only (a
 /// rok `str` is `(ptr, len)`, not a `char*`).
-fn check_extern_c_fn(f: &FnDef, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
+fn check_extern_fn(f: &FnDef, abi: &str, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
     let mut bad = |msg: String| {
         diags.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
             f.span,
             format!(
-                "`extern \"C\" fn {}`: {msg} (spec 5.9.10)",
+                "`extern {abi:?} fn {}`: {msg} (spec 5.9.10)",
                 leaf_name(&f.name)
             ),
         ));
     };
+    if abi != "C" && abi != "system" {
+        bad("unsupported ABI (`\"C\"` or `\"system\"`)".to_owned());
+    }
     if !matches!(f.throws, rokc_ast::ThrowsKind::None) {
         bad("cannot `throws` — an error cannot cross into C".to_owned());
     }

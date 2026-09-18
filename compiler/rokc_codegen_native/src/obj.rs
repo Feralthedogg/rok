@@ -124,7 +124,7 @@ pub struct Obj {
     pub syms: Vec<Sym>,
     by_name: HashMap<String, SymId>,
     pub sects: HashMap<Sect, Section>,
-    strings: HashMap<String, SymId>,
+    strings: HashMap<Vec<u8>, SymId>,
     pub fns: Vec<FnRange>,
     /// More sections: `(segment, section, flags, contents)` (debug info).
     pub extra: Vec<(&'static str, &'static str, u32, Section)>,
@@ -252,17 +252,18 @@ impl Obj {
         });
     }
 
-    /// A string literal's NUL-terminated bytes (one per content).
-    pub fn string(&mut self, text: &str) -> SymId {
-        if let Some(s) = self.strings.get(text) {
+    /// Constant bytes and a NUL (a string literal, a constant array),
+    /// one per content.
+    pub fn bytes(&mut self, content: &[u8]) -> SymId {
+        if let Some(s) = self.strings.get(content) {
             return *s;
         }
-        let name = rokc_codegen_mlir::mangle::str_global(text);
+        let name = rokc_codegen_mlir::mangle::str_global(content);
         let sym = self.sym(&name);
-        let mut bytes = text.as_bytes().to_vec();
+        let mut bytes = content.to_vec();
         bytes.push(0);
         self.define_data(sym, Sect::Const, &bytes, 1, false);
-        self.strings.insert(text.to_owned(), sym);
+        self.strings.insert(content.to_vec(), sym);
         sym
     }
 }

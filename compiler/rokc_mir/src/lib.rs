@@ -20,7 +20,7 @@ pub use liveness::{Deaths, addressed, block_local, deaths, live_across};
 pub use lower::lower;
 pub use part_store::{PartStore, part_stores};
 pub use print::print_mir;
-pub use rotate::back_edges;
+pub use rotate::{back_edges, short_loops};
 pub use target::{CAbi, GcSlot, StackProbes, Target, TargetSpec};
 pub use ty::{ANY_STRUCT, any_ty};
 

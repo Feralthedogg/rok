@@ -1,0 +1,156 @@
+// spec: §6.1.3 §6.3.3 §6.3.7
+// expect-exit: 0
+// expect-stdout:
+// S { a: 1, c: 3 } 2 S { a: 0, c: 0 }
+// 1 Off
+// Pair(1) Named { q: 2 }
+// loud m
+// not x 2 12
+// 5 Boxed { a: 0 }
+// not x
+
+// Spec 6.1.3 / 6.3.3 / 6.3.7: `#[cfg]` on members and statements.
+// A false one is gone before anything (derives, user attributes, name
+// resolution, type checking) sees it.
+trait Count {
+    fn count(self) -> i32;
+}
+
+#[impl_derive(Count)]
+pub @derive {
+    impl Count for @Self {
+        fn count(self) -> i32 {
+            let n = 0;
+            @for_fields {
+                n = n + 1;
+            }
+            return n;
+        }
+    }
+}
+
+#[impl_attribute(loud)]
+pub @attribute {
+    @accept(fn)
+    fn @item.name(@item.params) -> @item.return_type {
+        println("loud @item.name");
+        @item.body
+    }
+}
+
+// The expansion's own members are filtered too.
+#[impl_attribute(with_boxed)]
+pub @attribute {
+    @accept(fn)
+    @item
+    #[derive(Default, Debug)]
+    struct Boxed {
+        a: i32;
+        #[cfg(feature = "x")]
+        b: i32;
+    }
+}
+
+#[derive(Count, Clone, Debug, Default)]
+struct S {
+    a: i32;
+    #[cfg(feature = "x")]
+    b: i32;
+    #[cfg(not(feature = "x"))]
+    c: i32;
+}
+
+#[derive(Count)]
+struct T(i32, #[cfg(feature = "x")] i32);
+
+#[derive(Clone, Debug)]
+enum E {
+    #[cfg(feature = "x")]
+    On,
+    Off,
+    Pair(i32, #[cfg(feature = "x")] i32),
+    Named { #[cfg(feature = "x")] p: i32; q: i32; },
+}
+
+trait Tr {
+    #[cfg(feature = "x")]
+    fn only_x(self) -> i32;
+    #[cfg(feature = "x")]
+    const K: i32;
+    fn always(self) -> i32;
+}
+
+struct U {}
+
+impl U {
+    #[cfg(feature = "x")]
+    #[loud]
+    fn m(self) -> str { "x" }
+    #[cfg(not(feature = "x"))]
+    #[loud]
+    fn m(self) -> str { "not x" }
+    #[cfg(feature = "x")]
+    const N: i32 = 1;
+    #[cfg(not(feature = "x"))]
+    const N: i32 = 2;
+}
+
+impl Tr for U {
+    #[cfg(feature = "x")]
+    fn only_x(self) -> i32 { 10 }
+    #[cfg(feature = "x")]
+    const K: i32 = 11;
+    fn always(self) -> i32 { 12 }
+}
+
+extern "C" {
+    #[cfg(feature = "x")]
+    fn abs(x: i32) -> i32;
+    #[cfg(not(feature = "x"))]
+    #[link_name = "abs"]
+    fn abs(x: i64) -> i64;
+    #[cfg(feature = "nope")]
+    fn no_such_symbol_anywhere();
+}
+
+#[with_boxed]
+fn unit() {}
+
+fn which() -> str {
+    #[cfg(feature = "x")]
+    return "x";
+    #[cfg(not(feature = "x"))]
+    fn inner() -> str { "not x" }
+    #[cfg(not(feature = "x"))]
+    {
+        inner()
+    }
+}
+
+fn main() {
+    #[cfg(feature = "x")]
+    let s = S { a: 1, b: 2 };
+    #[cfg(not(feature = "x"))]
+    let s = S { a: 1, c: 3 };
+    println(f"{s.clone():?} {s.count()} {S::default():?}");
+    #[cfg(feature = "x")]
+    let t = T(1, 2);
+    #[cfg(not(feature = "x"))]
+    let t = T(1);
+    println(f"{t.count()} {E::Off:?}");
+    #[cfg(feature = "x")]
+    {
+        println(f"{E::On:?} {E::Pair(1, 2):?} {E::Named { p: 1, q: 2 }:?}");
+        println(f"{U {}.only_x()} {U::K}");
+    }
+    #[cfg(not(feature = "x"))]
+    println(f"{E::Pair(1):?} {E::Named { q: 2 }:?}");
+    println(f"{U {}.m()} {U::N} {U {}.always()}");
+    println(f"{unsafe { abs(-5) }} {Boxed::default():?}");
+    let f = || {
+        #[cfg(feature = "nope")]
+        undefined_name();
+        which()
+    };
+    println(f());
+}

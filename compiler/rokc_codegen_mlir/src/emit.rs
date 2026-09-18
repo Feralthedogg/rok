@@ -105,7 +105,7 @@ pub struct Emitter {
     target: Target,
     /// Interned string-literal globals: content → symbol, shared by every
     /// function of the module.
-    str_globals: std::collections::BTreeMap<String, String>,
+    str_globals: std::collections::BTreeMap<Vec<u8>, String>,
     /// Unsupported constructs found while emitting, at the function
     /// they are in (dummy outside one): the module is rejected instead
     /// of shipping placeholder IR.
@@ -151,6 +151,8 @@ pub(crate) struct FnSig {
     /// 8.6.3): the symbol and `(params) -> ret` type of the C ABI entry C
     /// calls (`emit_c_entry`); `name` is the rok-ABI body.
     c_entry: Option<(String, String)>,
+    /// Its C declaration or C entry is `stdcall` (`FnAbi::stdcall`).
+    stdcall: bool,
     /// A runtime declaration (`extern "rok"`).
     runtime: bool,
 }
@@ -387,8 +389,12 @@ impl Emitter {
         params: &[MirTy],
         ret: &MirTy,
         variadic: bool,
+        system: bool,
     ) -> Option<FnAbi> {
         let mut abi = crate::abi::classify(target, params, ret, variadic);
+        if let Some(abi) = abi.as_mut() {
+            abi.stdcall = system && target.stdcall_system();
+        }
         // A `#[repr(transparent)]` struct around a scalar crosses as the
         // scalar: through memory, like any coerced aggregate.
         let coerce = |t: &MirTy| {
@@ -462,7 +468,7 @@ impl Emitter {
         let mut c_entries: Vec<(FunctionId, FnAbi)> = Vec::new();
         for &f in &view {
             let c = match f.facts.abi {
-                Abi::C { variadic } => {
+                Abi::C { variadic, system } => {
                     let mut errs = Vec::new();
                     let abi = Self::classify(
                         &mut errs,
@@ -471,6 +477,7 @@ impl Emitter {
                         &f.param_tys,
                         &f.ret_ty,
                         variadic,
+                        system,
                     );
                     self.errors.extend(errs.into_iter().map(|e| (f.span, e)));
                     abi
@@ -486,6 +493,7 @@ impl Emitter {
                 ret: f.ret_ty.clone(),
                 c: None,
                 c_entry: None,
+                stdcall: c.as_ref().is_some_and(|a| a.stdcall),
                 runtime: f.facts.linkage == Linkage::Extern && f.facts.abi == Abi::Rok,
             };
             match c {
@@ -981,8 +989,8 @@ impl Emitter {
 
     fn intern_global_string(&mut self, text: &str) -> String {
         self.str_globals
-            .entry(text.to_owned())
-            .or_insert_with(|| crate::mangle::str_global(text))
+            .entry(text.as_bytes().to_vec())
+            .or_insert_with(|| crate::mangle::str_global(text.as_bytes()))
             .clone()
     }
 
@@ -991,13 +999,13 @@ impl Emitter {
     /// address is not significant: a split compile copies it into each
     /// part that uses it.
     fn emit_string_globals(&mut self) {
-        let entries: Vec<(String, String)> = self
+        let entries: Vec<(Vec<u8>, String)> = self
             .str_globals
             .iter()
             .map(|(content, sym)| (content.clone(), sym.clone()))
             .collect();
         for (content, sym) in entries {
-            let escaped = mlir_bytes(content.as_bytes());
+            let escaped = mlir_bytes(&content);
             let len = content.len() + 1;
             let _ = writeln!(
                 self.out,
@@ -1113,6 +1121,7 @@ impl Emitter {
         let str_globals = std::mem::take(&mut self.str_globals);
         let mut emit = FnEmit::new(f, &self.target, fns, str_globals, &self.pkgs, sources);
         emit.quiet = self.quiet.clone();
+        emit.back_edges = polled_back_edges(f, &emit.quiet, &self.pkgs, &self.target);
         emit.lists = self.lists.clone();
         emit.entry_poll = self.reentrant.contains(&f.id);
         emit.overflow_checks = self.overflow_checks;
@@ -1195,7 +1204,11 @@ impl Emitter {
             } else {
                 format!(" -> {ret}")
             };
-            let _ = writeln!(self.out, "  func.func private @{entry}{params}{ret}");
+            if sig.stdcall {
+                let _ = writeln!(self.out, "  llvm.func x86_stdcallcc @{entry}{params}{ret}");
+            } else {
+                let _ = writeln!(self.out, "  func.func private @{entry}{params}{ret}");
+            }
         }
     }
 
@@ -1230,11 +1243,22 @@ impl Emitter {
                 " attributes {llvm.linkage = #llvm.linkage<internal>}".to_owned(),
             )
         };
+        let op = if abi.stdcall {
+            let internal = if vis.is_empty() { "" } else { "internal " };
+            format!(
+                "llvm.func {internal}x86_stdcallcc @{entry}({}){arrow}",
+                head.join(", ")
+            )
+        } else {
+            format!(
+                "func.func {vis}@{entry}({}){arrow}{linkage}",
+                head.join(", ")
+            )
+        };
         let mut b = format!(
-            "  func.func {vis}@{entry}({}){arrow}{linkage} {{
+            "  {op} {{
     %one = llvm.mlir.constant(1 : i32) : i32
-",
-            head.join(", ")
+"
         );
         let slot = |b: &mut String, n: &str, ty: &MirTy| {
             let size = self.target.size_align(ty).0.next_multiple_of(8).max(16);
@@ -1349,6 +1373,10 @@ impl Emitter {
                 );
             }
         }
+        if abi.stdcall {
+            // An `llvm.func` returns with `llvm.return`.
+            b = b.replace("func.return", "llvm.return");
+        }
         b.push_str("  }\n");
         let b = self.described(b, entry, span);
         self.out.push_str(&b);
@@ -1379,11 +1407,14 @@ impl Emitter {
             );
             return;
         }
-        if abi.variadic {
-            params.push("...".to_owned());
+        if abi.variadic || abi.stdcall {
+            if abi.variadic {
+                params.push("...".to_owned());
+            }
+            let cc = if abi.stdcall { "x86_stdcallcc " } else { "" };
             let _ = writeln!(
                 self.out,
-                "  llvm.func @{symbol}({}){ret}",
+                "  llvm.func {cc}@{symbol}({}){ret}",
                 params.join(", ")
             );
             return;
@@ -1545,7 +1576,7 @@ struct FnEmit<'a> {
     fns: &'a HashMap<FunctionId, FnSig>,
     /// The module-wide string table, lent to this function while it is
     /// emitted so identical literals share one global across functions.
-    str_globals: std::collections::BTreeMap<String, String>,
+    str_globals: std::collections::BTreeMap<Vec<u8>, String>,
     errors: Vec<String>,
     needs: BTreeSet<&'static str>,
     /// Lent `Emitter::gc_types`.
@@ -1614,6 +1645,9 @@ struct FnEmit<'a> {
     lists: std::sync::Arc<HashSet<u32>>,
     /// In `Emitter::reentrant`: polls on entry.
     entry_poll: bool,
+    /// Where the next rok call returning by address writes its result
+    /// (`rok_call_args`): the target's slot instead of a temporary.
+    sret_into: Option<String>,
     /// This thread's address of each runtime TLS slot used, by offset,
     /// and of the block at `u32::MAX` (`tls_addr`), computed once in the
     /// entry block.
@@ -1624,6 +1658,38 @@ struct FnEmit<'a> {
 /// back-edge), found by an iterative DFS from the entry block.
 pub fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
     rokc_mir::back_edges(f).into_keys().collect()
+}
+
+/// The back edges that poll, by block, with their loop headers: all but
+/// those of a short loop (`rokc_mir::short_loops`) whose blocks reach no
+/// safepoint, which ends in bounded time anyway.
+#[allow(clippy::implicit_hasher)]
+pub fn polled_back_edges(
+    f: &MirFunction,
+    quiet: &HashSet<FunctionId>,
+    pkgs: &crate::mangle::Pkgs,
+    target: &Target,
+) -> HashMap<u32, HashSet<u32>> {
+    let mut edges = rokc_mir::back_edges(f);
+    let unpolled: HashSet<u32> = rokc_mir::short_loops(f)
+        .into_iter()
+        .filter(|(_, body)| {
+            !f.blocks.iter().any(|b| {
+                let skip = noreturn_call(b);
+                body.contains(&b.id.0)
+                    && b.stmts
+                        .iter()
+                        .enumerate()
+                        .any(|(i, s)| Some(i) != skip && stmt_safepoint(s, quiet, pkgs, target))
+            })
+        })
+        .map(|(h, _)| h)
+        .collect();
+    edges.retain(|_, hs| {
+        hs.retain(|h| !unpolled.contains(h));
+        !hs.is_empty()
+    });
+    edges
 }
 
 /// Whether statement `s` can reach a safepoint (a collection can run
@@ -1790,8 +1856,9 @@ pub fn reentrant_functions(module: &MirModule) -> HashSet<FunctionId> {
 
 /// Functions that never reach a safepoint.
 ///
-/// No loop, allocation or indirect call, and only calls to such
-/// functions (never-returning calls aside). The least fixpoint, so recursion is never in it. They
+/// No loop but short ones (`rokc_mir::short_loops`), no allocation or
+/// indirect call, and only calls to such functions (never-returning
+/// calls aside). The least fixpoint, so recursion is never in it. They
 /// need neither a shadow-stack frame nor an entry poll: they run for a
 /// bounded time and no collection can see their references.
 pub fn quiet_functions(
@@ -1802,10 +1869,17 @@ pub fn quiet_functions(
     let mut pending: HashMap<FunctionId, usize> = HashMap::new();
     let mut callers: HashMap<FunctionId, Vec<FunctionId>> = HashMap::new();
     let all: HashSet<FunctionId> = module.functions.iter().map(|f| f.id).collect();
+    // A prebuilt function's inline copy has its body here too.
     let candidates = module.functions.iter().filter(|f| {
-        f.facts.linkage == Linkage::Defined
-            && f.facts.role != FnRole::AnyDispatcher
-            && back_edge_blocks(f).is_empty()
+        let body = f.facts.linkage == Linkage::Defined
+            || (f.facts.linkage == Linkage::Prebuilt && !f.blocks.is_empty());
+        body && f.facts.role != FnRole::AnyDispatcher && {
+            let short = rokc_mir::short_loops(f);
+            rokc_mir::back_edges(f)
+                .values()
+                .flatten()
+                .all(|h| short.contains_key(h))
+        }
     });
     for f in candidates {
         // Every call counts as quiet here; the callees are checked below.
@@ -1862,7 +1936,7 @@ impl<'a> FnEmit<'a> {
         f: &'a MirFunction,
         target: &'a Target,
         fns: &'a HashMap<FunctionId, FnSig>,
-        str_globals: std::collections::BTreeMap<String, String>,
+        str_globals: std::collections::BTreeMap<Vec<u8>, String>,
         pkgs: &'a crate::mangle::Pkgs,
         sources: &'a SourceMap,
     ) -> Self {
@@ -1905,7 +1979,7 @@ impl<'a> FnEmit<'a> {
             gc_type_base: USER_TYPE_BASE,
             gc_pkg: None,
             gc_syms: BTreeSet::new(),
-            back_edges: rokc_mir::back_edges(f),
+            back_edges: HashMap::new(),
             reentry: HashSet::new(),
             edge_from: (0, false),
             rooted: None,
@@ -1924,6 +1998,7 @@ impl<'a> FnEmit<'a> {
             quiet: std::sync::Arc::default(),
             lists: std::sync::Arc::default(),
             entry_poll: true,
+            sret_into: None,
             tls: HashMap::new(),
         }
     }
@@ -1998,10 +2073,13 @@ impl<'a> FnEmit<'a> {
         ret: &MirTy,
     ) -> (Vec<String>, Option<String>) {
         let mut vals = Vec::new();
+        let into = self.sret_into.take();
         let sret = rok_by_ref(ret, self.target).then(|| {
-            let ty = mlir_type(ret, self.target);
-            let align = self.target.size_align(ret).1.max(8);
-            self.entry_alloca(&ty, align)
+            into.unwrap_or_else(|| {
+                let ty = mlir_type(ret, self.target);
+                let align = self.target.size_align(ret).1.max(8);
+                self.entry_alloca(&ty, align)
+            })
         });
         vals.extend(sret.clone());
         for (op, ty) in args.iter().zip(tys) {
@@ -2017,11 +2095,13 @@ impl<'a> FnEmit<'a> {
                     }
                 }
             }
-            let v = self.materialize_operand(op, ty);
             let t = mlir_type(ty, self.target);
             let align = self.target.size_align(ty).1.max(8);
             let tmp = self.entry_alloca(&t, align);
-            let _ = writeln!(self.body, "    llvm.store {v}, {tmp} : {t}, !llvm.ptr");
+            if !self.memcpy_operand(&tmp, op, ty) {
+                let v = self.materialize_operand(op, ty);
+                let _ = writeln!(self.body, "    llvm.store {v}, {tmp} : {t}, !llvm.ptr");
+            }
             vals.push(tmp);
         }
         (vals, sret)
@@ -2239,12 +2319,16 @@ impl<'a> FnEmit<'a> {
     }
 
     fn intern_string(&mut self, s: &str) -> String {
-        if let Some(name) = self.str_globals.get(s) {
-            return name.clone();
-        }
-        let name = crate::mangle::str_global(s);
-        self.str_globals.insert(s.to_owned(), name.clone());
-        name
+        self.intern_bytes(s.as_bytes())
+    }
+
+    /// The constant global holding `bytes` (and a NUL), shared by equal
+    /// string literals and data.
+    fn intern_bytes(&mut self, bytes: &[u8]) -> String {
+        self.str_globals
+            .entry(bytes.to_vec())
+            .or_insert_with(|| crate::mangle::str_global(bytes))
+            .clone()
     }
 
     fn is_block_param(&self, id: LocalId) -> bool {
@@ -2320,6 +2404,7 @@ impl<'a> FnEmit<'a> {
             }
             if ssa[local.id.0 as usize]
                 && !matches!(local.ty, MirTy::Array(..))
+                && !self.in_memory(&local.ty)
                 && (self.target.root_offsets(&local.ty).is_empty() || !self.is_rooted(local.id))
                 && (self.dbg.is_none() || local.name.as_deref().is_none_or(|n| n.starts_with('#')))
             {
@@ -2378,22 +2463,11 @@ impl<'a> FnEmit<'a> {
             let local_ty = self.f.locals[p.0 as usize].ty.clone();
             let mut arg = format!("%arg{}", i + first);
             if rok_by_ref(&local_ty, self.target) {
-                // A copy of the caller's value, taken before anything runs;
-                // an array's slot to slot (see `Statement::Assign`).
-                let slot = self.slot_names[p.0 as usize].clone();
-                if let (MirTy::Array(..), Some(slot)) = (&local_ty, slot) {
-                    if !self.root_cells.contains_key(&p.0) {
-                        let pw = self.pw;
-                        let size = self.target.size_align(&local_ty).0;
-                        let n = self.fresh_value();
-                        let _ = write!(
-                            self.body,
-                            "    {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
-    \"llvm.intr.memcpy\"({slot}, {arg}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, !llvm.ptr, i{pw}) -> ()
-"
-                        );
-                        continue;
-                    }
+                // A copy of the caller's value, taken before anything
+                // runs, slot to slot (see `Statement::Assign`).
+                if let Some(slot) = self.slot_names[p.0 as usize].clone() {
+                    self.emit_memcpy(&slot, &arg, &local_ty);
+                    continue;
                 }
                 let v = self.fresh_value();
                 let ty = mlir_type(&local_ty, self.target);
@@ -2472,6 +2546,7 @@ impl<'a> FnEmit<'a> {
                 // An addressed local's slot is the one pointers reach.
                 if self.rooted.is_some()
                     && !matches!(local.ty, MirTy::Array(..))
+                    && !self.in_memory(&local.ty)
                     && !addressed.contains(&local.id)
                 {
                     let cell = format!("%rc{id}");
@@ -2490,12 +2565,9 @@ impl<'a> FnEmit<'a> {
                 continue; // unslotted: never holds a value across a call
             };
             rooted.insert(id);
-            let zero = self.fresh_value();
-            let _ = writeln!(header, "    {zero} = llvm.mlir.zero : {ty}");
-            let _ = writeln!(
-                header,
-                "    llvm.store {zero}, {slot} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
-            );
+            let body = std::mem::take(&mut self.body);
+            self.emit_zero(&slot, &local.ty, "#rok_tbaa_gcroot");
+            header.push_str(&std::mem::replace(&mut self.body, body));
             for off in offsets {
                 if off == 0 {
                     roots.push(slot.clone());
@@ -2550,13 +2622,7 @@ impl<'a> FnEmit<'a> {
             (Some(s), _) | (None, Some(s)) => s.clone(),
             (None, None) => self.slot_names[l.0 as usize].clone().unwrap(),
         };
-        let ty = mlir_type(&self.local_ty(l), self.target);
-        let z = self.fresh_value();
-        let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
-        let _ = writeln!(
-            self.body,
-            "    llvm.store {z}, {slot} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
-        );
+        self.emit_zero(&slot, &self.local_ty(l), "#rok_tbaa_gcroot");
     }
 
     /// Unlink this function's shadow-stack frame (before every return).
@@ -2799,6 +2865,231 @@ impl<'a> FnEmit<'a> {
         self.heap_store(&q, &v, &field_ty);
     }
 
+    /// A `ty` lives in memory and moves by `llvm.intr.memcpy`: an
+    /// aggregate over 64 bytes (the size passed by address, 8.6.6). As an
+    /// LLVM value its loads and stores cost the optimizer time growing
+    /// with its size squared.
+    fn in_memory(&self, ty: &MirTy) -> bool {
+        rok_by_ref(ty, self.target)
+    }
+
+    fn emit_memcpy(&mut self, dst: &str, src: &str, ty: &MirTy) {
+        let pw = self.pw;
+        let size = self.target.size_align(ty).0;
+        let n = self.fresh_value();
+        let _ = write!(
+            self.body,
+            "    {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
+    \"llvm.intr.memcpy\"({dst}, {src}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, !llvm.ptr, i{pw}) -> ()
+"
+        );
+    }
+
+    /// Zero the `ty` at `dst` (TBAA `tag`).
+    fn emit_zero(&mut self, dst: &str, ty: &MirTy, tag: &str) {
+        let z = self.fresh_value();
+        if self.in_memory(ty) {
+            let pw = self.pw;
+            let size = self.target.size_align(ty).0;
+            let n = self.fresh_value();
+            let _ = write!(
+                self.body,
+                "    {z} = llvm.mlir.constant(0 : i8) : i8
+    {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
+    \"llvm.intr.memset\"({dst}, {z}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, i8, i{pw}) -> ()
+"
+            );
+            return;
+        }
+        let ty = mlir_type(ty, self.target);
+        let _ = write!(
+            self.body,
+            "    {z} = llvm.mlir.zero : {ty}
+    llvm.store {z}, {dst} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr
+"
+        );
+    }
+
+    /// Copy operand `op`, a `ty` in memory (`in_memory`), to `dst` from
+    /// its slot; false (nothing emitted) for another.
+    fn memcpy_operand(&mut self, dst: &str, op: &Operand, ty: &MirTy) -> bool {
+        let Operand::Copy(id) = op else { return false };
+        if !self.in_memory(ty) || self.local_ty(*id) != *ty {
+            return false;
+        }
+        let Some(src) = self.slot_of(*id) else {
+            return false;
+        };
+        if src != dst {
+            self.emit_memcpy(dst, &src, ty);
+        }
+        true
+    }
+
+    /// The address of field `index` of `target`, a struct or tuple in
+    /// memory with a slot.
+    fn field_addr(&mut self, target: &Operand, target_ty: &MirTy, index: u32) -> Option<String> {
+        let Operand::Copy(id) = target else {
+            return None;
+        };
+        if !self.in_memory(target_ty) || !matches!(target_ty, MirTy::Struct(..) | MirTy::Tuple(_)) {
+            return None;
+        }
+        let slot = self.slot_of(*id)?;
+        let off = self.target.field_offsets(target_ty)[index as usize];
+        let p = self.fresh_value();
+        let _ = writeln!(
+            self.body,
+            "    {p} = llvm.getelementptr {slot}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8"
+        );
+        Some(p)
+    }
+
+    /// The address `r`, a read of a `ty` from memory, reads at (its
+    /// checks emitted); `None` for any other rvalue.
+    fn rvalue_addr(&mut self, r: &RValue, ty: &MirTy) -> Option<String> {
+        match r {
+            RValue::Use(Operand::Copy(id)) if self.local_ty(*id) == *ty => self.slot_of(*id),
+            RValue::StaticLoad { name, .. } => {
+                self.ensure_static_init(name);
+                let addr = self.fresh_value();
+                let sym = self.pkgs.static_sym(name);
+                let _ = writeln!(
+                    self.body,
+                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
+                );
+                Some(addr)
+            }
+            RValue::FieldRead { target, index, .. } => {
+                let target_ty = match target {
+                    Operand::Copy(id) => self.local_ty(*id),
+                    Operand::Const(_) => return None,
+                };
+                self.field_addr(target, &target_ty, *index)
+            }
+            RValue::ArrayIndex {
+                array,
+                offset,
+                index,
+                elem_ty,
+                len,
+            } => {
+                let slot = self.array_base(*array, *offset)?;
+                let elem_str = mlir_type(elem_ty, self.target);
+                let (idx_int, from_str) = self.checked_index(index, *len);
+                let ptr = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {ptr} = llvm.getelementptr {slot}[0, {idx_int}] : (!llvm.ptr, {from_str}) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
+                );
+                Some(ptr)
+            }
+            RValue::HeapField { ptr, ty, index } => Some(self.heap_field_addr(ptr, ty, *index)),
+            RValue::HeapLoad { ptr, ty } if !self.target.any_inline(ty) => {
+                let p = self.materialize_operand(ptr, &MirTy::GcRef);
+                let addr = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {addr} = llvm.getelementptr {p}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8"
+                );
+                Some(addr)
+            }
+            RValue::BufLoad {
+                buf,
+                index,
+                elem_ty,
+            } if *elem_ty != MirTy::Unit => Some(self.buf_elem_addr(buf, index, elem_ty)),
+            _ => None,
+        }
+    }
+
+    /// Assign `r` to the `ty` (an array or `in_memory`) at `slot` in
+    /// memory: copied from where it is read, or built in place; false
+    /// (nothing emitted) for an rvalue computed as a value.
+    fn assign_in_memory(&mut self, slot: &str, ty: &MirTy, r: &RValue) -> bool {
+        if let Some(src) = self.rvalue_addr(r, ty) {
+            if src != slot {
+                self.emit_memcpy(slot, &src, ty);
+            }
+            return true;
+        }
+        if !self.in_memory(ty) {
+            return false;
+        }
+        match r {
+            RValue::StructInit { ty: sty, fields } => {
+                let tys = struct_field_tys(sty);
+                let offs = self.target.field_offsets(sty);
+                let packed: u32 = tys.iter().map(|t| self.target.size_align(t).0).sum();
+                if tys.len() != fields.len() || offs.len() != fields.len() {
+                    return false;
+                }
+                // Padding is zero, as in a value built field by field.
+                if packed != self.target.size_align(sty).0 {
+                    self.emit_zero(slot, sty, "#rok_tbaa_slot");
+                }
+                for ((f, t), off) in fields.iter().zip(&tys).zip(offs) {
+                    self.store_at(slot, off, f, t);
+                }
+                true
+            }
+            RValue::WithField {
+                source,
+                struct_ty,
+                index,
+                value,
+            } if matches!(struct_ty, MirTy::Struct(..) | MirTy::Tuple(_)) => {
+                if !self.memcpy_operand(slot, source, struct_ty) {
+                    let v = self.materialize_operand(source, struct_ty);
+                    let t = mlir_type(struct_ty, self.target);
+                    let _ = writeln!(self.body, "    llvm.store {v}, {slot} : {t}, !llvm.ptr");
+                }
+                let t = struct_field_tys(struct_ty)[*index as usize].clone();
+                let off = self.target.field_offsets(struct_ty)[*index as usize];
+                self.store_at(slot, off, value, &t);
+                true
+            }
+            RValue::Call { callee, args, .. }
+                if self.fns[callee].c.is_none() && !self.fns[callee].runtime =>
+            {
+                self.sret_into = Some(slot.to_owned());
+                let dst = self.fresh_value();
+                self.emit_call(&dst, *callee, args);
+                true
+            }
+            RValue::CallIndirect {
+                callee,
+                args,
+                arg_tys,
+                ret_ty,
+                abi: Abi::Rok,
+            } => {
+                self.sret_into = Some(slot.to_owned());
+                self.emit_call_indirect(callee, args, arg_tys, ret_ty);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Store operand `op`, a `ty`, `off` bytes into `base`.
+    fn store_at(&mut self, base: &str, off: u32, op: &Operand, ty: &MirTy) {
+        if *ty == MirTy::Unit {
+            return;
+        }
+        let p = self.fresh_value();
+        let _ = writeln!(
+            self.body,
+            "    {p} = llvm.getelementptr {base}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8"
+        );
+        if self.memcpy_operand(&p, op, ty) {
+            return;
+        }
+        let v = self.materialize_operand(op, ty);
+        let t = mlir_type(ty, self.target);
+        let _ = writeln!(self.body, "    llvm.store {v}, {p} : {t}, !llvm.ptr");
+    }
+
     fn emit_stmt(&mut self, s: &Statement) {
         match s {
             Statement::Assign { target, rvalue } => {
@@ -2814,40 +3105,15 @@ impl<'a> FnEmit<'a> {
                 if ty == MirTy::Unit && matches!(rvalue, RValue::Use(_)) {
                     return;
                 }
-                // An array copy goes slot to slot: as an LLVM value a
-                // big array takes the backend minutes (or crashes it).
-                let slots = match (&ty, rvalue) {
-                    (MirTy::Array(..), RValue::Use(Operand::Copy(src))) => {
-                        self.slot_of(*target).zip(self.slot_of(*src))
-                    }
-                    (MirTy::Array(..), RValue::StaticLoad { name, .. }) => {
-                        self.slot_of(*target).map(|d| {
-                            self.ensure_static_init(name);
-                            let addr = self.fresh_value();
-                            let sym = self.pkgs.static_sym(name);
-                            let _ = writeln!(
-                                self.body,
-                                "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
-                            );
-                            (d, addr)
-                        })
-                    }
-                    _ => None,
-                };
-                if let Some((d, s)) = slots {
-                    if d == s {
+                // An array or a value in memory (`in_memory`) is built
+                // in its slot and copied slot to slot: as an LLVM value a
+                // big one takes the optimizer minutes (or crashes it).
+                if let Some(slot) = self.slot_of(*target) {
+                    if (matches!(ty, MirTy::Array(..)) || self.in_memory(&ty))
+                        && self.assign_in_memory(&slot, &ty, rvalue)
+                    {
                         return;
                     }
-                    let pw = self.pw;
-                    let size = self.target.size_align(&ty).0;
-                    let n = self.fresh_value();
-                    let _ = write!(
-                        self.body,
-                        "    {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
-    \"llvm.intr.memcpy\"({d}, {s}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, !llvm.ptr, i{pw}) -> ()
-"
-                    );
-                    return;
                 }
                 let val = self.compute_rvalue(&ty, rvalue);
                 self.write_local(*target, &val);
@@ -2906,18 +3172,12 @@ impl<'a> FnEmit<'a> {
                     .get(&l.0)
                     .or(self.slot_names[l.0 as usize].as_ref());
                 if let (Some(_), Some(slot)) = (&self.gc_frame, slot.cloned()) {
-                    let ty = mlir_type(&self.local_ty(*l), self.target);
                     let tag = if self.root_cells.contains_key(&l.0) {
                         "#rok_tbaa_gcroot"
                     } else {
                         self.slot_tag(*l)
                     };
-                    let z = self.fresh_value();
-                    let _ = writeln!(self.body, "    {z} = llvm.mlir.zero : {ty}");
-                    let _ = writeln!(
-                        self.body,
-                        "    llvm.store {z}, {slot} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
-                    );
+                    self.emit_zero(&slot, &self.local_ty(*l), tag);
                 }
             }
             Statement::RawStore {
@@ -2927,6 +3187,9 @@ impl<'a> FnEmit<'a> {
                 volatile,
             } => {
                 let p = self.raw_addr(addr);
+                if !*volatile && self.memcpy_operand(&p, value, ty) {
+                    return;
+                }
                 let v = self.materialize_operand(value, ty);
                 let t = mlir_type(ty, self.target);
                 let vol = if *volatile { "volatile " } else { "" };
@@ -2941,12 +3204,14 @@ impl<'a> FnEmit<'a> {
                 elem_ty,
             } => {
                 let p = self.buf_elem_addr(buf, index, elem_ty);
-                let v = self.materialize_operand(value, elem_ty);
                 if self.target.has_gc_ref(elem_ty) {
                     let len = self.target.size_align(elem_ty).0;
                     self.emit_write_barrier(buf, &p, len);
                 }
-                self.heap_store(&p, &v, elem_ty);
+                if !self.memcpy_operand(&p, value, elem_ty) {
+                    let v = self.materialize_operand(value, elem_ty);
+                    self.heap_store(&p, &v, elem_ty);
+                }
             }
             Statement::HeapStore {
                 ptr,
@@ -2955,24 +3220,29 @@ impl<'a> FnEmit<'a> {
                 value,
             } => {
                 let field = struct_field_tys(ty)[*index as usize].clone();
-                let v = self.materialize_operand(value, &field);
                 let addr = self.heap_field_addr(ptr, ty, *index);
                 if self.target.has_gc_ref(&field) {
                     let len = self.target.size_align(&field).0;
                     self.emit_write_barrier(ptr, &addr, len);
                 }
-                self.heap_store(&addr, &v, &field);
+                if !self.memcpy_operand(&addr, value, &field) {
+                    let v = self.materialize_operand(value, &field);
+                    self.heap_store(&addr, &v, &field);
+                }
             }
             Statement::StaticStore { name, value, ty } => {
                 self.ensure_static_init(name);
-                let val = self.materialize_operand(value, ty);
-                let ty_str = mlir_type(ty, self.target);
                 let addr = self.fresh_value();
                 let sym = self.pkgs.static_sym(name);
                 let _ = writeln!(
                     self.body,
                     "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
                 );
+                if self.memcpy_operand(&addr, value, ty) {
+                    return;
+                }
+                let val = self.materialize_operand(value, ty);
+                let ty_str = mlir_type(ty, self.target);
                 let _ = writeln!(
                     self.body,
                     "    llvm.store {val}, {addr} : {ty_str}, !llvm.ptr"
@@ -3007,7 +3277,6 @@ impl<'a> FnEmit<'a> {
         let Some(slot) = self.array_base(array, offset) else {
             return;
         };
-        let val = self.materialize_operand(value, elem_ty);
         let elem_str = mlir_type(elem_ty, self.target);
         let (idx_int, from_str) = self.checked_index(index, len);
         let ptr = self.fresh_value();
@@ -3015,26 +3284,47 @@ impl<'a> FnEmit<'a> {
             self.body,
             "    {ptr} = llvm.getelementptr {slot}[0, {idx_int}] : (!llvm.ptr, {from_str}) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
         );
+        if self.memcpy_operand(&ptr, value, elem_ty) {
+            return;
+        }
+        let val = self.materialize_operand(value, elem_ty);
         let _ = writeln!(
             self.body,
             "    llvm.store {val}, {ptr} : {elem_str}, !llvm.ptr"
         );
     }
 
-    /// `[a, b, c]` stored element by element into the target's slot.
+    /// `[a, b, c]` stored element by element into the target's slot; a
+    /// big one of constants (`b"..."`) copied from a constant global.
     fn emit_array_init(&mut self, target: LocalId, elem_ty: &MirTy, elements: &[Operand]) {
         let Some(slot) = self.slot_names[target.0 as usize].clone() else {
             return;
         };
         let len = elements.len();
+        let ty = MirTy::Array(Box::new(elem_ty.clone()), len as u32);
+        if self.in_memory(&ty) {
+            if let Some(bytes) = const_bytes(elements, elem_ty, self.target) {
+                let sym = self.intern_bytes(&bytes);
+                let src = self.fresh_value();
+                let _ = writeln!(
+                    self.body,
+                    "    {src} = llvm.mlir.addressof @{sym} : !llvm.ptr"
+                );
+                self.emit_memcpy(&slot, &src, &ty);
+                return;
+            }
+        }
         let elem_str = mlir_type(elem_ty, self.target);
         for (i, e) in elements.iter().enumerate() {
-            let v = self.materialize_operand(e, elem_ty);
             let ptr = self.fresh_value();
             let _ = writeln!(
                 self.body,
                 "    {ptr} = llvm.getelementptr {slot}[0, {i}] : (!llvm.ptr) -> !llvm.ptr, !llvm.array<{len} x {elem_str}>"
             );
+            if self.memcpy_operand(&ptr, e, elem_ty) {
+                continue;
+            }
+            let v = self.materialize_operand(e, elem_ty);
             let _ = writeln!(
                 self.body,
                 "    llvm.store {v}, {ptr} : {elem_str}, !llvm.ptr"
@@ -3139,7 +3429,7 @@ impl<'a> FnEmit<'a> {
                 args,
                 arg_tys,
                 ret_ty,
-                abi: Abi::C { variadic },
+                abi: Abi::C { variadic, .. },
             } => {
                 // A call through an `extern "C" fn` pointer (spec 5.9.4).
                 let fn_ty = MirTy::Fn(arg_tys.clone(), Box::new(ret_ty.clone()));
@@ -3153,6 +3443,7 @@ impl<'a> FnEmit<'a> {
                     arg_tys,
                     ret_ty,
                     *variadic,
+                    false,
                 ) {
                     self.emit_c_call(&dst, arg_tys, ret_ty, &abi, Callee::Ptr(&ptr), args);
                 }
@@ -3324,8 +3615,8 @@ impl<'a> FnEmit<'a> {
     /// the `gep null[1]` idiom: MLIR folds that under LLVM's default data
     /// layout (`i64` 4-aligned), which undersizes objects for the target.
     fn emit_heap_box(&mut self, value: &Operand, ty: &MirTy) -> String {
-        let v = self.materialize_operand(value, ty);
         if self.target.any_inline(ty) {
+            let v = self.materialize_operand(value, ty);
             return self.bitcast_value(v, ty, &MirTy::GcRef);
         }
         let obj = self.emit_gc_object(ty);
@@ -3334,7 +3625,10 @@ impl<'a> FnEmit<'a> {
             self.body,
             "    {payload} = llvm.getelementptr {obj}[{HEADER_SIZE}] : (!llvm.ptr) -> !llvm.ptr, i8"
         );
-        self.heap_store(&payload, &v, ty);
+        if !self.memcpy_operand(&payload, value, ty) {
+            let v = self.materialize_operand(value, ty);
+            self.heap_store(&payload, &v, ty);
+        }
         obj
     }
 
@@ -3692,6 +3986,12 @@ impl<'a> FnEmit<'a> {
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
         let name = self.fns[&callee].name.clone();
+        if self.fns[&callee].stdcall {
+            return self.unsupported(
+                "an `extern \"system\"` function as a value: it is `stdcall` on this target, \
+                 not an `extern \"C\" fn`",
+            );
+        }
         if self.fns[&callee].c.as_ref().is_some_and(|a| a.variadic) {
             // An `llvm.func`: no `func.constant` of it.
             let dst = self.fresh_value();
@@ -3745,6 +4045,7 @@ impl<'a> FnEmit<'a> {
     ) -> String {
         let fn_ty = MirTy::Fn(arg_tys.to_vec(), Box::new(ret_ty.clone()));
         let callee_v = self.materialize_operand(callee, &fn_ty);
+        let into = self.sret_into.is_some();
         let (arg_vals, sret) = self.rok_call_args(args, arg_tys, ret_ty);
         let arg_ty_list = rok_fn_types(arg_tys, ret_ty, self.target).0.join(", ");
         let arg_list = arg_vals.join(", ");
@@ -3759,6 +4060,9 @@ impl<'a> FnEmit<'a> {
                 "    llvm.call {callee_v}({arg_list}) : !llvm.ptr, ({arg_ty_list}) -> ()"
             );
             let dst = self.fresh_value();
+            if into {
+                return dst;
+            }
             let _ = writeln!(self.body, "    {dst} = llvm.load {r} : !llvm.ptr -> {ret}");
             self.buf_ref_facts(dst, ret_ty)
         } else if matches!(ret_ty, MirTy::Unit) {
@@ -4098,6 +4402,12 @@ impl<'a> FnEmit<'a> {
             Operand::Copy(id) => self.local_ty(*id),
             Operand::Const(c) => const_ty(c),
         };
+        if let Some(p) = self.field_addr(target, &target_ty, index) {
+            let ty = mlir_type(field_ty, self.target);
+            let dst = self.fresh_value();
+            let _ = writeln!(self.body, "    {dst} = llvm.load {p} : !llvm.ptr -> {ty}");
+            return dst;
+        }
         let target_v = self.materialize_operand(target, &target_ty);
         let target_ty_str = mlir_type(&target_ty, self.target);
         let index = llvm_field(&target_ty, index as usize, self.target);
@@ -4129,17 +4439,16 @@ impl<'a> FnEmit<'a> {
         }
         // Each argument at the callee's parameter type, so the operand
         // list matches the declaration.
+        let into = self.sret_into.is_some();
         let (arg_vals, sret) = self.rok_call_args(args, &sig.params, &sig.ret);
         let (arg_tys, _) = rok_fn_types(&sig.params, &sig.ret, self.target);
         let (name, list, tys) = (&sig.name, arg_vals.join(", "), arg_tys.join(", "));
         if let Some(r) = sret {
-            let ret = mlir_type(&sig.ret, self.target);
-            let _ = write!(
-                self.body,
-                "    func.call @{name}({list}) : ({tys}) -> ()
-    {dst} = llvm.load {r} : !llvm.ptr -> {ret}
-"
-            );
+            let _ = writeln!(self.body, "    func.call @{name}({list}) : ({tys}) -> ()");
+            if !into {
+                let ret = mlir_type(&sig.ret, self.target);
+                let _ = writeln!(self.body, "    {dst} = llvm.load {r} : !llvm.ptr -> {ret}");
+            }
         } else if sig.ret == MirTy::Unit {
             let _ = write!(
                 self.body,
@@ -4372,6 +4681,12 @@ impl<'a> FnEmit<'a> {
                     self.body,
                     "    {lhs}llvm.call @{name}({list}) vararg(!llvm.func<{fn_ret} ({})>) : ({tlist}) -> {rty}",
                     proto.join(", ")
+                );
+            }
+            Callee::Symbol(name) if abi.stdcall => {
+                let _ = writeln!(
+                    self.body,
+                    "    {lhs}llvm.call x86_stdcallcc @{name}({list}) : ({tlist}) -> {rty}"
                 );
             }
             Callee::Symbol(name) if REF_ONLY_CALLS.contains(&name) => {
@@ -4983,9 +5298,11 @@ impl<'a> FnEmit<'a> {
             }
             Terminator::Return(Some(op)) if rok_by_ref(&self.f.ret_ty, self.target) => {
                 let ret_ty = self.f.ret_ty.clone();
-                let val = self.materialize_operand(op, &ret_ty);
-                let ty = mlir_type(&ret_ty, self.target);
-                let _ = writeln!(self.body, "    llvm.store {val}, %arg0 : {ty}, !llvm.ptr");
+                if !self.memcpy_operand("%arg0", op, &ret_ty) {
+                    let val = self.materialize_operand(op, &ret_ty);
+                    let ty = mlir_type(&ret_ty, self.target);
+                    let _ = writeln!(self.body, "    llvm.store {val}, %arg0 : {ty}, !llvm.ptr");
+                }
                 self.emit_gc_frame_pop();
                 self.body.push_str("    func.return\n");
             }
@@ -5634,6 +5951,29 @@ fn mlir_bytes(bytes: &[u8]) -> String {
         }
     }
     escaped
+}
+
+/// The bytes of an array of `elements`, constants of scalar type
+/// `elem_ty`, as stored on `target` (little-endian); `None` unless all
+/// are such constants.
+#[must_use]
+pub fn const_bytes(elements: &[Operand], elem_ty: &MirTy, target: &Target) -> Option<Vec<u8>> {
+    let MirTy::Prim(p) = elem_ty else { return None };
+    let size = target.size_align(elem_ty).0 as usize;
+    let mut out = Vec::with_capacity(elements.len() * size);
+    for e in elements {
+        let Operand::Const(c) = e else { return None };
+        let v: u128 = match c {
+            ConstVal::Int { value, .. } if p.is_int() => *value as u128,
+            ConstVal::UInt { value, .. } if p.is_int() => *value,
+            ConstVal::Char(c) if p.is_int() => u128::from(*c),
+            ConstVal::Bool(b) if *p == PrimTy::Bool => u128::from(*b),
+            ConstVal::Float { bits, ty } if *ty == *p && p.is_float() => u128::from(*bits),
+            _ => return None,
+        };
+        out.extend_from_slice(&v.to_le_bytes()[..size]);
+    }
+    Some(out)
 }
 
 fn format_const_attr(v: &ConstVal, ty: &MirTy, target: &Target) -> Option<String> {

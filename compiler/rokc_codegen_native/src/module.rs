@@ -97,7 +97,9 @@ pub fn compile(
     let mut c_entries = Vec::new();
     for &f in &view {
         let c = match f.facts.abi {
-            Abi::C { variadic } => {
+            // `system` is `stdcall` only on 32-bit x86, which has no
+            // native backend.
+            Abi::C { variadic, .. } => {
                 classify(&mut errors, f.span, t, &f.param_tys, &f.ret_ty, variadic)
             }
             Abi::Rok if f.facts.linkage == Linkage::Extern => {
@@ -401,7 +403,7 @@ fn glue_code(
             continue;
         }
         if let ConstVal::Str(text) = &s.init {
-            let lit = ctx.obj.string(text);
+            let lit = ctx.obj.bytes(text.as_bytes());
             let pw = t.pointer_width / 8;
             let mut bytes = vec![0u8; 2 * pw as usize];
             bytes[pw as usize..].copy_from_slice(&(text.len() as u64).to_le_bytes()[..pw as usize]);

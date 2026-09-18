@@ -818,6 +818,20 @@ impl TypeDefs<'_> {
         self.generics_of(base).is_some_and(mono::all_defaulted)
     }
 
+    /// Drop the structs and enums from `structs` / `enums` on (instances
+    /// a rolled-back lowering made).
+    fn truncate(&self, structs: usize, enums: usize) {
+        self.structs.borrow_mut().truncate(structs);
+        self.struct_table
+            .borrow_mut()
+            .retain(|_, id| (id.0 as usize) < structs);
+        self.enums.borrow_mut().truncate(enums);
+        self.enum_table
+            .borrow_mut()
+            .retain(|_, id| (id.0 as usize) < enums);
+        crate::truncate_type_names(structs, enums);
+    }
+
     fn struct_id(&self, key: &str) -> Option<StructId> {
         let id = self.struct_table.borrow().get(key).copied();
         incr::log_type(false, key, id.map(|i| i.0));

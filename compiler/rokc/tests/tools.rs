@@ -147,9 +147,9 @@ fn repl_loads_and_uses_a_library() {
     let rokr = env.rokr.display().to_string();
     let dir = std::env::temp_dir().join(format!("rok_repl_pkg_{}", std::process::id()));
     let lib = dir.join("geom");
-    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::create_dir_all(lib.join("src")).unwrap();
     std::fs::write(
-        lib.join("lib.rok"),
+        lib.join("src/lib.rok"),
         "pub fn twice(x: i32) -> i32 { x * 2 }\n",
     )
     .unwrap();
@@ -441,9 +441,13 @@ let never = 0;
 
     // A package: its `mod` files resolve.
     let pkg = dir.join("pkg");
-    std::fs::create_dir_all(&pkg).unwrap();
-    std::fs::write(pkg.join("main.rok"), "mod util;\nlet k = util::three();\n").unwrap();
-    std::fs::write(pkg.join("util.rok"), "pub fn three() -> i32 { 3 }\n").unwrap();
+    std::fs::create_dir_all(pkg.join("src")).unwrap();
+    std::fs::write(
+        pkg.join("src/main.rok"),
+        "mod util;\nlet k = util::three();\n",
+    )
+    .unwrap();
+    std::fs::write(pkg.join("src/util.rok"), "pub fn three() -> i32 { 3 }\n").unwrap();
     let pkg_s = pkg.display().to_string();
     let out = piped(
         ROKC,
@@ -662,14 +666,14 @@ fn lsp_sees_prebuilt_dependencies() {
     let Some(env) = setup() else { return };
     let dir = scratch("lsp-deps");
     let (util, app) = (dir.join("util"), dir.join("app"));
-    std::fs::create_dir_all(&util).unwrap();
-    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(util.join("src")).unwrap();
+    std::fs::create_dir_all(app.join("src")).unwrap();
     std::fs::write(
-        util.join("lib.rok"),
+        util.join("src/lib.rok"),
         "/// Says hi.\npub fn hello() -> i32 {\n    return 1;\n}\n",
     )
     .unwrap();
-    let main = app.join("main.rok");
+    let main = app.join("src/main.rok");
     let src = "use util::hello;\nlet x = hello();\nprintln(f\"{x}\");\n";
     std::fs::write(&main, src).unwrap();
     let uri = format!("file://{}", main.display());
@@ -719,7 +723,7 @@ fn lsp_sees_prebuilt_dependencies() {
     };
     assert!(reply(2).contains("Says hi."), "{stdout}");
     let def = reply(3);
-    let want = format!("file://{}", util.join("lib.rok").display());
+    let want = format!("file://{}", util.join("src/lib.rok").display());
     assert!(def.contains(&want), "{def}");
     assert!(def.contains(r#""start":{"line":1,"#), "{def}");
 }

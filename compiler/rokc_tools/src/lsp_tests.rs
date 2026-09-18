@@ -460,10 +460,10 @@ fn unsaved_submodule_buffer() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-sub-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("main.rok"), "mod m;\n\nlet x: i32 = m::v();\n").unwrap();
-    std::fs::write(dir.join("m.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
-    let uri = format!("file://{}", dir.join("m.rok").display());
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.rok"), "mod m;\n\nlet x: i32 = m::v();\n").unwrap();
+    std::fs::write(dir.join("src/m.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
+    let uri = format!("file://{}", dir.join("src/m.rok").display());
     let uri = uri.as_str();
     let open = notify(
         "textDocument/didOpen",

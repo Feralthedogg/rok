@@ -239,7 +239,7 @@ fn cases() -> Vec<(String, String)> {
         let p = e.path();
         let name = e.file_name().to_string_lossy().into_owned();
         let src = if p.is_dir() {
-            fs::read_to_string(p.join("main.rok")).ok()
+            fs::read_to_string(p.join("src/main.rok")).ok()
         } else if p.extension().is_some_and(|x| x == "rok") {
             fs::read_to_string(&p).ok()
         } else {

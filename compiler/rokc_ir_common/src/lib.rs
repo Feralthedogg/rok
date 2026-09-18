@@ -175,7 +175,9 @@ pub enum Abi {
     Rok,
     /// The platform C ABI (spec 8.6): `str` is a NUL-terminated `char*`,
     /// a `fn` parameter a bare C function pointer, aggregates classified.
-    C { variadic: bool },
+    /// `system`: `extern "system"`, `stdcall` on 32-bit x86 Windows and
+    /// the C ABI elsewhere (spec 5.9.2).
+    C { variadic: bool, system: bool },
 }
 
 /// Where a function's code comes from.
@@ -341,7 +343,7 @@ rokc_core::codec_enum!(ConstVal {
 });
 rokc_core::codec_enum!(Abi {
     Rok,
-    C { variadic }
+    C { variadic, system }
 });
 rokc_core::codec_enum!(Linkage {
     Defined,

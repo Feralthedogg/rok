@@ -7,7 +7,9 @@
 use std::collections::{HashMap, HashSet};
 
 use rokc_codegen_mlir::abi::{ArgAbi, FnAbi, RetAbi, rok_by_ref};
-use rokc_codegen_mlir::emit::{cannot_overflow, const_int, gc_object_size, scan_table};
+use rokc_codegen_mlir::emit::{
+    cannot_overflow, const_bytes, const_int, gc_object_size, scan_table,
+};
 use rokc_ir_common::{Abi, ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 use rokc_mir::gc_abi::{
     CARD_SHIFT, FLAG_CARDED, FLAG_UNLOGGED, GC_FLAGS_OFFSET, GC_WORD_OFFSET, HEADER_SIZE,
@@ -79,7 +81,7 @@ impl Ctx<'_> {
 
     /// The symbol of a string literal's bytes (NUL-terminated).
     pub fn str_sym(&mut self, text: &str) -> SymId {
-        self.obj.string(text)
+        self.obj.bytes(text.as_bytes())
     }
 
     pub fn sym(&mut self, name: &str) -> SymId {
@@ -180,6 +182,9 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 })
             })
             .collect();
+        let back_edges = rokc_codegen_mlir::emit::polled_back_edges(f, c.quiet, c.pkgs, c.t)
+            .into_keys()
+            .collect();
         let mut block_label = HashMap::new();
         let mut block_params = HashMap::new();
         for b in &f.blocks {
@@ -197,7 +202,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             gc_frame: None,
             rooted: HashSet::new(),
             deaths: rokc_mir::Deaths::default(),
-            back_edges: rokc_codegen_mlir::emit::back_edge_blocks(f),
+            back_edges,
             panics: Vec::new(),
             at: f.span,
             sret: None,
@@ -2085,6 +2090,28 @@ impl<'c, 'a> FnLower<'c, 'a> {
             RValue::ArrayInit { elem_ty, elements } => {
                 let Some(d) = dst else { return };
                 let size = t.size_align(elem_ty).0;
+                // A big one of constants (`b"..."`): one copy from data.
+                let all = size * elements.len() as u32;
+                let ty = MirTy::Array(Box::new(elem_ty.clone()), elements.len() as u32);
+                if rok_by_ref(&ty, t) {
+                    if let Some(bytes) = const_bytes(elements, elem_ty, t) {
+                        let sym = self.c.obj.bytes(&bytes);
+                        let w = self.word();
+                        let p = self.tmp_k(w);
+                        self.push(Inst::Sym {
+                            dst: p,
+                            sym,
+                            got: false,
+                        });
+                        let Mem::Frame(s, _) = p else { unreachable!() };
+                        self.push(Inst::Copy {
+                            dst: d,
+                            src: Mem::Ind(s, 0),
+                            size: all,
+                        });
+                        return;
+                    }
+                }
                 for (i, e) in elements.iter().enumerate() {
                     let v = self.val(e, elem_ty);
                     self.store(v, elem_ty, d.at(size * i as u32));
@@ -2146,7 +2173,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                             .collect();
                         self.call_rok(Callee::Ptr(cm), arg_tys, ret_ty, &vals, dst);
                     }
-                    Abi::C { variadic } => {
+                    Abi::C { variadic, .. } => {
                         let Some(fa) = classify(
                             &mut self.c.errors,
                             self.f.span,

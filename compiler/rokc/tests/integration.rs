@@ -1,5 +1,5 @@
-//! End to end: `rokc build` each `tests/cases/*.rok` (or
-//! `tests/cases/<dir>/main.rok`), then run it. A case has
+//! End to end: `rokc build` each `tests/cases/*.rok` (or the package
+//! `tests/cases/<dir>/`, `src/main.rok`), then run it. A case has
 //! `// expect-exit: N` (optionally `// expect-stdout:`), or
 //! `// expect-error: text` when it must fail to build. Directives:
 //! `common/mod.rs`.
@@ -26,7 +26,7 @@ fn end_to_end_cases() {
         .filter_map(|e| {
             let p = e.ok()?.path();
             if p.is_dir() {
-                let main = p.join("main.rok");
+                let main = p.join("src/main.rok");
                 let name = p.file_name()?.to_string_lossy().into_owned();
                 main.exists().then_some((name, main))
             } else if p.extension().is_some_and(|x| x == "rok") {
@@ -100,7 +100,11 @@ fn run_case(
         return Err(format!("rokc build failed: {first}"));
     }
     if let (Some(plug), Some(wac)) = (plug, wac) {
-        let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        // Relative to the case's package directory, above `src/`.
+        let dir = path
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap_or_else(|| std::path::Path::new("."));
         let plugged = case_dir.join(exe_name("plug"));
         let b = rokc_build(env, &dir.join(plug), &plugged).map_err(|e| format!("rokc: {e}"))?;
         if !b.status.success() {

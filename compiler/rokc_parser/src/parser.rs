@@ -778,15 +778,23 @@ impl<'a> Parser<'a> {
             if self.meta_block().is_some() || self.eat(&TokenKind::Semi) {
                 continue;
             }
-            tops.push((self.peek_span().start, self.at_item_start()));
-            if self.at_item_start() {
+            let at_item = self.at_item_start() && !self.at_attributed_stmt();
+            tops.push((self.peek_span().start, at_item));
+            if at_item {
                 if let Some(item) = self.parse_item() {
                     items.push(item);
                     items.append(&mut self.pending_items);
                 } else if !std::mem::take(&mut self.vanished) {
                     self.recover(from, Recover::TopItem);
                 }
-            } else if let Some(stmt) = self.parse_top_stmt() {
+                continue;
+            }
+            let attrs = self.cfg_only_attrs("a statement");
+            let marks = (self.pending_stmts.len(), self.lifted.len());
+            if let Some(stmt) = self.parse_top_stmt() {
+                if self.stmt_dropped(&attrs, marks) {
+                    continue;
+                }
                 stmts.push(stmt);
                 while let Some(extra) = self.pending_stmts.pop() {
                     stmts.push(extra);
@@ -898,6 +906,84 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// Whether the build's cfg rules out what `attrs` are on.
+    fn cfg_off(&self, attrs: &[Attribute]) -> bool {
+        self.cfg.as_ref().is_some_and(|env| !env.attrs_pass(attrs))
+    }
+
+    /// Spec 6.3.7: whether a member or statement with `attrs` stays
+    /// under the build's cfg (always without one). A dropped one's
+    /// malformed predicate is reported here; a kept one's with its item.
+    fn cfg_keeps(&mut self, attrs: &[Attribute]) -> bool {
+        if !self.cfg_off(attrs) {
+            return true;
+        }
+        for a in attrs.iter().filter(|a| a.path == ["cfg"]) {
+            if let Some(m) = crate::cfg::attr_problem(a) {
+                let d = RokDiagnostic::error(ErrorKind::Meta, a.span, m);
+                self.diagnostics.push(d.with_file(self.file.clone()));
+            }
+        }
+        false
+    }
+
+    /// Whether outer attributes start here and a statement, not an
+    /// item, follows them.
+    fn at_attributed_stmt(&mut self) -> bool {
+        let save = self.pos;
+        while matches!(self.peek(), TokenKind::HashLBracket) {
+            let mut depth = 0usize;
+            while let Some(t) = self.tokens.get(self.pos) {
+                self.pos += 1;
+                match t.kind {
+                    TokenKind::HashLBracket | TokenKind::LBracket => depth += 1,
+                    TokenKind::RBracket => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        let stmt = self.pos != save && !self.at_item_start();
+        self.pos = save;
+        stmt
+    }
+
+    /// The outer attributes of a statement or tuple variant field
+    /// (`what`), which keeps none: only `#[cfg]` may be there (spec 6.1.3).
+    fn cfg_only_attrs(&mut self, what: &str) -> Vec<Attribute> {
+        let attrs = self.parse_outer_attrs();
+        for a in &attrs {
+            let why = match a.name() {
+                "doc" => None,
+                "cfg" => crate::cfg::attr_problem(a),
+                _ => Some(format!(
+                    "`#[{}]` cannot be attached to {what}; only `#[cfg]` can (spec 6.1.3)",
+                    a.path.join("::")
+                )),
+            };
+            if let Some(m) = why {
+                let d = RokDiagnostic::error(ErrorKind::Meta, a.span, m);
+                self.diagnostics.push(d.with_file(self.file.clone()));
+            }
+        }
+        attrs
+    }
+
+    /// Spec 6.3.7: whether `attrs` drop the statement just parsed; the
+    /// statements and nested fns it queued since `marks` go with it.
+    fn stmt_dropped(&mut self, attrs: &[Attribute], (pending, lifted): (usize, usize)) -> bool {
+        if !self.cfg_off(attrs) {
+            return false;
+        }
+        self.pending_stmts.truncate(pending);
+        for f in self.lifted.drain(lifted..) {
+            self.lifted_names.remove(&f.name);
+        }
+        true
     }
 
     fn parse_outer_attrs(&mut self) -> Vec<Attribute> {
@@ -1249,16 +1335,10 @@ impl<'a> Parser<'a> {
             );
         }
         // Spec 6.3.7: cfg runs before meta expansion. A cfg-false item
-        // expands nothing (the driver drops it); cfg-false members go
-        // before a derive sees them.
-        let mut item = item;
-        if let Some(env) = &self.cfg {
-            if !env.attrs_pass(meta::item_attrs(&item)) {
-                return Some(item);
-            }
-            let diags = crate::cfg::drop_cfg_members(env, &mut item);
-            self.diagnostics
-                .extend(diags.into_iter().map(|d| d.with_file(self.file.clone())));
+        // expands nothing (the driver drops it); its cfg-false members
+        // were dropped as they were parsed.
+        if self.cfg_off(meta::item_attrs(&item)) {
+            return Some(item);
         }
         if !self.meta.is_empty() {
             // Spec 6.8.3: a user attribute replaces the item with its
@@ -1295,18 +1375,18 @@ impl<'a> Parser<'a> {
         }
         if self.at_kw("extern") {
             // `extern "C" fn f(..) { .. }` (spec 5.9.10): a rok function
-            // with the C ABI, marked for HIR's checks.
+            // with an external ABI, marked with it for HIR.
             let after_abi = self.tokens.get(self.pos + 2).map(|t| &t.kind);
-            if matches!(self.peek_next(), Some(TokenKind::StrLit(_)))
-                && matches!(after_abi, Some(TokenKind::Fn | TokenKind::Unsafe))
+            if let (Some(TokenKind::StrLit(abi)), Some(TokenKind::Fn | TokenKind::Unsafe)) =
+                (self.peek_next(), after_abi)
             {
                 let span = self.peek_span();
                 self.bump(); // `extern`
                 self.bump(); // ABI string
                 let mut attrs = attrs;
                 attrs.push(Attribute {
-                    path: vec![rokc_ast::EXTERN_C_FN_ATTR.to_owned()],
-                    body: rokc_ast::AttrBody::Empty,
+                    path: vec![rokc_ast::EXTERN_FN_ATTR.to_owned()],
+                    body: rokc_ast::AttrBody::Value(rokc_ast::Literal::Str(abi)),
                     inner: false,
                     span,
                 });
@@ -1506,12 +1586,14 @@ impl<'a> Parser<'a> {
                     let (f_attrs, f_vis) = self.parse_attrs_vis();
                     let span = self.peek_span();
                     let ty = self.parse_type()?;
-                    fields.push(rokc_ast::TupleField {
-                        vis: f_vis,
-                        attrs: f_attrs,
-                        ty,
-                        span,
-                    });
+                    if self.cfg_keeps(&f_attrs) {
+                        fields.push(rokc_ast::TupleField {
+                            vis: f_vis,
+                            attrs: f_attrs,
+                            ty,
+                            span,
+                        });
+                    }
                     if !self.eat(&TokenKind::Comma) {
                         break;
                     }
@@ -1595,14 +1677,16 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            fields.push(NamedField {
-                vis,
-                attrs,
-                name,
-                ty,
-                default,
-                span,
-            });
+            if self.cfg_keeps(&attrs) {
+                fields.push(NamedField {
+                    vis,
+                    attrs,
+                    name,
+                    ty,
+                    default,
+                    span,
+                });
+            }
             if !self.eat(&TokenKind::Semi) {
                 break;
             }
@@ -1682,11 +1766,16 @@ impl<'a> Parser<'a> {
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let attrs_from = self.pos;
             let (item_attrs, item_vis) = self.parse_attrs_vis();
+            let (on, before) = (self.cfg_keeps(&item_attrs), items.len());
             match self.peek() {
                 TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                     let from = self.pos;
                     if let Some(f) = self.parse_fn(item_vis, item_attrs) {
-                        let fs = self.expand_method(f, attrs_from);
+                        let fs = if on {
+                            self.expand_method(f, attrs_from)
+                        } else {
+                            Vec::new()
+                        };
                         items.extend(fs.into_iter().map(ImplItem::Method));
                     } else {
                         self.recover(from, Recover::NestedItem);
@@ -1716,7 +1805,11 @@ impl<'a> Parser<'a> {
                 TokenKind::Ident(k) if k == "const" && self.at_const_fn() => {
                     let from = self.pos;
                     if let Some(f) = self.parse_const_fn(item_vis, item_attrs) {
-                        let fs = self.expand_method(f, attrs_from);
+                        let fs = if on {
+                            self.expand_method(f, attrs_from)
+                        } else {
+                            Vec::new()
+                        };
                         items.extend(fs.into_iter().map(ImplItem::Method));
                     } else {
                         self.recover(from, Recover::NestedItem);
@@ -1739,6 +1832,9 @@ impl<'a> Parser<'a> {
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
+            }
+            if !on {
+                items.truncate(before);
             }
         }
         self.expect(&TokenKind::RBrace, "`}`")?;
@@ -1824,7 +1920,8 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let mut tys = Vec::new();
                     while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                        if let Some(t) = self.parse_type() {
+                        let f_attrs = self.cfg_only_attrs("a tuple variant field");
+                        if let Some(t) = self.parse_type().filter(|_| !self.cfg_off(&f_attrs)) {
                             tys.push(t);
                         }
                         if !self.eat(&TokenKind::Comma) {
@@ -1845,12 +1942,14 @@ impl<'a> Parser<'a> {
                 }
                 _ => EnumVariantKind::Unit,
             };
-            variants.push(EnumVariant {
-                attrs: v_attrs,
-                name: v_name,
-                kind,
-                span: v_span,
-            });
+            if self.cfg_keeps(&v_attrs) {
+                variants.push(EnumVariant {
+                    attrs: v_attrs,
+                    name: v_name,
+                    kind,
+                    span: v_span,
+                });
+            }
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
@@ -1887,6 +1986,7 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let (item_attrs, item_vis) = self.parse_attrs_vis();
+            let (on, before) = (self.cfg_keeps(&item_attrs), items.len());
             match self.peek() {
                 TokenKind::Fn | TokenKind::Unsafe => {
                     let from = self.pos;
@@ -1940,6 +2040,9 @@ impl<'a> Parser<'a> {
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
+            }
+            if !on {
+                items.truncate(before);
             }
         }
         self.expect(&TokenKind::RBrace, "`}`")?;
@@ -2189,8 +2292,9 @@ impl<'a> Parser<'a> {
         let outer_owner = self.fn_owner.replace(name.clone());
         while !matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
             let from = self.pos;
-            if let Some(item) = self.parse_trait_item() {
+            if let Some((item, on)) = self.parse_trait_item() {
                 match item {
+                    _ if !on => {}
                     TraitItem::Method(f) => {
                         let fs = self.expand_method(f, from);
                         items.extend(fs.into_iter().map(TraitItem::Method));
@@ -2215,8 +2319,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_trait_item(&mut self) -> Option<TraitItem> {
+    /// A trait item and whether its cfg keeps it.
+    fn parse_trait_item(&mut self) -> Option<(TraitItem, bool)> {
         let (attrs, vis) = self.parse_attrs_vis();
+        let on = self.cfg_keeps(&attrs);
+        self.parse_trait_member(attrs, vis).map(|i| (i, on))
+    }
+
+    fn parse_trait_member(&mut self, attrs: Vec<Attribute>, vis: Visibility) -> Option<TraitItem> {
         match self.peek() {
             TokenKind::Fn | TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => {
                 let f = self.parse_fn(vis, attrs)?;
@@ -3667,7 +3777,12 @@ impl<'a> Parser<'a> {
             if self.eat(&TokenKind::Semi) {
                 continue;
             }
+            let attrs = self.cfg_only_attrs("a statement");
+            let marks = (self.pending_stmts.len(), self.lifted.len());
             if let Some((stmt, is_trailing)) = self.parse_stmt() {
+                if self.stmt_dropped(&attrs, marks) {
+                    continue;
+                }
                 if is_trailing && matches!(self.peek(), TokenKind::RBrace) {
                     if let StmtKind::Trailing(expr) = stmt.kind {
                         trailing = Some(Box::new(expr));

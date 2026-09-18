@@ -1,0 +1,3 @@
+pub fn of(w: i32, h: i32) -> str {
+    if w == h { "square" } else { "rect" }
+}

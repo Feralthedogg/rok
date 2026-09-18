@@ -37,7 +37,8 @@
 //!     (WAVE syntax) prints the value after `=>`
 //!   - `// wasm-reactor` — a component without `wasi:cli/run`: not run,
 //!     only its `wasm-invoke`s
-//!   - `// wasm-plug: dir/main.rok` — that program is built too and
+//!   - `// wasm-plug: dir/main.rok` — that program (relative to the case
+//!     directory) is built too and
 //!     `wac plug` (`ROK_TEST_WAC`; the case is skipped without it)
 //!     satisfies the case's imports with its exports; the composition
 //!     runs
@@ -83,6 +84,14 @@ pub fn scratch(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// `fs::write`, creating the parent directories first (`app/src/..`).
+pub fn put(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> std::io::Result<()> {
+    if let Some(parent) = path.as_ref().parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, data)
 }
 
 /// Scratch directories of runs that ended (killed, failed, or never

@@ -1,0 +1,26 @@
+#[cfg(feature = "json")]
+pub fn to_json() -> i32 {
+    return 7;
+}
+
+pub fn which<T>(x: T) -> str {
+    let json = cfg!(feature = "json");
+    let own = cfg!(feature = "own");
+    return f"dep json: {json}, dep own: {own}";
+}
+
+// Members are filtered by the dependency's features, not the user's.
+#[derive(Clone, Debug)]
+pub struct Rec {
+    pub a: i32;
+    #[cfg(feature = "json")]
+    pub j: i32;
+    #[cfg(feature = "own")]
+    pub o: i32;
+}
+
+pub fn rec<T>(x: T) -> Rec {
+    #[cfg(feature = "own")]
+    return Rec { a: 0, j: 0, o: 0 };
+    Rec { a: 1, j: 2 }
+}

@@ -1,8 +1,25 @@
-// spec: §5.9.2
+// spec: §5.9.2 §5.9.10
 // only-target: i686-pc-windows-msvc
-// expect-error: 6:1: `extern "system"` is `stdcall` on 32-bit x86 Windows, which is not supported yet (spec 5.9.2)
+// expect-exit: 0
+// expect-stdout:
+// true 21 6 6
 
-// 5.9.2: on 32-bit x86 Windows `"system"` is `stdcall`.
-extern "system" { fn GetTickCount() -> u32; }
+// 5.9.2: on 32-bit x86 Windows `"system"` is `stdcall`: the callee pops
+// its arguments and the symbol is `_name@N`. Kernel32 functions are
+// called that way; an `extern "system" fn` definition is entered that
+// way (here through a declaration of its exported symbol, so a caller
+// and callee disagreeing on who pops would unbalance the stack).
+extern "system" {
+    fn GetTickCount() -> u32;
+    fn MulDiv(a: i32, b: i32, c: i32) -> i32;
+    fn rok_sum3(a: i32, b: i32, c: i32) -> i32;
+}
 
-println(f"{unsafe { GetTickCount() }}");
+#[export_name("rok_sum3")]
+extern "system" fn sum3(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+
+fn main() {
+    let t = unsafe { GetTickCount() };
+    let via_c = unsafe { rok_sum3(1, 2, 3) };
+    println(f"{t > 0u32} {unsafe { MulDiv(6, 7, 2) }} {sum3(1, 2, 3)} {via_c}");
+}

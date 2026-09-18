@@ -80,7 +80,7 @@ rok toolchain remove 0.1.0-aarch64-apple-darwin
 ## Quick start
 
 ```sh
-rok new hello        # hello/{main.rok, rok.rokon, .gitignore} + git init
+rok new hello        # hello/{src/main.rok, rok.rokon, .gitignore} + git init
 cd hello
 rok run              # Hello, world!
 rok repl .           # run it in a REPL session, then stay there with its bindings

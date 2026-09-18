@@ -18,7 +18,7 @@
 // handles from constructors, results, lists and records; borrowed ones
 // to methods and statics; owned ones handed back (`take`), so the value
 // here no longer has one; `using` drops one (the exporter's destructor).
-ffi::wit::import { "plug/counters.wit" }
+ffi::wit::import { "../plug/counters.wit" }
 
 use test::res::counters;
 use test::res::counters::Counter;

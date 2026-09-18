@@ -400,8 +400,10 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
     let name = m.name.clone().ok_or("rok.rokon has no `name`")?;
     manifest::check_name(&name)?;
     let vers = Version::parse(m.version.as_deref().ok_or("rok.rokon has no `version`")?)?;
-    if !dir.join("lib.rok").is_file() {
-        return Err(format!("`{name}` is not a library package (no lib.rok)"));
+    if !dir.join("src/lib.rok").is_file() {
+        return Err(format!(
+            "`{name}` is not a library package (no src/lib.rok)"
+        ));
     }
     let mut deps = Vec::new();
     for d in &m.native {

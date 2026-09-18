@@ -163,11 +163,11 @@ fn add_lock_update_offline_remove() {
     let root = scratch("lock");
     let home = root.join("home");
     let repo = root.join("greet");
-    let c1 = commit(&repo, &[("lib.rok", LIB_V1)]);
+    let c1 = commit(&repo, &[("src/lib.rok", LIB_V1)]);
     let url = repo.display().to_string();
     let app = root.join("app");
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "use greet::greet;\nprintln(f\"{greet()}\");\n",
     );
     write(&app.join("rok.rokon"), APP0);
@@ -202,12 +202,12 @@ fn add_lock_update_offline_remove() {
         deps(&home, &app, &[]),
         [(
             "greet".to_owned(),
-            checkout.join("lib.rok").display().to_string()
+            checkout.join("src/lib.rok").display().to_string()
         )]
     );
 
     // A new commit upstream: builds keep the locked one; `update` moves.
-    let c2 = commit(&repo, &[("lib.rok", LIB_V2)]);
+    let c2 = commit(&repo, &[("src/lib.rok", LIB_V2)]);
     assert!(deps(&home, &app, &["--locked"])[0].1.contains(&c1));
     ok(&rok(&home, &app, &["update", "greet"]));
     assert!(read(&app.join("rok.lock")).contains(&c2));
@@ -217,7 +217,7 @@ fn add_lock_update_offline_remove() {
     // Offline: a modified or missing checkout comes back from the cached
     // clone; nothing is fetched.
     let c2_dir = home.join("cache/git/checkouts").join(&c2);
-    write(&c2_dir.join("lib.rok"), "tampered");
+    write(&c2_dir.join("src/lib.rok"), "tampered");
     let out = rok(&home, &app, &["--offline", "deps"]);
     ok(&out);
     assert!(
@@ -225,7 +225,7 @@ fn add_lock_update_offline_remove() {
         "{}",
         text(&out.stderr)
     );
-    assert_eq!(read(&c2_dir.join("lib.rok")), LIB_V2);
+    assert_eq!(read(&c2_dir.join("src/lib.rok")), LIB_V2);
     fs::remove_dir_all(&c2_dir).unwrap();
     ok(&rok(&home, &app, &["--offline", "deps"]));
     // `update --offline` re-resolves against the cached clone.
@@ -293,12 +293,12 @@ fn transitive_dependencies_and_conflicts() {
     let root = scratch("transitive");
     let home = root.join("home");
     let b = root.join("b");
-    commit(&b, &[("lib.rok", "pub fn b() -> i32 { return 2; }\n")]);
+    commit(&b, &[("src/lib.rok", "pub fn b() -> i32 { return 2; }\n")]);
     let a = root.join("a");
     commit(
         &a,
         &[
-            ("lib.rok", "pub fn a() -> i32 { return 1; }\n"),
+            ("src/lib.rok", "pub fn a() -> i32 { return 1; }\n"),
             (
                 "rok.rokon",
                 &format!(
@@ -309,7 +309,7 @@ fn transitive_dependencies_and_conflicts() {
         ],
     );
     let app = root.join("app");
-    write(&app.join("main.rok"), "println(\"x\");\n");
+    write(&app.join("src/main.rok"), "println(\"x\");\n");
     ok(&rok(
         &home,
         &app,
@@ -327,7 +327,7 @@ fn transitive_dependencies_and_conflicts() {
     // `b` from a path as well: two packages named `b`.
     let other_b = root.join("other_b");
     write(
-        &other_b.join("lib.rok"),
+        &other_b.join("src/lib.rok"),
         "pub fn b() -> i32 { return 3; }\n",
     );
     let before = read(&app.join("rok.rokon"));
@@ -339,7 +339,7 @@ fn transitive_dependencies_and_conflicts() {
 
     // Path dependencies are written relative to the project; a
     // non-library is refused.
-    write(&root.join("tool/main.rok"), "println(\"t\");\n");
+    write(&root.join("tool/src/main.rok"), "println(\"t\");\n");
     fails(
         &rok(&home, &app, &["add", "tool", "--path", "../tool"]),
         "not a library package",
@@ -363,7 +363,7 @@ fn manifest_errors_and_reserved_forms() {
     let root = scratch("manifest");
     let home = root.join("home");
     let app = root.join("app");
-    write(&app.join("main.rok"), "println(\"x\");\n");
+    write(&app.join("src/main.rok"), "println(\"x\");\n");
     write(
         &app.join("rok.rokon"),
         "Package {\n    deps: { \"foo\": \"1.0.x.y\" },\n}\n",
@@ -412,7 +412,19 @@ fn new_and_init_write_a_manifest() {
     let root = scratch("new");
     let home = root.join("home");
     ok(&rok(&home, &root, &["new", "--lib", "mylib"]));
-    assert!(root.join("mylib/lib.rok").is_file());
+    assert!(read(&root.join("mylib/src/lib.rok")).contains("#[test]"));
+    assert!(!root.join("mylib/lib.rok").exists());
+    ok(&rok(&home, &root, &["new", "mybin"]));
+    assert_eq!(
+        read(&root.join("mybin/src/main.rok")),
+        "println(\"Hello, world!\");\n"
+    );
+    let mut files: Vec<String> = fs::read_dir(root.join("mybin"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(files, [".git", ".gitignore", "rok.rokon", "src"]);
     assert_eq!(
         read(&root.join("mylib/rok.rokon")),
         "Package { name: \"mylib\", version: \"0.1.0\", deps: {} }\n"
@@ -430,7 +442,7 @@ fn new_and_init_write_a_manifest() {
     let out = rok(&home, &dir, &["init"]);
     ok(&out);
     assert!(text(&out.stderr).contains("the package name is `existing-dir`"));
-    assert!(dir.join("main.rok").is_file());
+    assert!(dir.join("src/main.rok").is_file());
     assert!(read(&dir.join("rok.rokon")).contains("name: \"existing-dir\""));
     fs::create_dir_all(dir.join("sub")).unwrap();
     ok(&rok(&home, &dir.join("sub"), &["new", "inner"]));
@@ -470,7 +482,7 @@ fn new_and_init_write_a_manifest() {
 fn rok_add_writes_canonical_rokon() {
     let root = scratch("canon");
     let home = root.join("home");
-    write(&root.join("u/lib.rok"), LIB_V1);
+    write(&root.join("u/src/lib.rok"), LIB_V1);
     ok(&rok(&home, &root, &["new", "app"]));
     let app = root.join("app");
     ok(&rok(&home, &app, &["add", "u", "--path", "../u"]));
@@ -513,7 +525,7 @@ fn rok_add_writes_canonical_rokon() {
     assert!(read(&root.join("my-lib/rok.rokon")).contains("name: \"my-lib\""));
     write(&app.join("rok.rokon"), "Package { name: \"my-app\" }\n");
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "use my_lib::add;\nprintln(f\"{add(1, 2)}\");\n",
     );
     ok(&rok(&home, &app, &["add", "my-lib", "--path", "../my-lib"]));
@@ -534,7 +546,7 @@ fn lint_and_doc_with_dependencies() {
     let root = scratch("lintdoc");
     let home = root.join("home");
     write(
-        &root.join("util/lib.rok"),
+        &root.join("util/src/lib.rok"),
         "/// Says hi.\npub fn hello() -> i32 { let unused = 1; 1 }\n",
     );
     let app = root.join("app");
@@ -544,7 +556,7 @@ fn lint_and_doc_with_dependencies() {
          lints: { \"unused_variables\": \"deny\" },\n}\n",
     );
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "use util::hello;\nlet x = hello();\nprintln(\"hi\");\n",
     );
     // `lints` sets the level, the command line overrides it, and the
@@ -585,7 +597,7 @@ fn lints_from_and_files_in_a_package() {
         "Package { lints_from: \"../mid\" }\n",
     );
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "fn BadName() -> i32 { 1 }\nlet x = BadName();\nprintln(\"hi\");\n",
     );
     // base's deny reaches app through mid; mid's allow overrides base's.
@@ -601,8 +613,8 @@ fn lints_from_and_files_in_a_package() {
     // use the enclosing manifest's lints, from inside or outside.
     write(&root.join("mid/t.rok"), "let y = 1;\nprintln(\"t\");\n");
     for (cwd, path, want) in [
-        (&app, "main.rok", "unused variable `x`"),
-        (&root, "app/main.rok", "unused variable `x`"),
+        (&app, "src/main.rok", "unused variable `x`"),
+        (&root, "app/src/main.rok", "unused variable `x`"),
         (&root.join("mid"), "t.rok", "unused variable `y`"),
         (&root, "mid/t.rok", "unused variable `y`"),
     ] {
@@ -654,7 +666,7 @@ fn named_environments() {
     let root = scratch("envs");
     let home = root.join("home");
     let lib = root.join("lib1");
-    write(&lib.join("lib.rok"), LIB_V1);
+    write(&lib.join("src/lib.rok"), LIB_V1);
     let elsewhere = root.join("elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
 
@@ -716,7 +728,7 @@ fn named_environments() {
     assert_eq!(deps(&home, &elsewhere, &["--env", "copy"])[0].0, "greet");
     // Import from a project: relative paths become absolute.
     let proj = root.join("proj");
-    write(&proj.join("main.rok"), "println(\"p\");\n");
+    write(&proj.join("src/main.rok"), "println(\"p\");\n");
     write(
         &proj.join("rok.rokon"),
         "Package {\n    deps: {\n        \"g\": Dep::path(\"../lib1\"), // here\n    },\n}\n",
@@ -785,7 +797,7 @@ fn pinned_toolchains() {
     let home = root.join("home");
     let app = root.join("app");
     let host = env!("ROK_HOST");
-    write(&app.join("main.rok"), "println(\"x\");\n");
+    write(&app.join("src/main.rok"), "println(\"x\");\n");
     write(&app.join("rok.rokon"), "Package { toolchain: \"9.9\" }\n");
     fails(&rok(&home, &app, &["build"]), "rok toolchain install 9.9");
 
@@ -887,7 +899,7 @@ fn pinned_toolchains() {
 fn script_dependencies() {
     let root = scratch("script");
     let home = root.join("home");
-    write(&root.join("lib1/lib.rok"), LIB_V1);
+    write(&root.join("lib1/src/lib.rok"), LIB_V1);
     let script = "//! ```rokon\n//! Package {\n//!     deps: { \"greet\": Dep::path(\"lib1\") },\n//! }\n//! ```\n\
                   use greet::greet;\nprintln(f\"{greet()}\");\n";
     write(&root.join("s.rok"), script);
@@ -928,11 +940,11 @@ fn build_run_and_repl_with_dependencies() {
     let root = scratch("e2e");
     let home = root.join("home");
     let repo = root.join("greet");
-    commit(&repo, &[("lib.rok", LIB_V2)]);
+    commit(&repo, &[("src/lib.rok", LIB_V2)]);
     let app = root.join("app");
     ok(&rok(&home, &root, &["new", "app"]));
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "use greet::greet;\nprintln(f\"{greet()}\");\n",
     );
     ok(&rok(
@@ -963,7 +975,7 @@ fn build_run_and_repl_with_dependencies() {
     assert!(!app.join("target").exists());
 
     // `:add` in the REPL goes to the active environment; bare `rok` is `rok repl`.
-    write(&root.join("lib1/lib.rok"), LIB_V1);
+    write(&root.join("lib1/src/lib.rok"), LIB_V1);
     ok(&rok(&home, &root, &["env", "create", "r"]));
     let mut child = rok_cmd(&home, &root, &["--env", "r"])
         .stdin(Stdio::piped())
@@ -1003,12 +1015,12 @@ fn prebuilt_dependencies_are_reused_and_rebuilt() {
     let root = scratch("prebuilt");
     let home = root.join("home");
     write(
-        &root.join("base/lib.rok"),
+        &root.join("base/src/lib.rok"),
         "pub struct Cell { pub v: i32; }\npub fn cell(v: i32) -> Cell { return Cell { v: v }; }\n",
     );
     write(&root.join("base/rok.rokon"), "Package { name: \"base\" }\n");
     write(
-        &root.join("mid/lib.rok"),
+        &root.join("mid/src/lib.rok"),
         "pub fn twice<T>(x: T) -> (T, T) { return (x, x); }\n\
          pub fn get() -> i32 { return base::cell(20).v + 1; }\n",
     );
@@ -1019,7 +1031,7 @@ fn prebuilt_dependencies_are_reused_and_rebuilt() {
     let app = root.join("app");
     ok(&rok(&home, &root, &["new", "app"]));
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "let (a, b) = mid::twice(\"x\");\nprintln(f\"{mid::get()} {a}{b}\");\n",
     );
     write(
@@ -1048,7 +1060,7 @@ fn prebuilt_dependencies_are_reused_and_rebuilt() {
     );
     // `base` changed: it and `mid` (built after it) are rebuilt.
     write(
-        &root.join("base/lib.rok"),
+        &root.join("base/src/lib.rok"),
         "pub struct Cell { pub v: i32; }\npub fn cell(v: i32) -> Cell { return Cell { v: v * 2 }; }\n",
     );
     let out = rok(&home, &app, &["run"]);
@@ -1157,7 +1169,7 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     let one = ONE;
     // `num` 1.0.0: a dry run prints the line and writes nothing.
     let num = root.join("num");
-    let c1 = stone(&num, "num", "1.0.0", "", &[("lib.rok", one)]);
+    let c1 = stone(&num, "num", "1.0.0", "", &[("src/lib.rok", one)]);
     let tree1 = git(&num, &["rev-parse", "HEAD^{tree}"]);
     let line = format!(
         "Stone {{ name: \"num\", vers: \"1.0.0\", deps: [], source: Dep::git(\"{}\", rev: \
@@ -1183,12 +1195,12 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
         &rok(home, &num, &["publish", "--index", &reg, "--commit"]),
         "num 1.0.0 is already in the index",
     );
-    write(&num.join("lib.rok"), "dirty");
+    write(&num.join("src/lib.rok"), "dirty");
     fails(&rok(home, &num, &["publish"]), "uncommitted changes");
 
     // More versions, and `geom` 0.3.0 needing `num` ^1.0.
     for v in ["1.1.0", "2.0.0"] {
-        stone(&num, "num", v, "", &[("lib.rok", one)]);
+        stone(&num, "num", v, "", &[("src/lib.rok", one)]);
         ok(&rok(home, &num, &["publish", "--index", &reg, "--commit"]));
     }
     let geom = root.join("geom");
@@ -1200,7 +1212,7 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
         "0.3.0",
         "\"num\": \"^1.0\"",
         "description: \"Shapes\", license: \"MIT\", repository: \"https://example.com/geom\", ",
-        &[("lib.rok", two)],
+        &[("src/lib.rok", two)],
     );
     ok(&rok(home, &geom, &["publish", "--index", &reg, "--commit"]));
     let entry = read(&index.join("ge/om/geom"));
@@ -1222,7 +1234,7 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
         "bad",
         "0.1.0",
         "\"x\": Dep::path(\"..\")",
-        &[("lib.rok", one)],
+        &[("src/lib.rok", one)],
     );
     fails(
         &rok(home, &bad, &["publish"]),
@@ -1239,7 +1251,7 @@ fn self_dependency_is_rejected() {
     let root = scratch("self_dep");
     let home = root.join("home");
     let lib = root.join("me");
-    write(&lib.join("lib.rok"), "pub fn f() -> i32 { 1 }\n");
+    write(&lib.join("src/lib.rok"), "pub fn f() -> i32 { 1 }\n");
     write(
         &lib.join("rok.rokon"),
         "Package {\n    name: \"me\",\n    dev_deps: { \"me\": Dep::path(\".\") },\n}\n",
@@ -1359,7 +1371,13 @@ fn login_publish_yank_api() {
         out
     };
     let run = |args: &[&str]| done(&mut at(args));
-    stone(&root.join("num"), "num", "1.0.0", "", &[("lib.rok", ONE)]);
+    stone(
+        &root.join("num"),
+        "num",
+        "1.0.0",
+        "",
+        &[("src/lib.rok", ONE)],
+    );
 
     let out = run(&["logout"]);
     ok(&out);
@@ -1486,7 +1504,7 @@ fn stones_publish_add_update_yank() {
     // `add`: `^` the newest version; the lock pins both stones.
     let app = root.join("app");
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "use geom::two;\nprintln(f\"{two()}\");\n",
     );
     write(&app.join("rok.rokon"), APP0);
@@ -1529,7 +1547,7 @@ fn stones_publish_add_update_yank() {
     );
 
     // A new version: builds keep the locked one until `update`.
-    stone(&num, "num", "1.1.5", "", &[("lib.rok", ONE)]);
+    stone(&num, "num", "1.1.5", "", &[("src/lib.rok", ONE)]);
     ok(&rok(&home, &num, &["publish", "--index", &reg, "--commit"]));
     ok(&rok(&home, &app, &["--locked", "deps"]));
     assert!(locked_stones(&read(&app.join("rok.lock"))).contains(&"num@1.1.0".to_owned()));
@@ -1589,7 +1607,7 @@ fn stones_publish_add_update_yank() {
     assert_eq!(ok(&rok(&home, &root, &["search", "NU"])), "num 2.0.0\n");
     // Either spelling of `-` / `_` finds a stone.
     let big = root.join("big-int");
-    stone(&big, "big-int", "0.1.0", "", &[("lib.rok", ONE)]);
+    stone(&big, "big-int", "0.1.0", "", &[("src/lib.rok", ONE)]);
     ok(&rok(&home, &big, &["publish", "--index", &reg, "--commit"]));
     for q in ["big_int", "G-I", "big-int"] {
         assert_eq!(ok(&rok(&home, &root, &["search", q])), "big-int 0.1.0\n");
@@ -1754,7 +1772,7 @@ fn native_packages() {
     let app = root.join("app");
     ok(&rok(&home, &root, &["new", "app"]));
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "extern \"C\" {\n    fn zz_muladd(a: i32, b: i32, c: i32) -> i32;\n    fn yy_mul(a: i32, b: \
          i32) -> i32;\n}\nlet a = unsafe { zz_muladd(6, 7, 1) };\nlet b = unsafe { yy_mul(2, 3) \
          };\nprintln(f\"{a} {b}\");\n",
@@ -1803,7 +1821,7 @@ fn native_packages() {
     write(&vend.join("yy.rokon"), &yy_meta.replace(&from, "yy.tgz"));
     let direct = root.join("direct");
     write(
-        &direct.join("main.rok"),
+        &direct.join("src/main.rok"),
         "extern \"C\" { fn yy_mul(a: i32, b: i32) -> i32; }\nlet x = unsafe { yy_mul(4, 5) \
          };\nprintln(f\"{x}\");\n",
     );
@@ -1964,7 +1982,7 @@ fn features_pick_packages_and_cfg() {
     let home = root.join("home");
     let pkg = |name: &str, manifest: &str, lib: &str| {
         write(&root.join(name).join("rok.rokon"), manifest);
-        write(&root.join(name).join("lib.rok"), lib);
+        write(&root.join(name).join("src/lib.rok"), lib);
     };
     pkg(
         "tls",
@@ -1991,7 +2009,7 @@ fn features_pick_packages_and_cfg() {
     let app = root.join("app");
     write(&app.join("rok.rokon"), APP_FEATURES);
     write(
-        &app.join("main.rok"),
+        &app.join("src/main.rok"),
         "let web = cfg!(feature = \"web\");\nprintln(f\"{http::port()} {web}\");\n",
     );
     let e = |args: &[&str]| enabled(&home, &app, args);
@@ -2139,7 +2157,7 @@ fn stone_features_round_trip() {
         "1.0.0",
         "",
         "features: { \"big\": [] }, ",
-        &[("lib.rok", ONE)],
+        &[("src/lib.rok", ONE)],
     );
     ok(&rok(&home, &num, &["publish", "--index", &reg, "--commit"]));
     let codec = root.join("codec");
@@ -2150,7 +2168,7 @@ fn stone_features_round_trip() {
         "\"num\": Dep::version(\"^1.0\", optional: true, features: [\"big\"], default_features: \
          false)",
         "features: { \"default\": [\"std\"], \"std\": [], \"num\": [\"dep:num\"] }, ",
-        &[("lib.rok", ONE)],
+        &[("src/lib.rok", ONE)],
     );
     let line = ok(&rok(
         &home,
@@ -2168,7 +2186,7 @@ fn stone_features_round_trip() {
     assert_eq!(read(&index.join("co/de/codec")), line);
 
     let app = root.join("app");
-    write(&app.join("main.rok"), "println(1);\n");
+    write(&app.join("src/main.rok"), "println(1);\n");
     write(&app.join("rok.rokon"), APP0);
     ok(&rok(
         &home,

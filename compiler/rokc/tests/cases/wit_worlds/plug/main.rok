@@ -1,6 +1,6 @@
 // The component `../main.rok` imports: world `provider`, its exports
 // a world-level function and an interface declared inline.
-ffi::wit::export { "../wit/provider.wit" }
+ffi::wit::export { "../src/wit/provider.wit" }
 
 use test::w::shared::Pair;
 

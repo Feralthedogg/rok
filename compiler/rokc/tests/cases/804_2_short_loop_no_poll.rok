@@ -1,0 +1,98 @@
+// spec: 008.04-safepoint §8.4.2 §8.4.8
+// gc-stress: 3
+// expect-exit: 0
+// expect-stdout:
+// 2016 136 45 1425 130 10
+// 64 0 255
+// 8 32
+
+// 8.4.2: a loop with a constant trip count of at most 64 whose body
+// reaches no safepoint ends in bounded time, so its back edge has no
+// poll; LLVM may unroll and fold it. The counter forms: up, down, by 2,
+// `<=`, a `while` counter, a test that leaves on true; counters next to
+// their type's end (no wrap). Polled loops (a call that allocates, a
+// trip count of 65) and collections around them still work.
+fn tri() -> u64 {
+    let s = 0u64;
+    for i in 0..64 {
+        s += i as u64;
+    }
+    s
+}
+
+fn evens() -> i32 {
+    let s = 0;
+    let i = 0;
+    while i <= 30 {
+        s += i;
+        i += 2;
+    }
+    s
+}
+
+fn down() -> i32 {
+    let s = 0;
+    let i: i8 = 9;
+    while i > 0 {
+        s += i as i32;
+        i -= 1;
+    }
+    s
+}
+
+fn leaves_on_true() -> u32 {
+    let s = 0u32;
+    let i = 1u32;
+    loop {
+        if i > 30 { break; }
+        s += i * 3 + 1;
+        i += 1;
+    }
+    s
+}
+
+fn top_of_u8() -> u32 {
+    let s = 0u32;
+    let i = 250u8;
+    while i < 255u8 {
+        s += (i - 226u8) as u32;
+        i += 1u8;
+    }
+    s
+}
+
+fn nested() -> u32 {
+    let n = 0u32;
+    for _ in 0..2 {
+        for _ in 0..5 {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn allocating() -> usize {
+    let xs: List<str> = [];
+    for i in 0..64 {
+        xs.push(f"{i}");
+    }
+    xs.len()
+}
+
+fn long_count() -> u32 {
+    let s = 0u32;
+    for i in 0..65 {
+        s += i as u32;
+    }
+    s - 2080
+}
+
+fn main() {
+    println(f"{tri()} {evens() - 104} {down()} {leaves_on_true()} {top_of_u8()} {nested()}");
+    println(f"{allocating()} {long_count()} {250u8 + 5u8}");
+    let words: List<str> = [];
+    for i in 0..8 {
+        words.push(f"w{evens() + i}");
+    }
+    println(f"{words.len()} {words.join("").len()}");
+}

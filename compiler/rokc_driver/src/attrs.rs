@@ -258,12 +258,7 @@ impl Cx<'_> {
                 .then_some("`#[doc = \"..\"]`"),
             ),
             "allow" | "warn" | "deny" => (anywhere, words(a, false)),
-            "cfg" => {
-                return match &a.body {
-                    AttrBody::Args(xs) if xs.len() == 1 => rokc_parser::cfg::check_pred(&xs[0]),
-                    _ => Some("`#[cfg]` takes exactly one predicate (spec 6.3)".to_owned()),
-                };
-            }
+            "cfg" => return rokc_parser::cfg::attr_problem(a),
             // A well-formed one was resolved by the parser.
             "cfg_attr" => {
                 return Some(

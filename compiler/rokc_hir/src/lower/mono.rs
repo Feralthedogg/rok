@@ -1035,7 +1035,7 @@ fn lower_fn_with(
         let fixed_abi = fn_def
             .attrs
             .iter()
-            .any(|a| a.path == [rokc_ast::EXTERN_C_FN_ATTR] || a.name() == "export_name");
+            .any(|a| a.path == [rokc_ast::EXTERN_FN_ATTR] || a.name() == "export_name");
         // The location is a hidden parameter: no fixed signature.
         if fixed_abi || name == "main" {
             ctx.emit_error(

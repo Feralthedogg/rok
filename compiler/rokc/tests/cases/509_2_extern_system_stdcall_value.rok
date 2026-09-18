@@ -1,0 +1,12 @@
+// spec: §5.9.2 §5.9.4
+// only-target: i686-pc-windows-msvc
+// expect-error: an `extern "system"` function as a value: it is `stdcall` on this target, not an `extern "C" fn`
+
+// 5.9.4: a C function pointer is `extern "C" fn` only; on 32-bit x86
+// Windows an `extern "system"` function is `stdcall`, so it has no
+// such value.
+extern "system" fn twice(x: i32) -> i32 { x * 2 }
+
+fn call(f: extern "C" fn(i32) -> i32, x: i32) -> i32 { f(x) }
+
+println(f"{call(twice, 7)}");

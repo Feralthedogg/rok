@@ -25,7 +25,7 @@ usage: rokc [global options] <command> [options] [args]
 commands:
   build [path]           build the package (executable target/<profile>/<name>,
                          or target/<profile>/lib<name>.a + <name>.rokhir for a
-                         `lib.rok` package; <profile> is debug, or release at
+                         `src/lib.rok` package; <profile> is debug, or release at
                          -O2+ / -Os; a --target build goes under target/<target>/)
   run [path] [-- args]   build, then run; args after `--` are forwarded
   test [path] [filter]   build and run the `#[test]` functions (filter: regex
@@ -65,8 +65,9 @@ commands:
   help                   print this help
 
 path is a package directory (default: the current one), a file inside a
-package (the package is found by looking upward for `main.rok` / `lib.rok`),
-or a lone `.rok` file, which is built as an anonymous executable package.
+package (the nearest directory upward with `src/main.rok` or `src/lib.rok`),
+or a lone `.rok` file outside a package's `src/`, which is built as an
+anonymous executable package.
 
 global options:
   -v, --verbose                stage timings
@@ -128,7 +129,7 @@ build options:
   --native-runtime <file>      a shared library the executable loads:
                                copied beside it, and the executable looks
                                in its own directory (repeatable)
-  --extern <name>=<path>       dependency package: its directory or `lib.rok`
+  --extern <name>=<path>       dependency package: its directory or `src/lib.rok`
                                (prebuilt into target/<profile>/deps/ first,
                                each after the ones before it), or a prebuilt
                                <name>.rokhir / lib<name>.a; importable as
@@ -496,7 +497,7 @@ fn parse_lib(v: &str) -> (String, bool) {
 }
 
 /// `--extern name=path` (spec 902.3). The path is the dependency's
-/// package directory or its `lib.rok`, or a prebuilt `<name>.rokhir` /
+/// package directory or its `src/lib.rok`, or a prebuilt `<name>.rokhir` /
 /// `lib<name>.a` (spec 904).
 fn parse_extern(v: &str) -> (String, PathBuf) {
     let Some((name, path)) = v.split_once('=') else {
@@ -518,7 +519,7 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
     let root = if prebuilt {
         rokc_interface::rokhir::companions(&path).0
     } else if path.is_dir() {
-        path.join("lib.rok")
+        path.join("src/lib.rok")
     } else {
         path
     };
@@ -1145,10 +1146,13 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     ];
     words.extend(a.cfg.iter().cloned());
     words.extend(pkg.lib.then(|| lib_name(a, pkg)));
+    // A package's sources are its `src/`.
     let mut inputs = vec![if pkg.anonymous {
         pkg.root.clone()
     } else {
-        pkg.dir.clone()
+        pkg.root
+            .parent()
+            .map_or_else(|| pkg.dir.clone(), Path::to_path_buf)
     }];
     let mut stamped = vec![PathBuf::from(&a.opts.rokr)];
     stamped.extend(a.opts.profile_rt.clone());
@@ -1260,7 +1264,7 @@ fn cmd_run(mut a: Args) {
     let pkg = discover_arg(&a);
     if pkg.lib {
         fail(&format!(
-            "`{}` is a library package (`lib.rok`); there is nothing to run",
+            "`{}` is a library package (`src/lib.rok`); there is nothing to run",
             pkg.dir.display()
         ));
     }
@@ -1383,8 +1387,9 @@ fn cmd_doc(mut a: Args) {
     let std_only = a.std && a.positional.is_empty();
     let tmp = std_only.then(|| fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new()));
     if let Some(t) = &tmp {
-        let main = t.path().join("main.rok");
-        std::fs::write(&main, "")
+        let main = t.path().join("rok/src/main.rok");
+        std::fs::create_dir_all(t.path().join("rok/src"))
+            .and_then(|()| std::fs::write(&main, ""))
             .unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", main.display())));
         a.positional.push(main.display().to_string());
         a.name.get_or_insert_with(|| "rok".to_owned());
@@ -1416,7 +1421,8 @@ fn cmd_doc(mut a: Args) {
     }
 }
 
-/// `rokc fmt [path]`: a file, or every source file under a directory.
+/// `rokc fmt [path]`: a file, or every source file under a directory; of
+/// a package directory, those under `src/` and `tests/` and its manifest.
 fn cmd_fmt(a: &Args) {
     let roots: Vec<PathBuf> = if a.positional.is_empty() {
         vec![PathBuf::from(".")]
@@ -1425,7 +1431,11 @@ fn cmd_fmt(a: &Args) {
     };
     let mut files = Vec::new();
     for r in &roots {
-        if r.is_dir() {
+        if rokc_interface::root_file(r).is_ok_and(|f| f.is_some()) {
+            files.extend(rokc_interface::source_files(&r.join("src")));
+            files.extend(rokc_interface::source_files(&r.join("tests")));
+            files.extend(Some(r.join("rok.rokon")).filter(|m| m.is_file()));
+        } else if r.is_dir() {
             files.extend(rokc_interface::source_files(r));
         } else if r.is_file() {
             files.push(r.clone());

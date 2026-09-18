@@ -1,0 +1,11 @@
+// spec: §0.3.1 §5.4.4
+// expect-exit: 0
+// expect-stdout:
+// 12 square
+
+// The package's source is `src/`: `mod` files resolve under it
+// (`src/shapes.rok`, `src/shapes/name.rok`), and the `.rok` files beside
+// `src/` (`stray.rok`, `tools/gen.rok`) are not part of the package.
+mod shapes;
+
+println(f"{shapes::area(3, 4)} {shapes::name::of(4, 4)}");

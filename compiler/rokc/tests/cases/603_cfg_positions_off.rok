@@ -1,0 +1,38 @@
+// spec: §6.3.1 §6.3.3 §6.3.5 §6.3.7 §6.3.8 §6.3.9
+// expect-exit: 0
+// expect-stdout:
+// cpu 1 off
+// false
+
+// The condition-false side of 603_cfg_positions: without
+// `--cfg feature=gpu` its gpu items, field, module, use and static are
+// gone, so code naming them would not resolve.
+#[cfg(feature = "gpu")] fn run() -> str { "gpu" }
+#[cfg(not(feature = "gpu"))] fn run() -> str { "cpu" }
+
+struct Foo {
+    a: i32;
+    #[cfg(feature = "gpu")]
+    b: i32;
+}
+
+#[cfg(feature = "gpu")]
+mod on { pub fn name() -> str { undefined_call() } }
+
+#[cfg(not(feature = "gpu"))]
+mod off { pub fn name() -> str { "off" } }
+
+#[cfg(feature = "gpu")]
+use on::name;
+
+#[cfg(not(feature = "gpu"))]
+use off::name;
+
+#[cfg(feature = "gpu")]
+static SEVEN: i32 = undefined_value;
+
+const HAS_GPU: bool = cfg!(feature = "gpu");
+
+let foo = Foo { a: 1 };
+println(f"{run()} {foo.a} {name()}");
+println(f"{HAS_GPU}");

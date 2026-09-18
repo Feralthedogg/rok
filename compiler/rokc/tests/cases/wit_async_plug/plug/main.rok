@@ -1,6 +1,6 @@
 // The component `../main.rok` imports: a reactor (no `main`, so no
 // `wasi:cli/run`) exporting `svc`, async functions among them.
-ffi::wit::export { "../wit/svc.wit" }
+ffi::wit::export { "../src/wit/svc.wit" }
 
 use wasi::clocks::monotonic_clock;
 use rok::bare::ffi::wit::ErrorContext;

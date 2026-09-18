@@ -205,7 +205,7 @@ impl Printer {
         for a in attrs.iter().filter(|a| !a.inner) {
             if a.path.len() == 1
                 && [
-                    crate::EXTERN_C_FN_ATTR,
+                    crate::EXTERN_FN_ATTR,
                     crate::C_VARIADIC_ATTR,
                     crate::CONST_FN_ATTR,
                 ]
@@ -515,8 +515,8 @@ impl Printer {
         if marked(crate::CONST_FN_ATTR) {
             self.s("const ");
         }
-        if marked(crate::EXTERN_C_FN_ATTR) {
-            self.s("extern \"C\" ");
+        if let Some(abi) = crate::extern_fn_abi(&f.attrs) {
+            self.s(&format!("extern {abi:?} "));
         }
         if f.is_unsafe {
             self.s("unsafe ");

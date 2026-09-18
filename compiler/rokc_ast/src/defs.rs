@@ -26,9 +26,20 @@ pub struct FnDef {
     pub span: Span,
 }
 
-/// Marker attribute of an `extern "C" fn f(..) { .. }` definition
-/// (spec 5.9.10).
-pub const EXTERN_C_FN_ATTR: &str = "#extern_c";
+/// Marker attribute of an `extern "ABI" fn f(..) { .. }` definition
+/// (spec 5.9.10), its value the ABI string.
+pub const EXTERN_FN_ATTR: &str = "#extern_fn";
+
+/// The ABI of an `extern "ABI" fn` definition with attributes `attrs`.
+#[must_use]
+pub fn extern_fn_abi(attrs: &[crate::Attribute]) -> Option<&str> {
+    attrs.iter().find_map(|a| match &a.body {
+        crate::AttrBody::Value(crate::Literal::Str(abi)) if a.path == [EXTERN_FN_ATTR] => {
+            Some(abi.as_str())
+        }
+        _ => None,
+    })
+}
 
 /// Marker attribute of a nested `fn` statement (spec 4.10).
 ///

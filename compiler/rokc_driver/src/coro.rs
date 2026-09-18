@@ -68,7 +68,7 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
     if !(f.is_async || f.is_generator)
         || f.attrs
             .iter()
-            .any(|a| a.path.first().map(String::as_str) == Some(rokc_ast::EXTERN_C_FN_ATTR))
+            .any(|a| a.path.first().map(String::as_str) == Some(rokc_ast::EXTERN_FN_ATTR))
     {
         return;
     }

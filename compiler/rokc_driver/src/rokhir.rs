@@ -257,7 +257,7 @@ fn cut(f: &FnDef) -> bool {
         && !f
             .attrs
             .iter()
-            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_C_FN_ATTR])
+            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_FN_ATTR])
 }
 
 fn cut_spans(items: &[Item], out: &mut Vec<(rokc_diagnostic::Span, rokc_diagnostic::Span)>) {

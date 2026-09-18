@@ -6,6 +6,7 @@
 // json 7
 // dep json: true, dep own: false
 // own: true, json here: false
+// Rec { a: 1, j: 2 } Rec { a: 3, j: 4 }
 
 // `--extern-feature` gives a dependency its features; `--cfg feature=..`
 // is the package's own. Each package's code, generic bodies parsed here
@@ -16,4 +17,6 @@ fn main() {
     let own = cfg!(feature = "own");
     let json = cfg!(feature = "json");
     println(f"own: {own}, json here: {json}");
+    let r = fdep::Rec { a: 3, j: 4 };
+    println(f"{fdep::rec(0).clone():?} {r.clone():?}");
 }

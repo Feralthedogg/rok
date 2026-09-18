@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub use deps::DepBuild;
 pub use fresh::Fingerprint;
-pub use package::{Package, STDIN, discover, source_files};
+pub use package::{Package, STDIN, discover, root_file, source_files};
 pub use std_cache::{StdKey, prebuilt_std};
 
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};

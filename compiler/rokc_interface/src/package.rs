@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// A package to build: a directory holding `main.rok` (executable) or
-/// `lib.rok` (library), or a lone file outside any package (the
-/// anonymous executable package, 4.16.8).
+/// A package to build: a directory holding `src/main.rok` (executable)
+/// or `src/lib.rok` (library), or a lone file outside any package's
+/// `src/` (the anonymous executable package, 4.16.8).
 #[derive(Debug)]
 pub struct Package {
-    /// `main.rok` / `lib.rok` / the anonymous file.
+    /// `src/main.rok` / `src/lib.rok` / the anonymous file.
     pub root: PathBuf,
     pub dir: PathBuf,
     /// Artifact name: the directory name, or the anonymous file's stem.
@@ -39,9 +39,26 @@ impl Package {
     }
 }
 
-/// Find the package `path` belongs to: `path` itself when it is a
-/// `main.rok` / `lib.rok`, else the nearest directory at or above it
-/// holding one (902.2). A file with no such ancestor is anonymous.
+/// The root file of the package at `dir`: `src/main.rok` or
+/// `src/lib.rok` (spec 0.3.1); both is an error.
+pub fn root_file(dir: &Path) -> Result<Option<PathBuf>, String> {
+    let main = dir.join("src/main.rok");
+    let lib = dir.join("src/lib.rok");
+    match (main.is_file(), lib.is_file()) {
+        (true, true) => Err(format!(
+            "`{}` has both `src/main.rok` and `src/lib.rok`; a package is one or the other \
+             (spec 0.3.1)",
+            shown(dir).display()
+        )),
+        (true, false) => Ok(Some(main)),
+        (false, true) => Ok(Some(lib)),
+        (false, false) => Ok(None),
+    }
+}
+
+/// Find the package `path` belongs to: the nearest directory at or
+/// above it with `src/main.rok` / `src/lib.rok` (902.2). A file outside
+/// that package's `src/` is anonymous.
 pub fn discover(path: &Path) -> Result<Package, String> {
     if !path.exists() {
         return Err(format!("`{}` does not exist", path.display()));
@@ -53,30 +70,13 @@ pub fn discover(path: &Path) -> Result<Package, String> {
     } else {
         &abs
     };
-    let named_root = is_file
-        && abs
-            .file_name()
-            .is_some_and(|n| n == "main.rok" || n == "lib.rok");
-    let search: Box<dyn Iterator<Item = &Path>> = if named_root {
-        Box::new(std::iter::once(start))
-    } else {
-        Box::new(start.ancestors())
-    };
-    for dir in search {
-        let main = dir.join("main.rok");
-        let lib = dir.join("lib.rok");
-        let root = match (main.is_file(), lib.is_file()) {
-            (true, true) => {
-                return Err(format!(
-                    "`{}` has both `main.rok` and `lib.rok`; a package is one or the other \
-                     (spec 0.3.1)",
-                    shown(dir).display()
-                ));
-            }
-            (true, false) => main,
-            (false, true) => lib,
-            (false, false) => continue,
+    for dir in start.ancestors() {
+        let Some(root) = root_file(dir)? else {
+            continue;
         };
+        if is_file && !abs.starts_with(dir.join("src")) {
+            break;
+        }
         return Ok(Package {
             lib: root.ends_with("lib.rok"),
             root: shown(&root),
@@ -87,7 +87,7 @@ pub fn discover(path: &Path) -> Result<Package, String> {
     }
     if !is_file {
         return Err(format!(
-            "no `main.rok` or `lib.rok` in `{}` or any parent directory",
+            "no `src/main.rok` or `src/lib.rok` in `{}` or any parent directory",
             path.display()
         ));
     }

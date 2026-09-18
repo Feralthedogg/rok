@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use rokc_ir_common::{BlockId, LocalId, PrimOp};
+use rokc_ir_common::{BlockId, ConstVal, LocalId, PrimOp};
 
 use crate::{BasicBlock, MirFunction, Operand, RValue, Statement, Terminator};
 
@@ -64,6 +64,245 @@ pub fn back_edges(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
         }
     }
     out
+}
+
+/// A loop running at most this many times needs no back-edge poll when
+/// its body reaches no safepoint (804 §8.4.2): it ends in bounded time.
+pub const SHORT_TRIPS: i128 = 64;
+
+/// The loops of `f` that run at most `SHORT_TRIPS` times, by header,
+/// with their blocks.
+///
+/// Such a loop has a counter starting at constants, stepped by a
+/// constant once per iteration, and tested against a constant on every
+/// iteration.
+#[must_use]
+pub fn short_loops(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
+    let mut latches: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (l, hs) in back_edges(f) {
+        for h in hs {
+            latches.entry(h).or_default().push(l);
+        }
+    }
+    let mut defs: Defs<'_> = HashMap::new();
+    let mut other_defs: HashSet<LocalId> = crate::addressed(f);
+    other_defs.extend(f.params.iter().copied());
+    for b in &f.blocks {
+        other_defs.extend(b.params.iter().copied());
+        for s in &b.stmts {
+            match s {
+                Statement::Assign { target, rvalue } => {
+                    defs.entry(*target).or_default().push((b.id.0, rvalue));
+                }
+                s => other_defs.extend(crate::liveness::stmt_uses(s).1),
+            }
+        }
+    }
+    defs.retain(|l, _| !other_defs.contains(l));
+    let blocks: HashMap<u32, &BasicBlock> = f.blocks.iter().map(|b| (b.id.0, b)).collect();
+    latches
+        .into_iter()
+        .filter_map(|(h, ls)| {
+            let body = loop_body(f, h, &ls);
+            let every = |x| every_iteration(&blocks, h, &ls, &body, x);
+            let short = body.iter().any(|x| {
+                trips(blocks[x], &body, &defs, every).is_some_and(|n| n <= SHORT_TRIPS) && every(*x)
+            });
+            short.then_some((h, body))
+        })
+        .collect()
+}
+
+/// Whether block `x` of the loop `body` (header `h`, latches `ls`) runs
+/// on every iteration: no path from `h` to a latch avoids it.
+fn every_iteration(
+    blocks: &HashMap<u32, &BasicBlock>,
+    h: u32,
+    ls: &[u32],
+    body: &HashSet<u32>,
+    x: u32,
+) -> bool {
+    if x == h {
+        return true;
+    }
+    let mut seen: HashSet<u32> = HashSet::from([h, x]);
+    let mut work = vec![h];
+    while let Some(b) = work.pop() {
+        if ls.contains(&b) {
+            return false;
+        }
+        for s in succs(blocks[&b]) {
+            if body.contains(&s) && seen.insert(s) {
+                work.push(s);
+            }
+        }
+    }
+    true
+}
+
+/// The assignments of each local assigned only by `Assign` (not a
+/// parameter, never addressed), with their blocks.
+type Defs<'a> = HashMap<LocalId, Vec<(u32, &'a RValue)>>;
+
+/// An integer constant operand, or an assignment of one.
+fn lit(r: &RValue) -> Option<i128> {
+    match r {
+        RValue::Use(Operand::Const(ConstVal::Int { value, .. })) => Some(*value),
+        RValue::Use(Operand::Const(ConstVal::UInt { value, .. })) => i128::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+/// The constant a local always holds (every assignment the same
+/// constant), as an integer.
+fn const_int(op: &Operand, defs: &Defs<'_>) -> Option<i128> {
+    match op {
+        Operand::Const(_) => lit(&RValue::Use(op.clone())),
+        Operand::Copy(l) => {
+            let mut vals = defs.get(l)?.iter().map(|(_, r)| lit(r));
+            let first = vals.next()??;
+            vals.all(|v| v == Some(first)).then_some(first)
+        }
+    }
+}
+
+/// Bits of an integer type, taking `isize` / `usize` at their narrowest.
+const fn int_bits(ty: rokc_ir_common::PrimTy) -> Option<(u32, bool)> {
+    use rokc_ir_common::PrimTy as P;
+    Some(match ty {
+        P::I8 => (8, true),
+        P::I16 => (16, true),
+        P::I32 | P::Isize => (32, true),
+        P::I64 => (64, true),
+        P::U8 => (8, false),
+        P::U16 => (16, false),
+        P::U32 | P::Usize => (32, false),
+        P::U64 => (64, false),
+        _ => return None,
+    })
+}
+
+/// How many times the loop `body` can run when block `exit` ends in
+/// its exit test `c < n` (or `<=`, `>`, `>=`, either side), `c` a
+/// counter stepped toward `n` by a constant once in the loop (in a block
+/// `every` accepts), from constants outside it.
+fn trips(
+    exit: &BasicBlock,
+    body: &HashSet<u32>,
+    defs: &Defs<'_>,
+    every: impl Fn(u32) -> bool,
+) -> Option<i128> {
+    let Terminator::If {
+        cond: Operand::Copy(cond),
+        then_bb,
+        else_bb,
+        ..
+    } = &exit.terminator
+    else {
+        return None;
+    };
+    let stay_if = match (body.contains(&then_bb.0), body.contains(&else_bb.0)) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => return None,
+    };
+    let (op, ty, lhs, rhs) = exit.stmts.iter().rev().find_map(|s| match s {
+        Statement::Assign {
+            target,
+            rvalue:
+                RValue::BinOp {
+                    op,
+                    op_ty: crate::MirTy::Prim(ty),
+                    lhs,
+                    rhs,
+                },
+        } if target == cond => Some((*op, *ty, lhs, rhs)),
+        _ => None,
+    })?;
+    let (bits, signed) = int_bits(ty)?;
+    let (lo, hi) = if signed {
+        (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+    } else {
+        (0, (1i128 << bits) - 1)
+    };
+    // Normalize to `c < n` / `c <= n` (up) or `c > n` / `c >= n` (down)
+    // holding while the loop stays.
+    let (ctr, bound, up, strict) = match (op, lhs, rhs) {
+        (PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge, Operand::Copy(ctr), bound)
+            if const_int(bound, defs).is_some() =>
+        {
+            (
+                *ctr,
+                bound,
+                matches!(op, PrimOp::Lt | PrimOp::Le),
+                matches!(op, PrimOp::Lt | PrimOp::Gt),
+            )
+        }
+        (PrimOp::Lt | PrimOp::Le | PrimOp::Gt | PrimOp::Ge, bound, Operand::Copy(ctr))
+            if const_int(bound, defs).is_some() =>
+        {
+            (
+                *ctr,
+                bound,
+                matches!(op, PrimOp::Gt | PrimOp::Ge),
+                matches!(op, PrimOp::Lt | PrimOp::Gt),
+            )
+        }
+        _ => return None,
+    };
+    // A test that holds while leaving swaps the direction.
+    let (up, strict) = if stay_if {
+        (up, strict)
+    } else {
+        (!up, !strict)
+    };
+    let n = const_int(bound, defs)?;
+    let mut step = None;
+    let mut starts = Vec::new();
+    for (b, r) in defs.get(&ctr)? {
+        if body.contains(b) {
+            let RValue::BinOp {
+                op: op @ (PrimOp::Add | PrimOp::Sub),
+                lhs: Operand::Copy(l),
+                rhs: k,
+                ..
+            } = r
+            else {
+                return None;
+            };
+            let k = const_int(k, defs)?;
+            let k = if *op == PrimOp::Sub { -k } else { k };
+            if *l != ctr || step.is_some() || !every(*b) {
+                return None;
+            }
+            step = Some(k);
+        } else {
+            starts.push(lit(r)?);
+        }
+    }
+    let k = step?;
+    let start = if up {
+        starts.iter().min()
+    } else {
+        starts.iter().max()
+    }
+    .copied()?;
+    // The last value the counter takes stays in range, so it cannot wrap.
+    let (dist, last) = if up {
+        (n - start, n + k - i128::from(strict))
+    } else {
+        (start - n, n + k + i128::from(strict))
+    };
+    if (up && k <= 0) || (!up && k >= 0) || last < lo || last > hi {
+        return None;
+    }
+    // At the j-th test the counter has moved at least j steps.
+    let (dist, k) = (dist.max(0), k.abs());
+    Some(if strict {
+        (dist + k - 1) / k
+    } else {
+        dist / k + 1
+    })
 }
 
 /// A header cheap to copy: no parameters, a few statements that call
@@ -360,6 +599,50 @@ mod tests {
             ret_ty: MirTy::Unit,
             span: Span::default(),
         }
+    }
+
+    /// `counting(false)` with its counter and bound set in bb0 instead
+    /// of passed: `x0 = start; x1 = bound`.
+    fn constant_count(start: u128, bound: u128) -> MirFunction {
+        let mut f = counting(false);
+        let c = |value| {
+            RValue::Use(Operand::Const(ConstVal::UInt {
+                value,
+                ty: PrimTy::Usize,
+            }))
+        };
+        f.params.clear();
+        f.param_tys.clear();
+        f.blocks[0].stmts = vec![
+            Statement::Assign {
+                target: LocalId(0),
+                rvalue: c(start),
+            },
+            Statement::Assign {
+                target: LocalId(1),
+                rvalue: c(bound),
+            },
+        ];
+        f
+    }
+
+    #[test]
+    fn short_loops_have_a_small_constant_count() {
+        let short = short_loops(&constant_count(0, SHORT_TRIPS as u128));
+        assert_eq!(short.keys().collect::<Vec<_>>(), [&1]);
+        assert_eq!(short[&1], HashSet::from([1, 2]));
+        assert!(short_loops(&constant_count(0, SHORT_TRIPS as u128 + 1)).is_empty());
+        assert_eq!(short_loops(&constant_count(10, 70)).len(), 1);
+        // Rotated, the bottom test bounds it the same.
+        let mut f = constant_count(0, 8);
+        rotate(&mut f);
+        assert_eq!(short_loops(&f).len(), 1);
+        // A bound that is a parameter, or a counter stepped twice, is not.
+        assert!(short_loops(&counting(false)).is_empty());
+        let mut f = constant_count(0, 8);
+        let step = f.blocks[2].stmts[0].clone();
+        f.blocks[2].stmts.push(step);
+        assert!(short_loops(&f).is_empty());
     }
 
     #[test]

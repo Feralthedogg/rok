@@ -70,6 +70,10 @@ pub struct FnAbi {
     /// A runtime (`extern "rok"`) call: `str` crosses as its `(ptr, len)`
     /// pair, not as a `char*`.
     pub rok: bool,
+    /// `extern "system"` where it is `stdcall` (32-bit x86 Windows, spec
+    /// 5.9.2): an `llvm.func` / `llvm.call` with `x86_stdcallcc` (the
+    /// callee pops its arguments; LLVM decorates the symbol `_f@N`).
+    pub stdcall: bool,
 }
 
 /// A by-value aggregate (as opposed to a scalar, `str` or `()`).
@@ -219,6 +223,7 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
         args,
         variadic,
         rok: false,
+        stdcall: false,
     })
 }
 
