@@ -1231,8 +1231,9 @@ fn run_suite(env: &Env, py: &str, suite: &Suite, dir: &Path) -> Result<Vec<Strin
     let want: Vec<String> = if suite.want.is_empty() {
         let script = dir.join("oracle.py");
         fs::write(&script, format!("{PY_HEAD}{}", suite.py)).unwrap();
+        // UTF-8 stdout whatever the console code page (Windows).
         let out = Command::new(py)
-            .arg("-I")
+            .args(["-I", "-X", "utf8"])
             .arg(&script)
             .output()
             .map_err(|e| e.to_string())?;
@@ -1254,8 +1255,9 @@ fn run_suite(env: &Env, py: &str, suite: &Suite, dir: &Path) -> Result<Vec<Strin
     if !build.status.success() {
         let err = String::from_utf8_lossy(&build.stderr);
         return Err(format!(
-            "rok build failed ({}):\n{}",
+            "rok build failed ({}, {}):\n{}",
             main.display(),
+            build.status,
             err.lines().take(12).collect::<Vec<_>>().join("\n")
         ));
     }

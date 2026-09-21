@@ -37,6 +37,8 @@ pub const MUTATOR_STATE: Slot = at(10, 9);
 pub const TASK_LANE: Slot = at(10, 16);
 pub const STATIC_INITS: Slot = at(11, 16);
 pub const HELD_LOCKS: Slot = at(12, 16);
+/// The thread's name in reports, `{ptr, len}` (null: unnamed).
+pub const THREAD_NAME: Slot = at(13, 16);
 /// Size of the block; it is aligned to 8.
-pub const SIZE: Slot = at(13, 16);
+pub const SIZE: Slot = at(15, 16);
 pub const ALIGN: u32 = 8;

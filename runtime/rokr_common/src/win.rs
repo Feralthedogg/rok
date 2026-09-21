@@ -460,6 +460,7 @@ unsafe extern "system" {
     ) -> BOOL;
     pub fn AddVectoredExceptionHandler(first: u32, f: VectoredHandler) -> *mut c_void;
     pub fn SetThreadStackGuarantee(size: *mut u32) -> BOOL;
+    pub fn SetThreadDescription(t: HANDLE, name: *const u16) -> i32;
     pub fn GetCurrentThreadStackLimits(low: *mut usize, high: *mut usize);
     pub fn SetConsoleCtrlHandler(f: Option<CtrlHandler>, add: BOOL) -> BOOL;
 

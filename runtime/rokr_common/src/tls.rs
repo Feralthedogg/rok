@@ -347,6 +347,13 @@ pub fn held_locks() -> *mut usize {
     at(tls_abi::HELD_LOCKS).cast()
 }
 
+/// Address of this thread's name, `{ptr, len}` (implementation-defined;
+/// owned by `rokr::thread`).
+#[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
+pub fn thread_name() -> *mut [usize; 2] {
+    at(tls_abi::THREAD_NAME).cast()
+}
+
 /// Address of this thread's executor lane (implementation-defined).
 #[allow(clippy::cast_ptr_alignment)] // pointer-aligned slot
 pub fn task_lane() -> *mut usize {

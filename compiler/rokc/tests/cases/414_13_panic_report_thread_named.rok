@@ -1,0 +1,14 @@
+// spec: §4.14.13
+// needs: threads
+// expect-exit: 101
+// expect-stderr: thread 'worker-1' panicked at tests/cases/414_13_panic_report_thread_named.rok:12:65:
+// expect-stderr: boom
+// expect-stdout:
+
+// Spec 4.14.13 / 7.0: a panic report names the thread with the name
+// given to `thread::Builder::name`.
+use rok::std::thread;
+
+let t = try! thread::Builder::new().name("worker-1").spawn(|| { panic("boom"); });
+let r = try? t.join();
+println("not reached");

@@ -56,7 +56,7 @@ fn run(arg: *mut Start) {
     // SAFETY: allocated with `malloc` in `rok_thread_spawn`.
     unsafe { libc::free(arg.cast()) };
     tls::thread_init();
-    crate::stack::thread_start(false);
+    crate::stack::thread_start();
     // SAFETY: registered for this thread by `rok_thread_spawn`.
     unsafe { world::attach(s.me) };
     if let Some(code) = s.f.code {
@@ -72,7 +72,105 @@ pub fn thread_exit() {
     rok_task_worker_clear();
     world::detach();
     crate::stack::thread_exit();
+    // SAFETY: this thread's own slot.
+    let [p, _] = unsafe { tls::thread_name().read() };
+    #[cfg(not(rok_solo))]
+    if p != 0 && p != MAIN_NAME.as_ptr() as usize {
+        // SAFETY: allocated by `rok_thread_set_name`.
+        unsafe { libc::free(p as *mut libc::c_void) };
+    }
+    #[cfg(rok_solo)]
+    let _ = p;
+    // SAFETY: as above.
+    unsafe { tls::thread_name().write([0, 0]) };
 }
+
+static MAIN_NAME: [u8; 4] = *b"main";
+
+/// Name the calling (main) thread `main` in reports. Its OS name stays:
+/// on Linux it is the process's.
+pub fn name_main() {
+    // SAFETY: this thread's own slot.
+    unsafe { tls::thread_name().write([MAIN_NAME.as_ptr() as usize, MAIN_NAME.len()]) };
+}
+
+/// The calling thread's name in reports: the one given at spawn, `main`,
+/// else `<unnamed>`. Async-signal-safe.
+pub fn name() -> &'static [u8] {
+    // SAFETY: this thread's own slot; a name lives until `thread_exit`.
+    unsafe {
+        let [p, n] = tls::thread_name().read();
+        if p == 0 {
+            b"<unnamed>"
+        } else {
+            core::slice::from_raw_parts(p as *const u8, n)
+        }
+    }
+}
+
+/// `thread::Builder::name`, called on the new thread before its closure:
+/// the name in reports, also set as the OS thread name.
+#[cfg(not(rok_solo))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_thread_set_name(name: crate::RokStr) {
+    let b = name.bytes();
+    // SAFETY: a fresh block of `len + 1` bytes; this thread's own slot.
+    unsafe {
+        let p = libc::malloc(b.len() + 1).cast::<u8>();
+        if p.is_null() {
+            rokr_common::oom();
+        }
+        ptr::copy_nonoverlapping(b.as_ptr(), p, b.len());
+        p.add(b.len()).write(0);
+        let [old, _] = tls::thread_name().read();
+        if old != 0 && old != MAIN_NAME.as_ptr() as usize {
+            libc::free(old as *mut libc::c_void);
+        }
+        tls::thread_name().write([p as usize, b.len()]);
+    }
+    set_os_name(b);
+}
+
+/// No spawned threads on wasm32.
+#[cfg(rok_solo)]
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_thread_set_name(_name: crate::RokStr) {}
+
+/// The OS thread name: cut at a char boundary to what the OS takes
+/// (Linux 15 bytes, macOS 63).
+#[cfg(unix)]
+fn set_os_name(b: &[u8]) {
+    let mut c = [0u8; 64];
+    let max = if cfg!(target_vendor = "apple") {
+        63
+    } else {
+        15
+    };
+    let mut n = b.len().min(max);
+    while n < b.len() && n > 0 && b[n] & 0xC0 == 0x80 {
+        n -= 1;
+    }
+    c[..n].copy_from_slice(&b[..n]);
+    // SAFETY: `c` is NUL-terminated.
+    unsafe {
+        #[cfg(target_vendor = "apple")]
+        libc::pthread_setname_np(c.as_ptr().cast());
+        #[cfg(not(target_vendor = "apple"))]
+        libc::pthread_setname_np(libc::pthread_self(), c.as_ptr().cast());
+    }
+}
+
+#[cfg(windows)]
+fn set_os_name(b: &[u8]) {
+    use rokr_common::win;
+    let mut w = rokr_common::wtf8::wide(b);
+    // SAFETY: `w` is NUL-terminated and outlives the call.
+    unsafe { win::SetThreadDescription(win::GetCurrentThread(), w.ptr()) };
+}
+
+/// wasi-threads threads have no OS name.
+#[cfg(rok_wasi_threads)]
+const fn set_os_name(_b: &[u8]) {}
 
 /// A fresh thread id for [`rok_thread_spawn`].
 #[unsafe(no_mangle)]

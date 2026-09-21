@@ -11,6 +11,7 @@ use rok::core::future::Waker;
 extern "rok" {
     // Threads and the wait queue.
     fn rok_thread_spawn(f: fn() + Send, stack_size: usize, id: u64) -> usize;
+    fn rok_thread_set_name(name: str);
     fn rok_thread_join(handle: usize) -> i32;
     fn rok_thread_detach(handle: usize) -> i32;
     fn rok_thread_sleep_ns(ns: i64);

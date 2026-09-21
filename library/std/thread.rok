@@ -175,7 +175,11 @@ impl Builder {
             using g = THREADS.lock() { g.get().insert(id, rec); }
             // Written once by the thread, read by `join` after it.
             let cell = Handoff::new(result);
+            let name = self.name;
             let run: fn() + Send = || {
+                if let n: str = name {
+                    unsafe { rok_thread_set_name(n) };
+                }
                 let result = cell.get();
                 result[0] = f();
                 using g = THREADS.lock() { g.get().remove(id); }

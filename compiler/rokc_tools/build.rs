@@ -26,17 +26,9 @@ fn main() {
         // lack the loader's __stack_chk_guard (aarch64; distributions'
         // compilers protect the stack by default).
         ("linux", "aarch64" | "x86_64") => &["-fPIC", "-fno-stack-protector"],
-        // No C++ thread-local initialization guards (no MSVC CRT).
-        ("windows", "aarch64") => &[
-            "--target=aarch64-pc-windows-msvc",
-            "-ffreestanding",
-            "-fno-ms-tls-guards",
-        ],
-        ("windows", "x86_64") => &[
-            "--target=x86_64-pc-windows-msvc",
-            "-ffreestanding",
-            "-fno-ms-tls-guards",
-        ],
+        // No MSVC CRT or headers.
+        ("windows", "aarch64") => &["--target=aarch64-pc-windows-msvc", "-ffreestanding"],
+        ("windows", "x86_64") => &["--target=x86_64-pc-windows-msvc", "-ffreestanding"],
         _ => {
             std::fs::write(&out, []).unwrap();
             return;

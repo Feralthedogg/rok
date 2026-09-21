@@ -83,6 +83,12 @@ mod unicode_tables;
 mod winargs;
 pub use str::RokStr;
 
+// rokc links the runtime's import libraries; the unit-test executable
+// gets std's, which lack bcrypt.
+#[cfg(all(windows, test))]
+#[link(name = "bcrypt")]
+unsafe extern "system" {}
+
 /// Rust panic inside the runtime = inconsistent runtime state. Report
 /// to stderr and abort. Rok exceptions are not Rust panics.
 ///
@@ -328,7 +334,10 @@ pub extern "C" fn rok_thread_init() {
 fn init_thread(main: bool) {
     tls::thread_init();
     rokr_gc::world::attach_current();
-    stack::thread_start(main);
+    stack::thread_start();
+    if main {
+        thread::name_main();
+    }
 }
 
 /// Unregister this thread; it must not touch GC objects afterwards.
@@ -557,8 +566,7 @@ pub unsafe extern "C" fn rok_panic(msg: *const u8, msg_len: usize) -> ! {
 /// A panic's report, `thread '<name>' panicked at <at>:\n<msg>\n` (no
 /// ` at <at>` without a location), then exit 101.
 pub(crate) fn panic_at(msg: &[u8], at: Option<&[u8]>) -> ! {
-    let mut buf = [0u8; 64];
-    let name = stack::thread_name(&mut buf);
+    let name = thread::name();
     let (sep, at) = at.map_or((&b""[..], &b""[..]), |a| (&b" at "[..], a));
     rokr_common::write_all(
         2,

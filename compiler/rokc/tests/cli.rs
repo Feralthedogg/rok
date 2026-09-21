@@ -2192,10 +2192,36 @@ fn custom_target_file() {
         let mine = emit(&["--target", "mine.rokon"], "mine.out");
         assert!(host == mine, "{kind} differs");
     }
-    let out = rokc(
-        Some(&env),
-        &dir,
-        &[
+    // A shipped C library (Linux) is looked up in `targets/mine/` too:
+    // link with a sysroot whose `mine` is the host's directory.
+    let host = TargetSpec::host();
+    let sys = Path::new(ROKC)
+        .parent()
+        .unwrap()
+        .join(format!("custom-target-{}", std::process::id()));
+    let exe = if host.libc.shipped() {
+        let _ = fs::remove_dir_all(&sys);
+        fs::create_dir_all(sys.join("bin")).unwrap();
+        fs::create_dir_all(sys.join("lib/rok/targets")).unwrap();
+        let exe = sys.join("bin/rokc");
+        // Same file system as `ROKC`; `current_exe` must name the link.
+        fs::hard_link(ROKC, &exe).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            fs::canonicalize(Path::new(ROKC).parent().unwrap().join("../lib/rok/targets"))
+                .unwrap()
+                .join(&host.name),
+            sys.join("lib/rok/targets/mine"),
+        )
+        .unwrap();
+        exe
+    } else {
+        PathBuf::from(ROKC)
+    };
+    let out = Command::new(&exe)
+        .current_dir(&dir)
+        .env("ROK_HOME", workspace())
+        .args([
             "-q",
             "build",
             "h.rok",
@@ -2203,8 +2229,12 @@ fn custom_target_file() {
             "mine.rokon",
             "-o",
             "mine",
-        ],
-    );
+        ])
+        .arg("--rokr")
+        .arg(&env.rokr)
+        .output()
+        .unwrap();
+    let _ = fs::remove_dir_all(&sys);
     assert_exit(&out, 0);
     let run = Command::new(dir.join("mine")).output().unwrap();
     assert_exit(&run, 0);

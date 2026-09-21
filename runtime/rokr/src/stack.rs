@@ -10,12 +10,10 @@
 //! C threads that call `rok_thread_init`.
 
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use rokr_common::{tls, write_stderr};
 
-/// `pthread_self()` of the main thread, named `main` in the report.
-static MAIN: AtomicUsize = AtomicUsize::new(0);
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Alternate signal stack size (plus a guard page below it).
 const ALT_SIZE: usize = 64 << 10;
@@ -61,12 +59,9 @@ fn stack_bounds() -> Option<(usize, usize)> {
 
 /// Set up the calling thread: its guard range and alternate signal
 /// stack, and (once per process) the signal handlers.
-pub fn thread_start(main: bool) {
+pub fn thread_start() {
     // SAFETY: plain libc calls on this thread's own state.
     unsafe {
-        if main {
-            MAIN.store(libc::pthread_self() as usize, Ordering::Relaxed);
-        }
         let range =
             stack_bounds().map_or([0, 0], |(lo, guard)| [lo.saturating_sub(SLOP), lo + guard]);
         tls::stack_guard().write(range);
@@ -133,25 +128,6 @@ unsafe fn install(action: libc::sighandler_t) {
     }
 }
 
-/// The calling thread's name in a report: `main`, its OS name (set by
-/// `thread::Builder::name`), else `<unnamed>`. Async-signal-tolerant.
-pub fn thread_name(buf: &mut [u8; 64]) -> &[u8] {
-    // SAFETY: queries about the calling thread into a local buffer.
-    unsafe {
-        let me = libc::pthread_self();
-        if me as usize == MAIN.load(Ordering::Relaxed) {
-            b"main"
-        } else if libc::pthread_getname_np(me, buf.as_mut_ptr().cast(), buf.len()) == 0
-            && buf[0] != 0
-        {
-            let n = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-            &buf[..n]
-        } else {
-            b"<unnamed>"
-        }
-    }
-}
-
 extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
     // SAFETY: the kernel passes a valid `siginfo_t`; the TLS slot was
     // written by `thread_start` (or is zero).
@@ -164,8 +140,7 @@ extern "C" fn handler(_sig: libc::c_int, info: *mut libc::siginfo_t, _ctx: *mut 
         return;
     }
     crate::stdio::flush_in_signal();
-    let mut buf = [0u8; 64];
-    let name = thread_name(&mut buf);
+    let name = crate::thread::name();
     // SAFETY: only async-signal-tolerant calls.
     unsafe {
         for part in [
