@@ -1,0 +1,48 @@
+// expect-exit: 0
+// expect-stdout:
+// is: true false true
+// generic: true true false
+// pick: 5 p no | 6 b no
+// bind: 7
+// match: sum 3
+// narrow: 4
+
+// Spec 2.2.5 / 3.11: on a plain value of type `A`, `is (A | B)` and
+// the type pattern `v: A | B` test membership of `A` in the sum; the
+// binder is the value as `A | B`.
+fn sub_sum<T>(x: T) -> bool { x is (i32 | str) }
+
+fn pick<T>(x: T) -> str {
+    if x is (i32 | str) { show(x) } else { "no" }
+}
+
+fn bind<T>(x: T) -> str {
+    match x { v: i32 | str => show(v), _ => "no" }
+}
+
+fn show(v: i32 | str) -> str {
+    match v {
+        n: i32 => f"{n}",
+        s: str => s,
+    }
+}
+
+fn main() {
+    let x: i32 = 7;
+    let f: f64 = 1.5;
+    let s = "s";
+    println(f"is: {x is (i32 | str)} {f is (i32 | str)} {s is (i32 | str | none)}");
+    println(f"generic: {sub_sum(1i32)} {sub_sum("s")} {sub_sum(2.0)}");
+    println(f"pick: {pick(5i32)} {pick("p")} {pick(2.0)} | {bind(6i32)} {bind("b")} {bind(2.0)}");
+    let a = match x { v: i32 | str => show(v) };
+    println(f"bind: {a}");
+    let m = match 3i32 {
+        v: i32 | str => f"sum {show(v)}",
+    };
+    println(f"match: {m}");
+    let y: i32 = 3;
+    if y is (i32 | str) {
+        y = 4;
+    }
+    println(f"narrow: {y}");
+}

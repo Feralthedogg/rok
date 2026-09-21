@@ -7,13 +7,16 @@
 // are validated against `ClientConfig::root_certs` (by default the OS
 // trust store: the macOS keychain anchors, the Windows ROOT store, the
 // Linux CA bundle files; none on wasm). Key exchange is X25519, or the
-// X25519MLKEM768 hybrid when `enable_pq` is on. A server signs with
-// Ed25519, ECDSA P-256 / P-384 or RSA-PSS. A connection is used by one
+// X25519MLKEM768 hybrid when `enable_pq` is on. Either side signs with
+// Ed25519, ECDSA P-256 / P-384 or RSA-PSS; the server may ask for a
+// client certificate. Sessions resume from single-use tickets
+// (psk_dhe_ke), optionally with 0-RTT data. A connection is used by one
 // thread, and one operation, at a time.
 
 pub(pkg) mod der;
 pub(pkg) mod pem;
 pub(pkg) mod x509;
+pub(pkg) mod ocsp;
 pub(pkg) mod conn;
 
 use rok::core::collections::raw::{GcBuf, buf_new};
@@ -21,11 +24,13 @@ use rok::std::net::TcpStream;
 use rok::std::io::{IoError, IoErrorKind, AsBytes, Reader, Writer, byte_buf};
 use rok::std::fs;
 use rok::std::env;
-use rok::std::net::tls::x509::CertInfo;
+use rok::std::time::Instant;
+use rok::std::net::tls::x509::{CertInfo, PubKey};
 use rok::std::net::tls::conn::{Conn, new_conn, io_tls, OP_HANDSHAKE, OP_READ, OP_WRITE, OP_CLOSE_NOTIFY, OP_KEY_UPDATE};
 use rok::std::net::tls::der::{Der, SEQUENCE, INTEGER, OCTET_STRING, OID};
 use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
-use rok::core::crypto::rsa::RsaPrivateKey;
+use rok::core::crypto::ed25519::Ed25519;
+use rok::core::crypto::rsa::{RsaPrivateKey, RsaPublicKey};
 
 /// What failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -188,7 +193,45 @@ impl PrivateKey {
             try alg.finish();
             return try rsa_key(inner);
         }
-        throw TlsError::certificate(f"unsupported private key algorithm {oid} (Ed25519, EC, rsaEncryption)");
+        if oid == "1.2.840.113549.1.1.10" {
+            // id-RSASSA-PSS: the certificate's parameters decide the
+            // schemes, these are only checked.
+            let p = try alg.optional(SEQUENCE);
+            try alg.finish();
+            match p {
+                b: Slice<u8> => match try x509::pss_params(b) {
+                    x509::SigAlg::RsaPss(_, _) => {},
+                    _ => throw TlsError::certificate("unsupported RSASSA-PSS key parameters"),
+                },
+                none => {},
+            }
+            return try rsa_key(inner);
+        }
+        throw TlsError::certificate(f"unsupported private key algorithm {oid} (Ed25519, EC, rsaEncryption, RSASSA-PSS)");
+    }
+
+    /// Whether this is the private key of `cert`'s public key.
+    pub(pkg) fn matches(self, cert: Certificate) -> bool {
+        match self.key {
+            KeyKind::Ed25519(seed) => match cert.info.key {
+                PubKey::EdDsa(pk) => (try Ed25519::public_key(seed) catch _ { [] }) == pk,
+                _ => false,
+            },
+            KeyKind::Ec(c, d) => match cert.info.key {
+                PubKey::Ec(cc, pt) => cc == c && (try Ecdsa::public_key(c, d) catch _ { [] }) == pt,
+                _ => false,
+            },
+            KeyKind::Rsa(k) => {
+                let der: List<u8> = match cert.info.key {
+                    PubKey::Rsa(b) => b,
+                    PubKey::RsaPss(b, _, _) => b,
+                    _ => return false,
+                };
+                let p: RsaPublicKey = try RsaPublicKey::from_pkcs1_der(der) catch _ { return false; };
+                let mine = k.public_key();
+                p.modulus() == mine.modulus() && p.exponent() == mine.exponent()
+            },
+        }
     }
 
     /// The first private key of PEM text: `PRIVATE KEY` (PKCS #8),
@@ -213,16 +256,31 @@ pub struct ClientConfig {
     pub alpn_protocols: List<List<u8>>;
     /// Offer the X25519MLKEM768 hybrid key exchange first.
     pub enable_pq: bool;
+    /// Sent when the server asks for a certificate: leaf first (empty:
+    /// none), with the leaf's key.
+    pub client_cert_chain: List<Certificate>;
+    pub client_key: PrivateKey | none;
+    /// Tickets from earlier connections, to resume from (none: never
+    /// resume).
+    pub session_cache: SessionCache | none;
+    /// Sent as 0-RTT data when a resumed session allows that much, else
+    /// as the first application data after the handshake.
+    pub early_data: List<u8>;
 }
 
 impl ClientConfig {
-    /// The OS trust store, all suites, no ALPN, post-quantum on.
+    /// The OS trust store, all suites, no ALPN, post-quantum on, no
+    /// client certificate, a new session cache, no early data.
     pub fn new() -> ClientConfig {
         ClientConfig {
             root_certs: try system_roots() catch _ { [] },
             cipher_suites: CipherSuite::all(),
             alpn_protocols: [],
             enable_pq: true,
+            client_cert_chain: [],
+            client_key: none,
+            session_cache: SessionCache::new(),
+            early_data: [],
         }
     }
 }
@@ -233,11 +291,186 @@ pub struct ServerConfig {
     pub private_key: PrivateKey;
     pub cipher_suites: List<CipherSuite>;
     pub alpn_protocols: List<List<u8>>;
+    /// Non-empty: ask for a client certificate and validate it against
+    /// these roots (clientAuth).
+    pub client_roots: List<Certificate>;
+    /// With `client_roots`: refuse a client that sends no certificate.
+    pub require_client_cert: bool;
+    /// A DER OCSPResponse for the leaf, stapled when the client asks
+    /// (empty: none).
+    pub ocsp_response: List<u8>;
+    /// Issues and redeems session tickets (none: no resumption).
+    pub ticket_store: TicketStore | none;
+    /// 0-RTT data accepted per resumed connection, in bytes (0: none).
+    pub max_early_data: u32;
 }
 
 impl ServerConfig {
-    pub fn new(cert_chain: List<Certificate>, private_key: PrivateKey) -> ServerConfig {
-        ServerConfig { cert_chain, private_key, cipher_suites: CipherSuite::all(), alpn_protocols: [] }
+    /// All suites, no ALPN, no client certificates, no OCSP response, a
+    /// new ticket store, no 0-RTT. The key must belong to the leaf.
+    pub fn new(cert_chain: List<Certificate>, private_key: PrivateKey) throws (TlsError) -> ServerConfig {
+        if cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
+        if !private_key.matches(cert_chain[0]) { throw TlsError::certificate("private key does not match the certificate"); }
+        ServerConfig {
+            cert_chain,
+            private_key,
+            cipher_suites: CipherSuite::all(),
+            alpn_protocols: [],
+            client_roots: [],
+            require_client_cert: true,
+            ocsp_response: [],
+            ticket_store: TicketStore::new(),
+            max_early_data: 0u32,
+        }
+    }
+}
+
+// ---- resumption ----
+
+/// A ticket the client holds (RFC 8446 4.6.1).
+pub(pkg) struct Ticket {
+    pub(pkg) host: str;
+    pub(pkg) suite: CipherSuite;
+    pub(pkg) ticket: List<u8>;
+    pub(pkg) psk: List<u8>;
+    pub(pkg) age_add: u32;
+    pub(pkg) lifetime: u32;
+    pub(pkg) received: Instant;
+    pub(pkg) max_early: u32;
+    pub(pkg) alpn: List<u8> | none;
+    pub(pkg) peer: List<Certificate>;
+}
+
+/// Tickets per cache.
+const CACHE_MAX: usize = 64;
+
+/// The client's tickets by server name; copies share them. Each ticket
+/// is used once (RFC 8446 C.4).
+pub struct SessionCache {
+    m: Mutex<List<Ticket>>;
+}
+
+impl SessionCache {
+    pub fn new() -> SessionCache { SessionCache { m: Mutex::new([]) } }
+
+    /// Tickets held.
+    pub fn len(self) -> usize {
+        let n = 0usize;
+        using g = self.m.lock() { n = g.get().len(); }
+        n
+    }
+
+    pub fn clear(self) {
+        using g = self.m.lock() { g.set([]); }
+    }
+
+    pub(pkg) fn put(self, t: Ticket) {
+        using g = self.m.lock() {
+            let l = g.get();
+            if l.len() >= CACHE_MAX { let _ = l.remove(0); }
+            l.push(t);
+        }
+    }
+
+    /// The newest live ticket for `host` whose suite's hash one of
+    /// `suites` has, removed (expired tickets are dropped).
+    pub(pkg) fn take(self, host: str, suites: List<CipherSuite>) -> Ticket | none {
+        let found: Ticket | none = none;
+        using g = self.m.lock() {
+            let live: List<Ticket> = [];
+            for t in g.get() {
+                if t.received.elapsed().as_secs() < t.lifetime as i64 { live.push(t); }
+            }
+            let j = live.len();
+            while j > 0 && found is none {
+                j -= 1;
+                if live[j].host == host && hash_offered(live[j].suite, suites) { found = live.remove(j); }
+            }
+            g.set(live);
+        }
+        found
+    }
+}
+
+fn hash_offered(s: CipherSuite, suites: List<CipherSuite>) -> bool {
+    for x in suites {
+        if conn::suite_hash(x) == conn::suite_hash(s) { return true; }
+    }
+    false
+}
+
+/// A session the server can resume.
+pub(pkg) struct Session {
+    pub(pkg) id: List<u8>;
+    pub(pkg) psk: List<u8>;
+    pub(pkg) suite: CipherSuite;
+    pub(pkg) alpn: List<u8> | none;
+    pub(pkg) sni: str | none;
+    pub(pkg) peer: List<Certificate>;
+    pub(pkg) issued: Instant;
+    pub(pkg) age_add: u32;
+    pub(pkg) max_early: u32;
+}
+
+/// Sessions per store.
+const STORE_MAX: usize = 4096;
+
+/// Ticket lifetime, seconds.
+pub(pkg) const TICKET_LIFETIME: u32 = 7200u32;
+
+/// The server's resumable sessions; copies share them. A ticket is
+/// redeemed at most once, which also stops 0-RTT replays (RFC 8446
+/// 8.1) for every server sharing the store; the oldest session goes
+/// when the store is full.
+pub struct TicketStore {
+    m: Mutex<List<Session>>;
+}
+
+impl TicketStore {
+    pub fn new() -> TicketStore { TicketStore { m: Mutex::new([]) } }
+
+    /// Sessions held.
+    pub fn len(self) -> usize {
+        let n = 0usize;
+        using g = self.m.lock() { n = g.get().len(); }
+        n
+    }
+
+    pub(pkg) fn put(self, s: Session) {
+        using g = self.m.lock() {
+            let l = g.get();
+            if l.len() >= STORE_MAX { let _ = l.remove(0); }
+            l.push(s);
+        }
+    }
+
+    /// The live session with ticket `id`, left in the store.
+    pub(pkg) fn find(self, id: Slice<u8>) -> Session | none {
+        let found: Session | none = none;
+        using g = self.m.lock() {
+            for s in g.get() {
+                if found is none && s.id[0:s.id.len()] == id && s.issued.elapsed().as_secs() < TICKET_LIFETIME as i64 { found = s; }
+            }
+        }
+        found
+    }
+
+    /// Remove the session with ticket `id`: whether it was there (so
+    /// only one connection redeems it).
+    pub(pkg) fn redeem(self, id: List<u8>) -> bool {
+        let hit = false;
+        using g = self.m.lock() {
+            let l = g.get();
+            let i = 0usize;
+            while i < l.len() && !hit {
+                if l[i].id == id {
+                    let _ = l.remove(i);
+                    hit = true;
+                }
+                i += 1;
+            }
+        }
+        hit
     }
 }
 
@@ -509,6 +742,15 @@ impl Shared {
     }
 }
 
+/// A configured client key must belong to the client certificate.
+fn check_client_key(cfg: ClientConfig) throws (TlsError) {
+    if let k: PrivateKey = cfg.client_key {
+        if cfg.client_cert_chain.len() == 0 || !k.matches(cfg.client_cert_chain[0]) {
+            throw TlsError::certificate("client key does not match the client certificate");
+        }
+    }
+}
+
 /// An empty view, for operations without data.
 fn nothing() -> Slice<u8> {
     let e: List<u8> = [];
@@ -531,8 +773,12 @@ impl Client {
     /// Handshake as `server_name` (a DNS name, or an IP address checked
     /// against the certificate's IP addresses; no SNI is sent for one).
     pub fn with_config(stream: TcpStream, server_name: str, cfg: ClientConfig) throws (TlsError) -> Client {
+        try check_client_key(cfg) catch e {
+            stream.close();
+            throw e;
+        };
         let c = new_conn(stream, true);
-        try c.client_start(server_name, ip_bytes(server_name), cfg.root_certs, cfg.cipher_suites, cfg.alpn_protocols, cfg.enable_pq) catch e {
+        try c.client_start(server_name, ip_bytes(server_name), cfg) catch e {
             c.fail(e);
             throw e;
         };
@@ -550,9 +796,13 @@ impl Client {
 
     /// `with_config` without blocking the worker.
     pub async fn with_config_async(stream: TcpStream, server_name: str, cfg: ClientConfig) throws (TlsError) -> Client {
+        try check_client_key(cfg) catch e {
+            stream.close();
+            throw e;
+        };
         let c = new_conn(stream, true);
         c.nb = true;
-        try c.client_start(server_name, ip_bytes(server_name), cfg.root_certs, cfg.cipher_suites, cfg.alpn_protocols, cfg.enable_pq) catch e {
+        try c.client_start(server_name, ip_bytes(server_name), cfg) catch e {
             c.fail(e);
             throw e;
         };
@@ -605,8 +855,16 @@ impl Client {
 
     pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
 
-    /// The server's certificate chain as sent, leaf first.
+    /// The server's certificate chain as sent, leaf first (on a resumed
+    /// connection, the original connection's).
     pub fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
+
+    /// Whether the handshake resumed a session.
+    pub fn resumed(self) -> bool { self.s.conn().resumed }
+
+    /// Whether the server took `ClientConfig::early_data` as 0-RTT data
+    /// (else it was sent after the handshake).
+    pub fn early_data_accepted(self) -> bool { self.s.conn().early_accepted }
 }
 
 impl Reader for Client {
@@ -640,7 +898,7 @@ impl Server {
     pub fn new(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
         if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
         let c = new_conn(stream, false);
-        c.server_start(cfg.cert_chain, cfg.private_key, cfg.cipher_suites, cfg.alpn_protocols);
+        c.server_start(cfg);
         try c.handshake() catch e {
             c.fail(e);
             throw e;
@@ -652,7 +910,7 @@ impl Server {
     pub async fn new_async(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
         if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
         let c = new_conn(stream, false);
-        c.server_start(cfg.cert_chain, cfg.private_key, cfg.cipher_suites, cfg.alpn_protocols);
+        c.server_start(cfg);
         let s = Shared::new(c);
         try await s.pump(OP_HANDSHAKE, [], nothing());
         Server { s }
@@ -688,9 +946,16 @@ impl Server {
     pub fn close(self) { self.s.close(); }
     pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
 
-    /// The client's certificates: none (client authentication is not
-    /// supported).
+    /// The client's validated certificate chain, leaf first (empty: it
+    /// sent none; on a resumed connection, the original connection's).
     pub fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
+
+    /// Whether the handshake resumed a session.
+    pub fn resumed(self) -> bool { self.s.conn().resumed }
+
+    /// The 0-RTT data accepted from the client (empty: none); `read`
+    /// returns what follows it.
+    pub fn early_data(self) -> List<u8> { self.s.conn().early }
 
     /// The server name the client asked for (SNI).
     pub fn server_name(self) -> str | none { self.s.conn().sni }

@@ -121,7 +121,7 @@ V6zLJHZlQcHWjWL1lHtwcFbKukWxfjN5BynkEdYTPGKAYseWAKzZOA==
 ";
 
 fn config(cert: str, key: str) -> ServerConfig {
-    ServerConfig::new(try! Certificate::from_pem(cert), try! PrivateKey::from_pem(key))
+    try! ServerConfig::new(try! Certificate::from_pem(cert), try! PrivateKey::from_pem(key))
 }
 
 fn key_error(pem: str) -> str {

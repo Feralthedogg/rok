@@ -1,0 +1,144 @@
+// needs: threads net
+// expect-exit: 0
+// expect-stdout:
+// full: resumed false, peer 1, early false, cache 1 -> read:GET /1
+// resumed: resumed true, peer 1, early false, cache 1 -> read:GET /2
+// 0-rtt: resumed true, peer 1, early true, cache 1 -> early:GET /0rtt
+// 0-rtt larger than the ticket allows: resumed true, peer 1, early false, cache 1 -> read:2000 bytes
+// another name: resumed false, peer 1, early false, cache 2 -> read:GET /ip
+// no cache: resumed false, peer 1, early false, cache 0 -> read:GET /plain
+// sha384 ticket: resumed false, peer 1, early false, cache 1 -> read:GET /a256
+// sha384 ticket, sha256 suites: resumed false, peer 1, early false, cache 2 -> read:GET /a128
+// first: resumed false, peer 1, early false, cache 1 -> read:GET /first
+// 0-rtt to a server without it: resumed true, peer 1, early false, cache 1 -> read:GET /late
+// served: 8 and 2; store: 5 sessions
+
+// Stdlib 3.2.5: session resumption from tickets (psk_dhe_ke) between
+// our client and server: the server issues one single-use ticket per
+// connection, the client resumes from its `SessionCache` (per server
+// name, a hash its suites share) and sends `early_data` as 0-RTT when
+// the server allows it (`max_early_data`) and the data fits, else after
+// the handshake.
+use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, CipherSuite, SessionCache, TicketStore};
+use rok::std::thread;
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBcjCCARigAwIBAgIUesSSl98urNjXdIg9ZEchaXosKn8wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMBYxFDASBgNVBAMMC3JvayB0bHMzIENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE4kV13G3nP06aBCX+u52Cuqk/R76W72DWLp1Lcfa7koO1hNfw
++10uBWWyPK4V60HuuPfxt7/JVLSKFadc3CQ7/KNCMEAwDwYDVR0TAQH/BAUwAwEB
+/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFPrNL2ff/ZhYdliVjlRBjXA7GCYA
+MAoGCCqGSM49BAMCA0gAMEUCIQDG06e7A0VHI6ZAtQtQq28OOx1+iPizhjQAysBD
+StWbYwIgS8FQ2a42r2yQGSPJtGddwkuhvTCs7eF3Cy1mpiSrCPc=
+-----END CERTIFICATE-----
+";
+const LEAF: str = "-----BEGIN CERTIFICATE-----
+MIIBuDCCAV6gAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmyco0wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA3NydjBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABHm5n0+SWVTWbZ55MH0XSUNYxg+m1jgAdoYS25h8KzufL+QbzhTIqJLvDJi1
+fncoKPluNud5yAE0IUMIJRJqve6jgY8wgYwwCQYDVR0TBAIwADAOBgNVHQ8BAf8E
+BAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0
+hwR/AAABMB0GA1UdDgQWBBRrjj4b9HL+ckorpa4lMsfgs0dQyjAfBgNVHSMEGDAW
+gBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQDAgNIADBFAiAk4UEvAjbM
+vnEoh4A8FgiBFfwDv6/OxYhtBLRLFbcskAIhAMorR5WRpyGXXY43jvoJoiKMV4hQ
+v2isg0nT0kdjAaow
+-----END CERTIFICATE-----
+";
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgNTSUe5vgM79N6K71
+1M22uGAT9Rl/3Xj4L0M3ROx+CNGhRANCAAR5uZ9PkllU1m2eeTB9F0lDWMYPptY4
+AHaGEtuYfCs7ny/kG84UyKiS7wyYtX53KCj5bjbnecgBNCFDCCUSar3u
+-----END PRIVATE KEY-----
+";
+
+/// Serve `n` connections: reply `early:<0-RTT data>`, else
+/// `read:<first request>` (or its length past 100 bytes).
+fn serve(l: TcpListener, n: i32, early: u32, store: TicketStore) -> i32 {
+    let cfg = try! ServerConfig::new(try! Certificate::from_pem(LEAF), try! PrivateKey::from_pem(KEY));
+    cfg.max_early_data = early;
+    cfg.ticket_store = store;
+    let seen = 0;
+    for _ in 0..n {
+        let (s, _) = try l.accept() catch _ { return seen; };
+        let srv = try Server::new(s, cfg) catch _ { continue; };
+        seen += 1;
+        let early = srv.early_data();
+        let reply = "";
+        if early.len() > 0 {
+            reply = f"early:{try str::from_utf8(early) catch _ { "?" }}";
+        } else {
+            let buf: List<u8> = [];
+            for _ in 0..4096 { buf.push(0u8); }
+            let got: List<u8> = [];
+            while got.len() == 0 || (got.len() < 2000 && got[0] == 0x78u8) {
+                let k = try srv.read(buf) catch _ { break; };
+                if k == 0 { break; }
+                for i in 0..k { got.push(buf[i]); }
+            }
+            reply = if got.len() > 100 { f"read:{got.len()} bytes" } else { f"read:{try str::from_utf8(got) catch _ { "?" }}" };
+        }
+        try srv.write_all(reply) catch _ {};
+        srv.close();
+    }
+    seen
+}
+
+fn run(what: str, port: u16, name: str, cfg: ClientConfig, req: str) {
+    let s = try tcp_connect(f"127.0.0.1:{port}") catch e { println(f"{what}: connect {e}"); return; };
+    let c = try Client::with_config(s, name, cfg) catch e { println(f"{what}: {e}"); return; };
+    if cfg.early_data.len() == 0 { try c.write_all(req) catch e { println(f"{what}: write {e}"); }; }
+    let back = try c.read_to_end() catch e { println(f"{what}: read {e}"); return; };
+    let cached = match cfg.session_cache {
+        k: SessionCache => k.len(),
+        none => 0usize,
+    };
+    println(f"{what}: resumed {c.resumed()}, peer {c.peer_certificates().len()}, early {c.early_data_accepted()}, cache {cached} -> {try str::from_utf8(back) catch _ { "?" }}");
+    c.close();
+}
+
+fn main() {
+    let l = try! tcp_listen("127.0.0.1:0");
+    let port = (try! l.local_addr()).port();
+    let store = TicketStore::new();
+    let t = thread::spawn(|| serve(l, 8, 1024u32, store));
+    let l2 = try! tcp_listen("127.0.0.1:0");
+    let port2 = (try! l2.local_addr()).port();
+    let t2 = thread::spawn(|| serve(l2, 2, 0u32, TicketStore::new()));
+
+    let cfg = ClientConfig::new();
+    cfg.root_certs = try! Certificate::from_pem(CA);
+    run("full", port, "localhost", cfg, "GET /1");
+    run("resumed", port, "localhost", cfg, "GET /2");
+    let e = cfg;
+    e.early_data = "GET /0rtt".as_bytes().to_list();
+    run("0-rtt", port, "localhost", e, "");
+    let big: List<u8> = [];
+    for _ in 0..2000 { big.push(0x78u8); }
+    e.early_data = big;
+    run("0-rtt larger than the ticket allows", port, "localhost", e, "");
+    run("another name", port, "127.0.0.1", cfg, "GET /ip");
+    let plain = cfg;
+    plain.session_cache = none;
+    run("no cache", port, "localhost", plain, "GET /plain");
+    // A ticket from an AES-256 (SHA-384) connection, then only SHA-256
+    // suites: a full handshake.
+    let a256 = cfg;
+    a256.session_cache = SessionCache::new();
+    a256.cipher_suites = [CipherSuite::Aes256GcmSha384];
+    run("sha384 ticket", port, "localhost", a256, "GET /a256");
+    a256.cipher_suites = [CipherSuite::Aes128GcmSha256, CipherSuite::ChaCha20Poly1305Sha256];
+    run("sha384 ticket, sha256 suites", port, "localhost", a256, "GET /a128");
+
+    let late = cfg;
+    late.session_cache = SessionCache::new();
+    run("first", port2, "localhost", late, "GET /first");
+    late.early_data = "GET /late".as_bytes().to_list();
+    run("0-rtt to a server without it", port2, "localhost", late, "");
+    let served = try! t.join();
+    println(f"served: {served} and {try! t2.join()}; store: {store.len()} sessions");
+}
+
+// spec: std 302-net §3.2.5

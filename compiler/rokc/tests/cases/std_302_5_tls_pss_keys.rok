@@ -1,0 +1,235 @@
+// needs: threads net
+// expect-exit: 0
+// expect-stdout:
+// pss, sha-256 only: hello
+// pss, any hash: hello
+// config rsa: ok
+// config ec leaf, rsa key: Certificate private key does not match the certificate
+// config pss leaf, another pss key: Certificate private key does not match the certificate
+// config ec leaf, other ec key: Certificate private key does not match the certificate
+
+// Stdlib 3.2.5: id-RSASSA-PSS (PSS-restricted) server keys, signed with
+// rsa_pss_pss_* (a key whose parameters fix SHA-256 signs with
+// rsa_pss_pss_sha256 only), and `ServerConfig::new` refusing a private
+// key that is not the leaf's. Keys and certificates from OpenSSL 3.6
+// (`genpkey -algorithm RSA-PSS`).
+use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, TlsError};
+use rok::std::thread;
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBcjCCARigAwIBAgIUesSSl98urNjXdIg9ZEchaXosKn8wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMBYxFDASBgNVBAMMC3JvayB0bHMzIENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE4kV13G3nP06aBCX+u52Cuqk/R76W72DWLp1Lcfa7koO1hNfw
++10uBWWyPK4V60HuuPfxt7/JVLSKFadc3CQ7/KNCMEAwDwYDVR0TAQH/BAUwAwEB
+/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFPrNL2ff/ZhYdliVjlRBjXA7GCYA
+MAoGCCqGSM49BAMCA0gAMEUCIQDG06e7A0VHI6ZAtQtQq28OOx1+iPizhjQAysBD
+StWbYwIgS8FQ2a42r2yQGSPJtGddwkuhvTCs7eF3Cy1mpiSrCPc=
+-----END CERTIFICATE-----
+";
+const PSS: str = "-----BEGIN CERTIFICATE-----
+MIICuDCCAl2gAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmyco8wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA3BzczCCAVYwQQYJKoZIhvcNAQEKMDSgDzAN
+BglghkgBZQMEAgEFAKEcMBoGCSqGSIb3DQEBCDANBglghkgBZQMEAgEFAKIDAgEg
+A4IBDwAwggEKAoIBAQCs/h02FAGYHUuj3sqQ8FhABCpnN2EyDAOaCuthrFMrsrr8
+e5jzuUjX+kUL9L/URqw9x5dJ2UOXLHA8oW8qkeAR0F9sQRrIezFLSvS/4Ct4srrU
+cLo0vd+RSEXuF1ZUR4usr4N1oNrJAHWYjtqSJfV7eHzRYqeqMKjtCU+4D8TUYpgT
+4Ie/BV5RRxOHXGggcSz3JB7Nr05YHcsoM0DCcGC8LrZoHAuhLp8jI9G9xxt6ucZG
+3L6/ZpCYKCOpSsNNXt+OTJW0+OXBwjjV+ji59YCq96p0aK5ar5u2DkR6J6QCgHDa
+LL18xgm3v4S6WUn8lZFRTfbdUNlkikWXaRli/zeJAgMBAAGjgY8wgYwwCQYDVR0T
+BAIwADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0R
+BBMwEYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQWBBR2tv2Clm/vqPql8P8Hgz4H
+aVRfMDAfBgNVHSMEGDAWgBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQD
+AgNJADBGAiEA+AaZmyyyq6JZiUYdswaTgsoEjkOolqzGUzcwsUUn4FoCIQDWRBOy
+tV5vs8lye4bqv8HE8VTbCDrmiwlHC9EznPKo8A==
+-----END CERTIFICATE-----
+";
+const PSS_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIIE8gIBADBBBgkqhkiG9w0BAQowNKAPMA0GCWCGSAFlAwQCAQUAoRwwGgYJKoZI
+hvcNAQEIMA0GCWCGSAFlAwQCAQUAogMCASAEggSoMIIEpAIBAAKCAQEArP4dNhQB
+mB1Lo97KkPBYQAQqZzdhMgwDmgrrYaxTK7K6/HuY87lI1/pFC/S/1EasPceXSdlD
+lyxwPKFvKpHgEdBfbEEayHsxS0r0v+AreLK61HC6NL3fkUhF7hdWVEeLrK+DdaDa
+yQB1mI7akiX1e3h80WKnqjCo7QlPuA/E1GKYE+CHvwVeUUcTh1xoIHEs9yQeza9O
+WB3LKDNAwnBgvC62aBwLoS6fIyPRvccbernGRty+v2aQmCgjqUrDTV7fjkyVtPjl
+wcI41fo4ufWAqveqdGiuWq+btg5EeiekAoBw2iy9fMYJt7+EullJ/JWRUU323VDZ
+ZIpFl2kZYv83iQIDAQABAoIBAA3mSg8RCvK/sdbsHP8JzLFyFD0gWj8k73omU/TQ
+XYtmjDcisC6vDb8KxRb5lps2BXteSNXebtub7rW0a+Px/hy4Tx552a7PlS2dS26K
+UrvbMn9EwnVf5zF7auD/P4i8iei5XnjqUIHzdz9nhQDWq3N9AhxpzppyV/RZue3K
+WJCO7J9Aimdze3YyznjT36l6s8CkROYRHfAYhVTSwGRCYYQjlEs5n0AcFwrKdEiF
+XUMbeGO8CGeahu7C+4w/lQW/r8Swk1CHfWbYjAC5Up8JAC/7ILeVdibt+Nnvh8jn
+TEJYtIoaXXvPWBL90tvAqS8JDBbl2ymE2F6xosfFEG/LTd0CgYEA2QrmRi7+iWcP
+DHVnDlbug4UJWKapys4bcMyYznPT42UqojSLLFj7zylI1MrGZuIzW5ta1iYlJacU
+G8afSR0FMal6ej1e/LDkV2b0zFNOL/QZ31+uLC6+rADZIAfAcElG93dCvkliHdl9
+0OCCQF2voF+LXYnwIOJizL59d29hIa0CgYEAzAse9CE5XDRhu15RQogRUH+CaMsT
+XoHz/Y6uvtQGWY65rOCkpeEnAOO5H5bhW8/mTMLY0K9hEKXM5xINUOwL9zZ9u+II
+ATxt4GZKelk6yAHBmTcEu9XotOMLztlw20iuGPQfaNjZ7ilAe3b6cgCCDa3buwKy
++Ow78M/iqkJ8QM0CgYEAtUaON9YuT/Kctgokjex7f6uQt9NTgwiMELVBd0V0lrs7
+VYjPKLYVctwHcXr/JJUO0hc6Uhw/8GfQurY0+arcWLM1kX1KpYDU5k8ebL2zUwfs
+yA0w+sP8CssWjdMLnn0FYdDhFO9TnJy3ocqx3zKgajECxJhd0Alk/Z6oSiXjmW0C
+gYEAu/2fBjQ6Ie6NANFUMuUkdrMUFrLLZK58eudjrqOwOgEapuHOMJqxkcs9u5IK
+jcmNGLoIgrSizHDFyTtDk4P3PkwxKdKFp4XigfYctn7RfobHtP8Q2HKr1US+k1SY
++yAKbyk0aygoGZpeM6KZ+kDnkezV3oYNGPSmASe3YUCiNB0CgYBmZfZhd0mdcWAC
+LyGBAy3IQCaedMWwr11fG9rGrSquOISPXO1J8D4wWEntccSWgHcaJzRDOwv0ciS0
+JKHvUoerAIOhDOafz3/HdYJJe6c+8ZvNnjVzNDbAynIZCyAQcRQ9bVB6QSuMn/bw
+v7uWIkCOfbDwwvQBp0JGFQhd1gwC2A==
+-----END PRIVATE KEY-----
+";
+const PSS_ANY: str = "-----BEGIN CERTIFICATE-----
+MIIChTCCAiqgAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmycpAwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMBExDzANBgNVBAMMBnBzc2FueTCCASAwCwYJKoZIhvcNAQEKA4IB
+DwAwggEKAoIBAQCjVKqoons8DE3lpb6/+C6PLd5Tqlrp1Cq8QStKGOQ3dxYr9zbd
+3J1Qt1H1Vd2KzCsVGh9BAnzCZhJV4a8gQHqXpjV9dgYT89N0vIlihkN6rTJfyBk4
+6GfP2z5iMp7RqEM1dmHZRa5D9gi6UJHnoSHpwk2CDBr2pltlWbTMnGmCuufUMrlW
+tzh4IXuWpRi3r2QoUkvlGvB0010kC3sfhdCzDvrTKRhIZ1FUojET6oz03udm24B8
+c+SUNx0n638dj4Q53QicwBgQqPhGZdu0F3X/WD4TuvlMw4eIHC82JO22Vf3y5QQc
+XattwBhOH7/AWs+wX4AdVCDhr1/iX+vKngbrAgMBAAGjgY8wgYwwCQYDVR0TBAIw
+ADAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMw
+EYIJbG9jYWxob3N0hwR/AAABMB0GA1UdDgQWBBQTap7BXDK6UZZ0rvPZh/HKsc9q
+0TAfBgNVHSMEGDAWgBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQDAgNJ
+ADBGAiEAsoIn3khWRWNXU9MfcxfpTfKwYpaUI0Ahrb0u2O1FRBECIQCA9aRsU8Mn
+RaksCgUyJsJC8kZRXRCwKlnVNqruWxsoyg==
+-----END CERTIFICATE-----
+";
+const PSS_ANY_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIIEvAIBADALBgkqhkiG9w0BAQoEggSoMIIEpAIBAAKCAQEAo1SqqKJ7PAxN5aW+
+v/gujy3eU6pa6dQqvEErShjkN3cWK/c23dydULdR9VXdiswrFRofQQJ8wmYSVeGv
+IEB6l6Y1fXYGE/PTdLyJYoZDeq0yX8gZOOhnz9s+YjKe0ahDNXZh2UWuQ/YIulCR
+56Eh6cJNggwa9qZbZVm0zJxpgrrn1DK5Vrc4eCF7lqUYt69kKFJL5RrwdNNdJAt7
+H4XQsw760ykYSGdRVKIxE+qM9N7nZtuAfHPklDcdJ+t/HY+EOd0InMAYEKj4RmXb
+tBd1/1g+E7r5TMOHiBwvNiTttlX98uUEHF2rbcAYTh+/wFrPsF+AHVQg4a9f4l/r
+yp4G6wIDAQABAoIBAA/MLnjYGl5Q/FnUIbKKATWFD2Yn6doy/3KCRSXKFDd507xV
+5snSaamMdFIWnN0svpVbF58fQUzrjXt0CY8aMsv8iLDwBkoja8D0mWnc/aWIdKux
+/B/hJBAFLy//9b+RQaA9U90thwZOGO2twacAkqSm+qiI84oGxiaej2+48zWbJyWK
+MRUPBQjc70vSuSKb3vlT8iRlA1wr1oZuIT1wAgJoiFyh465sHoCLsxqd3iNLxsua
+K2MGa7Zq4NtuKjhB9w7UlVDcrU3e0QdRaD59pt4xeiCPU2gXyUR1Sk3qTLb/y/nC
+MXqnIA0v1aMKEQ/OezG0yg4ymnpGs7VwXWyAVD0CgYEA0CoFkrZPzzAVqYYXf/Fy
+aapNgg9eCYCsczzQ49fTh6AEqVgC7Y4zE4xe1BphpvSkXawT6sp4qKlyHZduJv5M
+piURT26RLfKEQ0yCVUQUGli9OK3OWIyRMyv0hkM0iv34elm44wGCTNJtTmvQawVO
+y/g/Olzb2fKA8d/2O35C6ocCgYEAyN0p2Qc8aqcOMK9xubPUI85KASSqgLdE1O6c
+/cG7nCpJl5rJwEjElXlJdJZ4Fmx+VDPwYbsW5v3sGd0Im/XRViS/0SpHkfd5xUen
+kdScsGgzttpHOn8q2a19bd6UjKRoTFI20LWZKy7KaYqoSKPiQxqs3Z37A0ykBw9T
+n46UJX0CgYEAjDUhl9XwH481p/9HaMfJ1l384rNTFXdzsBKwaCaAtYMUYLOFFViI
+Eoyjep1iVL/GzckPiT9i0cd/s2rBqMXz/pxM8oF4i8gjSekIiEHYgH5wxPJcX8we
+KKdchepSQ6QYbuBr5YqopvG86es4cD0c+8lzXO4arsvmCgRdp2i9zZUCgYEAxCQT
+RTZnrM3McYYgy3Hq6bv7T/p59I8By9vluXWAuhIhIsWn1Pg53qw9Knf0dBElmxvM
+0+JZjt7NusO4MHNuI2xnUtyyXrsGUbqSyziOeUSHmzqy61Bai416Odtru5qfrkdp
+94wdManTRhR8F9LQky5tN0uZXbNtSOeShPA5ghECgYBTSWteU86YiZoyHkBI+QwJ
+7yJ/DSI5FJS5U8fbKGkikdmx/bXR7tY4IYekvd7JG5aIftAZWYYBGmcVGvudtQRb
+deDnIEkNyCghv1NysaxX+XQ0Rk5kw8/22FbS973xdwsoXZ13WMhwQpTRUpscie1F
+1fytGygnRBkSlcxpX6BRhw==
+-----END PRIVATE KEY-----
+";
+const RSA: str = "-----BEGIN CERTIFICATE-----
+MIICgjCCAimgAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmycpEwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA3JzYTCCASIwDQYJKoZIhvcNAQEBBQADggEP
+ADCCAQoCggEBALDB8N33h/4fwma8SRn/Z2xusk0Wsth3UHfNwgKGPUJnSaCU7+wT
+6pVy5/WsoR9Fb/0WfGGaK91bffX1yjhPbUJCDdJa0v9Ndandi1zwmfqmziROXWf4
+ENXZuRMWdlS7eSe7W8CDEfhD4eL5tXxWRw6nkRAF6Pxqs/eCuChHBsaQxe0lXVw+
+aIFL+CzXq+JR5pElvUSrxpgRt/0AWOZ3lo+NCnDA4nP2QEypepCRPspXhyJ1dtrA
+8E3A70ubhyNtZGRV0I2bMuklxJJ2dDrs8BWKILckHmePMcshRsq8CIU2lrgEx2NT
+xN/CokW+UXPi6CLmKs8Xxdk3rasG2yt+IL8CAwEAAaOBjzCBjDAJBgNVHRMEAjAA
+MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAaBgNVHREEEzAR
+gglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFLCu738zqdZnqG+JPiY8+VGW7aYZ
+MB8GA1UdIwQYMBaAFPrNL2ff/ZhYdliVjlRBjXA7GCYAMAoGCCqGSM49BAMCA0cA
+MEQCIEmh9wrbHMfUCHjmFWHfeBjX+cYHY84dbIyo4gtxADpqAiACggLb95GOUzuU
+ZfjxNZYO64PPY+wpMxboYeq9cd095A==
+-----END CERTIFICATE-----
+";
+const RSA_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCwwfDd94f+H8Jm
+vEkZ/2dsbrJNFrLYd1B3zcIChj1CZ0mglO/sE+qVcuf1rKEfRW/9FnxhmivdW331
+9co4T21CQg3SWtL/TXWp3Ytc8Jn6ps4kTl1n+BDV2bkTFnZUu3knu1vAgxH4Q+Hi
++bV8VkcOp5EQBej8arP3grgoRwbGkMXtJV1cPmiBS/gs16viUeaRJb1Eq8aYEbf9
+AFjmd5aPjQpwwOJz9kBMqXqQkT7KV4cidXbawPBNwO9Lm4cjbWRkVdCNmzLpJcSS
+dnQ67PAViiC3JB5njzHLIUbKvAiFNpa4BMdjU8TfwqJFvlFz4ugi5irPF8XZN62r
+BtsrfiC/AgMBAAECggEAM6jbDuSTeHArzv7klpaQ0Z4gumsR5jYo7HrUYwx8xvWN
+DUO6Q1Mm0nr81E6Z4JvYuS1jONtoSo+85q/pZD/CfQT1KS+mTzuCUh0P6B/hwOIT
+iYTlw8c6lGXHs45zExyfsj8N99vW2qpsUHwO0MIejmfm+7neeDdvVb18uTjZABs+
+J7ZWe6NlYyRamEWWo4ehDZDay1GHjLylo3AXc0drWYi8jVFLa9zSOdMGguJnOAHN
+7sWgKOiZTdqxq7c4utB5PfX1hJ4uUKwtIPNiD2ZPGTqL21QCLUBQf1BCqoT9+3pn
+IFTg+RFiqCgei8rpet2zAyVrNmEvIyZJFj2BOqqIgQKBgQD2tYgChPJzSqSgsU8b
+65cq2LymCZ3DbVJmprjw0wOEieLR0aS/cWc/+EaS96xPD073hp8rfFoHg8o5mJ+/
+BbunTk3etSDspE7s2DToetcOHPa/GV0leDhjnelhmqwFMhb3jo+/TOhk+ajsea1X
+C2JWlFe5blb0LZaCvG5HovyI4QKBgQC3agWupGBW9eN9RXtD2LUO/000r4Qfr2Hq
+ZVvRItayxJMSPEnc9ccwJGorwwJ49ehTFSx2NgBymz0La0ejM02oeItcHoQgKo5u
+jcvImw76wazytlg0+2NYbs4s8wOhRSo5yg4grjflGqSDaTJZCbMJrGHTFNUq5KCM
+u48lv3e9nwKBgQCm2reWHJxtZTpahBDg7UFb9SIBmdddaP6l9nR2TADBDxCcn5Ew
++V2/Ygc5NtEO12es+RuFqaCqHHQU6CiCZTo5OThpO099PNM0VDXUVeBE50nqjRj2
+Uoywswg4vwdArFPkMkL+OuGiCUg6R0D48fYcYE/EVd/xXTPCT/a19IGfgQKBgGZZ
+UIBrE6OTJPXzvtxWYnrS9mdPBiCUQsSE+R6UHVC2pwdHA0S9FgEEYQa4lHmhZ5pt
+N1ljuw45GHB11gz5BP3c/o9SLBKzDLYehDgWZt6BExyBqmkuWvqvIngsx7rHmM+U
+tBuCfIhpPKJkIodTBUiBnDko5+c+m2TNCQ1ccdorAoGAEwxLySFeQL+iEzvKi+rY
+EScuMN1ye6o54RqxzC+btZWySgetJk5Yny+fUUiSkvagqZe/koBEDW1OpmfpOl9r
+IlEkHYoKpXtJ7qJ0cohDqXM/gzhHP7NBbRhl7FdddT9dLT0JjCwtr3UvCCY1lCUC
+YHxQvRNCnJxyTFZzWluYKXw=
+-----END PRIVATE KEY-----
+";
+const EC: str = "-----BEGIN CERTIFICATE-----
+MIIBuDCCAV6gAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmyco0wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA3NydjBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABHm5n0+SWVTWbZ55MH0XSUNYxg+m1jgAdoYS25h8KzufL+QbzhTIqJLvDJi1
+fncoKPluNud5yAE0IUMIJRJqve6jgY8wgYwwCQYDVR0TBAIwADAOBgNVHQ8BAf8E
+BAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0
+hwR/AAABMB0GA1UdDgQWBBRrjj4b9HL+ckorpa4lMsfgs0dQyjAfBgNVHSMEGDAW
+gBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQDAgNIADBFAiAk4UEvAjbM
+vnEoh4A8FgiBFfwDv6/OxYhtBLRLFbcskAIhAMorR5WRpyGXXY43jvoJoiKMV4hQ
+v2isg0nT0kdjAaow
+-----END CERTIFICATE-----
+";
+const EC_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgNTSUe5vgM79N6K71
+1M22uGAT9Rl/3Xj4L0M3ROx+CNGhRANCAAR5uZ9PkllU1m2eeTB9F0lDWMYPptY4
+AHaGEtuYfCs7ny/kG84UyKiS7wyYtX53KCj5bjbnecgBNCFDCCUSar3u
+-----END PRIVATE KEY-----
+";
+
+fn config(cert: str, key: str) throws (TlsError) -> ServerConfig {
+    try ServerConfig::new(try Certificate::from_pem(cert), try PrivateKey::from_pem(key))
+}
+
+fn serve(l: TcpListener) {
+    for (cert, key) in [(PSS, PSS_KEY), (PSS_ANY, PSS_ANY_KEY)] {
+        let cfg = try! config(cert, key);
+        let (s, _) = try l.accept() catch _ { return; };
+        let srv = try Server::new(s, cfg) catch _ { continue; };
+        try srv.write_all("hello") catch _ {};
+        srv.close();
+    }
+}
+
+fn main() {
+    let l = try! tcp_listen("127.0.0.1:0");
+    let port = (try! l.local_addr()).port();
+    let t = thread::spawn(|| serve(l));
+    let cfg = ClientConfig::new();
+    cfg.root_certs = try! Certificate::from_pem(CA);
+    for what in ["pss, sha-256 only", "pss, any hash"] {
+        let s = try! tcp_connect(f"127.0.0.1:{port}");
+        let c = try Client::with_config(s, "localhost", cfg) catch e {
+            println(f"{what}: {e.kind:?} {e.msg}");
+            continue;
+        };
+        println(f"{what}: {try str::from_utf8(try! c.read_to_end()) catch _ { "?" }}");
+        c.close();
+    }
+    try! t.join();
+    for (what, cert, key) in [("rsa", RSA, RSA_KEY), ("ec leaf, rsa key", EC, RSA_KEY), ("pss leaf, another pss key", PSS, PSS_ANY_KEY), ("ec leaf, other ec key", EC, "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgi3F3cWqG4N4j0PGf
+COyNvLhinAYS4S58OQdqcyT434KhRANCAAQ6vkUQQgpNYs8R9nWuwAlmi+7UWevT
+6uT42GYD5Myk2nFMih/JEjfP3mU3UcCTZagXDGP3859X6YcwzsXwta6o
+-----END PRIVATE KEY-----
+")] {
+        let _ = try config(cert, key) catch e {
+            println(f"config {what}: {e.kind:?} {e.msg}");
+            continue;
+        };
+        println(f"config {what}: ok");
+    }
+}
+
+// spec: std 302-net §3.2.5

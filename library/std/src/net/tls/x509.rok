@@ -1,13 +1,14 @@
 // X.509 certificates (RFC 5280): parsing, path building and validation
-// for TLS server authentication, and host name matching (RFC 6125).
+// for TLS server and client authentication, and host name matching (RFC 6125).
 //
 // Validation: signatures along the path, validity times (anchors too),
 // basicConstraints (cA, pathLenConstraint), keyUsage (keyCertSign on
 // CAs, digitalSignature on the leaf), extendedKeyUsage (serverAuth or
-// anyExtendedKeyUsage wherever present), DNS / IP nameConstraints, and
-// no unknown critical extension. Names are compared as encoded bytes.
-// The leaf's name is checked against its subjectAltName only (no
-// common-name fallback). No revocation checking.
+// anyExtendedKeyUsage wherever present; clientAuth for a client
+// certificate), DNS / IP nameConstraints, and no unknown critical
+// extension. Names are compared as encoded bytes. A server's name is
+// checked against its subjectAltName only (no common-name fallback).
+// Revocation: stapled OCSP responses (`ocsp`).
 
 use sup::TlsError;
 use sup::der::{Der, SEQUENCE, SET, INTEGER, BIT_STRING, OCTET_STRING, NULL, OID, BOOLEAN, UTC_TIME, GENERALIZED_TIME};
@@ -22,6 +23,9 @@ pub(pkg) enum PubKey {
     /// PKCS #1 `RSAPublicKey` DER, made a key only to verify (setup is
     /// costly and most anchors are never used).
     Rsa(List<u8>),
+    /// An id-RSASSA-PSS key (RFC 4055): PSS only, with the hash its
+    /// parameters fix (none: any) and at least their salt length.
+    RsaPss(List<u8>, HashAlgorithm | none, usize),
     Ec(EcCurve, List<u8>),
     EdDsa(List<u8>),
     Other(str),
@@ -30,7 +34,8 @@ pub(pkg) enum PubKey {
 /// A signature algorithm (certificates and CertificateVerify).
 pub(pkg) enum SigAlg {
     RsaPkcs1(HashAlgorithm),
-    RsaPss(HashAlgorithm),
+    /// The hash (also MGF1's) and the salt length.
+    RsaPss(HashAlgorithm, usize),
     Ecdsa(HashAlgorithm),
     EdDsa,
     Other(str),
@@ -50,10 +55,17 @@ pub(pkg) fn verify_sig(key: PubKey, alg: SigAlg, msg: Slice<u8>, sig: Slice<u8>)
             },
             _ => false,
         },
-        SigAlg::RsaPss(h) => match key {
+        SigAlg::RsaPss(h, salt) => match key {
             PubKey::Rsa(der) => match rsa_key(der) {
-                k: RsaPublicKey => k.verify_pss(h, msg, sig),
+                k: RsaPublicKey => k.verify_pss(h, msg, sig, salt),
                 none => false,
+            },
+            PubKey::RsaPss(der, only, min_salt) => {
+                if (only is HashAlgorithm && only != h) || salt < min_salt { return false; }
+                match rsa_key(der) {
+                    k: RsaPublicKey => k.verify_pss(h, msg, sig, salt),
+                    none => false,
+                }
             },
             _ => false,
         },
@@ -81,6 +93,7 @@ const OID_P256: str = "1.2.840.10045.3.1.7";
 const OID_P384: str = "1.3.132.0.34";
 const OID_ED25519: str = "1.3.101.112";
 const EKU_SERVER_AUTH: str = "1.3.6.1.5.5.7.3.1";
+const EKU_CLIENT_AUTH: str = "1.3.6.1.5.5.7.3.2";
 const EKU_ANY: str = "2.5.29.37.0";
 
 /// A parsed certificate. Views point into `der`.
@@ -106,6 +119,12 @@ pub(pkg) struct CertInfo {
     pub(pkg) excluded_dns: List<str>;
     pub(pkg) permitted_ip: List<List<u8>>;
     pub(pkg) excluded_ip: List<List<u8>>;
+    /// The serial number's contents.
+    pub(pkg) serial: Slice<u8>;
+    /// The subjectPublicKey bits.
+    pub(pkg) spk: Slice<u8>;
+    /// A TLS feature extension (RFC 7633) asks for status_request.
+    pub(pkg) must_staple: bool;
 }
 
 fn hash_of_oid(oid: str) -> HashAlgorithm | none {
@@ -125,9 +144,9 @@ fn hash_alg(b: Slice<u8>) throws (TlsError) -> HashAlgorithm | none {
     hash_of_oid(oid)
 }
 
-/// RSASSA-PSS-params: only an explicit SHA-2 hash, MGF1 with the same
-/// hash and a salt as long as the hash are accepted.
-fn pss_params(b: Slice<u8>) throws (TlsError) -> SigAlg {
+/// RSASSA-PSS-params (RFC 4055 3.1) as `RsaPss(hash, salt)`: only an
+/// explicit SHA-2 hash with MGF1 over the same hash is accepted.
+pub(pkg) fn pss_params(b: Slice<u8>) throws (TlsError) -> SigAlg {
     let d = Der::new(b);
     let hash: HashAlgorithm | none = none;
     let mgf_hash: HashAlgorithm | none = none;
@@ -150,8 +169,8 @@ fn pss_params(b: Slice<u8>) throws (TlsError) -> SigAlg {
     try d.finish();
     match hash {
         h: HashAlgorithm => {
-            if mgf_hash != h || salt != h.output_len() as i64 { return SigAlg::Other("RSA-PSS parameters"); }
-            SigAlg::RsaPss(h)
+            if mgf_hash != h || salt > 1024i64 { return SigAlg::Other("RSA-PSS parameters"); }
+            SigAlg::RsaPss(h, salt as usize)
         },
         none => SigAlg::Other("RSA-PSS with SHA-1"),
     }
@@ -202,6 +221,18 @@ pub(pkg) fn public_key(b: Slice<u8>) throws (TlsError) -> PubKey {
         if curve == OID_P256 && bits.len() == 65 && bits[0] == 4u8 { return PubKey::Ec(EcCurve::P256, bits.to_list()); }
         if curve == OID_P384 && bits.len() == 97 && bits[0] == 4u8 { return PubKey::Ec(EcCurve::P384, bits.to_list()); }
         return PubKey::Other(f"EC key on {curve}");
+    }
+    if oid == OID_RSA_PSS {
+        // Absent parameters: no restriction.
+        let p = try alg.optional(SEQUENCE);
+        try alg.finish();
+        match p {
+            b: Slice<u8> => match try pss_params(b) {
+                SigAlg::RsaPss(h, salt) => return PubKey::RsaPss(bits.to_list(), h, salt),
+                _ => return PubKey::Other("RSA-PSS key parameters"),
+            },
+            none => return PubKey::RsaPss(bits.to_list(), none, 0),
+        }
     }
     if oid == OID_ED25519 {
         try alg.finish();
@@ -261,6 +292,9 @@ pub(pkg) fn parse(der_bytes: Slice<u8>) throws (TlsError) -> CertInfo {
     if stag != SEQUENCE { throw der::bad("subject"); }
     let (ktag, kbody, _) = try t.next();
     if ktag != SEQUENCE { throw der::bad("subjectPublicKeyInfo"); }
+    let kd = Der::new(kbody);
+    let _ = try kd.expect(SEQUENCE);
+    let spk = try der::bit_string_bytes(try kd.expect(BIT_STRING));
     let _ = try t.optional(0x81u8);
     let _ = try t.optional(0x82u8);
     let info = CertInfo {
@@ -282,6 +316,9 @@ pub(pkg) fn parse(der_bytes: Slice<u8>) throws (TlsError) -> CertInfo {
         excluded_dns: [],
         permitted_ip: [],
         excluded_ip: [],
+        serial,
+        spk,
+        must_staple: false,
     };
     let exts = try t.optional(0xa3u8);
     try t.finish();
@@ -360,6 +397,14 @@ fn extension(ref info: CertInfo, oid: str, critical: bool, value: Slice<u8>) thr
         let x = try seq.optional(0xa1u8);
         if x is Slice<u8> { try subtrees(x, ref info.excluded_dns, ref info.excluded_ip); }
         try seq.finish();
+    } else if oid == "1.3.6.1.5.5.7.1.24" {
+        // TLS feature: a list of extension types; 5 is status_request.
+        let seq = try d.enter(SEQUENCE);
+        try d.finish();
+        while !seq.done() {
+            if (try der::small_int(try seq.expect(INTEGER))) == 5 { info.must_staple = true; }
+        }
+        if critical { throw TlsError::certificate("unsupported critical extension 1.3.6.1.5.5.7.1.24"); }
     } else if critical {
         // Certificate policies and the rest: not processed, so a critical
         // one fails validation (RFC 5280 4.2).
@@ -450,11 +495,12 @@ fn names_allowed(ca: CertInfo, leaf: CertInfo) -> bool {
     true
 }
 
-fn eku_server_ok(c: CertInfo) -> bool {
+/// Whether `c` may be used for `usage` (an extendedKeyUsage OID).
+fn eku_ok(c: CertInfo, usage: str) -> bool {
     match c.eku {
         l: List<str> => {
             for u in l {
-                if u == EKU_SERVER_AUTH || u == EKU_ANY { return true; }
+                if u == usage || u == EKU_ANY { return true; }
             }
             false
         },
@@ -481,30 +527,51 @@ pub(pkg) fn names_host(leaf: CertInfo, host: str, ip: List<u8> | none) -> bool {
 }
 
 /// Validate `chain[0]` (the leaf; the rest are intermediates in any
-/// order) up to one of `roots` at Unix time `now`, for server `host`.
-pub(pkg) fn verify_server(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, host: str, ip: List<u8> | none) throws (TlsError) {
+/// order) up to one of `roots` at Unix time `now`, for server `host`:
+/// the path, leaf first, ending in the anchor.
+pub(pkg) fn verify_server(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, host: str, ip: List<u8> | none) throws (TlsError) -> List<CertInfo> {
+    try verify_chain(chain, roots, now, EKU_SERVER_AUTH, host, ip)
+}
+
+/// `verify_server` for a client certificate (clientAuth, no name).
+pub(pkg) fn verify_client(chain: List<CertInfo>, roots: List<CertInfo>, now: i64) throws (TlsError) -> List<CertInfo> {
+    try verify_chain(chain, roots, now, EKU_CLIENT_AUTH, none, none)
+}
+
+fn verify_chain(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, usage: str, host: str | none, ip: List<u8> | none) throws (TlsError) -> List<CertInfo> {
     if chain.len() == 0 { throw TlsError::certificate("no certificate"); }
     let leaf = chain[0];
     if now < leaf.not_before || now > leaf.not_after { throw TlsError::certificate("certificate expired or not yet valid"); }
-    if !eku_server_ok(leaf) { throw TlsError::certificate("certificate not valid for server authentication"); }
+    let role = if usage == EKU_SERVER_AUTH { "server" } else { "client" };
+    if !eku_ok(leaf, usage) { throw TlsError::certificate(f"certificate not valid for {role} authentication"); }
     if leaf.key_usage >= 0 && leaf.key_usage & KU_DIGITAL_SIGNATURE == 0 {
         throw TlsError::certificate("certificate key usage does not allow signing");
     }
-    if !names_host(leaf, host, ip) { throw TlsError::certificate(f"certificate is not valid for {host}"); }
+    match host {
+        h: str => {
+            if !names_host(leaf, h, ip) { throw TlsError::certificate(f"certificate is not valid for {h}"); }
+        },
+        none => {},
+    }
     let path: List<CertInfo> = [leaf];
-    let why = build(path, chain, roots, now);
+    let why = build(path, chain, roots, now, usage);
     if why != "" { throw TlsError::certificate(why); }
+    path
 }
 
 /// Extend `path` (ending in a certificate to find the issuer of) to a
-/// root: "" on success, else the reason the last attempt failed.
-fn build(path: List<CertInfo>, pool: List<CertInfo>, roots: List<CertInfo>, now: i64) -> str {
+/// root, which ends it on success: "" then, else the reason the last
+/// attempt failed.
+fn build(path: List<CertInfo>, pool: List<CertInfo>, roots: List<CertInfo>, now: i64, usage: str) -> str {
     let cur = path[path.len() - 1];
     let why = "certificate signed by an unknown authority";
     for r in roots {
         if r.subject == cur.issuer {
-            let w = check_issuer(path, r, true, now);
-            if w == "" { return ""; }
+            let w = check_issuer(path, r, true, now, usage);
+            if w == "" {
+                path.push(r);
+                return "";
+            }
             why = w;
         }
     }
@@ -517,13 +584,13 @@ fn build(path: List<CertInfo>, pool: List<CertInfo>, roots: List<CertInfo>, now:
             if p.tbs == c.tbs { loops = true; }
         }
         if loops { continue; }
-        let w = check_issuer(path, c, false, now);
+        let w = check_issuer(path, c, false, now, usage);
         if w != "" {
             why = w;
             continue;
         }
         path.push(c);
-        let w2 = build(path, pool, roots, now);
+        let w2 = build(path, pool, roots, now, usage);
         if w2 == "" { return ""; }
         why = w2;
         let _ = path.pop();
@@ -533,14 +600,14 @@ fn build(path: List<CertInfo>, pool: List<CertInfo>, roots: List<CertInfo>, now:
 
 /// Whether CA `ca` may issue the last certificate of `path`: "" or the
 /// reason it may not.
-fn check_issuer(path: List<CertInfo>, ca: CertInfo, anchor: bool, now: i64) -> str {
+fn check_issuer(path: List<CertInfo>, ca: CertInfo, anchor: bool, now: i64, usage: str) -> str {
     let cur = path[path.len() - 1];
     // An anchor is trusted as configured (a v1 root has no
     // basicConstraints).
     if !ca.is_ca && !anchor { return "issuer is not a CA"; }
     if ca.key_usage >= 0 && ca.key_usage & KU_KEY_CERT_SIGN == 0 { return "issuer may not sign certificates"; }
     if now < ca.not_before || now > ca.not_after { return "issuer certificate expired or not yet valid"; }
-    if !eku_server_ok(ca) { return "issuer not valid for server authentication"; }
+    if !eku_ok(ca, usage) { return if usage == EKU_SERVER_AUTH { "issuer not valid for server authentication" } else { "issuer not valid for client authentication" }; }
     // Intermediates below `ca` in the path (the leaf excluded).
     if ca.path_len >= 0 && (path.len() as i64) - 1 > ca.path_len { return "path length constraint exceeded"; }
     if !names_allowed(ca, path[0]) { return "name constraints violated"; }

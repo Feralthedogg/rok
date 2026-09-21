@@ -66,7 +66,7 @@ fn text(b: List<u8> | none) -> str {
 /// client's close_notify; a request "big" echoes the next 300000 bytes.
 fn serve(l: TcpListener, n: i32) {
     let chain = [try Certificate::from_pem(LEAF) catch _ { return; }][0];
-    let cfg = ServerConfig::new(chain, try PrivateKey::from_pem(KEY) catch _ { return; });
+    let cfg = try! ServerConfig::new(chain, try PrivateKey::from_pem(KEY) catch _ { return; });
     cfg.alpn_protocols = ["http/1.1".as_bytes().to_list(), "h2".as_bytes().to_list()];
     let seen = 0;
     for _ in 0..n {
@@ -131,7 +131,7 @@ fn main() throws (tls::TlsError) {
     let t = thread::spawn(|| serve(l, 12));
     let roots = try Certificate::from_pem(CA);
 
-    let cfg = ClientConfig { root_certs: roots, cipher_suites: CipherSuite::all(), alpn_protocols: ["h2".as_bytes().to_list(), "http/1.1".as_bytes().to_list()], enable_pq: true };
+    let cfg = ClientConfig { root_certs: roots, cipher_suites: CipherSuite::all(), alpn_protocols: ["h2".as_bytes().to_list(), "http/1.1".as_bytes().to_list()], enable_pq: true, client_cert_chain: [], client_key: none, session_cache: none, early_data: [] };
     let c = try connect(port, "localhost", cfg);
     println(f"default: alpn {text(c.negotiated_alpn())} peer {c.peer_certificates().len()} certs -> {ask(c, "ping")}");
     try c.key_update() catch _ {};
@@ -139,12 +139,12 @@ fn main() throws (tls::TlsError) {
     try c.close_notify() catch _ {};
     c.close();
 
-    let plain = ClientConfig { root_certs: roots, cipher_suites: [CipherSuite::ChaCha20Poly1305Sha256], alpn_protocols: [], enable_pq: false };
+    let plain = ClientConfig { root_certs: roots, cipher_suites: [CipherSuite::ChaCha20Poly1305Sha256], alpn_protocols: [], enable_pq: false, client_cert_chain: [], client_key: none, session_cache: none, early_data: [] };
     let c2 = try connect(port, "localhost", plain);
     println(f"chacha x25519: alpn {text(c2.negotiated_alpn())} -> {ask(c2, "hi")}");
     c2.close();
 
-    let a256 = ClientConfig { root_certs: roots, cipher_suites: [CipherSuite::Aes256GcmSha384], alpn_protocols: [], enable_pq: true };
+    let a256 = ClientConfig { root_certs: roots, cipher_suites: [CipherSuite::Aes256GcmSha384], alpn_protocols: [], enable_pq: true, client_cert_chain: [], client_key: none, session_cache: none, early_data: [] };
     let c3 = try connect(port, "localhost", a256);
     println(f"aes256: -> {ask(c3, "hi")}");
     c3.close();
@@ -174,9 +174,9 @@ fn main() throws (tls::TlsError) {
     c6.close();
 
     try connect(port, "example.com", plain) catch e { println(f"wrong name: {e.kind:?} {e.msg}"); };
-    let none_cfg = ClientConfig { root_certs: [], cipher_suites: CipherSuite::all(), alpn_protocols: [], enable_pq: true };
+    let none_cfg = ClientConfig { root_certs: [], cipher_suites: CipherSuite::all(), alpn_protocols: [], enable_pq: true, client_cert_chain: [], client_key: none, session_cache: none, early_data: [] };
     try connect(port, "localhost", none_cfg) catch e { println(f"unknown root: {e.kind:?} {e.msg}"); };
-    let odd = ClientConfig { root_certs: roots, cipher_suites: CipherSuite::all(), alpn_protocols: ["spdy/1".as_bytes().to_list()], enable_pq: true };
+    let odd = ClientConfig { root_certs: roots, cipher_suites: CipherSuite::all(), alpn_protocols: ["spdy/1".as_bytes().to_list()], enable_pq: true, client_cert_chain: [], client_key: none, session_cache: none, early_data: [] };
     try connect(port, "localhost", odd) catch e { println(f"no common alpn: {e.kind:?} {e.msg}"); };
 
     // `Client::new` trusts the OS store, which lacks the test CA.

@@ -1040,6 +1040,18 @@ pub(super) fn lower_pattern_inner(
                     },
                     None => HirPattern::Wildcard,
                 };
+            } else if matches!(&target_ty, HirTy::Sum(ws) if ws.contains(scrut_ty)) {
+                // `v: A | B` against an `A`: always matches; the binder
+                // is the value wrapped as `A | B`.
+                let Some(binder) = bind(ctx) else {
+                    return HirPattern::Wildcard;
+                };
+                let whole = ctx.declare(None, scrut_ty.clone());
+                ctx.pending_resums.push((binder, whole));
+                return HirPattern::Binding {
+                    local: whole,
+                    ty: scrut_ty.clone(),
+                };
             }
             // Spec 2.10.9: every type supports `is`. A test that turns on
             // a type parameter is opaque at the definition check (its own

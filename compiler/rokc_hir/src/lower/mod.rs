@@ -1631,7 +1631,8 @@ fn resum(ctx: &mut LowerCtx<'_>, value: HirExpr, to: &HirTy) -> HirExpr {
             .chain(ws)
             .map(|w| (ctx.any_tag(w), w.clone()))
             .collect(),
-        _ => return value,
+        // A plain member: wrap it.
+        _ => return wrap_into_sum(to, value),
     };
     let span = value.span;
     let arms = members

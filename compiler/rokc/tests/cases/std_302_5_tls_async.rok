@@ -65,7 +65,7 @@ fn data() -> List<u8> {
 let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
 let l = try! TcpListener::bind(any);
 let addr = try! l.local_addr();
-let cfg = ServerConfig::new(try! Certificate::from_pem(CERT), try! PrivateKey::from_pem(KEY));
+let cfg = try! ServerConfig::new(try! Certificate::from_pem(CERT), try! PrivateKey::from_pem(KEY));
 cfg.alpn_protocols = ["h2".as_bytes().to_list()];
 let server = task::spawn_local(async {
     let (s, _) = try! await l.accept_async();

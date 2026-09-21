@@ -1,0 +1,200 @@
+// needs: threads net
+// expect-exit: 0
+// expect-stdout:
+// ed25519: hello, resumed false
+// p256: hello, resumed false
+// p256 again: hello, resumed true
+// none: read: tls: peer sent alert 116
+// serverAuth only: read: tls: peer sent alert 42
+// other CA: read: tls: peer sent alert 42
+// key mismatch: handshake: Certificate client key does not match the client certificate
+// server: peer 1 certs, names 1, resumed false
+// server: peer 1 certs, names 1, resumed false
+// server: peer 1 certs, names 1, resumed true
+// server: error client sent no certificate (alert 116)
+// server: error certificate not valid for client authentication (alert 42)
+// server: error certificate signed by an unknown authority (alert 42)
+// server: error connection closed without close_notify (alert 0)
+// optional, none: hello, resumed false
+// optional, ed25519: hello, resumed false
+// optional server: peer 0 certs, names 0, resumed false
+// optional server: peer 1 certs, names 1, resumed false
+
+// Stdlib 3.2.5: client certificates. A server with `client_roots` sends
+// a CertificateRequest and validates the client's chain (clientAuth,
+// keyUsage, the path to a root) and CertificateVerify; without a
+// certificate it fails with certificate_required unless
+// `require_client_cert` is off. A resumed connection keeps the original
+// client certificates. A client key that does not match its certificate
+// fails before anything is sent.
+use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, SessionCache, TicketStore};
+use rok::std::thread;
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBcjCCARigAwIBAgIUesSSl98urNjXdIg9ZEchaXosKn8wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMBYxFDASBgNVBAMMC3JvayB0bHMzIENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE4kV13G3nP06aBCX+u52Cuqk/R76W72DWLp1Lcfa7koO1hNfw
++10uBWWyPK4V60HuuPfxt7/JVLSKFadc3CQ7/KNCMEAwDwYDVR0TAQH/BAUwAwEB
+/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFPrNL2ff/ZhYdliVjlRBjXA7GCYA
+MAoGCCqGSM49BAMCA0gAMEUCIQDG06e7A0VHI6ZAtQtQq28OOx1+iPizhjQAysBD
+StWbYwIgS8FQ2a42r2yQGSPJtGddwkuhvTCs7eF3Cy1mpiSrCPc=
+-----END CERTIFICATE-----
+";
+const LEAF: str = "-----BEGIN CERTIFICATE-----
+MIIBuDCCAV6gAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmyco0wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA3NydjBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABHm5n0+SWVTWbZ55MH0XSUNYxg+m1jgAdoYS25h8KzufL+QbzhTIqJLvDJi1
+fncoKPluNud5yAE0IUMIJRJqve6jgY8wgYwwCQYDVR0TBAIwADAOBgNVHQ8BAf8E
+BAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0
+hwR/AAABMB0GA1UdDgQWBBRrjj4b9HL+ckorpa4lMsfgs0dQyjAfBgNVHSMEGDAW
+gBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQDAgNIADBFAiAk4UEvAjbM
+vnEoh4A8FgiBFfwDv6/OxYhtBLRLFbcskAIhAMorR5WRpyGXXY43jvoJoiKMV4hQ
+v2isg0nT0kdjAaow
+-----END CERTIFICATE-----
+";
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgNTSUe5vgM79N6K71
+1M22uGAT9Rl/3Xj4L0M3ROx+CNGhRANCAAR5uZ9PkllU1m2eeTB9F0lDWMYPptY4
+AHaGEtuYfCs7ny/kG84UyKiS7wyYtX53KCj5bjbnecgBNCFDCCUSar3u
+-----END PRIVATE KEY-----
+";
+const CLI: str = "-----BEGIN CERTIFICATE-----
+MIIBuTCCAV6gAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmycpIwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA2NsaTBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABDq+RRBCCk1izxH2da7ACWaL7tRZ69Pq5PjYZgPkzKTacUyKH8kSN8/eZTdR
+wJNlqBcMY/fzn1fphzDOxfC1rqijgY8wgYwwCQYDVR0TBAIwADAOBgNVHQ8BAf8E
+BAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwIwGgYDVR0RBBMwEYIJbG9jYWxob3N0
+hwR/AAABMB0GA1UdDgQWBBRWh5KK4CmY1HDCq1qhbX6nL2nZ+DAfBgNVHSMEGDAW
+gBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQDAgNJADBGAiEAgpqXROnG
+cMoXusKfTcTuFYTQktLgBswuO3wtEfk5Xl4CIQCRrFtvq6NWXomSHsFJ3m8AvH6H
+RsBBemjc5KbfIu2ZfA==
+-----END CERTIFICATE-----
+";
+const CLI_KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgi3F3cWqG4N4j0PGf
+COyNvLhinAYS4S58OQdqcyT434KhRANCAAQ6vkUQQgpNYs8R9nWuwAlmi+7UWevT
+6uT42GYD5Myk2nFMih/JEjfP3mU3UcCTZagXDGP3859X6YcwzsXwta6o
+-----END PRIVATE KEY-----
+";
+const CLI2: str = "-----BEGIN CERTIFICATE-----
+MIIBijCCATCgAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmycpMwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA8xDTALBgNVBAMMBGNsaTIwKjAFBgMrZXADIQCQt8n7s0u2o4vg
+xmQvd2zfif6Y0vVzBgHb3MdJeIQzpqOBjzCBjDAJBgNVHRMEAjAAMA4GA1UdDwEB
+/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAjAaBgNVHREEEzARgglsb2NhbGhv
+c3SHBH8AAAEwHQYDVR0OBBYEFBC7vabJ1GQeSKXBqF4ATcYNcj6CMB8GA1UdIwQY
+MBaAFPrNL2ff/ZhYdliVjlRBjXA7GCYAMAoGCCqGSM49BAMCA0gAMEUCIAzrSZuV
+CNAZfW+S350/6TPTcOHR1vzhagbS8wTf6tMOAiEA5j1uArN9TmpYaVo3VVbcd2F0
+SCD04mMkE8CIlhIZZ/U=
+-----END CERTIFICATE-----
+";
+const CLI2_KEY: str = "-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIGdZYIkJbfk2rpdZjY2AXGf+6+dsGilRyunjhbcgvRg1
+-----END PRIVATE KEY-----
+";
+const SERVER_ONLY: str = "-----BEGIN CERTIFICATE-----
+MIIBuzCCAWKgAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmycpQwCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMBIxEDAOBgNVBAMMB3Nydm9ubHkwWTATBgcqhkjOPQIBBggqhkjO
+PQMBBwNCAAQ6vkUQQgpNYs8R9nWuwAlmi+7UWevT6uT42GYD5Myk2nFMih/JEjfP
+3mU3UcCTZagXDGP3859X6YcwzsXwta6oo4GPMIGMMAkGA1UdEwQCMAAwDgYDVR0P
+AQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBoGA1UdEQQTMBGCCWxvY2Fs
+aG9zdIcEfwAAATAdBgNVHQ4EFgQUVoeSiuApmNRwwqtaoW1+py9p2fgwHwYDVR0j
+BBgwFoAU+s0vZ9/9mFh2WJWOVEGNcDsYJgAwCgYIKoZIzj0EAwIDRwAwRAIgMoG6
+yx+nsWvyM4VCaQOMNbKBlaQJnS+2IOHSiSRhuzACIBVAYLQu77x8+GGhZi4/sRTP
+6ex+EUOMSvF6Vz9m7hRD
+-----END CERTIFICATE-----
+";
+const OTHER_CA_CLI: str = "-----BEGIN CERTIFICATE-----
+MIIBhTCCASygAwIBAgIUdfNnZcsnTWDc0coH9he7nbRgS/swCgYIKoZIzj0EAwIw
+EjEQMA4GA1UEAwwHZXZpbCBDQTAgFw0yNjEwMTYxNjQ1MjlaGA8yMTI2MDkyMjE2
+NDUyOVowDzENMAsGA1UEAwwEY2xpMjAqMAUGAytlcAMhAJC3yfuzS7aji+DGZC93
+bN+J/pjS9XMGAdvcx0l4hDOmo4GPMIGMMAkGA1UdEwQCMAAwDgYDVR0PAQH/BAQD
+AgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMCMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcE
+fwAAATAdBgNVHQ4EFgQUELu9psnUZB5IpcGoXgBNxg1yPoIwHwYDVR0jBBgwFoAU
+bRj/BfanFEsq7XebMgJvoqKTwv0wCgYIKoZIzj0EAwIDRwAwRAIgP1iFY/52yHHy
+7eq6PJ3rY2aUSfJNx4PAtA/wpYZrwp0CIBiQX48FBw1zVxcMvMDmVvN3Ewho08Ds
+YuaDAAoTeHTv
+-----END CERTIFICATE-----
+";
+
+/// Serve `n` connections: each reply names the client certificate's
+/// subject size and whether the session resumed; the log comes back.
+fn serve(l: TcpListener, n: i32, required: bool) -> List<str> {
+    let cfg = try! ServerConfig::new(try! Certificate::from_pem(LEAF), try! PrivateKey::from_pem(KEY));
+    cfg.client_roots = try! Certificate::from_pem(CA);
+    cfg.require_client_cert = required;
+    let log: List<str> = [];
+    for _ in 0..n {
+        let (s, _) = try l.accept() catch _ { return log; };
+        let srv = try Server::new(s, cfg) catch e {
+            log.push(f"error {e.msg} (alert {e.alert})");
+            continue;
+        };
+        let peer = srv.peer_certificates();
+        let names: List<str> = if peer.len() > 0 { peer[0].dns_names() } else { [] };
+        log.push(f"peer {peer.len()} certs, names {names.len()}, resumed {srv.resumed()}");
+        let buf: List<u8> = [];
+        for _ in 0..64 { buf.push(0u8); }
+        let _ = try srv.read(buf) catch _ { 0usize };
+        try srv.write_all("hello") catch _ {};
+        srv.close();
+    }
+    log
+}
+
+fn with_cert(cert: str, key: str) -> ClientConfig {
+    let cfg = ClientConfig::new();
+    cfg.root_certs = try! Certificate::from_pem(CA);
+    cfg.session_cache = none;
+    if cert != "" {
+        cfg.client_cert_chain = try! Certificate::from_pem(cert);
+        cfg.client_key = try! PrivateKey::from_pem(key);
+    }
+    cfg
+}
+
+fn run(what: str, port: u16, cfg: ClientConfig) {
+    let s = try tcp_connect(f"127.0.0.1:{port}") catch e { println(f"{what}: connect {e}"); return; };
+    let c = try Client::with_config(s, "localhost", cfg) catch e {
+        println(f"{what}: handshake: {e.kind:?} {e.msg}");
+        return;
+    };
+    try c.write_all("hi") catch _ {};
+    let r = try c.read_to_end() catch e {
+        println(f"{what}: read: {e}");
+        c.close();
+        return;
+    };
+    println(f"{what}: {try str::from_utf8(r) catch _ { "?" }}, resumed {c.resumed()}");
+    c.close();
+}
+
+fn main() {
+    let l = try! tcp_listen("127.0.0.1:0");
+    let port = (try! l.local_addr()).port();
+    let t = thread::spawn(|| serve(l, 7, true));
+    run("ed25519", port, with_cert(CLI2, CLI2_KEY));
+    let p256 = with_cert(CLI, CLI_KEY);
+    p256.session_cache = SessionCache::new();
+    run("p256", port, p256);
+    run("p256 again", port, p256);
+    run("none", port, with_cert("", ""));
+    run("serverAuth only", port, with_cert(SERVER_ONLY, CLI_KEY));
+    run("other CA", port, with_cert(OTHER_CA_CLI, CLI2_KEY));
+    run("key mismatch", port, with_cert(CLI2, CLI_KEY));
+    for e in try! t.join() { println(f"server: {e}"); }
+
+    let l2 = try! tcp_listen("127.0.0.1:0");
+    let port2 = (try! l2.local_addr()).port();
+    let t2 = thread::spawn(|| serve(l2, 2, false));
+    run("optional, none", port2, with_cert("", ""));
+    run("optional, ed25519", port2, with_cert(CLI2, CLI2_KEY));
+    for e in try! t2.join() { println(f"optional server: {e}"); }
+}
+
+// spec: std 302-net §3.2.5

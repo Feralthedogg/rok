@@ -1,0 +1,86 @@
+// needs: net
+// expect-exit: 0
+// expect-stdout:
+// client 0: resumed false, early accepted false, reply ok
+// client 1: resumed true, early accepted true, reply ok
+// client 2: resumed true, early accepted true, reply ok
+// server: resumed false, early 0 bytes, got GET /async
+// server: resumed true, early 10 bytes, got GET /async
+// server: resumed true, early 10 bytes, got GET /async
+
+// Stdlib 3.2.0 / 3.2.5: resumption and 0-RTT data through the `*_async`
+// handshakes on tasks: the early data goes out with the ClientHello and
+// reaches `Server::early_data` (the first, full handshake sends it
+// after the handshake); each connection resumes from the ticket the one
+// before it left.
+use rok::std::net::{TcpListener, SocketAddr};
+use rok::std::net;
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBcjCCARigAwIBAgIUesSSl98urNjXdIg9ZEchaXosKn8wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMBYxFDASBgNVBAMMC3JvayB0bHMzIENBMFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE4kV13G3nP06aBCX+u52Cuqk/R76W72DWLp1Lcfa7koO1hNfw
++10uBWWyPK4V60HuuPfxt7/JVLSKFadc3CQ7/KNCMEAwDwYDVR0TAQH/BAUwAwEB
+/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0OBBYEFPrNL2ff/ZhYdliVjlRBjXA7GCYA
+MAoGCCqGSM49BAMCA0gAMEUCIQDG06e7A0VHI6ZAtQtQq28OOx1+iPizhjQAysBD
+StWbYwIgS8FQ2a42r2yQGSPJtGddwkuhvTCs7eF3Cy1mpiSrCPc=
+-----END CERTIFICATE-----
+";
+const LEAF: str = "-----BEGIN CERTIFICATE-----
+MIIBuDCCAV6gAwIBAgIUNVBLVY9ZRZowYSKfPQfz7lmyco0wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLcm9rIHRsczMgQ0EwIBcNMjYxMDE2MTY0NTI4WhgPMjEyNjA5
+MjIxNjQ1MjhaMA4xDDAKBgNVBAMMA3NydjBZMBMGByqGSM49AgEGCCqGSM49AwEH
+A0IABHm5n0+SWVTWbZ55MH0XSUNYxg+m1jgAdoYS25h8KzufL+QbzhTIqJLvDJi1
+fncoKPluNud5yAE0IUMIJRJqve6jgY8wgYwwCQYDVR0TBAIwADAOBgNVHQ8BAf8E
+BAMCB4AwEwYDVR0lBAwwCgYIKwYBBQUHAwEwGgYDVR0RBBMwEYIJbG9jYWxob3N0
+hwR/AAABMB0GA1UdDgQWBBRrjj4b9HL+ckorpa4lMsfgs0dQyjAfBgNVHSMEGDAW
+gBT6zS9n3/2YWHZYlY5UQY1wOxgmADAKBggqhkjOPQQDAgNIADBFAiAk4UEvAjbM
+vnEoh4A8FgiBFfwDv6/OxYhtBLRLFbcskAIhAMorR5WRpyGXXY43jvoJoiKMV4hQ
+v2isg0nT0kdjAaow
+-----END CERTIFICATE-----
+";
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgNTSUe5vgM79N6K71
+1M22uGAT9Rl/3Xj4L0M3ROx+CNGhRANCAAR5uZ9PkllU1m2eeTB9F0lDWMYPptY4
+AHaGEtuYfCs7ny/kG84UyKiS7wyYtX53KCj5bjbnecgBNCFDCCUSar3u
+-----END PRIVATE KEY-----
+";
+
+let l = try! TcpListener::bind(try! "127.0.0.1:0".parse::<SocketAddr>());
+let addr = try! l.local_addr();
+let cfg = try! ServerConfig::new(try! Certificate::from_pem(LEAF), try! PrivateKey::from_pem(KEY));
+cfg.max_early_data = 4096u32;
+let server = task::spawn_local(async {
+    let log: List<str> = [];
+    for _ in 0..3 {
+        let (s, _) = try! await l.accept_async();
+        let srv = try! await Server::new_async(s, cfg);
+        let early = srv.early_data();
+        let got = early;
+        if early.len() == 0 {
+            let buf: List<u8> = [];
+            for _ in 0..256 { buf.push(0u8); }
+            let n = try! await srv.read_async(buf);
+            got = buf[0:n].to_list();
+        }
+        log.push(f"resumed {srv.resumed()}, early {early.len()} bytes, got {try! str::from_utf8(got)}");
+        try! await srv.write_all_async("ok");
+        try! await srv.close_notify_async();
+        srv.close();
+    }
+    log
+});
+let ccfg = ClientConfig::new();
+ccfg.root_certs = try! Certificate::from_pem(CA);
+ccfg.early_data = "GET /async".as_bytes().to_list();
+for i in 0..3 {
+    let s = try! await net::tcp_connect_async(f"{addr}");
+    let c = try! await Client::with_config_async(s, "localhost", ccfg);
+    let back = try! await c.read_to_end_async();
+    println(f"client {i}: resumed {c.resumed()}, early accepted {c.early_data_accepted()}, reply {try! str::from_utf8(back)}");
+    c.close();
+}
+for line in await server { println(f"server: {line}"); }
+// spec: std 302-net §3.2.0 §3.2.5

@@ -2783,7 +2783,11 @@ fn narrowings(ctx: &LowerCtx<'_>, cond: &Expr) -> Vec<(String, rokc_ast::Ty)> {
                 if p.segments.len() == 1
                     && ctx.lookup(&p.segments[0].name).is_some_and(|l| {
                         // An enum's `x is E::V` is a variant test: no narrowing.
-                        !ctx.is_boxed(l) && !matches!(ctx.local_ty(l), HirTy::Enum(_))
+                        // A plain member of the target sum stays as it is.
+                        let lt = ctx.local_ty(l);
+                        !ctx.is_boxed(l)
+                            && !matches!(lt, HirTy::Enum(_))
+                            && !matches!(ctx.resolve_ast_ty(ty), HirTy::Sum(ws) if ws.contains(&lt))
                     }) =>
             {
                 vec![(p.segments[0].name.clone(), ty.clone())]
@@ -2942,7 +2946,11 @@ fn lower_is(
         matches!(scrut.ty, HirTy::AnyTrait(_) | HirTy::Sum(_)),
         &pat.kind,
     ) {
-        let same = ctx.resolve_ast_ty(ty) == scrut.ty;
+        // `A is (A | B)`: membership of the value's type in the sum.
+        let same = match ctx.resolve_ast_ty(ty) {
+            HirTy::Sum(ws) => ws.contains(&scrut.ty),
+            t => t == scrut.ty,
+        };
         return with_lets(vec![HirStmt::Expr(scrut)], lit(same));
     }
     ctx.push_scope();
