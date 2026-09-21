@@ -1039,7 +1039,7 @@ fn for_each_start(
 
 /// Before marking: the sorted LOS index. (Block start bits of the lines
 /// handed out since the last collection are parsed lazily, by
-/// [`object_containing`].)
+/// [`object_in`].)
 /// Also the block heap view lookups use ([`Mark`]). With the world
 /// stopped and the mark lock held.
 fn build_index() {
@@ -1175,12 +1175,10 @@ pub unsafe fn no_move(obj: *mut u8) {
 /// decided from the line table without touching the object. Free and
 /// `BLACK` lines hold none (a live object covers only its own lines;
 /// a concurrent mark never looks at what was allocated meanwhile).
-fn object_containing(word: usize, young: bool) -> Option<*mut u8> {
-    object_in::<false>(word, young)
-}
-
-/// [`object_containing`]; `MOVED`: objects may be evacuated already.
-fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
+/// `MOVED`: objects may be evacuated already. `!exact` (a precise reference: inside its object, or one past its
+/// end): the nearest block object start at or before `word`, its header
+/// left unread.
+fn object_in<const MOVED: bool>(word: usize, young: bool, exact: bool) -> Option<*mut u8> {
     let size_of = |o: *mut u8| if MOVED { moved_size(o) } else { obj_size(o) };
     let m = mark();
     if word >= m.base && word < m.base + m.nblocks * BLOCK_SIZE && !foreign(m, word) {
@@ -1211,8 +1209,10 @@ fn object_in<const MOVED: bool>(word: usize, young: bool) -> Option<*mut u8> {
         loop {
             if bits != 0 {
                 let start = block + (i * 64 + 63 - bits.leading_zeros() as usize) * 8;
-                let size = size_of(start as *mut u8);
-                return (word < start + size).then_some(start as *mut u8);
+                if !exact {
+                    return Some(start as *mut u8);
+                }
+                return (word < start + size_of(start as *mut u8)).then_some(start as *mut u8);
             }
             if i == 0 || (i - 1) * 64 + 63 < lowest {
                 return None;
@@ -1273,10 +1273,11 @@ fn load_u32(p: *const u8) -> u32 {
 }
 
 /// Queue the object `word` points into, if any (and young, unless the
-/// mark is full) and not marked yet. `pin`: `word` is a root or
-/// ambiguous, so the object must not move.
+/// mark is full). `pin`: `word` is a root or ambiguous, so the object
+/// must not move (and the lookup is exact); else it is a precise
+/// reference.
 fn push(word: usize, pin: bool) {
-    let Some(obj) = object_containing(word, !mark().full) else {
+    let Some(obj) = object_in::<false>(word, !mark().full, pin) else {
         return;
     };
     let m = mark();
@@ -1295,10 +1296,29 @@ fn push(word: usize, pin: bool) {
         unsafe { *m.pinned.add(m.pinned_len) = obj as usize };
         m.pinned_len += 1;
     }
-    // SAFETY: an object header.
-    if unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) } & FLAG_MARK == 0 {
-        push_obj(obj);
+    // Marked or not is decided by `drain`, once the header is in cache.
+    push_obj(obj);
+}
+
+/// Start loading the cache line at `p` (a hint: never faults).
+#[inline]
+#[allow(clippy::missing_const_for_fn)] // const only where it is a no-op
+fn prefetch(p: *const u8) {
+    // SAFETY (each): a prefetch does not access memory architecturally.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) p, options(nostack, readonly, preserves_flags));
     }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_mm_prefetch(p.cast(), core::arch::x86_64::_MM_HINT_T0);
+    }
+    #[cfg(target_arch = "x86")]
+    unsafe {
+        core::arch::x86::_mm_prefetch(p.cast(), core::arch::x86::_MM_HINT_T0);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64", target_arch = "x86")))]
+    let _ = p;
 }
 
 /// `addr` lies in an evacuation candidate block.
@@ -1327,23 +1347,39 @@ fn push_obj(obj: *mut u8) {
     m.len += 1;
 }
 
+/// Objects popped from the mark stack and prefetched before they are
+/// scanned: the header of each is loading while the ones ahead of it
+/// are scanned.
+const PREFETCH: usize = 8;
+
 /// Mark the queued objects until none is left (`batch`: at most that
 /// many). A minor collection never enters an old object: whatever young
 /// object it references is in the remembered set's reach.
 fn drain(mut batch: usize) {
+    let mut ring = [ptr::null_mut::<u8>(); PREFETCH];
+    let (mut head, mut count) = (0, 0);
     while batch > 0 {
         let m = mark();
-        if m.len == 0 {
+        while count < PREFETCH && m.len > 0 {
+            m.len -= 1;
+            // SAFETY: `push` only queues addresses of live GC objects.
+            let o = unsafe { *m.stack.add(m.len) };
+            prefetch(o);
+            ring[(head + count) % PREFETCH] = o;
+            count += 1;
+        }
+        if count == 0 {
             return;
         }
+        let o = ring[head];
+        head = (head + 1) % PREFETCH;
+        count -= 1;
         batch -= 1;
-        m.len -= 1;
-        // SAFETY: `push` only queues addresses of live GC objects.
-        let o = unsafe { *m.stack.add(m.len) };
         let (full, concurrent) = (m.full, m.concurrent);
         // SAFETY: as above.
         let flags = unsafe { &(*header(o)).gc_flags };
         if (!full && flags.load(Ordering::Relaxed) & FLAG_STICKY != 0)
+            || flags.load(Ordering::Relaxed) & FLAG_MARK != 0
             || flags.fetch_or(FLAG_MARK, Ordering::Relaxed) & FLAG_MARK != 0
         {
             continue;
@@ -1355,6 +1391,10 @@ fn drain(mut batch: usize) {
             flags.fetch_or(FLAG_SCANNED, Ordering::Release);
         }
     }
+    // Out of budget: what was popped goes back.
+    for k in 0..count {
+        push_obj(ring[(head + k) % PREFETCH]);
+    }
 }
 
 /// Queue the referents of `o`'s reference words.
@@ -1365,16 +1405,40 @@ fn scan_children(o: *mut u8) {
     // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
     unsafe {
         let type_id = (*header(o)).type_id;
-        let t = if type_id == SCAN_WORDS_TYPE_ID {
-            ptr::null()
-        } else {
-            scan_table(type_id)
-        };
-        if t.is_null() || t.add(4).cast::<u16>().read_unaligned() & TABLE_ARRAY != 0 {
+        if type_id == SCAN_WORDS_TYPE_ID {
             scan_range(o, 0, usize::MAX);
             return;
         }
+        let t = scan_table(type_id);
+        if t.is_null() {
+            return;
+        }
         let n = t.add(6).cast::<u16>().read_unaligned() as usize;
+        if t.add(4).cast::<u16>().read_unaligned() & TABLE_ARRAY != 0 {
+            // A buffer of plain references (`List<str>`, a list of
+            // handles): one word per entry and element.
+            let entries = core::slice::from_raw_parts(t.add(8).cast::<[u32; 2]>(), n);
+            if !entries
+                .iter()
+                .all(|&[_, kind]| matches!(kind & KIND_MASK, STRONG_REF | INTERIOR_REF))
+            {
+                scan_range(o, 0, usize::MAX);
+                return;
+            }
+            let stride = t.cast::<u32>().read_unaligned() as usize;
+            if n == 0 || stride == 0 {
+                return;
+            }
+            let end = o.add(obj_size(o));
+            let mut e = o.add(HEADER_SIZE);
+            while e.add(stride) <= end {
+                for &[eo, _] in entries {
+                    push(load_word(e.add(eo as usize)), false);
+                }
+                e = e.add(stride);
+            }
+            return;
+        }
         for e in 0..n {
             let entry = t.add(8 + 8 * e).cast::<u32>();
             let mut off = entry.read_unaligned() as usize;
@@ -1460,6 +1524,12 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)
         // counts by its payload word).
         let stride = t.cast::<u32>().read_unaligned() as usize;
         let count = (obj_size(o) - HEADER_SIZE) / stride;
+        if lo == 0 && hi == usize::MAX {
+            for i in 0..count {
+                visit_entries(o, t, entries, HEADER_SIZE + i * stride, &mut f);
+            }
+            return;
+        }
         let first = lo.saturating_sub(HEADER_SIZE + size_of::<usize>()) / stride;
         let last = hi.saturating_sub(HEADER_SIZE).div_ceil(stride).min(count);
         for i in first..last {
@@ -1985,7 +2055,7 @@ fn fix_references() {
                 if !in_candidate(w) {
                     return;
                 }
-                if let Some(old) = object_in::<true>(w, false) {
+                if let Some(old) = object_in::<true>(w, false, true) {
                     slot.write_unaligned(forwarded(old as usize) + (w - old as usize));
                 }
             }
@@ -2359,7 +2429,7 @@ mod tests {
             collect();
             assert_eq!(live_bytes(), base + 32 + 24);
             assert_eq!((*header(b)).type_id, USER_TYPE_BASE + 1);
-            assert_eq!(object_containing(garbage as usize + 16, false), None);
+            assert_eq!(object_in::<false>(garbage as usize + 16, false, true), None);
             *frame.1 = 0;
             collect();
             assert_eq!(live_bytes(), base);
@@ -2476,8 +2546,8 @@ mod tests {
             assert_eq!(word(w, 16), d as usize);
             assert_eq!(word(d, 16), 0xD);
             // `g` was only behind an inline `any` payload: dead.
-            assert_eq!(object_containing(g as usize, false), None);
-            assert_eq!(object_containing(b as usize, false), None);
+            assert_eq!(object_in::<false>(g as usize, false, true), None);
+            assert_eq!(object_in::<false>(b as usize, false, true), None);
             assert_eq!(live_bytes(), base + 48 * 2 + 24 * 4 + 32 + 32 + 24);
             // A second round moves the copies again.
             collect();
@@ -2545,11 +2615,11 @@ mod tests {
             }
             world::unlock();
             heap().concurrent = Concurrent::Auto;
-            assert_eq!(object_containing(b as usize, false), Some(b));
+            assert_eq!(object_in::<false>(b as usize, false, true), Some(b));
             assert_eq!(word(b, 16), 0xB);
             collect_young();
             assert_eq!(word(a, 16), d as usize);
-            assert_eq!(object_containing(d as usize, false), Some(d));
+            assert_eq!(object_in::<false>(d as usize, false, true), Some(d));
             assert_eq!(word(d, 16), 0xD);
             assert_eq!(live_bytes(), base + 32 * 2 + 24 * 2);
             *frame.1 = 0;
@@ -2624,7 +2694,7 @@ mod tests {
             assert_ne!(z2, z);
             assert_eq!(word(z2, 16), 0xC);
             assert_eq!(word(b, 24), y as usize);
-            assert_eq!(object_containing(y as usize, false), None);
+            assert_eq!(object_in::<false>(y as usize, false, true), None);
             assert_eq!(live_bytes(), base + 40 * 3 + 24 + 32);
             *frame.1 = 0;
             *frame.2 = 0;
@@ -2727,7 +2797,7 @@ mod tests {
             collect_young();
             assert_eq!(heap().minors, minors + 2);
             assert_eq!((*header(young)).type_id, USER_TYPE_BASE + 1);
-            assert_eq!(object_containing(garbage as usize, false), None);
+            assert_eq!(object_in::<false>(garbage as usize, false, true), None);
             assert_eq!(live_bytes(), base + 32 + 24);
             *old.add(16).cast::<*mut u8>() = ptr::null_mut();
             *frame.1 = 0;

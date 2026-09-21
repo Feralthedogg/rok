@@ -217,21 +217,30 @@ impl Incr {
         }
     }
 
-    fn save(&self) {
+    /// A failed build keeps the bodies of the last one: it may not
+    /// have lowered (and so kept) them.
+    fn save(&self, ok: bool) {
         self.parse.save(PARSE);
-        self.bodies.save(BODIES);
+        if ok {
+            self.bodies.save(BODIES);
+        }
     }
 }
 
-/// Run `f` with the stores of `dir` (none: no caching), then save them;
-/// what was reused.
-pub fn with<T>(dir: Option<&Path>, f: impl FnOnce() -> T) -> (T, Option<Reuse>) {
+/// Run `f` with the stores of `dir` (none: no caching), then save them
+/// (`ok`: whether it succeeded); what was reused.
+pub fn with<T>(
+    dir: Option<&Path>,
+    f: impl FnOnce() -> T,
+    ok: impl FnOnce(&T) -> bool,
+) -> (T, Option<Reuse>) {
     let incr = dir.map(|d| std::sync::Arc::new(Incr::open(d)));
     INCR.with(|i| i.borrow_mut().clone_from(&incr));
     let r = f();
     INCR.with(|i| *i.borrow_mut() = None);
+    let ok = ok(&r);
     let reuse = incr.map(|i| {
-        i.save();
+        i.save(ok);
         Reuse {
             files: (
                 i.parsed_reused.load(Ordering::Relaxed),

@@ -31,6 +31,7 @@ mod desugar;
 mod expr;
 mod frame_ptr;
 mod fstring;
+mod handoff;
 mod incr;
 mod infer;
 mod method_value;
@@ -95,7 +96,7 @@ struct NameSet<'b> {
 /// name (driver-qualified, e.g. `a::P`; generic bases unmangled) plus
 /// `pub use` re-export aliases. All type paths — in signatures, fields,
 /// struct literals, patterns, enum paths — resolve through `canon`.
-struct TypeNames<'a> {
+struct TypeNames {
     names: std::collections::HashSet<String>,
     traits: std::collections::HashSet<String>,
     /// Structural auto traits (`#[lang("send_trait" | "sync_trait")]`):
@@ -111,7 +112,7 @@ struct TypeNames<'a> {
     visibility: HashMap<String, Visibility>,
     /// Module path → its `mod` visibility (the driver's flattened stubs).
     mod_vis: HashMap<String, Visibility>,
-    uses: &'a crate::uses::UseTable,
+    uses: crate::uses::UseTable,
     diags: std::cell::RefCell<Vec<rokc_diagnostic::RokDiagnostic>>,
     /// Generic type aliases (`type Row<const N: usize> = [i32; N];`)
     /// by full name, expanded at each use; also the non-generic ones
@@ -171,7 +172,7 @@ pub fn type_visible(m: &crate::HirModule, full: &str, module: &str) -> bool {
         .is_none_or(|&vis| visible_from(module, &module_of(full), vis))
 }
 
-impl TypeNames<'_> {
+impl TypeNames {
     /// The item bound to lang slot `slot` (spec 6.4), `""` if unbound; a
     /// method slot (`drop_method`) gives its trait.
     fn lang_item(&self, slot: &str) -> &str {
@@ -192,14 +193,13 @@ impl TypeNames<'_> {
             return None;
         };
         let args = &p.segments.last()?.generics;
-        if args.is_empty() || self.generic_aliases.is_empty() {
+        if args.is_empty() || !self.any_generic_alias() {
             return None;
         }
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
         let full = self.canon(&segs, module, &[], at)?;
         let alias = self
-            .generic_aliases
-            .get(&full)
+            .generic_alias(&full)
             .filter(|a| !a.generics.params.is_empty())?;
         let map: HashMap<String, Ty> = alias
             .generics
@@ -230,14 +230,14 @@ impl TypeNames<'_> {
         }
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
         self.canon(&segs, module, &[], at)
-            .filter(|full| self.plain_aliases.contains_key(full))
+            .filter(|full| self.plain_alias_ty(full).is_some())
     }
 
     /// `B` → `<A as P>::Out` when plain alias `full`'s body names a
     /// projection: expanded in body context (after impl registration),
     /// the body written absolute for `module`.
     fn projection_alias(&self, full: &str, module: &str, at: Span) -> Option<Ty> {
-        let body = self.plain_aliases.get(full)?;
+        let body = self.plain_alias_ty(full)?;
         let from = module_of(full);
         if !self.names_projection(body, &from, at) {
             return None;
@@ -250,13 +250,13 @@ impl TypeNames<'_> {
     /// Does `ty` (written in `module`) name a projection: `<T as Tr>::X`,
     /// or `A::X` with `A` a type?
     fn names_projection(&self, ty: &Ty, module: &str, at: Span) -> bool {
-        struct Find<'x, 'n> {
-            names: &'x TypeNames<'n>,
+        struct Find<'x> {
+            names: &'x TypeNames,
             module: &'x str,
             at: Span,
             found: bool,
         }
-        impl crate::walk::AstVisitor for Find<'_, '_> {
+        impl crate::walk::AstVisitor for Find<'_> {
             fn ty(&mut self, t: &Ty) {
                 match &t.kind {
                     AstTyKind::QPath(_) => self.found = true,
@@ -266,7 +266,7 @@ impl TypeNames<'_> {
                         match n.canon(&segs, self.module, &[], self.at) {
                             // Through another alias (`type D = List<B>;`).
                             Some(full) if n.alias_depth.get() < 32 => {
-                                if let Some(body) = n.plain_aliases.get(&full) {
+                                if let Some(body) = n.plain_alias_ty(&full) {
                                     n.alias_depth.set(n.alias_depth.get() + 1);
                                     self.found |=
                                         n.names_projection(body, &module_of(&full), self.at);
@@ -333,7 +333,7 @@ impl TypeNames<'_> {
                 let abs: Vec<String> = if full.starts_with("rok::") {
                     full.split("::").map(str::to_owned).collect()
                 } else if pkg == resolve::package_of(to) {
-                    let rest = full.strip_prefix(&pkg).unwrap_or(&full);
+                    let rest = full.strip_prefix(pkg).unwrap_or(&full);
                     std::iter::once("pkg")
                         .chain(rest.split("::").filter(|x| !x.is_empty()))
                         .map(str::to_owned)
@@ -390,6 +390,12 @@ impl TypeNames<'_> {
         if !local_uses.iter().all(Vec::is_empty) {
             return self.canon_uncached(segments, module, local_uses, at);
         }
+        incr::read(|| {
+            incr::Read::Canon(
+                segments.iter().map(|s| (*s).to_owned()).collect(),
+                module.to_owned(),
+            )
+        });
         let key = (segments.join("::"), module.to_owned());
         if let Some(hit) = self.canon_memo.borrow().get(&key) {
             return hit.clone();
@@ -404,9 +410,8 @@ impl TypeNames<'_> {
 
     /// Can `module` see type-namespace key `k`?
     fn visible_type(&self, k: &str, module: &str) -> bool {
-        self.visibility
-            .get(k)
-            .is_none_or(|&vis| visible_from(module, &module_of(k), vis))
+        self.type_vis(k)
+            .is_none_or(|vis| visible_from(module, &module_of(k), vis))
     }
 
     fn canon_uncached(
@@ -416,22 +421,16 @@ impl TypeNames<'_> {
         local_uses: &[Vec<crate::uses::UseEntry>],
         at: Span,
     ) -> Option<String> {
-        let exists = |k: &str| self.names.contains(k) || self.reexports.contains_key(k);
-        let keys = |leaf: &str| {
-            self.leaves
-                .get_or_init(|| leaves(self.names.iter().chain(self.reexports.keys())))
-                .get(leaf)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let exists = |k: &str| self.has_type(k) || self.reexport(k).is_some();
+        let keys = |leaf: &str| self.type_leaf(leaf);
         let visible = |k: &str| self.visible_type(k, module);
         let set = NameSet {
             exists: &exists,
             keys: &keys,
             visible: &visible,
         };
-        let item = |k: &String| self.reexports.get(k).unwrap_or(k).clone();
-        let mut full = match resolve_name(segments, module, local_uses, self.uses, &set) {
+        let item = |k: &String| self.reexport(k).unwrap_or(k).clone();
+        let mut full = match resolve_name(segments, module, local_uses, &self.uses, &set) {
             Ok(r) => r?,
             // An item and its re-exports are one item (spec 5.8.4).
             Err(hits) if hits.iter().all(|h| item(h) == item(&hits[0])) => item(&hits[0]),
@@ -451,13 +450,13 @@ impl TypeNames<'_> {
         };
         // Spec 5.6.13: every module on the path as written (a re-export
         // key, before following it) must be visible too.
-        if let Some(m) = resolve::hidden_module(&self.mod_vis, module, &full) {
+        if let Some(m) = self.hidden(module, &full) {
             self.error(at, resolve::hidden_module_msg(&full, &m, module));
         }
-        if let Some(t) = self.reexports.get(&full) {
+        if let Some(t) = self.reexport(&full) {
             full.clone_from(t);
         }
-        if let Some(&vis) = self.visibility.get(&full) {
+        if let Some(vis) = self.type_vis(&full) {
             let def_module = module_of(&full);
             if !visible_from(module, &def_module, vis) {
                 self.error(
@@ -484,23 +483,17 @@ impl TypeNames<'_> {
         at: Span,
     ) -> Option<String> {
         let full_key = |k: &str| -> Option<String> {
-            if self.variants.contains(k) {
+            if self.is_variant(k) {
                 return Some(k.to_owned());
             }
             let (ty, v) = k.rsplit_once("::")?;
             let segs: Vec<&str> = ty.split("::").collect();
             let e = self.canon(&segs, module, local_uses, at)?;
             let key = format!("{e}::{v}");
-            self.variants.contains(&key).then_some(key)
+            self.is_variant(&key).then_some(key)
         };
         let exists = |k: &str| full_key(k).is_some();
-        let keys = |leaf: &str| {
-            self.variant_leaves
-                .get_or_init(|| leaves(&self.variants))
-                .get(leaf)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let keys = |leaf: &str| self.variant_leaf(leaf);
         // A variant is as visible as its enum (spec 5.6.9).
         let visible = |k: &str| self.visible_type(&module_of(k), module);
         let set = NameSet {
@@ -508,7 +501,7 @@ impl TypeNames<'_> {
             keys: &keys,
             visible: &visible,
         };
-        match resolve_name(segments, module, local_uses, self.uses, &set) {
+        match resolve_name(segments, module, local_uses, &self.uses, &set) {
             Ok(r) => full_key(&r?),
             Err(hits) => {
                 self.error(
@@ -592,7 +585,7 @@ impl TypeNames<'_> {
                 return None;
             }
             seen.borrow_mut().push(key.clone());
-            let value = rokc_ast::ConstExpr::Expr(Box::new(self.consts[&key].1.clone()));
+            let value = rokc_ast::ConstExpr::Expr(Box::new(self.name_const(&key)?.1.clone()));
             let v = self.const_int_in(&value, &module_of(&key), seen);
             seen.borrow_mut().pop();
             v
@@ -601,29 +594,23 @@ impl TypeNames<'_> {
 
     /// The module `const` `segments` names from `module`.
     fn const_key(&self, segments: &[&str], module: &str) -> Option<String> {
-        let exists = |k: &str| self.consts.contains_key(k);
-        let keys = |leaf: &str| {
-            self.const_leaves
-                .get_or_init(|| leaves(self.consts.keys()))
-                .get(leaf)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let exists = |k: &str| self.name_const(k).is_some();
+        let keys = |leaf: &str| self.name_const_leaf(leaf);
         let visible = |_: &str| true;
         let set = NameSet {
             exists: &exists,
             keys: &keys,
             visible: &visible,
         };
-        resolve_name(segments, module, &[], self.uses, &set)
+        resolve_name(segments, module, &[], &self.uses, &set)
             .ok()
             .flatten()
-            .map(|k| self.value_reexports.get(&k).cloned().unwrap_or(k))
+            .map(|k| self.value_reexport(&k).cloned().unwrap_or(k))
     }
 
     fn trait_key(&self, segments: &[&str], module: &str, at: Span) -> String {
         self.canon(segments, module, &[], at)
-            .filter(|full| self.traits.contains(full))
+            .filter(|full| self.is_trait(full))
             .unwrap_or_else(|| segments.last().copied().unwrap_or_default().to_owned())
     }
 
@@ -645,11 +632,112 @@ impl TypeNames<'_> {
     }
 }
 
+/// Lowering reads the name tables through these: each read is logged
+/// for the incremental store (`incr::Read`).
+impl TypeNames {
+    /// Type-namespace key `k` names an item.
+    fn has_type(&self, k: &str) -> bool {
+        incr::read(|| incr::Read::Type(k.to_owned()));
+        self.names.contains(k)
+    }
+
+    /// The type `pub use` alias `k` ends at.
+    fn reexport(&self, k: &str) -> Option<&String> {
+        incr::read(|| incr::Read::Reexport(k.to_owned()));
+        self.reexports.get(k)
+    }
+
+    /// Type keys and re-exports whose last segment is `leaf`.
+    fn type_leaf(&self, leaf: &str) -> Vec<String> {
+        incr::read(|| incr::Read::TypeLeaf(leaf.to_owned()));
+        self.leaves
+            .get_or_init(|| leaves(self.names.iter().chain(self.reexports.keys())))
+            .get(leaf)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn type_vis(&self, k: &str) -> Option<Visibility> {
+        incr::read(|| incr::Read::TypeVis(k.to_owned()));
+        self.visibility.get(k).copied()
+    }
+
+    /// `resolve::hidden_module` over the `mod` visibilities.
+    fn hidden(&self, cur: &str, full: &str) -> Option<String> {
+        let def = module_of(full);
+        for (i, _) in def.match_indices("::") {
+            incr::read(|| incr::Read::ModVis(def[..i].to_owned()));
+        }
+        incr::read(|| incr::Read::ModVis(def.clone()));
+        resolve::hidden_module(&self.mod_vis, cur, full)
+    }
+
+    fn is_trait(&self, k: &str) -> bool {
+        incr::read(|| incr::Read::Trait(k.to_owned()));
+        self.traits.contains(k)
+    }
+
+    fn all_traits(&self) -> &std::collections::HashSet<String> {
+        incr::read(|| incr::Read::Traits);
+        &self.traits
+    }
+
+    fn is_variant(&self, k: &str) -> bool {
+        incr::read(|| incr::Read::Variant(k.to_owned()));
+        self.variants.contains(k)
+    }
+
+    fn variant_leaf(&self, leaf: &str) -> Vec<String> {
+        incr::read(|| incr::Read::VariantLeaf(leaf.to_owned()));
+        self.variant_leaves
+            .get_or_init(|| leaves(&self.variants))
+            .get(leaf)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn name_const(&self, k: &str) -> Option<&(Ty, rokc_ast::Expr)> {
+        incr::read(|| incr::Read::NameConst(k.to_owned()));
+        self.consts.get(k)
+    }
+
+    fn name_const_leaf(&self, leaf: &str) -> Vec<String> {
+        incr::read(|| incr::Read::NameConstLeaf(leaf.to_owned()));
+        self.const_leaves
+            .get_or_init(|| leaves(self.consts.keys()))
+            .get(leaf)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The `const` / `static` `pub use` alias `k` ends at.
+    fn value_reexport(&self, k: &str) -> Option<&String> {
+        incr::read(|| incr::Read::ValueReexport(k.to_owned()));
+        self.value_reexports.get(k)
+    }
+
+    fn generic_alias(&self, k: &str) -> Option<&rokc_ast::TypeAliasDef> {
+        incr::read(|| incr::Read::GenericAlias(k.to_owned()));
+        self.generic_aliases.get(k)
+    }
+
+    /// Whether any generic alias exists.
+    fn any_generic_alias(&self) -> bool {
+        incr::read(|| incr::Read::AnyGenericAlias);
+        !self.generic_aliases.is_empty()
+    }
+
+    fn plain_alias_ty(&self, k: &str) -> Option<&Ty> {
+        incr::read(|| incr::Read::PlainAlias(k.to_owned()));
+        self.plain_aliases.get(k)
+    }
+}
+
 /// Where a type is being resolved: the name index, the module the
 /// referencing item lives in, and the location its errors go to.
 #[derive(Clone, Copy)]
 struct Scope<'b> {
-    names: &'b TypeNames<'b>,
+    names: &'b TypeNames,
     module: &'b str,
     at: Span,
 }
@@ -767,11 +855,55 @@ impl Impls {
     }
 
     fn generic(&self) -> impl Iterator<Item = &Impl> {
+        incr::read(|| incr::Read::GenericImpls);
         self.all.iter().filter(|i| i.is_generic())
+    }
+
+    /// The generic impls `pick` names.
+    fn generic_by<'i: 'p, 'p>(&'i self, pick: Pick<'p>) -> Box<dyn Iterator<Item = &'i Impl> + 'p> {
+        match pick {
+            Pick::Trait(key) => {
+                incr::read(|| incr::Read::GenericImplsOf(key.to_owned()));
+                Box::new(
+                    self.all
+                        .iter()
+                        .filter(move |i| i.is_generic() && i.trait_key == key),
+                )
+            }
+            Pick::Method(m) => {
+                incr::read(|| incr::Read::GenericImplsWith(m.to_owned()));
+                Box::new(
+                    self.all
+                        .iter()
+                        .filter(move |i| i.is_generic() && i.methods.contains_key(m)),
+                )
+            }
+            Pick::Where(keep) => Box::new(self.generic().filter(move |i| keep(i))),
+        }
+    }
+
+    /// The impls with associated const `name`.
+    fn with_const<'i: 'n, 'n>(&'i self, name: &'n str) -> impl Iterator<Item = &'i Impl> + 'n {
+        incr::read(|| incr::Read::ImplConsts(name.to_owned()));
+        self.all
+            .iter()
+            .filter(move |i| i.consts.iter().any(|(n, ..)| n == name))
+    }
+
+    /// The trait refs of the concrete impls of trait `key` on `ty`.
+    fn refs_of<'s>(&'s self, ty: &HirTy, key: &'s str) -> impl Iterator<Item = &'s TraitRef> + 's {
+        incr::read(|| incr::Read::ImplsOnOf(ty.clone(), key.to_owned()));
+        method_target_for(ty)
+            .and_then(|t| self.by_target.get(&t))
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .filter_map(|&i| self.all[i].concrete.as_ref()?.1.as_ref())
+            .filter(move |r| r.path == key)
     }
 
     /// The trait refs of the concrete impls on `ty`.
     fn refs_on<'s>(&'s self, ty: &HirTy) -> impl Iterator<Item = &'s TraitRef> + use<'s> {
+        incr::read(|| incr::Read::ImplsOn(ty.clone()));
         method_target_for(ty)
             .and_then(|t| self.by_target.get(&t))
             .map_or(&[][..], Vec::as_slice)
@@ -781,12 +913,22 @@ impl Impls {
 
     /// The targets of trait `key`'s concrete impls, in resolution order.
     fn tys_of(&self, key: &str) -> impl Iterator<Item = &HirTy> {
+        incr::read(|| incr::Read::ImplsOf(key.to_owned()));
         self.by_trait
             .get(key)
             .into_iter()
             .flatten()
             .filter_map(|&i| Some(&self.all[i].concrete.as_ref()?.0))
     }
+}
+
+/// Which generic impls a lookup wants: of a trait, with a method, or
+/// any `keep` takes.
+#[derive(Clone, Copy)]
+enum Pick<'p> {
+    Trait(&'p str),
+    Method(&'p str),
+    Where(&'p dyn Fn(&Impl) -> bool),
 }
 
 /// Every struct / union and enum definition by id: the declared ones,
@@ -806,12 +948,38 @@ struct TypeDefs<'a> {
     defaulted_leaves: std::collections::HashSet<String>,
 }
 
-impl TypeDefs<'_> {
+impl<'a> TypeDefs<'a> {
     fn generics_of(&self, base: &str) -> Option<&rokc_ast::Generics> {
-        self.generic_structs
-            .get(base)
+        self.generic_struct(base)
             .map(|d| &d.generics)
-            .or_else(|| self.generic_enums.get(base).map(|d| &d.generics))
+            .or_else(|| self.generic_enum(base).map(|d| &d.generics))
+    }
+
+    /// Generic struct template `base`.
+    fn generic_struct(&self, base: &str) -> Option<&'a AstStructDef> {
+        incr::read(|| incr::Read::GenericStruct(base.to_owned()));
+        self.generic_structs.get(base).copied()
+    }
+
+    fn generic_enum(&self, base: &str) -> Option<&'a AstEnumDef> {
+        incr::read(|| incr::Read::GenericEnum(base.to_owned()));
+        self.generic_enums.get(base).copied()
+    }
+
+    /// A template with leaf name `leaf` has every parameter defaulted.
+    fn defaulted(&self, leaf: &str) -> bool {
+        incr::read(|| incr::Read::DefaultedLeaf(leaf.to_owned()));
+        self.defaulted_leaves.contains(leaf)
+    }
+
+    fn struct_at(&self, id: StructId) -> HirStructDef {
+        incr::read(|| incr::Read::StructDef(id));
+        self.structs.borrow()[id.0 as usize].clone()
+    }
+
+    fn enum_at(&self, id: EnumId) -> HirEnumDef {
+        incr::read(|| incr::Read::EnumDef(id));
+        self.enums.borrow()[id.0 as usize].clone()
     }
 
     /// `base` written without arguments names its all-defaults instance.
@@ -865,7 +1033,7 @@ impl TypeDefs<'_> {
         if let Some(id) = found {
             return Some(id);
         }
-        let def = *self.generic_structs.get(base)?;
+        let def = self.generic_struct(base)?;
         let id = StructId(u32::try_from(self.structs.borrow().len()).expect("StructId overflow"));
         crate::name_type(false, id.0, base, &args);
         self.struct_table.borrow_mut().insert(key.clone(), id);
@@ -902,7 +1070,7 @@ impl TypeDefs<'_> {
         if let Some(id) = found {
             return Some(id);
         }
-        let def = *self.generic_enums.get(base)?;
+        let def = self.generic_enum(base)?;
         let id = EnumId(u32::try_from(self.enums.borrow().len()).expect("EnumId overflow"));
         crate::name_type(true, id.0, base, &args);
         self.enum_table.borrow_mut().insert(key.clone(), id);
@@ -922,10 +1090,30 @@ impl TypeDefs<'_> {
 }
 
 /// Module-wide, read-only lowering environment shared by every function
-/// body (plus the interior-mutable `sink`).
+/// body (plus the interior-mutable `sink`): the compile's own inputs and
+/// the tables collected from the items.
 struct Env<'a> {
     /// The compile's source files (`#[track_caller]` / `throw` sites).
     sources: &'a rokc_diagnostic::SourceMap,
+    prec: &'a PrecTable,
+    t: Tables<'a>,
+}
+
+impl<'a> std::ops::Deref for Env<'a> {
+    type Target = Tables<'a>;
+    fn deref(&self) -> &Tables<'a> {
+        &self.t
+    }
+}
+
+impl std::ops::DerefMut for Env<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.t
+    }
+}
+
+/// What collecting the items makes (`Env`'s tables).
+struct Tables<'a> {
     fn_table: HashMap<String, FnSig>,
     /// `fn_table` and `generic_fns` keys by last segment (both are
     /// complete before any body is lowered).
@@ -981,21 +1169,20 @@ struct Env<'a> {
     /// `extern "system"` declarations and definitions where `"system"`
     /// is `stdcall` (else empty): `extern "system" fn(..)` values.
     stdcall_fns: std::collections::HashSet<FunctionId>,
-    prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
     item_visibility: HashMap<String, Visibility>,
     /// Struct name → field name → visibility.
     field_vis: HashMap<String, HashMap<String, Visibility>>,
-    /// Per-module `use` table — feeds into bare-name and unresolved
-    /// path lookups. Empty when no `use` declarations were collected.
-    uses: &'a crate::uses::UseTable,
     /// Every impl (bounds, dispatch, projections, associated consts).
     impls: Impls,
     /// `unsafe fn`s and C functions (spec 4.15): calls need an unsafe scope.
     unsafe_fns: std::collections::HashSet<FunctionId>,
     /// `impl !Send for S {}` opt-outs: `(generic base of S, trait key)`.
     neg_auto: std::collections::HashSet<(String, String)>,
+    /// `auto_trait` answers by type and trait, while the program no
+    /// longer changes (`send_check`); `None` otherwise.
+    auto_memo: std::cell::RefCell<Option<HashMap<String, bool>>>,
     /// Trait key → declared methods + supertraits (`any Tr` calls).
     trait_info: HashMap<String, TraitInfo>,
     /// Module-level `static` items by name → declared type.
@@ -1005,7 +1192,7 @@ struct Env<'a> {
     mut_statics: std::collections::HashSet<String>,
     /// `#[literal]` handlers of the built-in literal shapes (spec 6.5).
     literal_shapes: Vec<ShapeHandler>,
-    names: TypeNames<'a>,
+    names: TypeNames,
     /// Every non-generic function by `FunctionId` (the ids below
     /// `sink.next_id`'s start).
     decls: Vec<MethodOrFn<'a>>,
@@ -1016,6 +1203,199 @@ struct Env<'a> {
     bound_methods: HashMap<(String, String), GenericMethod>,
     /// A `bound_methods` template's name → its trait.
     bound_traits: HashMap<String, String>,
+}
+
+/// One of `Env`'s sets of functions.
+#[derive(Clone, Copy)]
+enum FnSet {
+    ExternC,
+    RokExtern,
+    CVariadic,
+    CDef,
+    Stdcall,
+    Unsafe,
+}
+
+impl FnSet {
+    const fn of(n: u8) -> Option<Self> {
+        Some(match n {
+            0 => Self::ExternC,
+            1 => Self::RokExtern,
+            2 => Self::CVariadic,
+            3 => Self::CDef,
+            4 => Self::Stdcall,
+            5 => Self::Unsafe,
+            _ => return None,
+        })
+    }
+
+    fn contains(self, env: &Env<'_>, id: FunctionId) -> bool {
+        match self {
+            Self::ExternC => env.extern_fn_ids.contains(&id),
+            Self::RokExtern => env.rok_externs.contains(&id),
+            Self::CVariadic => env.c_variadic.contains(&id),
+            Self::CDef => env.c_defs.contains(&id),
+            Self::Stdcall => env.stdcall_fns.contains(&id),
+            Self::Unsafe => env.unsafe_fns.contains(&id),
+        }
+    }
+}
+
+/// Body lowering reads the interface tables through these: each read
+/// is logged for the incremental store (`incr::Read`).
+impl<'a> Env<'a> {
+    fn sig(&self, key: &str) -> Option<&FnSig> {
+        incr::read(|| incr::Read::Sig(key.to_owned()));
+        self.fn_table.get(key)
+    }
+
+    fn generic_fn(&self, key: &str) -> Option<&'a FnDef> {
+        incr::read(|| incr::Read::Generic(key.to_owned()));
+        self.generic_fns.get(key).copied()
+    }
+
+    /// Function and generic function keys whose last segment is `leaf`.
+    fn fn_leaf(&self, leaf: &str) -> Vec<String> {
+        incr::read(|| incr::Read::FnLeaf(leaf.to_owned()));
+        self.fn_leaves
+            .get_or_init(|| leaves(self.fn_table.keys().chain(self.generic_fns.keys())))
+            .get(leaf)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The module declaring `extern` function `name`.
+    fn extern_fn(&self, name: &str) -> Option<&String> {
+        incr::read(|| incr::Read::ExternFn(name.to_owned()));
+        self.extern_fns.get(name)
+    }
+
+    /// The concrete methods `method` of `ty`.
+    fn methods_on(&self, ty: &HirTy, method: &str) -> Option<&Vec<FunctionId>> {
+        let t = method_target_for(ty)?;
+        incr::read(|| incr::Read::Methods(ty.clone(), method.to_owned()));
+        self.method_table.get(&(t, method.to_owned()))
+    }
+
+    /// Every concrete method.
+    fn all_methods(&self) -> &HashMap<(MethodTarget, String), Vec<FunctionId>> {
+        incr::read(|| incr::Read::AllMethods);
+        &self.method_table
+    }
+
+    /// Every generic method template.
+    fn all_generic_methods(&self) -> &HashMap<(String, String), Vec<GenericMethod>> {
+        incr::read(|| incr::Read::AllGenericMethods);
+        &self.generic_methods
+    }
+
+    fn method_info(&self, id: FunctionId) -> Option<&MethodInfo> {
+        incr::read(|| incr::Read::MethodInfo(id));
+        self.method_info.get(&id)
+    }
+
+    fn generic_methods(&self, base: &str, method: &str) -> Option<&Vec<GenericMethod>> {
+        incr::read(|| incr::Read::GenericMethods(base.to_owned(), method.to_owned()));
+        self.generic_methods
+            .get(&(base.to_owned(), method.to_owned()))
+    }
+
+    /// The `fn_table` key of function `id`.
+    fn fn_key(&self, id: FunctionId) -> Option<&String> {
+        incr::read(|| incr::Read::KeyOf(id));
+        self.key_of.get(&id)
+    }
+
+    /// Declaration `id`'s return type is inferred from its body.
+    fn infers_ret(&self, id: FunctionId) -> bool {
+        incr::read(|| incr::Read::InferRet(id));
+        self.infer_ret.contains(&id)
+    }
+
+    /// The body at `at` may diverge on every path (`collect::may_diverge`).
+    fn diverges(&self, at: Span) -> bool {
+        incr::read(|| incr::Read::MayDiverge(at));
+        self.may_diverge.contains(&at)
+    }
+
+    fn intrinsic(&self, id: FunctionId) -> Option<&collect::Intrinsic> {
+        incr::read(|| incr::Read::Intrinsic(id));
+        self.intrinsics.get(&id)
+    }
+
+    fn generic_intrinsic(&self, name: &str) -> Option<&collect::Intrinsic> {
+        incr::read(|| incr::Read::GenericIntrinsic(name.to_owned()));
+        self.generic_intrinsics.get(name)
+    }
+
+    fn is(&self, set: FnSet, id: FunctionId) -> bool {
+        incr::read(|| incr::Read::FnIn(set as u8, id));
+        set.contains(self, id)
+    }
+
+    /// The visibility of value item `key`.
+    fn item_vis(&self, key: &str) -> Option<Visibility> {
+        incr::read(|| incr::Read::ItemVis(key.to_owned()));
+        self.item_visibility.get(key).copied()
+    }
+
+    fn fields_vis(&self, ty: &str) -> Option<&HashMap<String, Visibility>> {
+        incr::read(|| incr::Read::FieldVis(ty.to_owned()));
+        self.field_vis.get(ty)
+    }
+
+    fn konst(&self, key: &str) -> Option<&(Ty, Expr)> {
+        incr::read(|| incr::Read::Const(key.to_owned()));
+        self.consts.get(key)
+    }
+
+    fn static_ty(&self, key: &str) -> Option<&HirTy> {
+        incr::read(|| incr::Read::Static(key.to_owned()));
+        self.statics.get(key)
+    }
+
+    fn is_mut_static(&self, key: &str) -> bool {
+        incr::read(|| incr::Read::MutStatic(key.to_owned()));
+        self.mut_statics.contains(key)
+    }
+
+    fn trait_of(&self, key: &str) -> Option<&TraitInfo> {
+        incr::read(|| incr::Read::TraitInfo(key.to_owned()));
+        self.trait_info.get(key)
+    }
+
+    /// `impl !key for base {}`.
+    fn opts_out(&self, base: &str, key: &str) -> bool {
+        incr::read(|| incr::Read::NegAuto(base.to_owned(), key.to_owned()));
+        self.neg_auto.contains(&(base.to_owned(), key.to_owned()))
+    }
+
+    fn is_non_exhaustive(&self, name: &str) -> bool {
+        incr::read(|| incr::Read::NonExhaustive(name.to_owned()));
+        self.non_exhaustive.contains(name)
+    }
+
+    fn bound_method(&self, tr: &str, method: &str) -> Option<&GenericMethod> {
+        incr::read(|| incr::Read::BoundMethod(tr.to_owned(), method.to_owned()));
+        self.bound_methods.get(&(tr.to_owned(), method.to_owned()))
+    }
+
+    /// The trait of `bound_methods` template `name`.
+    fn bound_trait(&self, name: &str) -> Option<&String> {
+        incr::read(|| incr::Read::BoundTrait(name.to_owned()));
+        self.bound_traits.get(name)
+    }
+
+    /// Module `module`'s `use` entries.
+    fn uses_of(&self, module: &str) -> Option<&Vec<crate::uses::UseEntry>> {
+        incr::read(|| incr::Read::Uses(module.to_owned()));
+        self.names.uses.get(module)
+    }
+
+    fn decl(&self, id: FunctionId) -> Option<&MethodOrFn<'a>> {
+        incr::read(|| incr::Read::Decl(id));
+        self.decls.get(id.0 as usize)
+    }
 }
 
 /// A handler registered with a built-in shape's pattern (`[..]` etc.).
@@ -1084,8 +1464,7 @@ enum MethodOrFn<'a> {
 /// Where a free function's names resolve: its module, or for an
 /// `extern` declaration (not a module item) the module declaring it.
 fn fn_module(env: &Env<'_>, f: &FnDef) -> String {
-    env.extern_fns
-        .get(&f.name)
+    env.extern_fn(&f.name)
         .cloned()
         .unwrap_or_else(|| module_of(&f.name))
 }
@@ -1497,7 +1876,7 @@ fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
     let Some(HirTy::Fn(_, _, want)) = target else {
         return value;
     };
-    if !(ctx.env.extern_fn_ids.contains(id) || ctx.env.c_defs.contains(id)) {
+    if !(ctx.env.is(FnSet::ExternC, *id) || ctx.env.is(FnSet::CDef, *id)) {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             "only an `extern \"C\"` function (an `extern` block declaration or an \
@@ -1505,7 +1884,7 @@ fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
                 .to_owned(),
         );
     }
-    let stdcall = ctx.env.stdcall_fns.contains(id);
+    let stdcall = ctx.env.is(FnSet::Stdcall, *id);
     if stdcall != want.stdcall {
         let (is, slot) = if stdcall {
             ("an `extern \"system\"`", "`extern \"C\" fn(..)`")
@@ -1568,7 +1947,7 @@ fn bound_covers(ctx: &LowerCtx<'_>, have: &[TraitRef], want: &TraitRef) -> bool 
         if h == *want || (want.is_plain() && h.path == want.path) {
             return true;
         }
-        if let (false, Some(info)) = (seen.contains(&h.path), ctx.env.trait_info.get(&h.path)) {
+        if let (false, Some(info)) = (seen.contains(&h.path), ctx.env.trait_of(&h.path)) {
             stack.extend(info.supers.iter().map(|s| TraitRef::plain(s)));
         }
         seen.push(h.path);
@@ -2560,6 +2939,29 @@ impl<'a> LowerCtx<'a> {
     /// have it. Primitives and `str` do. A recursive type assumes it
     /// for itself (`seen`).
     fn auto_trait(&self, ty: &HirTy, key: &str, depth: u32, seen: &mut Vec<HirTy>) -> bool {
+        let memo = self
+            .env
+            .auto_memo
+            .borrow()
+            .is_some()
+            .then(|| format!("{key}|{ty:?}"));
+        if let Some(m) = &memo {
+            if let Some(&v) = self.env.auto_memo.borrow().as_ref().and_then(|t| t.get(m)) {
+                return v;
+            }
+        }
+        let outer = seen.is_empty();
+        let ok = self.auto_trait_inner(ty, key, depth, seen);
+        // A `true` found inside a recursive type assumed what encloses it.
+        if let Some(m) = memo.filter(|_| outer || !ok) {
+            if let Some(t) = self.env.auto_memo.borrow_mut().as_mut() {
+                t.insert(m, ok);
+            }
+        }
+        ok
+    }
+
+    fn auto_trait_inner(&self, ty: &HirTy, key: &str, depth: u32, seen: &mut Vec<HirTy>) -> bool {
         if self.has_impl(ty, &TraitRef::plain(key), depth) {
             return true;
         }
@@ -2570,7 +2972,7 @@ impl<'a> LowerCtx<'a> {
         };
         if let Some(b) = base {
             let b = b.split("__").next().unwrap_or(&b).to_owned();
-            if self.env.neg_auto.contains(&(b, key.to_owned())) {
+            if self.env.opts_out(&b, key) {
                 return false;
             }
         }
@@ -2659,11 +3061,7 @@ impl<'a> LowerCtx<'a> {
                          array)"
                     );
                 }
-                if self
-                    .env
-                    .neg_auto
-                    .contains(&(base.to_owned(), key.to_owned()))
-                {
+                if self.env.opts_out(base, key) {
                     return String::new();
                 }
                 def.fields
@@ -2742,9 +3140,12 @@ impl<'a> LowerCtx<'a> {
         if bounds::assumed(self.env, ty, want) {
             return true;
         }
-        self.concrete_impls(ty).any(|r| r.satisfies(want))
+        self.env
+            .impls
+            .refs_of(ty, &want.path)
+            .any(|r| r.satisfies(want))
             || self
-                .generic_impls(ty, |gi| gi.trait_key == want.path, depth)
+                .generic_impls(ty, Pick::Trait(&want.path), depth)
                 .any(|(gi, subst)| {
                     want.is_plain() || self.generic_impl_ref(gi, &subst).satisfies(want)
                 })
@@ -2756,13 +3157,12 @@ impl<'a> LowerCtx<'a> {
     fn generic_impls<'s>(
         &'s self,
         ty: &'s HirTy,
-        keep: impl Fn(&Impl) -> bool + 's,
+        pick: Pick<'s>,
         depth: u32,
     ) -> impl Iterator<Item = (&'a Impl, TySubst)> + 's {
         let env: &'a Env<'a> = self.env;
         env.impls
-            .generic()
-            .filter(move |gi| keep(gi))
+            .generic_by(pick)
             .filter_map(move |gi| Some((gi, self.generic_impl_subst(gi, ty, depth)?)))
     }
 
@@ -2928,7 +3328,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn struct_def(&self, id: StructId) -> HirStructDef {
-        self.env.defs.structs.borrow()[id.0 as usize].clone()
+        self.env.defs.struct_at(id)
     }
 
     /// Struct id by table key (a declared struct or an instance).
@@ -2946,7 +3346,7 @@ impl<'a> LowerCtx<'a> {
         span: rokc_diagnostic::Span,
     ) -> Option<StructId> {
         let mut args = args;
-        if let Some(def) = self.env.defs.generic_structs.get(base) {
+        if let Some(def) = self.env.defs.generic_struct(base) {
             mono::fill_defaults(&def.generics, &mut args, |subst, t| {
                 let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
                 rcx.current_module = module_of(base);
@@ -2964,7 +3364,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     fn enum_def(&self, id: EnumId) -> HirEnumDef {
-        self.env.defs.enums.borrow()[id.0 as usize].clone()
+        self.env.defs.enum_at(id)
     }
 
     /// Enum id by table key (a declared enum or an instance).
@@ -2990,7 +3390,7 @@ impl<'a> LowerCtx<'a> {
         span: rokc_diagnostic::Span,
     ) -> Option<EnumId> {
         let mut args = args;
-        if let Some(def) = self.env.defs.generic_enums.get(base) {
+        if let Some(def) = self.env.defs.generic_enum(base) {
             mono::fill_defaults(&def.generics, &mut args, |subst, t| {
                 let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
                 rcx.current_module = module_of(base);
@@ -3074,22 +3474,42 @@ impl<'a> LowerCtx<'a> {
     /// statics) from this function's module and `use`s.
     /// `index` caches `table`'s keys by last segment (rebuilt when the
     /// table grows; keys are never removed).
-    fn resolve_in<T>(
-        &self,
-        segments: &[&str],
-        table: &HashMap<String, T>,
-        index: &std::cell::RefCell<(usize, Leaves)>,
-    ) -> Option<String> {
-        let exists = |k: &str| table.contains_key(k);
+    /// The module `const` (`statics`: `static`) `segments` names.
+    fn resolve_in(&self, segments: &[&str], statics: bool) -> Option<String> {
+        let env = self.env;
+        let exists = |k: &str| {
+            if statics {
+                env.static_ty(k).is_some()
+            } else {
+                env.konst(k).is_some()
+            }
+        };
         let keys = |leaf: &str| {
+            incr::read(|| {
+                if statics {
+                    incr::Read::StaticLeaf(leaf.to_owned())
+                } else {
+                    incr::Read::ConstLeaf(leaf.to_owned())
+                }
+            });
+            let (index, len) = if statics {
+                (&env.static_leaves, env.statics.len())
+            } else {
+                (&env.const_leaves, env.consts.len())
+            };
             let mut index = index.borrow_mut();
-            if index.0 != table.len() {
-                *index = (table.len(), leaves(table.keys()));
+            if index.0 != len {
+                let keys = if statics {
+                    leaves(env.statics.keys())
+                } else {
+                    leaves(env.consts.keys())
+                };
+                *index = (len, keys);
             }
             index.1.get(leaf).cloned().unwrap_or_default()
         };
         let visible = |k: &str| {
-            let vis = self.env.item_visibility.get(k).copied();
+            let vis = self.env.item_vis(k);
             vis.is_none_or(|v| self.is_visible(&module_of(k), v))
         };
         let set = NameSet {
@@ -3101,7 +3521,7 @@ impl<'a> LowerCtx<'a> {
             segments,
             &self.current_module,
             &self.local_uses,
-            self.env.uses,
+            &self.env.names.uses,
             &set,
         ) {
             Ok(r) => r,
@@ -3117,23 +3537,16 @@ impl<'a> LowerCtx<'a> {
     /// so the nearest declaration wins whichever kind it is (spec 5.7:
     /// the module's own items, then its `use`s, then `rok::core::**`).
     fn resolve_any_fn(&self, segments: &[&str]) -> Option<String> {
-        let (fns, gens) = (&self.env.fn_table, &self.env.generic_fns);
+        let env = self.env;
         if let [name] = segments {
             if let Some(k) = self.nested_fns.iter().rev().find_map(|m| m.get(*name)) {
                 return Some(k.clone());
             }
         }
-        let exists = |k: &str| fns.contains_key(k) || gens.contains_key(k);
-        let keys = |leaf: &str| {
-            self.env
-                .fn_leaves
-                .get_or_init(|| leaves(fns.keys().chain(gens.keys())))
-                .get(leaf)
-                .cloned()
-                .unwrap_or_default()
-        };
+        let exists = |k: &str| env.sig(k).is_some() || env.generic_fn(k).is_some();
+        let keys = |leaf: &str| env.fn_leaf(leaf);
         let visible = |k: &str| {
-            let vis = self.env.item_visibility.get(k).copied();
+            let vis = self.env.item_vis(k);
             vis.is_none_or(|v| self.is_visible(&module_of(k), v))
         };
         let set = NameSet {
@@ -3145,7 +3558,7 @@ impl<'a> LowerCtx<'a> {
             segments,
             &self.current_module,
             &self.local_uses,
-            self.env.uses,
+            &self.env.names.uses,
             &set,
         ) {
             Ok(r) => r,
@@ -3153,8 +3566,8 @@ impl<'a> LowerCtx<'a> {
             Err(mut hits) => {
                 let item = |k: &String| {
                     (
-                        fns.get(k).map(|s| s.id),
-                        gens.get(k).map(|d| std::ptr::from_ref::<FnDef>(d)),
+                        env.sig(k).map(|s| s.id),
+                        env.generic_fn(k).map(std::ptr::from_ref::<FnDef>),
                     )
                 };
                 // Each item once, by its shortest path.
@@ -3178,9 +3591,9 @@ impl<'a> LowerCtx<'a> {
     /// qualified fn-table key (a concrete fn), or an `extern "C"` one.
     fn resolve_fn_name(&self, segments: &[&str]) -> Option<String> {
         match self.resolve_any_fn(segments) {
-            Some(f) => self.env.fn_table.contains_key(&f).then_some(f),
+            Some(f) => self.env.sig(&f).is_some().then_some(f),
             None => match segments {
-                [name] if self.env.extern_fns.contains_key(*name) => Some((*name).to_owned()),
+                [name] if self.env.extern_fn(name).is_some() => Some((*name).to_owned()),
                 _ => None,
             },
         }
@@ -3189,7 +3602,7 @@ impl<'a> LowerCtx<'a> {
     /// `resolve_fn_name` for a generic fn (a `generic_fns` key).
     fn resolve_generic_fn_name(&self, segments: &[&str]) -> Option<String> {
         self.resolve_any_fn(segments)
-            .filter(|f| self.env.generic_fns.contains_key(f))
+            .filter(|f| self.env.generic_fn(f).is_some())
     }
 
     fn report_ambiguous(&self, name: &str, hits: &[String]) {
@@ -3215,15 +3628,9 @@ impl<'a> LowerCtx<'a> {
         if self.harness_main {
             return true;
         }
-        let vis = self
-            .env
-            .item_visibility
-            .get(full)
-            .copied()
-            .unwrap_or(Visibility::Pub);
+        let vis = self.env.item_vis(full).unwrap_or(Visibility::Pub);
         let def_module = module_of(full);
-        if let Some(m) = resolve::hidden_module(&self.env.names.mod_vis, &self.current_module, full)
-        {
+        if let Some(m) = self.env.names.hidden(&self.current_module, full) {
             self.emit_error(
                 rokc_diagnostic::ErrorKind::Module,
                 resolve::hidden_module_msg(full, &m, &self.current_module),
@@ -3239,7 +3646,7 @@ impl<'a> LowerCtx<'a> {
                 format!(
                     "{what} `{full}` is `pub(pkg)`: visible only inside its package \
                      `{}` (spec 5.6.4)",
-                    module_display(&package_of(&def_module))
+                    module_display(package_of(&def_module))
                 ),
             );
             return false;
@@ -3266,8 +3673,7 @@ impl<'a> LowerCtx<'a> {
         };
         let Some(vis) = self
             .env
-            .field_vis
-            .get(&base)
+            .fields_vis(&base)
             .and_then(|m| m.get(field))
             .copied()
         else {
@@ -3422,13 +3828,7 @@ impl<'a> LowerCtx<'a> {
                         // A `const` item as a const generic argument
                         // (`Grid<W, 3>`, spec 2.11.4).
                         if self.canon_type(&[seg.name.as_str()]).is_none()
-                            && self
-                                .resolve_in(
-                                    &[seg.name.as_str()],
-                                    &self.env.consts,
-                                    &self.env.const_leaves,
-                                )
-                                .is_some()
+                            && self.resolve_in(&[seg.name.as_str()], false).is_some()
                         {
                             if let Ok((v, t)) =
                                 self.eval_const_arg(&rokc_ast::ConstExpr::Path(p.clone()))
@@ -3445,7 +3845,7 @@ impl<'a> LowerCtx<'a> {
                 let bare = generics.is_empty()
                     && p.segments
                         .last()
-                        .is_some_and(|s| self.env.defs.defaulted_leaves.contains(&s.name));
+                        .is_some_and(|s| self.env.defs.defaulted(&s.name));
                 if !generics.is_empty() || bare {
                     let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
                     if let Some(full) = self
@@ -3468,8 +3868,7 @@ impl<'a> LowerCtx<'a> {
                             .for_each(|a| collect_unknown_paths(a, &mut leftover));
                         // An inference variable is an argument like any type.
                         leftover.retain(|p| p != "_");
-                        if leftover.is_empty() && self.env.defs.generic_structs.contains_key(&full)
-                        {
+                        if leftover.is_empty() && self.env.defs.generic_struct(&full).is_some() {
                             if let Some(id) = self.instantiate_struct(&full, args, at) {
                                 return HirTy::Struct(id);
                             }
@@ -3567,7 +3966,7 @@ impl<'a> LowerCtx<'a> {
             .env
             .names
             .trait_key(&segs, &self.current_module, self.here());
-        if !self.env.names.traits.contains(&key) {
+        if !self.env.names.is_trait(&key) {
             self.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -3728,11 +4127,8 @@ impl<'a> LowerCtx<'a> {
             .filter_map(|r| r.binds.iter().find(|(n, _)| n == name))
             .map(|(_, t)| t.clone())
             .collect();
-        let generic = self.generic_impls(
-            base,
-            |gi| wanted(&gi.trait_key) && gi.assoc.iter().any(|(n, _)| n == name),
-            0,
-        );
+        let keep = |gi: &Impl| wanted(&gi.trait_key) && gi.assoc.iter().any(|(n, _)| n == name);
+        let generic = self.generic_impls(base, Pick::Where(&keep), 0);
         for (gi, subst) in generic {
             let Some((_, ty)) = gi.assoc.iter().find(|(n, _)| n == name) else {
                 continue;
@@ -3795,7 +4191,7 @@ impl<'a> LowerCtx<'a> {
                         continue;
                     }
                     entry.push(k.clone());
-                    if let Some(info) = self.env.trait_info.get(&k) {
+                    if let Some(info) = self.env.trait_of(&k) {
                         stack.extend(info.supers.iter().cloned());
                     }
                 }
@@ -3980,15 +4376,14 @@ impl<'a> LowerCtx<'a> {
 
     /// Signature of function `id` (a method's, whatever its key).
     fn sig_by_id(&self, id: FunctionId) -> FnSig {
-        self.sig_of_key(&self.env.key_of[&id])
+        self.sig_of_key(self.env.fn_key(id).expect("a declaration"))
     }
 
     /// `fn_table[key]`, with a return type inferred from the body when
     /// the declaration omits it (spec 4.1.3).
     fn sig_of_key(&self, key: &str) -> FnSig {
-        let mut sig = self.env.fn_table[key].clone();
-        incr::log_sig(key, &sig);
-        if self.env.infer_ret.contains(&sig.id) {
+        let mut sig = self.env.sig(key).expect("a signature").clone();
+        if self.env.infers_ret(sig.id) {
             sig.ret_ty = mono::decl_ret(self, sig.id, sig.ret_ty);
         }
         sig

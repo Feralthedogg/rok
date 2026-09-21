@@ -163,8 +163,8 @@ fn shape(
         .collect();
     let full = ctx.canon_type(&ty_segs);
     // `Tr::m`: `Self` comes from the expected `fn` type at the call.
-    if let Some(key) = full.as_ref().filter(|f| ctx.env.names.traits.contains(*f)) {
-        let decl = ctx.env.trait_info.get(key)?.decls.get(method)?;
+    if let Some(key) = full.as_ref().filter(|f| ctx.env.names.is_trait(f)) {
+        let decl = ctx.env.trait_of(key)?.decls.get(method)?;
         return Some(Ok(Shape::of_def(decl)));
     }
     let ty_ast = |segments: &[rokc_ast::PathSegment]| Ty {
@@ -196,11 +196,7 @@ fn shape(
     }
     // `Box::m` of a generic type: its instantiation comes from the
     // expected `fn` type at the call.
-    let gm = ctx
-        .env
-        .generic_methods
-        .get(&(full, method.to_owned()))?
-        .first()?;
+    let gm = ctx.env.generic_methods(&full, method)?.first()?;
     Some(Ok(Shape::of_def(&gm.def)))
 }
 

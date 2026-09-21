@@ -57,7 +57,8 @@ pub fn expand(
         let fail = |diags: &mut Vec<RokDiagnostic>, msg: String| {
             diags.push(RokDiagnostic::error(ErrorKind::Module, span, msg));
         };
-        let loaded = match rokc_wit::load(&requests) {
+        // A prebuilt dependency's WIT is in its ROKHIR (the overlay).
+        let loaded = match crate::OVERLAY.with(|o| rokc_wit::load(&requests, &o.borrow())) {
             Ok(l) => l,
             Err(e) => {
                 fail(diags, format!("WIT: {e}"));
@@ -65,9 +66,19 @@ pub fn expand(
             }
         };
         // A changed `.wit` file rebuilds (`rokc_interface::fresh`).
-        crate::READ.with(|r| {
-            r.borrow_mut()
-                .extend(loaded.resolve.files.iter().map(|(p, _)| p.clone()));
+        crate::OVERLAY.with(|o| {
+            let o = o.borrow();
+            crate::READ.with(|r| {
+                r.borrow_mut().extend(
+                    loaded
+                        .resolve
+                        .files
+                        .iter()
+                        .map(|(p, _)| p)
+                        .filter(|p| !o.contains_key(*p))
+                        .cloned(),
+                );
+            });
         });
         // `pkg::` paths within the package the module is in (a
         // dependency's mount name is its first segment).
@@ -146,9 +157,18 @@ pub fn expand(
         );
         any = true;
         world.push_str(&b.world);
-        for s in loaded.units {
-            if !link.sources.contains(&s) {
-                link.sources.push(s);
+        for u in loaded.units {
+            if !link.sources.iter().any(|s| s.path == u.path) {
+                link.sources.push(rokc_mir::WitSource {
+                    pkg: pkg.to_owned(),
+                    files: u
+                        .files
+                        .iter()
+                        .map(|&i| loaded.resolve.files[i].clone())
+                        .collect(),
+                    path: u.path,
+                    dir: u.dir,
+                });
             }
         }
         for e in b.exports {

@@ -14,7 +14,9 @@
 //! package's source, every file, with each concrete function body cut
 //! to `;` (line breaks kept, so diagnostics keep their lines): what
 //! downstream code needs (signatures, types, traits, impls, generic and
-//! `async` / `#[inline]` bodies, trait defaults) and nothing it can link.
+//! `async` / `#[inline]` bodies, trait defaults) and nothing it can link;
+//! then the `.wit` files its `ffi::wit` items read, whole (paths may
+//! leave the source dir through `..`).
 // The body is rok source rather than 904.9-11's type / item / body
 // sections: monomorphization consumes AST and the parser reads it; a
 // binary tree would only save the (cheap) parse.
@@ -27,7 +29,7 @@ use crate::SourceFile;
 use rokc_diagnostic::SourceMap;
 
 /// Bumped on any change to the layout or to what the body holds.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 const MAGIC: &[u8; 4] = b"ROKH";
 
 #[derive(Clone, Debug, Default)]
@@ -403,7 +405,11 @@ pub fn inspect(path: &Path) -> Result<String, String> {
         r.type_end()
     );
     let (mut exports, mut generic) = (Vec::new(), Vec::new());
-    for (_, text) in &r.files {
+    for (_, text) in r
+        .files
+        .iter()
+        .filter(|(p, _)| Path::new(p).extension().is_some_and(|e| e == "rok"))
+    {
         signatures(text, &mut exports, &mut generic);
     }
     s.push_str("\nExports:\n");
@@ -420,6 +426,34 @@ pub fn inspect(path: &Path) -> Result<String, String> {
         Err(e) => s.push_str(&format!("  ({}: {e})\n", archive.display())),
     }
     Ok(s)
+}
+
+/// The WIT files package `pkg`'s `ffi::wit` items read (stdlib 1.8),
+/// by path relative to its source dir `dir`.
+#[must_use]
+pub fn wit_files(w: &rokc_mir::WitLink, pkg: &str, dir: &Path) -> Vec<(String, String)> {
+    // The disk's files are canonical paths.
+    let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
+    w.sources
+        .iter()
+        .filter(|s| s.pkg == pkg)
+        .flat_map(|s| &s.files)
+        .map(|(path, text)| {
+            let base = if path.starts_with(dir) { dir } else { &canon };
+            (relative(path, base), text.clone())
+        })
+        .collect()
+}
+
+/// `path` from `base`, `/`-separated (`..` where it leaves `base`).
+fn relative(path: &Path, base: &Path) -> String {
+    let (p, b): (Vec<_>, Vec<_>) = (path.components().collect(), base.components().collect());
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let up = std::iter::repeat_n("..".to_owned(), b.len() - common);
+    let down = p[common..]
+        .iter()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned());
+    up.chain(down).collect::<Vec<_>>().join("/")
 }
 
 /// `(x.rokhir, libx.a)` from either of them.

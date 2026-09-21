@@ -1,25 +1,38 @@
 name: ci
 
-# Linux on every push and pull request; macOS and Windows on pushes to
-# main and on a manual run, which can also pick the hosts and jobs.
+# Three tiers (docs/ci.md):
+#   fast     push to a branch but main, pull request: linux-x64, -O0
+#   main     push to main, merge queue: linux-x64, linux-arm64,
+#            windows-x64, -O0
+#   nightly  schedule, manual run: every host at -O0 and -O2, cross
+#            targets, wasm; a manual run's inputs pick a subset
 on:
   push:
     paths-ignore: ["**/*.md"]
   pull_request:
     paths-ignore: ["**/*.md"]
+  merge_group:
+  schedule:
+    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
       hosts:
-        description: "Hosts: all, or some of linux-x64 linux-arm64 macos-arm64 macos-x64 windows-x64"
+        description: "Hosts: all, or some of linux-x64 linux-arm64 macos-arm64 macos-x64 windows-x64 windows-arm64"
         default: all
       jobs:
         description: "Jobs after the prefixes: all, or some of gate cross wasm (none: prefixes only)"
         default: all
+      filter:
+        description: "ROK_TEST_FILTER: the integration cases to run (empty: all)"
+        default: ""
 
 # A newer run of the same branch and event cancels the older one.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -29,42 +42,108 @@ defaults:
     shell: bash
 
 jobs:
+  # What runs where. hosts: the gate's hosts; prefixes: the hosts whose
+  # LLVM prefix a later job restores; runners: host -> runs-on labels
+  # (a repository variable puts linux-x64 / windows-x64 on a self-hosted
+  # runner, never for a pull request from a fork); cross: the cross
+  # targets with the host they run on.
   plan:
+    # The nightly schedule runs only where the repository variable ROK_NIGHTLY is `on`.
+    if: github.event_name != 'schedule' || vars.ROK_NIGHTLY == 'on'
     runs-on: ubuntu-24.04
     outputs:
       hosts: ${{ steps.plan.outputs.hosts }}
+      prefixes: ${{ steps.plan.outputs.prefixes }}
+      runners: ${{ steps.plan.outputs.runners }}
+      opts: ${{ steps.plan.outputs.opts }}
+      cross: ${{ steps.plan.outputs.cross }}
       jobs: ${{ steps.plan.outputs.jobs }}
+      filter: ${{ steps.plan.outputs.filter }}
     steps:
       - id: plan
         env:
-          HOSTS: ${{ github.event_name == 'workflow_dispatch' && inputs.hosts || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'all' || 'linux-x64 linux-arm64') }}
-          JOBS: ${{ github.event_name == 'workflow_dispatch' && inputs.jobs || 'all' }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          IN_HOSTS: ${{ inputs.hosts }}
+          IN_JOBS: ${{ inputs.jobs }}
+          IN_FILTER: ${{ inputs.filter }}
+          FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          LINUX_RUNNER: ${{ vars.ROK_LINUX_RUNNER }}
+          WINDOWS_RUNNER: ${{ vars.ROK_WINDOWS_RUNNER }}
         run: |
           all='[
-            {"name": "linux-x64", "os": "ubuntu-24.04"},
-            {"name": "linux-arm64", "os": "ubuntu-24.04-arm"},
-            {"name": "macos-arm64", "os": "macos-26"},
-            {"name": "macos-x64", "os": "macos-26-intel"},
-            {"name": "windows-x64", "os": "windows-2022"}
+            {"name": "linux-x64", "os": "ubuntu-24.04", "gate": true},
+            {"name": "linux-arm64", "os": "ubuntu-24.04-arm", "gate": true},
+            {"name": "macos-arm64", "os": "macos-26", "gate": true},
+            {"name": "macos-x64", "os": "macos-26-intel", "gate": true},
+            {"name": "windows-x64", "os": "windows-2022", "gate": true},
+            {"name": "windows-arm64", "os": "windows-11-arm", "gate": false}
           ]'
-          [ "$HOSTS" = all ] && HOSTS=$(echo "$all" | jq -r '.[].name')
-          [ "$JOBS" = all ] && JOBS="gate cross wasm"
-          hosts=$(echo "$all" | jq -c --arg h "$HOSTS" '[.[] | select(.name | IN($h | splits("[\\s,]+")))]')
-          echo "hosts=$hosts" | tee -a "$GITHUB_OUTPUT"
-          echo "jobs=$JOBS" | tee -a "$GITHUB_OUTPUT"
+          # windows-arm64 runs an x64 rokc (emulated) with the x64 prefix.
+          cross='[
+            {"target": "i686-unknown-linux-gnu", "host": "linux-x64"},
+            {"target": "armv7-unknown-linux-gnueabihf", "host": "linux-x64"},
+            {"target": "x86_64-unknown-linux-musl", "host": "linux-x64"},
+            {"target": "i686-pc-windows-msvc", "host": "windows-x64"},
+            {"target": "aarch64-pc-windows-msvc", "host": "windows-arm64"}
+          ]'
+          case $EVENT:$REF in
+          schedule:* | workflow_dispatch:*) tier=nightly ;;
+          merge_group:* | push:refs/heads/main) tier=main ;;
+          *) tier=fast ;;
+          esac
+          filter=
+          case $tier in
+          fast) hosts=linux-x64 jobs=gate opts='["-O0"]' ;;
+          main) hosts="linux-x64 linux-arm64 windows-x64" jobs=gate opts='["-O0"]' ;;
+          nightly)
+            hosts=${IN_HOSTS:-all} jobs=${IN_JOBS:-all} opts='["-O0", "-O2"]' filter=$IN_FILTER
+            [ "$hosts" = all ] && hosts=$(echo "$all" | jq -r '.[].name')
+            [ "$jobs" = all ] && jobs="gate cross wasm"
+            ;;
+          esac
+          picked=$(echo "$all" | jq -c --arg h "$hosts" '[.[] | select(.name | IN($h | splits("[\\s,]+")))]')
+          gate='[]'
+          case " $jobs " in *" gate "*) gate=$(echo "$picked" | jq -c '[.[] | select(.gate) | .name]') ;; esac
+          case " $jobs " in
+          *" cross "*) cross=$(echo "$cross" | jq -c --argjson p "$picked" '[.[] | select(.host | IN($p[].name))]') ;;
+          *) cross='[]' ;;
+          esac
+          prefixes=$(jq -cn --argjson p "$picked" --argjson c "$cross" \
+            '[($p[] | select(.gate) | .name), ($c[].host | sub("windows-arm64"; "windows-x64"))] | unique')
+          sh_linux=false sh_windows=false
+          if [ "$FORK" != true ]; then
+            [ "$LINUX_RUNNER" = self-hosted ] && sh_linux=true
+            [ "$WINDOWS_RUNNER" = self-hosted ] && sh_windows=true
+          fi
+          runners=$(echo "$all" | jq -c --argjson l "$sh_linux" --argjson w "$sh_windows" '
+            map({key: .name, value: [.os]}) | from_entries
+            | if $l then .["linux-x64"] = ["self-hosted", "linux", "x64"] else . end
+            | if $w then .["windows-x64"] = ["self-hosted", "windows", "x64"] else . end')
+          {
+            echo "hosts=$gate"
+            echo "prefixes=$prefixes"
+            echo "runners=$runners"
+            echo "opts=$opts"
+            echo "cross=$cross"
+            echo "jobs=$jobs"
+            echo "filter=$filter"
+          } | tee -a "$GITHUB_OUTPUT"
+          echo "tier: $tier"
 
   # The pinned LLVM prefix per host (llvm/build.sh, ~1-1.5 h), built
-  # once per content of the build script and PGO profile and cached;
-  # a cache hit only looks the entry up.
+  # once per content of the build script and PGO profile: cached on a
+  # GitHub-hosted runner, kept in ROK_CI_HOME on a self-hosted one. A
+  # hit only looks it up.
   llvm:
     needs: plan
-    if: needs.plan.outputs.hosts != '[]'
+    if: needs.plan.outputs.prefixes != '[]'
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.hosts) }}
-    name: llvm (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+        host: ${{ fromJSON(needs.plan.outputs.prefixes) }}
+    name: llvm (${{ matrix.host }})
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)[matrix.host] }}
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,17 +151,18 @@ jobs:
         with:
           build: "true"
 
-  # The local gate (README "Checks"), every step even after a failure.
-  gate:
+  # The local gate (README "Checks") but the corpora, every step even
+  # after a failure.
+  check:
     needs: [plan, llvm]
-    if: ${{ !cancelled() && contains(needs.plan.outputs.jobs, 'gate') && needs.plan.outputs.hosts != '[]' }}
+    if: ${{ !cancelled() && needs.plan.outputs.hosts != '[]' }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.plan.outputs.hosts) }}
-    name: gate (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+        host: ${{ fromJSON(needs.plan.outputs.hosts) }}
+    name: check (${{ matrix.host }})
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)[matrix.host] }}
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/llvm-prefix
@@ -98,15 +178,12 @@ jobs:
       - name: clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --all-targets -- -D warnings
-      - name: test
+      - name: test (but the corpora)
         if: ${{ !cancelled() }}
-        run: ROK_REQUIRE_LLVM=1 cargo test --no-fail-fast
-      - name: test -O2
-        if: ${{ !cancelled() }}
-        run: ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration --test differential
+        run: ROK_REQUIRE_LLVM=1 cargo test --no-fail-fast -- --exact --skip end_to_end_cases --skip differential
       - name: fmt library
         if: ${{ !cancelled() }}
-        run: ./target/debug/rokc fmt --check library
+        run: '"${CARGO_TARGET_DIR:-target}/debug/rokc" fmt --check library'
       - name: compiler / runtime isolation (targets.md)
         if: ${{ !cancelled() }}
         run: |
@@ -117,44 +194,97 @@ jobs:
             echo "rokr depends on compiler crates"; exit 1
           fi
 
-  # The non-wasm cross targets from Linux x86_64: the sysroot link check,
-  # then the corpora of the 32-bit Linux targets, i686 natively (the
-  # i386 loader and libc) and armv7 under qemu-user.
-  cross:
+  # The integration and differential corpora, a job per host, level and
+  # shard (ROK_TEST_SHARD).
+  corpus:
     needs: [plan, llvm]
-    if: ${{ !cancelled() && contains(needs.plan.outputs.jobs, 'cross') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    if: ${{ !cancelled() && needs.plan.outputs.hosts != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.plan.outputs.hosts) }}
+        opt: ${{ fromJSON(needs.plan.outputs.opts) }}
+        shard: [1, 2, 3, 4]
+    name: corpus (${{ matrix.host }} ${{ matrix.opt }} ${{ matrix.shard }}/4)
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)[matrix.host] }}
+    timeout-minutes: 120
     env:
-      QEMU_LD_PREFIX: /usr/arm-linux-gnueabihf
       ROK_REQUIRE_LLVM: "1"
+      ROK_TEST_OPT: ${{ matrix.opt != '-O0' && matrix.opt || '' }}
+      ROK_TEST_SHARD: ${{ matrix.shard }}/4
+      ROK_TEST_FILTER: ${{ needs.plan.outputs.filter }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/llvm-prefix
-      - name: i386 and armhf runtimes, qemu-user
+      - name: toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -vV
+      - name: host C library (Linux)
+        if: runner.os == 'Linux'
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libc6-i386 libc6-armhf-cross qemu-user-binfmt
+          targets/build.sh "$(rustc -vV | sed -n 's/^host: //p')"
+      - run: cargo test --test integration --test differential
+
+  # The sysroot link check of the non-wasm cross targets, from Linux
+  # x86_64.
+  cross-link:
+    needs: [plan, llvm]
+    if: ${{ !cancelled() && contains(needs.plan.outputs.cross, '"linux-x64"') }}
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)['linux-x64'] }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
       - name: toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustc -vV
       - name: targets/build.sh
         run: |
           targets/build.sh x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl \
             aarch64-unknown-linux-musl i686-unknown-linux-gnu armv7-unknown-linux-gnueabihf i686-pc-windows-msvc
-      - name: cross link check
-        run: cargo test --test cli -- cross_targets_link_from_the_sysroot
-      - name: i686-unknown-linux-gnu -O0
-        if: ${{ !cancelled() }}
-        run: ROK_TEST_TARGET=i686-unknown-linux-gnu cargo test --test integration --test differential
-      - name: i686-unknown-linux-gnu -O2
-        if: ${{ !cancelled() }}
-        run: ROK_TEST_TARGET=i686-unknown-linux-gnu ROK_TEST_OPT=-O2 cargo test --test integration --test differential
-      - name: armv7-unknown-linux-gnueabihf -O0 (qemu)
-        if: ${{ !cancelled() }}
-        run: ROK_TEST_TARGET=armv7-unknown-linux-gnueabihf cargo test --test integration --test differential
-      - name: armv7-unknown-linux-gnueabihf -O2 (qemu)
-        if: ${{ !cancelled() }}
-        run: ROK_TEST_TARGET=armv7-unknown-linux-gnueabihf ROK_TEST_OPT=-O2 cargo test --test integration --test differential
+      - run: ROK_REQUIRE_LLVM=1 cargo test --test cli -- cross_targets_link_from_the_sysroot
+
+  # The corpora of a cross target on a host that runs it: i686 Linux
+  # natively (the i386 loader and libc), armv7 under qemu-user, musl
+  # static, i686 Windows under WOW64, arm64 Windows natively.
+  cross:
+    needs: [plan, llvm]
+    if: ${{ !cancelled() && needs.plan.outputs.cross != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJSON(needs.plan.outputs.cross) }}
+        opt: ${{ fromJSON(needs.plan.outputs.opts) }}
+    name: cross (${{ matrix.entry.target }} ${{ matrix.opt }})
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)[matrix.entry.host] }}
+    timeout-minutes: 180
+    env:
+      QEMU_LD_PREFIX: /usr/arm-linux-gnueabihf
+      ROK_REQUIRE_LLVM: "1"
+      ROK_TEST_TARGET: ${{ matrix.entry.target }}
+      ROK_TEST_OPT: ${{ matrix.opt != '-O0' && matrix.opt || '' }}
+      ROK_TEST_FILTER: ${{ needs.plan.outputs.filter }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+        with:
+          arch: ${{ matrix.entry.host == 'windows-arm64' && 'X64' || '' }}
+      - name: i386 and armhf runtimes, qemu-user
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted' && matrix.entry.target != 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libc6-i386 libc6-armhf-cross qemu-user-binfmt
+      - name: toolchain (rust-toolchain.toml)
+        if: matrix.entry.host != 'windows-arm64'
+        run: rustup toolchain install && rustc -vV
+      - name: toolchain (rust-toolchain.toml, x64 under emulation)
+        if: matrix.entry.host == 'windows-arm64'
+        run: |
+          t=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)-x86_64-pc-windows-msvc
+          rustup toolchain install "$t" --profile minimal --force-non-host
+          echo "RUSTUP_TOOLCHAIN=$t" >>"$GITHUB_ENV"
+          RUSTUP_TOOLCHAIN=$t rustc -vV
+      - name: targets/build.sh
+        run: targets/build.sh "$ROK_TEST_TARGET"
+      - run: cargo test --test integration --test differential
 
   # The wasm32 corpora (targets/test-wasm.sh), a job per target:
   # wasmtime and node (the image's, 18+); the image's clang has the
@@ -168,7 +298,7 @@ jobs:
       matrix:
         target: [wasm32-wasi, wasm32-wasi-threads, wasm32-unknown-unknown]
     name: wasm (${{ matrix.target }})
-    runs-on: ubuntu-24.04
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)['linux-x64'] }}
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

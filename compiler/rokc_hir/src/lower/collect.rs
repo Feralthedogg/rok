@@ -411,7 +411,7 @@ pub fn lower_full(
         reexports: type_reexports,
         visibility: type_vis,
         mod_vis: super::resolve::module_visibility(&program.items),
-        uses,
+        uses: uses.clone(),
         diags: std::cell::RefCell::new(Vec::new()),
         generic_aliases: program
             .items
@@ -1256,62 +1256,64 @@ pub fn lower_full(
     let (bound_methods, bound_traits) = super::bounds::templates(&trait_info);
     let mut env = Env {
         sources,
-        infer_ret: std::collections::HashSet::new(),
-        implicit_main: input.root_main == crate::RootMain::Implicit,
-        harness_main: input.root_main == crate::RootMain::Harness,
-        may_diverge: may_diverge(program),
-        fn_table,
-        fn_leaves: std::cell::OnceCell::new(),
-        extern_fns,
-        method_table,
-        key_of: HashMap::new(),
-        method_info,
-        defs,
-        consts,
-        const_leaves: std::cell::RefCell::default(),
-        generic_fns,
-        generic_methods,
-        intrinsics,
-        generic_intrinsics,
-        extern_fn_ids: extern_fn_ids.clone(),
-        rok_externs: rok_externs.clone(),
-        c_variadic: c_variadic.clone(),
-        c_defs: std::collections::HashSet::new(),
-        stdcall_fns: std::collections::HashSet::new(),
         prec,
-        sink,
-        item_visibility,
-        field_vis,
-        uses,
-        impls,
-        unsafe_fns: std::collections::HashSet::new(),
-        neg_auto,
-        trait_info,
-        statics: static_tys,
-        static_leaves: std::cell::RefCell::default(),
-        mut_statics: static_defs
-            .iter()
-            .filter(|s| s.is_mut)
-            .map(|s| s.name.clone())
-            .collect(),
-        literal_shapes: literal_handlers(program, &mut pre_diags),
-        names,
-        decls,
-        non_exhaustive: program
-            .items
-            .iter()
-            .filter_map(|i| match i {
-                Item::Struct(s) if s.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
-                    Some(s.name.clone())
-                }
-                Item::Enum(e) if e.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
-                    Some(e.name.clone())
-                }
-                _ => None,
-            })
-            .collect(),
-        bound_methods,
-        bound_traits,
+        t: Tables {
+            infer_ret: std::collections::HashSet::new(),
+            implicit_main: input.root_main == crate::RootMain::Implicit,
+            harness_main: input.root_main == crate::RootMain::Harness,
+            may_diverge: may_diverge(program),
+            fn_table,
+            fn_leaves: std::cell::OnceCell::new(),
+            extern_fns,
+            method_table,
+            key_of: HashMap::new(),
+            method_info,
+            defs,
+            consts,
+            const_leaves: std::cell::RefCell::default(),
+            generic_fns,
+            generic_methods,
+            intrinsics,
+            generic_intrinsics,
+            extern_fn_ids: extern_fn_ids.clone(),
+            rok_externs: rok_externs.clone(),
+            c_variadic: c_variadic.clone(),
+            c_defs: std::collections::HashSet::new(),
+            stdcall_fns: std::collections::HashSet::new(),
+            sink,
+            item_visibility,
+            field_vis,
+            impls,
+            unsafe_fns: std::collections::HashSet::new(),
+            neg_auto,
+            auto_memo: std::cell::RefCell::default(),
+            trait_info,
+            statics: static_tys,
+            static_leaves: std::cell::RefCell::default(),
+            mut_statics: static_defs
+                .iter()
+                .filter(|s| s.is_mut)
+                .map(|s| s.name.clone())
+                .collect(),
+            literal_shapes: literal_handlers(program, &mut pre_diags),
+            names,
+            decls,
+            non_exhaustive: program
+                .items
+                .iter()
+                .filter_map(|i| match i {
+                    Item::Struct(s) if s.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
+                        Some(s.name.clone())
+                    }
+                    Item::Enum(e) if e.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
+                        Some(e.name.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            bound_methods,
+            bound_traits,
+        },
     };
     // Impl targets and trait arguments, now that every item is
     // registered; then each impl's methods, keyed by them.
@@ -1509,7 +1511,7 @@ pub fn lower_full(
             // build's struct numbering (`Struct70__m`): a prebuilt
             // dependency and its users name it alike (the standard
             // library's too, when it is prebuilt).
-            if resolve::is_dependency(&package_of(&module))
+            if resolve::is_dependency(package_of(&module))
                 || (std_linked && !package_of(&module).is_empty())
             {
                 let mut name = format!("{module}::{}.{leaf}", impl_def_display(&impl_def.self_ty));
@@ -1737,7 +1739,7 @@ pub fn lower_full(
         // after the build's type numbering). A prebuilt package's lazy
         // statics are initialized by its `.a`.
         let stable = matches!(d, MethodOrFn::Fn(_)) || link_names.contains_key(&i);
-        let std_fn = std_prebuilt && within(&package_of(&module), "rok");
+        let std_fn = std_prebuilt && within(package_of(&module), "rok");
         let linked =
             f.body.is_none() || is_lazy_init_fn(&f.name) || (std_fn && stable && in_archive(f));
         let prebuilt_fn = linked
@@ -1745,7 +1747,7 @@ pub fn lower_full(
             && input
                 .prebuilt
                 .iter()
-                .any(|p| within(&package_of(&module), p));
+                .any(|p| within(package_of(&module), p));
         if prebuilt_fn {
             prebuilt.insert(id);
             if input.inline_prebuilt && std_fn && f.body.is_some() && small_body(f) {
@@ -1801,7 +1803,7 @@ pub fn lower_full(
     let infer_ret: std::collections::HashSet<FunctionId> = decls
         .iter()
         .enumerate()
-        .filter(|(_, d)| mono::infers_ret(d.def(), &env.may_diverge))
+        .filter(|(_, d)| mono::infers_ret(d.def(), |s| env.may_diverge.contains(&s)))
         .map(|(i, _)| FunctionId(u32::try_from(i).expect("FunctionId overflow")))
         .collect();
     env.fn_table = fn_table;
@@ -1897,8 +1899,14 @@ pub fn lower_full(
         .collect();
     ref_out.sort_by_key(|(id, _)| *id);
     env.sink.ref_out.borrow_mut().extend(ref_out);
-    check_impl_overlap(&env);
-    check_impl_rules(&env, program);
+    // Coherence and impl rules for the package's impls (a dependency's
+    // when it is built), every library's with `--check-library`.
+    let own = |module: &str| {
+        let pkg = package_of(module);
+        pkg.is_empty() || check_library || lib_pkg.as_ref().is_some_and(|p| within(pkg, p))
+    };
+    check_impl_overlap(&env, &own);
+    check_impl_rules(&env, program, &own);
     let failed_derives = check_derives(&env, program);
     // Every static's type, now that every item is registered.
     let no_subst = HashMap::new();
@@ -1946,7 +1954,7 @@ pub fn lower_full(
                 || is_lazy_init_fn(&f.name)
                 || lib_pkg
                     .as_ref()
-                    .is_some_and(|p| within(&package_of(&module), p))
+                    .is_some_and(|p| within(package_of(&module), p))
         })
         .collect();
     assign_discriminants(&env, &enum_decls);
@@ -1971,7 +1979,7 @@ pub fn lower_full(
                 || check_library
                 || lib_pkg
                     .as_ref()
-                    .is_some_and(|p| p != "rok" && within(&pkg, p))
+                    .is_some_and(|p| p != "rok" && within(pkg, p))
         });
     });
     let (mut functions, unlowered) = rokc_diagnostic::time("hir bodies", || {
@@ -2013,17 +2021,24 @@ pub fn lower_full(
     }
     check_type_bounds(&env);
     rokc_diagnostic::time("hir send check", || {
+        *env.auto_memo.borrow_mut() = Some(HashMap::new());
         super::send_check::check(&env, &functions);
+        *env.auto_memo.borrow_mut() = None;
     });
     super::frame_ptr::check(&env, &functions);
+    let lint_hits = if input.lints {
+        rokc_diagnostic::time("hir lints", || super::handoff::check(&env, &functions))
+    } else {
+        Vec::new()
+    };
     let (any_seeds, any_exports) = super::expr::any_link(&env, lib_pkg.as_deref());
     let any_types = super::expr::any_types(&env);
     if lib_pkg.is_some() || !prebuilt.is_empty() {
         exports.extend(any_exports);
     }
-    let Env {
+    let Tables {
         defs, sink, names, ..
-    } = env;
+    } = env.t;
     // Append every closure body / monomorphization lifted to a top-level
     // function during expression lowering.
     functions.extend(sink.extras.into_inner());
@@ -2094,8 +2109,9 @@ pub fn lower_full(
     let lazy_inits = static_defs
         .iter()
         .filter(|s| {
-            let pkg = package_of(&module_of(&s.name));
-            !input.prebuilt.iter().any(|p| within(&pkg, p))
+            let module = module_of(&s.name);
+            let pkg = package_of(&module);
+            !input.prebuilt.iter().any(|p| within(pkg, p))
         })
         .filter_map(|s| s.init_fn);
     let roots = if lib_pkg.is_some() {
@@ -2134,6 +2150,7 @@ pub fn lower_full(
         any_tags: sink.any_tags.take(),
         type_visibility: names.visibility.clone(),
         reuse,
+        lint_hits,
     };
     module.diagnostics.extend(names.diags.into_inner());
     module.diagnostics.extend(sink.diagnostics.into_inner());
@@ -3787,7 +3804,7 @@ fn impl_assoc_list(impl_def: &rokc_ast::ImplDef) -> Vec<(String, Ty)> {
 fn impl_consts(
     i: &rokc_ast::ImplDef,
     program: &Program,
-    names: &TypeNames<'_>,
+    names: &TypeNames,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) -> (Vec<AssocConst>, Vec<AssocConst>) {
     let mut out: Vec<(String, Ty, Expr)> = i
@@ -3884,7 +3901,8 @@ fn impl_consts(
 /// Lower declaration `i` (`stub`: its signature only).
 pub(super) fn lower_decl(env: &Env<'_>, i: usize, stub: bool) -> HirFunction {
     let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
-    let f = env.decls[i].def();
+    let decl = env.decl(id).expect("a declaration");
+    let f = decl.def();
     let bodiless;
     let f: &FnDef = if stub {
         bodiless = FnDef {
@@ -3906,7 +3924,7 @@ pub(super) fn lower_decl(env: &Env<'_>, i: usize, stub: bool) -> HirFunction {
     } else {
         f
     };
-    match &env.decls[i] {
+    match decl {
         MethodOrFn::Fn(_) => lower_fn(env, f, id, None, fn_module(env, f)),
         MethodOrFn::Method {
             self_ty,
@@ -4018,7 +4036,10 @@ fn lower_bodies(
 /// signature (for tools; MIR drops it).
 fn sig_stub(env: &Env<'_>, i: usize) -> HirFunction {
     let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
-    let f = env.decls[i].def();
+    let f = env
+        .decl(FunctionId(u32::try_from(i).expect("FunctionId overflow")))
+        .expect("a declaration")
+        .def();
     let name = match &env.decls[i] {
         MethodOrFn::Fn(f) => f.name.clone(),
         MethodOrFn::Method { key, .. } => key.clone(),
@@ -4195,7 +4216,7 @@ fn check_pod(
 /// `fn() + Tr` check their own).
 fn check_bound_names(
     program: &Program,
-    names: &TypeNames<'_>,
+    names: &TypeNames,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) {
     let mut check = |b: &Ty, module: &str| {
@@ -4430,7 +4451,7 @@ fn check_type_bounds(env: &Env<'_>) {
 /// type is the impl's package's own), and supertraits (spec 2.8.4: a
 /// type implementing a trait implements its supertraits too; a generic
 /// impl's target must meet them for every instance its bounds allow).
-fn check_impl_rules(env: &Env<'_>, program: &Program) {
+fn check_impl_rules(env: &Env<'_>, program: &Program, own: &dyn Fn(&str) -> bool) {
     let no_subst = HashMap::new();
     let traits: HashMap<&str, &rokc_ast::TraitDef> = program
         .items
@@ -4448,10 +4469,15 @@ fn check_impl_rules(env: &Env<'_>, program: &Program) {
             continue;
         };
         let module = impl_module(i);
+        if !own(&module) {
+            continue;
+        }
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
         let key = env.names.trait_key(&segs, &module, i.span);
         let pkg = package_of(&module);
-        if package_of(&module_of(&key)) != pkg && target_package(env, i, &module) != Some(pkg) {
+        if package_of(&module_of(&key)) != pkg
+            && target_package(env, i, &module).as_deref() != Some(pkg)
+        {
             env.sink
                 .diagnostics
                 .borrow_mut()
@@ -4769,18 +4795,26 @@ fn target_package(env: &Env<'_>, i: &rokc_ast::ImplDef, module: &str) -> Option<
             return None;
         }
         if let Some(full) = env.names.canon(&segs, module, &[], i.span) {
-            return Some(package_of(&module_of(&full)));
+            return Some(package_of(&module_of(&full)).to_owned());
         }
     }
     Some("rok::core".to_owned())
 }
 
-fn check_impl_overlap(env: &Env<'_>) {
+fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
-    for gi in env.impls.generic() {
+    let impls = &env.impls;
+    for gi in impls.generic() {
         ctx.at.set(gi.self_ty.span);
-        for ty in env.impls.tys_of(&gi.trait_key) {
+        let concrete = impls.by_trait.get(&gi.trait_key).into_iter().flatten();
+        for ci in concrete.map(|&i| &impls.all[i]) {
+            let Some((ty, _)) = &ci.concrete else {
+                continue;
+            };
+            if !own(&gi.module) && !own(&ci.module) {
+                continue;
+            }
             if ctx
                 .generic_impl_subst(gi, ty, 0)
                 .is_some_and(|s| trait_args_overlap(&ctx, gi, &s, ty))
@@ -4820,7 +4854,9 @@ fn check_impl_overlap(env: &Env<'_>) {
             m.first().map(|s| (*s).clone())
         };
         for b in gis.iter().skip(i + 1).filter(|b| {
-            b.trait_key == a.trait_key && (!a.trait_key.is_empty() || shared(b).is_some())
+            b.trait_key == a.trait_key
+                && (own(&a.module) || own(&b.module))
+                && (!a.trait_key.is_empty() || shared(b).is_some())
         }) {
             ctx.at.set(b.self_ty.span);
             let witness = symbolic_overlap(&ctx, a, b).unwrap_or_else(|| {
@@ -5087,13 +5123,13 @@ fn canon_ast_ty(
             }
             let names = &ctx.env.names;
             if let Some(full) = names.plain_alias(t, module, ctx.here()) {
-                let body = names.plain_aliases.get(&full)?;
+                let body = names.plain_alias_ty(&full)?;
                 return canon_ast_ty(ctx, &module_of(&full), &HashMap::new(), body);
             }
             let full = names.canon(&segs, module, &[], ctx.here());
             if full
                 .as_ref()
-                .is_some_and(|f| names.generic_aliases.contains_key(f))
+                .is_some_and(|f| names.generic_alias(f).is_some())
             {
                 return None;
             }
@@ -5339,7 +5375,7 @@ fn occurs(v: &str, t: &CanonTy) -> bool {
 /// the impl like any other (false for opt-outs and errors).
 fn check_auto_impl(
     impl_def: &rokc_ast::ImplDef,
-    names: &TypeNames<'_>,
+    names: &TypeNames,
     module: &str,
     neg: &mut std::collections::HashSet<(String, String)>,
     diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
@@ -5719,7 +5755,7 @@ fn impl_assoc_types(impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
 /// The value of a trait's const argument: a literal, a `const` item
 /// (`W`, looked up from `module` then the root) or a braced const
 /// expression over those (`{ W + 1 }`).
-fn const_arg_value(t: &Ty, names: &TypeNames<'_>, module: &str) -> Option<i128> {
+fn const_arg_value(t: &Ty, names: &TypeNames, module: &str) -> Option<i128> {
     let c = match &t.kind {
         AstTyKind::Const(c) => c.clone(),
         AstTyKind::Path(p) => rokc_ast::ConstExpr::Path(p.clone()),
@@ -5926,7 +5962,7 @@ fn add_self_assoc_sigs(program: &mut Program) {
 /// default, its names resolved in the trait's module and the trait's
 /// parameters replaced by the impl's arguments. Everything after sees
 /// an ordinary `type X = ..;` in the impl. The additions, by item index.
-fn assoc_defaults(program: &Program, names: &TypeNames<'_>) -> Vec<(usize, Vec<AstImplItem>)> {
+fn assoc_defaults(program: &Program, names: &TypeNames) -> Vec<(usize, Vec<AstImplItem>)> {
     let traits: HashMap<&str, &rokc_ast::TraitDef> = program
         .items
         .iter()
@@ -6103,7 +6139,7 @@ fn may_diverge(program: &Program) -> std::collections::HashSet<rokc_diagnostic::
 /// declares at its position (trait parameters replaced by the impl's
 /// arguments), not an implicit type parameter: the method implements
 /// that signature.
-fn impl_param_types(program: &mut Program, names: &TypeNames<'_>) {
+fn impl_param_types(program: &mut Program, names: &TypeNames) {
     let traits: HashMap<&str, &rokc_ast::TraitDef> = program
         .items
         .iter()
@@ -6168,7 +6204,7 @@ fn impl_param_types(program: &mut Program, names: &TypeNames<'_>) {
 /// same name inside its trait / impl.
 fn warn_assoc_shadowing(
     program: &Program,
-    names: &TypeNames<'_>,
+    names: &TypeNames,
     diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) {
     for it in &program.items {

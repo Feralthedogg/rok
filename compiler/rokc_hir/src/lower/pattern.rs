@@ -563,11 +563,14 @@ pub(super) fn check_match_arms(
     // The catch-all a foreign `#[non_exhaustive]` type requires is never
     // unreachable.
     let foreign = foreign_non_exhaustive(ctx, scrut_ty);
+    // In an instance, reachability turns on the type arguments; the
+    // definition check reported what doesn't.
+    let instance = in_instance(ctx);
     for (i, a) in arms.iter().enumerate() {
         let p = simplify(ctx, &a.pat);
         let exempt = synthetic.get(i).copied().unwrap_or(false)
             || (foreign.is_some() && hir_pattern_irrefutable(&a.pat));
-        if !exempt && !useful(ctx, &rows, std::slice::from_ref(&p), &tys) {
+        if !exempt && !instance && !useful(ctx, &rows, std::slice::from_ref(&p), &tys) {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -692,6 +695,16 @@ pub(super) fn check_match_exhaustiveness(
     }
 }
 
+/// Is a generic body being lowered for concrete type arguments (not
+/// for its definition check)?
+fn in_instance(ctx: &LowerCtx<'_>) -> bool {
+    !ctx.ty_subst.is_empty()
+        && !ctx
+            .ty_subst
+            .values()
+            .any(|t| super::bounds::has_param(ctx, t))
+}
+
 /// `ty`'s name when it is a `#[non_exhaustive]` struct / enum of another
 /// package.
 fn foreign_non_exhaustive(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<String> {
@@ -700,7 +713,7 @@ fn foreign_non_exhaustive(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<String> {
         HirTy::Struct(id) => enum_base_name(&ctx.struct_def(*id).name).to_owned(),
         _ => return None,
     };
-    (ctx.env.non_exhaustive.contains(&name)
+    (ctx.env.is_non_exhaustive(&name)
         && package_of(&module_of(&name)) != package_of(&ctx.current_module))
     .then(|| ctx.ty_name(ty))
 }
@@ -1027,6 +1040,24 @@ pub(super) fn lower_pattern_inner(
                     },
                     None => HirPattern::Wildcard,
                 };
+            }
+            // Spec 2.10.9: every type supports `is`. A test that turns on
+            // a type parameter is opaque at the definition check (its own
+            // tag on an open domain) and decided per instance, where a
+            // static mismatch matches nothing.
+            if super::bounds::has_param(ctx, scrut_ty) || super::bounds::has_param(ctx, &target_ty)
+            {
+                let binder = bind(ctx);
+                return HirPattern::SumVariant {
+                    sum_ty: scrut_ty.clone(),
+                    variant_index: ctx.any_tag(&target_ty),
+                    binder,
+                    payload_ty: Some(target_ty),
+                };
+            }
+            if in_instance(ctx) {
+                bind(ctx);
+                return HirPattern::Or(Vec::new());
             }
             mismatch(ctx, format!("type pattern `{}`", ctx.ty_name(&target_ty)))
         }

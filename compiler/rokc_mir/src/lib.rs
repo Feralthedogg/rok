@@ -129,12 +129,23 @@ pub struct WitLink {
     /// A WIT package with the one world the component has.
     pub world: String,
     /// The package sources: `.wit` files or directories.
-    pub sources: Vec<std::path::PathBuf>,
+    pub sources: Vec<WitSource>,
     /// Symbols the core module exports (functions, post-returns,
     /// destructors, `cabi_realloc`).
     pub exports: Vec<String>,
     /// A reactor: no `main`, so no `wasi:cli/run` (only the exports).
     pub reactor: bool,
+}
+
+/// One WIT package source, read: a `.wit` file or a directory of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WitSource {
+    /// The package whose `ffi::wit` read it first.
+    pub pkg: String,
+    pub path: std::path::PathBuf,
+    pub dir: bool,
+    /// Its files: `(path, text)`.
+    pub files: Vec<(std::path::PathBuf, String)>,
 }
 
 impl Link {

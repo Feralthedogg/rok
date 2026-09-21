@@ -1,6 +1,5 @@
-// RSA (RFC 8017): PKCS #1 v1.5 and PSS verification, PSS signing (MGF1
-// with the message hash, salt as long as the hash), moduli of 2048 to
-// 4096 bits.
+// RSA (RFC 8017): PKCS #1 v1.5 and PSS verification and signing (MGF1
+// with the message hash), moduli of 2048 to 4096 bits.
 
 use sup::{view, Bytes, constant_time_eq};
 use sup::sha2::{HashAlgorithm, Digest};
@@ -63,6 +62,20 @@ fn digest_info(hash: HashAlgorithm) -> List<u8> {
         0x65u8, 0x03u8, 0x04u8, 0x02u8, id, 0x05u8, 0x00u8, 0x04u8, hl]
 }
 
+/// EMSA-PKCS1-v1_5 of digest `h` in `k` bytes (`k` >= 256: room for
+/// the 8-byte minimum padding with any digest).
+fn pkcs1_encoding(hash: HashAlgorithm, h: List<u8>, k: usize) -> List<u8> {
+    let t = digest_info(hash);
+    for x in h { t.push(x); }
+    let em: List<u8> = List::with_capacity(k);
+    em.push(0u8);
+    em.push(1u8);
+    while em.len() + t.len() + 1 < k { em.push(0xffu8); }
+    em.push(0u8);
+    for x in t { em.push(x); }
+    em
+}
+
 /// MGF1 (RFC 8017 B.2.1): `len` bytes from `seed`.
 fn mgf1(hash: HashAlgorithm, seed: Slice<u8>, len: usize) -> List<u8> {
     let out: List<u8> = List::with_capacity(len);
@@ -121,6 +134,15 @@ impl RsaPublicKey {
 
     pub fn bits(self) -> usize { self.bits }
 
+    /// The modulus, big-endian without leading zeros.
+    pub fn modulus(self) -> List<u8> {
+        let k = (self.bits + 7) / 8;
+        Nat::to_be(self.md.m, k)
+    }
+
+    /// The public exponent, big-endian without leading zeros.
+    pub fn exponent(self) -> List<u8> { self.e.clone() }
+
     /// `signature^e mod n` as `k` bytes; `none` if the signature is not
     /// `k` bytes or not below `n`.
     fn open(self, signature: Bytes) -> List<u8> | none {
@@ -137,22 +159,12 @@ impl RsaPublicKey {
     /// and compared.
     pub fn verify_pkcs1v15(self, hash: HashAlgorithm, msg: Bytes, signature: Bytes) -> bool {
         let em: List<u8> = self.open(signature) else { return false; };
-        let k = em.len();
-        let t = digest_info(hash);
-        for x in hash.digest(msg) { t.push(x); }
-        if k < t.len() + 11 { return false; }
-        let want: List<u8> = List::with_capacity(k);
-        want.push(0u8);
-        want.push(1u8);
-        for _ in 0..k - t.len() - 3 { want.push(0xffu8); }
-        want.push(0u8);
-        for x in t { want.push(x); }
-        constant_time_eq(em, want)
+        constant_time_eq(em, pkcs1_encoding(hash, hash.digest(msg), em.len()))
     }
 
-    /// RSASSA-PSS verification, MGF1 with `hash`, salt length = hash
-    /// length.
-    pub fn verify_pss(self, hash: HashAlgorithm, msg: Bytes, signature: Bytes) -> bool {
+    /// RSASSA-PSS verification, MGF1 with `hash`; the salt is
+    /// `salt_len` bytes (none: the hash length).
+    pub fn verify_pss(self, hash: HashAlgorithm, msg: Bytes, signature: Bytes, salt_len: usize | none = none) -> bool {
         let full: List<u8> = self.open(signature) else { return false; };
         let em_bits = self.bits - 1;
         let em_len = (em_bits + 7) / 8;
@@ -161,7 +173,7 @@ impl RsaPublicKey {
         if full.len() > em_len && full[0] != 0u8 { return false; }
         let em = full[full.len() - em_len:full.len()];
         let hl = hash.output_len();
-        let sl = hl;
+        let sl = salt_len ?? hl;
         if em_len < hl + sl + 2 || em[em_len - 1] != 0xbcu8 { return false; }
         let db_len = em_len - hl - 1;
         let masked = em[0:db_len];
@@ -301,16 +313,31 @@ impl RsaPrivateKey {
         for x in db { em.push(x); }
         for x in h { em.push(x); }
         em.push(0xbcu8);
+        try self.sign_encoded(em, sb, mh)
+    }
+
+    /// An RSASSA-PKCS1-v1_5 signature of `msg` (deterministic: the
+    /// blinding factor is derived from the message and the key).
+    pub fn sign_pkcs1v15(self, hash: HashAlgorithm, msg: Bytes) throws (ValueError) -> List<u8> {
+        let mh = hash.digest(msg);
+        let k = (self.public.bits + 7) / 8;
+        try self.sign_encoded(pkcs1_encoding(hash, mh, k), "", mh)
+    }
+
+    /// The signature of the `k`-byte encoding `em`, blinded with a
+    /// factor derived from `salt`, the message hash `mh` and the key.
+    fn sign_encoded(self, em: List<u8>, salt: Bytes, mh: List<u8>) throws (ValueError) -> List<u8> {
+        let k = em.len();
         let n = self.public.md.n;
-        let m: List<u32> = Nat::from_be(em[0:k], n) else { throw ValueError { msg: "PSS encoding" }; };
+        let m: List<u32> = Nat::from_be(em[0:k], n) else { throw ValueError { msg: "RSA encoding" }; };
         // The blinding factor, below 2^(8 (k - 1)) <= 2^(bits - 1) < n.
         let ikm = self.dp.clone();
         for x in self.dq { ikm.push(x); }
         let info = "rok rsa blinding".as_bytes().to_list();
         for x in mh { info.push(x); }
-        let rb = try Hkdf::expand(HashAlgorithm::Sha512, Hkdf::extract(HashAlgorithm::Sha512, sb, ikm), info, k);
+        let rb = try Hkdf::expand(HashAlgorithm::Sha512, Hkdf::extract(HashAlgorithm::Sha512, salt, ikm), info, k);
         rb[0] = 0u8;
-        let r: List<u32> = Nat::from_be(rb[0:k], n) else { throw ValueError { msg: "PSS blinding" }; };
+        let r: List<u32> = Nat::from_be(rb[0:k], n) else { throw ValueError { msg: "RSA blinding" }; };
         Nat::to_be(try self.private_op(m, r), k)
     }
 }

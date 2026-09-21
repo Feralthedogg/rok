@@ -1,18 +1,10 @@
 // rok::core::collections::ordered_dict — `OrderedDict<K, V>`, a hash map
-// that iterates in insertion order (stdlib spec 2.9.5). `index` maps a
-// live key to its position in the parallel `keys` / `vals` lists.
-// Re-inserting a present key keeps its place. `remove` drops the key from
-// `index` only, leaving a hole (a slot whose key `index` does not map
-// back to it): O(1). Holes are squeezed out when they outnumber the live
-// entries and before iterating, so removed values stay reachable at most
-// until then.
-
-use rok::core::iter::Zip;
+// that iterates in insertion order (stdlib spec 2.9.5): a `Dict`, whose
+// compact entries already keep that order. Re-inserting a present key
+// keeps its place; a removed key re-inserted goes last.
 
 pub struct OrderedDict<K, V> {
-    index: Dict<K, usize>;
-    keys: List<K>;
-    vals: List<V>;
+    d: Dict<K, V>;
 }
 
 // Shares its buffer like `List` (stdlib 2.13.9).
@@ -20,11 +12,11 @@ impl<K, V> !Sync for OrderedDict<K, V> {}
 
 impl<K: Hash, V> OrderedDict<K, V> {
     pub const fn new() -> OrderedDict<K, V> {
-        OrderedDict::with_capacity(4)
+        OrderedDict { d: Dict::new() }
     }
 
     pub const fn with_capacity(cap: usize) -> OrderedDict<K, V> {
-        OrderedDict { index: Dict::with_capacity(cap), keys: List::with_capacity(cap), vals: List::with_capacity(cap) }
+        OrderedDict { d: Dict::with_capacity(cap) }
     }
 
     /// The pairs inserted in order (a later duplicate key replaces the
@@ -38,94 +30,47 @@ impl<K: Hash, V> OrderedDict<K, V> {
     }
 
     pub const fn len(self) -> usize {
-        self.index.len()
+        self.d.len()
     }
 
     pub const fn is_empty(self) -> bool {
-        self.index.len() == 0
+        self.d.is_empty()
     }
 
     /// Insert or replace; the old value, or `none`.
     pub const fn insert(self, k: K, v: V) -> V | none {
-        if let at: usize = self.index.get(k) {
-            let old = self.vals[at];
-            self.vals[at] = v;
-            return old;
-        }
-        self.index.insert(k, self.keys.len());
-        self.keys.push(k);
-        self.vals.push(v);
-        none
+        self.d.insert(k, v)
     }
 
     pub const fn get(self, k: K) -> V | none {
-        let at = self.index.get(k)?;
-        self.vals[at]
+        self.d.get(k)
     }
 
     pub const fn contains_key(self, k: K) -> bool {
-        self.index.contains_key(k)
+        self.d.contains_key(k)
     }
 
     pub const fn remove(self, k: K) -> V | none {
-        let at = self.index.remove(k)?;
-        let v = self.vals[at];
-        if 2 * self.index.len() < self.keys.len() {
-            self.compact();
-        }
-        v
+        self.d.remove(k)
     }
 
     pub const fn clear(self) {
-        for k in self.keys {
-            self.index.remove(k);
-        }
-        self.keys.clear();
-        self.vals.clear();
+        self.d.clear();
     }
 
     /// The keys in insertion order, lazily.
-    pub const fn keys(self) -> ListIter<K> {
-        self.compact();
-        self.keys.iter()
+    pub const fn keys(self) -> KeysIter<K, V> {
+        self.d.keys()
     }
 
     /// The values in insertion order, lazily.
-    pub const fn values(self) -> ListIter<V> {
-        self.compact();
-        self.vals.iter()
+    pub const fn values(self) -> ValuesIter<K, V> {
+        self.d.values()
     }
 
     /// `(key, value)` pairs in insertion order, lazily.
-    pub const fn entries(self) -> Zip<ListIter<K>, ListIter<V>> {
-        self.compact();
-        self.keys.iter().zip(self.vals.iter())
-    }
-
-    /// Move the live entries down over the holes, in order.
-    const fn compact(self) {
-        let n = self.keys.len();
-        if self.index.len() == n {
-            return;
-        }
-        let w: usize = 0;
-        for i in 0..n {
-            let k = self.keys[i];
-            if let at: usize = self.index.get(k) {
-                if at == i {
-                    if w != i {
-                        self.keys[w] = k;
-                        self.vals[w] = self.vals[i];
-                        self.index.insert(k, w);
-                    }
-                    w += 1;
-                }
-            }
-        }
-        while self.keys.len() > w {
-            self.keys.pop();
-            self.vals.pop();
-        }
+    pub const fn entries(self) -> EntriesIter<K, V> {
+        self.d.entries()
     }
 }
 
@@ -145,9 +90,9 @@ impl<K: Hash + Clone, V: Clone> Clone for OrderedDict<K, V> {
 
 /// `for (k, v) in d`, in insertion order (2.9.9).
 impl<K: Hash, V> IntoIterator for OrderedDict<K, V> {
-    type IntoIter = Zip<ListIter<K>, ListIter<V>>;
+    type IntoIter = EntriesIter<K, V>;
     type Item = (K, V);
-    const fn into_iter(self) -> Zip<ListIter<K>, ListIter<V>> {
+    const fn into_iter(self) -> EntriesIter<K, V> {
         self.entries()
     }
 }
@@ -166,7 +111,7 @@ impl<K: Hash, V> FromIterator<(K, V)> for OrderedDict<K, V> {
 impl<K: Hash, V> Index<K> for OrderedDict<K, V> {
     type Output = V;
     const fn index(self, k: K) -> V {
-        self.vals[self.index[k]]
+        self.d[k]
     }
 }
 

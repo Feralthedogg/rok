@@ -12,6 +12,9 @@
 //!   - `// expect-stderr: text` — (repeatable) the run's stderr, one
 //!     directive per line, leading and trailing blanks aside (`\` read
 //!     as `/`, library paths relative to the workspace); none: empty stderr
+//!   - `// expect-lint: L:C message` — (repeatable) `rokc lint` on the
+//!     case reports exactly these `E503` lints, in order: line, column
+//!     and headline
 //!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
 //!     overflow panics, which only `-O0` checks)
 //!   - `// gc-stress: N`        — run twice more, with
@@ -51,6 +54,9 @@
 //!     at that optimization level instead of the default `-O0`.
 //!   - `ROK_TEST_FILTER=text` — only the integration cases whose name
 //!     contains `text`.
+//!   - `ROK_TEST_SHARD=i/n` — only every n-th integration case of the
+//!     sorted list from the i-th (1-based), and every n-th differential
+//!     suite: CI splits a corpus over n jobs.
 //!   - `ROK_TEST_TARGET=<triple>` — build for that target (with a runtime
 //!     built for it), e.g. `x86_64-apple-darwin` run under Rosetta.
 //!     `wasm32-wasi` and `wasm32-wasi-threads` run each module with
@@ -237,6 +243,25 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
         .output()
 }
 
+/// `rokc lint src`, with the build's library and target.
+pub fn rokc_lint(env: &Env, src: &Path, dir: &Path) -> std::io::Result<Output> {
+    let source = std::fs::read_to_string(src).unwrap_or_default();
+    Command::new(ROKC)
+        .args(directives(&source, "rokc-arg:").flat_map(str::split_whitespace))
+        .arg("lint")
+        .arg(src)
+        .arg("--bootstrap")
+        .arg(&env.bootstrap)
+        .arg("--bootstrap")
+        .arg(env.workspace.join("library/std/src/lib.rok"))
+        .arg("--bootstrap")
+        .arg(env.workspace.join("library/bare/src/lib.rok"))
+        .args(test_target().map(|t| format!("--target={t}")))
+        .arg("--target-dir")
+        .arg(dir)
+        .output()
+}
+
 /// `ROK_TEST_TARGET`: the target to build the cases for.
 pub fn test_target() -> Option<String> {
     env::var("ROK_TEST_TARGET").ok().filter(|t| !t.is_empty())
@@ -392,6 +417,24 @@ pub fn invoke_command(exe: &Path, call: &str) -> Command {
 /// what wasmtime enables by default (async is on).
 const COMPONENT_FEATURES: &str =
     "component-model-fixed-length-lists=y,component-model-error-context=y";
+
+/// The `ROK_TEST_SHARD=i/n` part of `items` (all when unset).
+pub fn shard<T>(items: Vec<T>) -> Vec<T> {
+    match env::var("ROK_TEST_SHARD") {
+        Ok(spec) if !spec.is_empty() => shard_of(&spec, items),
+        _ => items,
+    }
+}
+
+/// Shard `spec` (`i/n`, 1 <= i <= n) of `items`: indices `i-1, i-1+n, ...`.
+pub fn shard_of<T>(spec: &str, items: Vec<T>) -> Vec<T> {
+    let (i, n) = spec
+        .split_once('/')
+        .and_then(|(i, n)| Some((i.parse::<usize>().ok()?, n.parse::<usize>().ok()?)))
+        .filter(|&(i, n)| (1..=n).contains(&i))
+        .unwrap_or_else(|| panic!("ROK_TEST_SHARD={spec}: expected i/n with 1 <= i <= n"));
+    items.into_iter().skip(i - 1).step_by(n).collect()
+}
 
 /// Run `f` over `items` on all cores; results keep input order.
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {

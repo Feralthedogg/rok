@@ -140,7 +140,7 @@ fn library_build_drops_code_its_package_does_not_reach() {
     assert!(mir.contains("fn plib::unused_private()"), "{mir}");
     assert!(mir.contains("fn plib::f()"), "{mir}");
     assert!(!mir.contains("fn rok_f64_cbrt("), "{mir}");
-    assert!(mir.matches("\nfn ").count() < 40, "{mir}");
+    assert!(mir.matches("\nfn ").count() < 44, "{mir}");
 }
 
 /// 902.16: an unchanged package is not rebuilt; a changed source, a
@@ -468,14 +468,20 @@ fn front_end_reuses_parses_and_bodies() {
     let (n, w, out) = build();
     assert_eq!((n.0, n.1, n.3, bodies - n.2), (files - 1, files, bodies, 3));
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
-    // Another item: every body is lowered again.
+    // Another item no body reads: every body is taken.
+    let item = sig + "\npub struct S {\n    v: i64;\n}\n";
+    put(app.join("src/m.rok"), &item).unwrap();
+    let (n, w, out) = build();
+    assert_eq!((n.0, n.2, n.3), (files - 1, bodies, bodies), "{n:?}");
+    assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
+    // A new method: it is lowered, every other body is taken.
     put(
         app.join("src/m.rok"),
-        sig + "\npub struct S {\n    v: i64;\n}\n",
+        item + "\nimpl S {\n    pub fn get(self) -> i64 {\n        self.v\n    }\n}\n",
     )
     .unwrap();
     let (n, w, out) = build();
-    assert_eq!((n.0, n.2), (files - 1, 0), "{n:?}");
+    assert_eq!((n.0, n.3 - n.2), (files - 1, 1), "{n:?}");
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
 }
 
@@ -1812,7 +1818,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "ROKHIR version: 2\n",
+        "ROKHIR version: 3\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
@@ -2754,4 +2760,79 @@ fn rok_cc_links_wit_components() {
         args.lines().any(|l| l.starts_with("-Wl,--component-type,")),
         "{args}"
     );
+}
+
+/// Stdlib 1.8: a prebuilt dependency's ROKHIR carries the `.wit` files
+/// its `ffi::wit` items read (one outside its source dir, with its
+/// `deps/`): a dependent builds, links and runs with them gone.
+#[test]
+fn wit_prebuilt_dependency_carries_its_wit() {
+    let Some(_env) = setup() else { return };
+    let rt = workspace().join("target/lib/rok/targets/wasm32-wasi/librokr.a");
+    if !rt.is_file() {
+        eprintln!("skipped: no wasm32-wasi runtime (targets/build.sh wasm32-wasi)");
+        return;
+    }
+    let dir = scratch("wit-prebuilt");
+    put(
+        dir.join("calc/wit/calc.wit"),
+        "package test:calc;\n\nworld calc {\n    use test:num/types.{n};\n    \
+         export add: func(a: n, b: n) -> n;\n}\n",
+    )
+    .unwrap();
+    put(
+        dir.join("calc/wit/deps/num.wit"),
+        "package test:num;\n\ninterface types {\n    type n = s32;\n}\n",
+    )
+    .unwrap();
+    put(
+        dir.join("calc/src/lib.rok"),
+        "ffi::wit::export { \"../wit/calc.wit\" }\n\n\
+         #[wit::export]\npub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+    )
+    .unwrap();
+    put(
+        dir.join("app/main.rok"),
+        "fn main() { println(f\"{calc::add(2, 3)}\"); }\n",
+    )
+    .unwrap();
+    let out = rokc(
+        None,
+        &dir,
+        &["-q", "build", "calc", "--target", "wasm32-wasi"],
+    );
+    assert_exit(&out, 0);
+    fs::remove_dir_all(dir.join("calc/src")).unwrap();
+    fs::remove_dir_all(dir.join("calc/wit")).unwrap();
+    let out = rokc(
+        None,
+        &dir,
+        &[
+            "-q",
+            "build",
+            "app/main.rok",
+            "--target",
+            "wasm32-wasi",
+            "--extern",
+            "calc=calc/target/wasm32-wasi/debug/calc.rokhir",
+            "-o",
+            "app.wasm",
+        ],
+    );
+    assert_exit(&out, 0);
+    let Some(runner) = std::env::var_os("ROK_TEST_WASM_RUNNER") else {
+        return;
+    };
+    for (args, want) in [
+        (&["run", "app.wasm"][..], "5\n"),
+        (&["run", "--invoke", "add(4, 5)", "app.wasm"][..], "9\n"),
+    ] {
+        let run = Command::new(&runner)
+            .current_dir(&dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_exit(&run, 0);
+        assert_eq!(text(&run.stdout), want);
+    }
 }

@@ -18,7 +18,8 @@ mod bind;
 pub mod parse;
 pub mod resolve;
 
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 pub use bind::{Bindings, bind};
 pub use parse::Error;
@@ -31,6 +32,19 @@ pub struct Request {
     pub paths: Vec<PathBuf>,
 }
 
+/// Files served instead of the disk, by [`normal`] path: a prebuilt
+/// dependency's WIT, carried in its ROKHIR.
+pub type Overlay = HashMap<PathBuf, String>;
+
+/// One package source the linker's WIT directory is made of: a file or
+/// a directory (its `*.wit` files), as indices into `Resolve::files`.
+#[derive(Debug)]
+pub struct Unit {
+    pub path: PathBuf,
+    pub dir: bool,
+    pub files: Vec<usize>,
+}
+
 /// The files read: the ones a request names (`roots`, one entry per
 /// path: the indices of its files in `Resolve::files`) and their
 /// dependencies.
@@ -38,103 +52,159 @@ pub struct Request {
 pub struct Loaded {
     pub resolve: Resolve,
     pub roots: Vec<Vec<usize>>,
-    /// What the linker's WIT directory is made of: each package source,
-    /// a file or a directory.
-    pub units: Vec<PathBuf>,
+    pub units: Vec<Unit>,
 }
 
-fn read_wit(path: &Path) -> Result<(parse::File, String), Error> {
-    let src = std::fs::read_to_string(path).map_err(|e| Error {
+/// `p` absolute, without `.` and `..` (the disk is not asked).
+#[must_use]
+pub fn normal(p: &Path) -> PathBuf {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_owned());
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn cannot(path: &Path, e: &std::io::Error) -> Error {
+    Error {
         path: path.to_owned(),
         line: 0,
         col: 0,
         msg: format!("cannot read: {e}"),
-    })?;
-    Ok((parse::parse_file(path, &src)?, src))
+    }
 }
 
-/// The `*.wit` files of `dir`, sorted; a file without `package` takes
-/// the one another file of the directory declares.
-fn read_dir(dir: &Path) -> Result<Vec<(parse::File, String)>, Error> {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| Error {
-            path: dir.to_owned(),
-            line: 0,
-            col: 0,
-            msg: format!("cannot read: {e}"),
-        })?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "wit"))
-        .collect();
-    paths.sort();
-    let mut files = paths
-        .iter()
-        .map(|p| read_wit(p))
-        .collect::<Result<Vec<_>, _>>()?;
-    let pkg = files.iter().find_map(|(f, _)| f.package.clone());
-    for (f, _) in &mut files {
-        if f.package.is_none() {
-            f.package.clone_from(&pkg);
+/// The overlay, else the disk.
+struct Fs<'a> {
+    overlay: &'a Overlay,
+}
+
+impl Fs<'_> {
+    /// The overlay's path for `p` when it holds `p` or files under it.
+    fn served(&self, p: &Path) -> Option<PathBuf> {
+        let n = normal(p);
+        self.overlay.keys().any(|k| k.starts_with(&n)).then_some(n)
+    }
+
+    fn canonical(&self, p: &Path) -> Result<PathBuf, Error> {
+        match self.served(p) {
+            Some(n) => Ok(n),
+            None => std::fs::canonicalize(p).map_err(|e| cannot(p, &e)),
         }
     }
-    Ok(files)
-}
 
-/// Read and resolve every path of `requests` (and their `deps/`).
-pub fn load(requests: &[Request]) -> Result<Loaded, Error> {
-    let mut files: Vec<(parse::File, String)> = Vec::new();
-    // Each source read once: its canonical path and its files.
-    let mut seen: Vec<(PathBuf, Vec<usize>)> = Vec::new();
-    let mut units = Vec::new();
-    let mut roots = Vec::new();
-    let mut add = |path: &Path,
-                   files: &mut Vec<(parse::File, String)>,
-                   units: &mut Vec<PathBuf>|
-     -> Result<Vec<usize>, Error> {
-        let canon = std::fs::canonicalize(path).map_err(|e| Error {
-            path: path.to_owned(),
-            line: 0,
-            col: 0,
-            msg: format!("cannot read: {e}"),
-        })?;
-        if let Some((_, ids)) = seen.iter().find(|(p, _)| *p == canon) {
-            return Ok(ids.clone());
+    fn is_dir(&self, p: &Path) -> bool {
+        self.served(p)
+            .is_some_and(|n| !self.overlay.contains_key(&n))
+            || p.is_dir()
+    }
+
+    fn read(&self, p: &Path) -> Result<(parse::File, String), Error> {
+        let src = match self.overlay.get(&normal(p)) {
+            Some(t) => t.clone(),
+            None => std::fs::read_to_string(p).map_err(|e| cannot(p, &e))?,
+        };
+        Ok((parse::parse_file(p, &src)?, src))
+    }
+
+    /// The entries of directory `dir`, sorted.
+    fn entries(&self, dir: &Path) -> Result<Vec<PathBuf>, Error> {
+        let mut out: Vec<PathBuf> = match self.served(dir) {
+            Some(n) => self
+                .overlay
+                .keys()
+                .filter_map(|k| Some(n.join(k.strip_prefix(&n).ok()?.components().next()?)))
+                .collect(),
+            None => std::fs::read_dir(dir)
+                .map_err(|e| cannot(dir, &e))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect(),
+        };
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
+    /// The `*.wit` files of `dir`, sorted; a file without `package`
+    /// takes the one another file of the directory declares.
+    fn read_dir(&self, dir: &Path) -> Result<Vec<(parse::File, String)>, Error> {
+        let mut files = self
+            .entries(dir)?
+            .iter()
+            .filter(|p| !self.is_dir(p) && p.extension().is_some_and(|x| x == "wit"))
+            .map(|p| self.read(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let pkg = files.iter().find_map(|(f, _)| f.package.clone());
+        for (f, _) in &mut files {
+            if f.package.is_none() {
+                f.package.clone_from(&pkg);
+            }
         }
-        let read = if canon.is_dir() {
-            read_dir(&canon)?
+        Ok(files)
+    }
+
+    /// The files of `path` (a file or a directory) as a unit, read once.
+    fn add(
+        &self,
+        path: &Path,
+        files: &mut Vec<(parse::File, String)>,
+        units: &mut Vec<Unit>,
+    ) -> Result<Vec<usize>, Error> {
+        let canon = self.canonical(path)?;
+        if let Some(u) = units.iter().find(|u| u.path == canon) {
+            return Ok(u.files.clone());
+        }
+        let dir = self.is_dir(&canon);
+        let read = if dir {
+            self.read_dir(&canon)?
         } else {
-            vec![read_wit(&canon)?]
+            vec![self.read(&canon)?]
         };
         let ids: Vec<usize> = (files.len()..files.len() + read.len()).collect();
         files.extend(read);
-        units.push(canon.clone());
-        seen.push((canon, ids.clone()));
+        units.push(Unit {
+            path: canon,
+            dir,
+            files: ids.clone(),
+        });
         Ok(ids)
-    };
+    }
+}
+
+/// Read and resolve every path of `requests` (and their `deps/`), from
+/// `overlay` where it has them.
+pub fn load(requests: &[Request], overlay: &Overlay) -> Result<Loaded, Error> {
+    let fs = Fs { overlay };
+    let mut files: Vec<(parse::File, String)> = Vec::new();
+    let mut units = Vec::new();
+    let mut roots = Vec::new();
     let mut deps_dirs = Vec::new();
     for req in requests {
         for p in &req.paths {
             // A file is read with its directory (its package), but names
             // only what it defines.
-            let dir = if p.is_dir() {
+            let is_dir = fs.is_dir(p);
+            let dir = if is_dir {
                 p.clone()
             } else {
                 p.parent()
                     .filter(|d| !d.as_os_str().is_empty())
                     .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
             };
-            let mut ids = add(&dir, &mut files, &mut units)?;
-            if !p.is_dir() {
-                let canon = std::fs::canonicalize(p).map_err(|e| Error {
-                    path: p.clone(),
-                    line: 0,
-                    col: 0,
-                    msg: format!("cannot read: {e}"),
-                })?;
+            let mut ids = fs.add(&dir, &mut files, &mut units)?;
+            if !is_dir {
+                let canon = fs.canonical(p)?;
                 ids.retain(|&i| files[i].0.path == canon);
             }
             roots.push(ids);
-            if dir.join("deps").is_dir() {
+            if fs.is_dir(&dir.join("deps")) {
                 deps_dirs.push(dir.join("deps"));
             }
         }
@@ -142,14 +212,11 @@ pub fn load(requests: &[Request]) -> Result<Loaded, Error> {
     // Dependencies: each entry of a `deps/` directory is a package, and
     // may have `deps/` of its own.
     while let Some(d) = deps_dirs.pop() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&d)
-            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-            .unwrap_or_default();
-        entries.sort();
-        for e in entries {
-            if e.is_dir() || e.extension().is_some_and(|x| x == "wit") {
-                add(&e, &mut files, &mut units)?;
-                if e.join("deps").is_dir() {
+        for e in fs.entries(&d).unwrap_or_default() {
+            let dir = fs.is_dir(&e);
+            if dir || e.extension().is_some_and(|x| x == "wit") {
+                fs.add(&e, &mut files, &mut units)?;
+                if dir && fs.is_dir(&e.join("deps")) {
                     deps_dirs.push(e.join("deps"));
                 }
             }

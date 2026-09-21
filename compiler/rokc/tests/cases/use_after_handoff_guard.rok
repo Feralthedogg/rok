@@ -1,0 +1,96 @@
+// expect-exit: 0
+// expect-stdout: 2 2 1 2 1 7 2 3
+// expect-lint: 21:5 `ys` is used after guard `g` released its lock
+// expect-lint: 30:5 `zs` is used after guard `g` released its lock
+// expect-lint: 38:5 `a` is used after guard `g` released its lock
+// expect-lint: 47:5 `got` is used after guard `g` released its lock
+// spec: std 213-marker §2.13.9 / std 216-sync §2.16.3 / §2.16.4
+
+// A handle taken out of a guard (`g.get()`), or handed to it
+// (`g.set(v)`), is protected only while the guard's `using` block holds
+// the lock; using it after the block ends races (lint
+// `use_after_handoff`). Inside the block, a `Sync` value, or a value
+// `set` replaced, is fine.
+
+fn got_after(m: Mutex<List<i32>>) -> i64 {
+    let ys: List<i32> = [];
+    using g = m.lock() {
+        ys = g.get();
+        ys.push(1);
+    }
+    ys.len() as i64
+}
+
+fn set_after(m: Mutex<List<i32>>) -> i64 {
+    let zs: List<i32> = [5];
+    using g = m.lock() {
+        g.set(zs);
+        zs.push(6);
+    }
+    zs.len() as i64
+}
+
+fn read_after(l: RwLock<List<i32>>) -> i64 {
+    let a: List<i32> = [];
+    using g = l.read() {
+        a = g.get();
+    }
+    a.len() as i64
+}
+
+fn try_locked(m: Mutex<List<i32>>) -> i64 {
+    let got: List<i32> = [];
+    match m.try_lock() {
+        v: MutexGuard<List<i32>> => using g = v { got = g.get(); },
+        none => {},
+    }
+    got.len() as i64
+}
+
+fn inside(m: Mutex<List<i32>>) -> i64 {
+    using g = m.lock() {
+        let ys = g.get();
+        ys.push(9);
+        ys.len() as i64
+    }
+}
+
+fn number(m: Mutex<i64>) -> i64 {
+    let n = 0i64;
+    using g = m.lock() {
+        n = g.get();
+    }
+    n + 1
+}
+
+fn written(l: RwLock<List<i32>>) -> i64 {
+    using g = l.write() {
+        let w = g.get();
+        w.push(2);
+        w.len() as i64
+    }
+}
+
+// `set` gives the lock a new value: what `get` returned is ours alone.
+fn taken(m: Mutex<List<i32>>) -> i64 {
+    let ws: List<i32> = [];
+    using g = m.lock() {
+        ws = g.get();
+        g.set([]);
+    }
+    ws.push(0);
+    ws.len() as i64
+}
+
+fn main() {
+    let m = Mutex::new([1i32]);
+    let a = got_after(m);
+    let b = set_after(m);
+    let c = read_after(RwLock::new([3i32]));
+    let d = try_locked(Mutex::new([4i32, 5]));
+    let e = inside(Mutex::new([]));
+    let f = number(Mutex::new(6i64));
+    let h = written(RwLock::new([1i32]));
+    let k = taken(Mutex::new([1i32, 2]));
+    println(f"{a} {b} {c} {d} {e} {f} {h} {k}");
+}

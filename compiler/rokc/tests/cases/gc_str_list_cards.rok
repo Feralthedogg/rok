@@ -1,0 +1,56 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// n-3 n-1500 n-2999 3000
+// e- 2 mid tail
+
+// A loop storing young strings into an old `List<str>` buffer over 8 KiB
+// (a carded large object) while minor collections run: the list's length
+// may be kept out of the loop, but the card marks and the stored strings
+// must not be. Slices kept past their string (an empty one at its very
+// end, one in its middle) keep its bytes alive.
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_collect_young();
+}
+
+fn main() -> i32 {
+    let xs: List<str> = [];
+    let i: i64 = 0;
+    while i < 3000 {
+        xs.push("init");
+        i += 1;
+    }
+    unsafe { rok_gc_collect() };
+    i = 0;
+    while i < 3000 {
+        xs[i as usize] = f"n-{i}";
+        if i % 500 == 0 {
+            unsafe { rok_gc_collect_young() };
+        }
+        i += 1;
+    }
+    unsafe { rok_gc_collect_young() };
+    unsafe { rok_gc_collect() };
+    println(f"{xs[3]} {xs[1500]} {xs[2999]} {xs.len()}");
+
+    let ends: List<str> = [];
+    let k = 0;
+    while k < 200 {
+        let s = f"e-{k}-mid-tail";
+        ends.push(s.slice(0..2));
+        ends.push(s.slice(s.len()..s.len()));
+        ends.push(s.slice(s.len() - 8..s.len() - 5));
+        ends.push(s.slice(s.len() - 4..s.len()));
+        k += 1;
+    }
+    unsafe { rok_gc_collect() };
+    let j = 0;
+    while j < 2000 {
+        let _g = f"garbage-{j}";
+        j += 1;
+    }
+    unsafe { rok_gc_collect() };
+    println(f"{ends[0]} {ends[1].len() + 2} {ends[798]} {ends[799]}");
+    return 0;
+}

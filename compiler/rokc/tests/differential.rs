@@ -32,7 +32,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use common::{Env, Rng, exe_name, par_map, rokc_build, run_command, setup};
+use common::{Env, Rng, exe_name, par_map, rokc_build, run_command, setup, shard};
 use rokc_rokon::{Field, Kind, Value};
 
 /// `(suite, op, why)`: mismatches that do not fail the test.
@@ -1310,7 +1310,9 @@ fn differential() {
         return;
     };
     let mut rng = Rng(seed());
-    let suites = vec![
+    // Every suite is generated, then sharded: a shard's cases do not
+    // depend on the shard spec.
+    let suites = shard(vec![
         int_suite(&mut rng),
         bigint_suite(&mut rng),
         float_suite(&mut rng),
@@ -1320,7 +1322,7 @@ fn differential() {
         slice_suite(&mut rng),
         rokon_suite(&mut rng),
         aggregate_suite(&mut rng),
-    ];
+    ]);
     let root = env
         .workspace
         .join(format!("target/differential{}", common::opt_suffix()));
@@ -1379,4 +1381,16 @@ fn float_compare() {
     assert!(same(Cmp::Float, "-inf", "-inf"));
     assert!(!same(Cmp::Float, "-0", "0.0"));
     assert_eq!(digits("-1.50e3"), "15");
+}
+
+#[test]
+fn shards_partition() {
+    let all: Vec<u32> = (0..10).collect();
+    let mut got: Vec<u32> = (1..=4)
+        .flat_map(|i| common::shard_of(&format!("{i}/4"), all.clone()))
+        .collect();
+    assert_eq!(common::shard_of("2/4", all.clone()), [1, 5, 9]);
+    got.sort_unstable();
+    assert_eq!(got, all);
+    assert_eq!(common::shard_of("1/1", all.clone()), all);
 }

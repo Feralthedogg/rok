@@ -1,0 +1,72 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout: 1 2 2 4 6 1
+// expect-lint: 22:5 `xs` is used after it was handed over to `Sender::send`
+// expect-lint: 28:5 `ys` is used after it was handed over to `Sender::try_send`
+// expect-lint: 34:5 `zs` is used after it was handed over to `Sender::send_async`
+// expect-lint: 41:13 `xs` is used after it was handed over to `Handoff::new`
+// spec: std 213-marker §2.13.9 / std 217-channel §2.17.2
+
+// A value sent through a channel, or wrapped in `Handoff` for another
+// thread, is shared with the receiver: the sender's handle must not be
+// used afterwards (lint `use_after_handoff`). Captures of a spawned
+// closure must already be `Sync` (a `List` capture does not compile),
+// so a `Mutex` used after the spawn is fine, and so is a clone sent in
+// place of the value.
+use rok::core::marker::Handoff;
+use rok::std::thread;
+
+fn sent(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1];
+    try! tx.send(xs);
+    xs.len() as i64
+}
+
+fn tried(tx: Sender<List<i32>>) -> i64 {
+    let ys: List<i32> = [1, 2];
+    try! tx.try_send(ys);
+    ys.len() as i64
+}
+
+async fn sent_async(tx: Sender<List<i32>>) -> i64 {
+    let zs: List<i32> = [1, 2];
+    try! await tx.send_async(zs);
+    zs.len() as i64
+}
+
+fn handed() -> i64 {
+    let xs: List<i32> = [1, 2];
+    let h = unsafe { Handoff::new(xs) };
+    let t = thread::spawn(|| h.get().len());
+    let k = xs.len();
+    (try! t.join() + k) as i64
+}
+
+fn shared_lock() -> i64 {
+    let m: Mutex<List<i32>> = Mutex::new([]);
+    let t = thread::spawn(|| {
+        using g = m.lock() { g.get().push(1); }
+    });
+    try! t.join();
+    using g = m.lock() { g.get().len() as i64 }
+}
+
+fn sent_clone(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1, 2, 3, 4, 5, 6];
+    try! tx.send(xs.clone());
+    xs.len() as i64
+}
+
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let a = sent(tx);
+    let b = tried(tx);
+    let c = task::block_on(sent_async(tx));
+    let d = handed();
+    let e = sent_clone(tx);
+    let f = shared_lock();
+    for _ in 0..4 {
+        let _ = rx.recv();
+    }
+    println(f"{a} {b} {c} {d} {e} {f}");
+}

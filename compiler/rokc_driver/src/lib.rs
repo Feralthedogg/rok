@@ -236,7 +236,7 @@ fn load_prebuilt(
         OVERLAY.with(|o| {
             let mut o = o.borrow_mut();
             for (rel, text) in &r.files {
-                o.insert(r.src_dir.join(rel), text.clone());
+                o.insert(rokc_wit::normal(&r.src_dir.join(rel)), text.clone());
             }
         });
         let archive = rokhir::companions(root).1;
@@ -480,7 +480,11 @@ pub fn compile_source(
         .first()
         .map(|m| m.hir.any_seeds.clone())
         .unwrap_or_default();
-    let interface = rokhir::interface(&p.sources, files, &lib, src_dir, &seeds, true);
+    let mut interface = rokhir::interface(&p.sources, files, &lib, src_dir, &seeds, true);
+    // Its WIT, so a dependent needs no `.wit` file on disk.
+    if let Some(w) = p.modules.first().and_then(|m| m.mir.link.wit.as_ref()) {
+        interface.extend(rokhir::wit_files(w, &lib, &dir));
+    }
     if !keep_ast {
         p.sources.clear();
     }
@@ -627,9 +631,11 @@ fn compile_unit(
         .incremental
         .as_ref()
         .map(|d| d.join(format!("{:016x}", incr::key(&[flavor.as_bytes()]))));
-    let (r, reuse) = incr::with(dir.as_deref(), || {
-        compile_unit_in(source, path, config, prebuilt, lib, files)
-    });
+    let (r, reuse) = incr::with(
+        dir.as_deref(),
+        || compile_unit_in(source, path, config, prebuilt, lib, files),
+        Result::is_ok,
+    );
     r.map(|mut p| {
         p.reuse = reuse;
         p
@@ -898,6 +904,7 @@ fn compile_unit_in(
         no_implicit_rok: NO_IMPLICIT.with(std::cell::RefCell::take),
         fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
         bodies: incr::current().map(|i| incr::bodies(i, files)),
+        lints: config.keep_ast,
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -1060,14 +1067,25 @@ fn package_hashes(
 /// Spec 0.3.3: SHA-256 over the files in byte-wise order of their
 /// package-relative `/` paths, each as `path \0 content \0`; the first
 /// 8 hex digits.
+/// Each package's hash is computed once per process (a REPL session
+/// hashes the same library every cell), by a fast hash of its files.
 fn hash_package(files: &mut Vec<(String, &str)>) -> String {
+    static DONE: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> =
+        std::sync::Mutex::new(None);
     files.sort_unstable();
     files.dedup();
     let blob: String = files
         .iter()
         .flat_map(|(rel, text)| [rel.as_str(), "\0", text, "\0"])
         .collect();
-    rokc_codegen_mlir::pkg_hash(&blob)
+    let key = rokc_core::hash::fast(blob.as_bytes());
+    let mut done = DONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    done.get_or_insert_with(std::collections::HashMap::new)
+        .entry(key)
+        .or_insert_with(|| rokc_codegen_mlir::pkg_hash(&blob))
+        .clone()
 }
 
 fn build_prec_table(

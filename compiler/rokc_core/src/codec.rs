@@ -22,6 +22,9 @@ pub struct Enc {
     pub foreign: Vec<(u32, u32)>,
     /// When set, gets every id written by `Enc::id`.
     pub ids: Option<Vec<(IdKind, u32)>>,
+    /// Ids go to `ids` only, not into `buf` (a fingerprint that names
+    /// them otherwise).
+    pub no_ids: bool,
 }
 
 impl Enc {
@@ -34,6 +37,7 @@ impl Enc {
             home: None,
             foreign: Vec::new(),
             ids: None,
+            no_ids: false,
         }
     }
 
@@ -42,7 +46,9 @@ impl Enc {
         if let Some(ids) = &mut self.ids {
             ids.push((kind, v));
         }
-        self.u(u64::from(v));
+        if !self.no_ids {
+            self.u(u64::from(v));
+        }
     }
 
     pub fn u(&mut self, mut v: u64) {

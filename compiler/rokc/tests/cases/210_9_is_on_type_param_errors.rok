@@ -1,0 +1,19 @@
+// expect-error: 9:5: non-exhaustive match on `T`: values of `T` (add a `_` arm) not covered (spec 3.12.5)
+// expect-error: 15:37: type pattern `i32` can't match a value of type `str`
+
+// A type pattern on a type parameter is refutable at the definition
+// check (each arm is reachable for some `T`, so the match needs a `_`);
+// one on a fixed type that can't match stays an error in a generic
+// body.
+fn no_catch_all<T>(x: T) -> i32 {
+    match x {
+        n: i32 => n,
+        s: str => 1,
+    }
+}
+
+fn fixed<T>(x: T, s: str) -> bool { if let n: i32 = s { true } else { false } }
+
+fn main() {
+    println(f"{no_catch_all(1i32)} {fixed(1i32, "a")}");
+}

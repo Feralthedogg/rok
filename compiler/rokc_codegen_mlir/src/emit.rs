@@ -26,8 +26,11 @@ const LIST: &str = "rok::core::collections::list::List";
 /// GC object memory; GC object memory read and written as different
 /// scalar types (a `GcBuf<f64>`'s elements, a `GcBuf<usize>` length)
 /// never overlaps: a buffer is only ever accessed as its element type.
-/// A root (`gcroot`, what the shadow-stack frame points to) counts as a
-/// reference: the collector reads it (`REF_ONLY_CALLS`). Other accesses
+/// Memory the collector reads or rewrites counts as a reference (`ref`,
+/// the tag of `REF_ONLY_CALLS`): a root (`gcroot`, what the shadow-stack
+/// frame points to), a heap reference (`gc`), a heap `str` (its pointer)
+/// and a card of the write barrier (`card`); each a type of its own, so
+/// one does not clobber the other. Other accesses
 /// (raw addresses, scratch, the runtime's words) carry no tag and may
 /// alias anything.
 const TBAA_DEFS: &str = r#"#rok_tbaa_root = #llvm.tbaa_root<id = "rok">
@@ -69,6 +72,12 @@ const TBAA_DEFS: &str = r#"#rok_tbaa_root = #llvm.tbaa_root<id = "rok">
 #rok_tbaa_ref = #llvm.tbaa_tag<base_type = #rok_tbaa_ref_t, access_type = #rok_tbaa_ref_t, offset = 0>
 #rok_tbaa_gcroot_t = #llvm.tbaa_type_desc<id = "rok.gcroot", members = {<#rok_tbaa_ref_t, 0>}>
 #rok_tbaa_gcroot = #llvm.tbaa_tag<base_type = #rok_tbaa_gcroot_t, access_type = #rok_tbaa_gcroot_t, offset = 0>
+#rok_tbaa_gc_t = #llvm.tbaa_type_desc<id = "rok.heap.gc", members = {<#rok_tbaa_ref_t, 0>}>
+#rok_tbaa_gc = #llvm.tbaa_tag<base_type = #rok_tbaa_gc_t, access_type = #rok_tbaa_gc_t, offset = 0>
+#rok_tbaa_str_t = #llvm.tbaa_type_desc<id = "rok.heap.str", members = {<#rok_tbaa_ref_t, 0>}>
+#rok_tbaa_str = #llvm.tbaa_tag<base_type = #rok_tbaa_str_t, access_type = #rok_tbaa_str_t, offset = 0>
+#rok_tbaa_card_t = #llvm.tbaa_type_desc<id = "rok.card", members = {<#rok_tbaa_ref_t, 0>}>
+#rok_tbaa_card = #llvm.tbaa_tag<base_type = #rok_tbaa_card_t, access_type = #rok_tbaa_card_t, offset = 0>
 "#;
 
 /// The TBAA tag (`TBAA_DEFS`) of a GC buffer element of type `ty`.
@@ -90,9 +99,9 @@ const fn heap_tbaa(ty: &MirTy) -> &'static str {
             PrimTy::Bool => "#rok_tbaa_bool",
             PrimTy::Char => "#rok_tbaa_char",
             PrimTy::CChar => "#rok_tbaa_cchar",
-            PrimTy::Str => "#rok_tbaa_heap",
+            PrimTy::Str => "#rok_tbaa_str",
         },
-        MirTy::GcRef => "#rok_tbaa_ref",
+        MirTy::GcRef => "#rok_tbaa_gc",
         _ => "#rok_tbaa_heap",
     }
 }
@@ -2235,7 +2244,7 @@ impl<'a> FnEmit<'a> {
     cf.cond_br {carded}, ^rok_wbcard{n}, ^rok_wbok{n}
   ^rok_wbcard{n}:
     {ctp} = llvm.getelementptr {hp}[-{word}] : (!llvm.ptr) -> !llvm.ptr, i8
-    {ct} = llvm.load {ctp} : !llvm.ptr -> !llvm.ptr
+    {ct} = llvm.load {ctp} {{tbaa = [#rok_tbaa_card]}} : !llvm.ptr -> !llvm.ptr
     {si} = llvm.ptrtoint {slot} : !llvm.ptr to i{pw}
     {oi} = llvm.ptrtoint {hp} : !llvm.ptr to i{pw}
     {off} = arith.subi {si}, {oi} : i{pw}
@@ -2247,8 +2256,8 @@ impl<'a> FnEmit<'a> {
     {c0} = llvm.getelementptr {ct}[{i0}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
     {c1} = llvm.getelementptr {ct}[{i1}] : (!llvm.ptr, i{pw}) -> !llvm.ptr, i8
     {one} = arith.constant 1 : i8
-    llvm.store {one}, {c0} : i8, !llvm.ptr
-    llvm.store {one}, {c1} : i8, !llvm.ptr
+    llvm.store {one}, {c0} {{tbaa = [#rok_tbaa_card]}} : i8, !llvm.ptr
+    llvm.store {one}, {c1} {{tbaa = [#rok_tbaa_card]}} : i8, !llvm.ptr
     cf.br ^rok_wbok{n}
   ^rok_wbok{n}:
 "
@@ -4667,6 +4676,20 @@ impl<'a> FnEmit<'a> {
         if parked {
             self.emit_native_edge(true);
         }
+        // The declaration's parameter attributes (`sret` in `x8` on arm64,
+        // `byval`, `signext` / `zeroext`) go on the call too: LLVM reads
+        // some from the call alone (a `tail` call reaches no caller
+        // `alloca` unless the call marks it `byval`).
+        let mut attrs: Vec<String> = c_signature(params, ret, abi, self.target)
+            .0
+            .into_iter()
+            .map(|(_, a)| match a.trim() {
+                "" => "{}".to_owned(),
+                a => a.to_owned(),
+            })
+            .collect();
+        attrs.resize(ops.len(), "{}".to_owned());
+        let attrs = format!("arg_attrs = [{}]", attrs.join(", "));
         match callee {
             Callee::Symbol(name) if abi.variadic => {
                 // The fixed part of the prototype: the hidden sret
@@ -4677,44 +4700,33 @@ impl<'a> FnEmit<'a> {
                 proto.push("...");
                 let _ = writeln!(
                     self.body,
-                    "    {lhs}llvm.call @{name}({list}) vararg(!llvm.func<{fn_ret} ({})>) : ({tlist}) -> {rty}",
+                    "    {lhs}llvm.call @{name}({list}) vararg(!llvm.func<{fn_ret} ({})>) {{{attrs}}} : ({tlist}) -> {rty}",
                     proto.join(", ")
                 );
             }
             Callee::Symbol(name) if abi.stdcall => {
                 let _ = writeln!(
                     self.body,
-                    "    {lhs}llvm.call x86_stdcallcc @{name}({list}) : ({tlist}) -> {rty}"
+                    "    {lhs}llvm.call x86_stdcallcc @{name}({list}) {{{attrs}}} : ({tlist}) -> {rty}"
                 );
             }
             Callee::Symbol(name) if REF_ONLY_CALLS.contains(&name) => {
                 let _ = writeln!(
                     self.body,
-                    "    {lhs}llvm.call @{name}({list}) {{tbaa = [#rok_tbaa_ref]}} : ({tlist}) -> {rty}"
+                    "    {lhs}llvm.call @{name}({list}) {{{attrs}, tbaa = [#rok_tbaa_ref]}} : ({tlist}) -> {rty}"
                 );
             }
             Callee::Symbol(name) => {
                 let _ = writeln!(
                     self.body,
-                    "    {lhs}func.call @{name}({list}) : ({tlist}) -> {rty}"
+                    "    {lhs}func.call @{name}({list}) {{{attrs}}} : ({tlist}) -> {rty}"
                 );
             }
             Callee::Ptr(p) => {
-                // The declaration's parameter attributes (`sret` in `x8`
-                // on arm64, `byval`, `signext` / `zeroext`) go on the call.
-                let attrs: Vec<String> = c_signature(params, ret, abi, self.target)
-                    .0
-                    .into_iter()
-                    .map(|(_, a)| match a.trim() {
-                        "" => "{}".to_owned(),
-                        a => a.to_owned(),
-                    })
-                    .collect();
                 let cc = if abi.stdcall { "x86_stdcallcc " } else { "" };
                 let _ = writeln!(
                     self.body,
-                    "    {lhs}llvm.call {cc}{p}({list}) {{arg_attrs = [{}]}} : !llvm.ptr, ({tlist}) -> {rty}",
-                    attrs.join(", ")
+                    "    {lhs}llvm.call {cc}{p}({list}) {{{attrs}}} : !llvm.ptr, ({tlist}) -> {rty}"
                 );
             }
         }

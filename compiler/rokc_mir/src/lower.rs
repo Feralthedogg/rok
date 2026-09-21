@@ -1865,6 +1865,45 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
+    /// Or-pattern test. Chain: the first alt that matches lands in a
+    /// per-alt success block, runs its own `bind_pattern`, then jumps to
+    /// the arm body. Spec 3.11.4 — each alt's bindings reach the arm body
+    /// through the same shared locals (allocated in HIR lowering). No
+    /// alts match nothing (a type test decided false per instance).
+    fn lower_or_test(
+        &mut self,
+        alts: &[HirPattern],
+        scrut_local: LocalId,
+        scrut_ty: &MirTy,
+        arm_body_bb: BlockId,
+        next_bb: BlockId,
+    ) {
+        if alts.is_empty() {
+            self.terminate(Terminator::Goto {
+                target: next_bb,
+                args: Vec::new(),
+            });
+        }
+        for (i, alt) in alts.iter().enumerate() {
+            let local_next = if i + 1 < alts.len() {
+                self.new_block()
+            } else {
+                next_bb
+            };
+            let alt_success_bb = self.new_block();
+            self.lower_pattern_test(alt, scrut_local, scrut_ty, alt_success_bb, local_next);
+            self.current = alt_success_bb;
+            self.bind_pattern(alt, scrut_local);
+            self.terminate(Terminator::Goto {
+                target: arm_body_bb,
+                args: Vec::new(),
+            });
+            if i + 1 < alts.len() {
+                self.current = local_next;
+            }
+        }
+    }
+
     /// Emit the comparison(s) that decide whether an arm matches. On a
     /// match the fall-through reaches `arm_body_bb`; otherwise it
     /// reaches `next_bb`. The current block is fully terminated.
@@ -1946,28 +1985,7 @@ impl<'a> FnBuilder<'a> {
                 }
             }
             HirPattern::Or(alts) => {
-                // Chain: first alt that matches lands in a per-alt success
-                // block, runs its own `bind_pattern`, then jumps to the arm
-                // body. Spec 3.11.4 — each alt's bindings reach the arm body
-                // through the same shared locals (allocated in HIR lowering).
-                for (i, alt) in alts.iter().enumerate() {
-                    let local_next = if i + 1 < alts.len() {
-                        self.new_block()
-                    } else {
-                        next_bb
-                    };
-                    let alt_success_bb = self.new_block();
-                    self.lower_pattern_test(alt, scrut_local, scrut_ty, alt_success_bb, local_next);
-                    self.current = alt_success_bb;
-                    self.bind_pattern(alt, scrut_local);
-                    self.terminate(Terminator::Goto {
-                        target: arm_body_bb,
-                        args: Vec::new(),
-                    });
-                    if i + 1 < alts.len() {
-                        self.current = local_next;
-                    }
-                }
+                self.lower_or_test(alts, scrut_local, scrut_ty, arm_body_bb, next_bb);
             }
             HirPattern::Struct { fields, .. } => {
                 let MirTy::Struct(_, elem_tys) = scrut_ty.clone() else {

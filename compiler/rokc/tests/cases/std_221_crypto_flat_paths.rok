@@ -1,0 +1,67 @@
+// expect-exit: 0
+// expect-stdout:
+// sha256 32 64
+// digest 32
+// sha3 32 64
+// shake 16 32
+// hmac true
+// hkdf 42
+// aead 12 16 28 3
+// x25519 32
+// mlkem 1184 2400 1088 32
+// ed25519 true
+// ecdsa true
+// rsa true
+// same type true
+
+// Every item 2.21 lists is reachable flat at `crypto::`; the submodule path
+// names the same definition.
+use rok::core::crypto;
+use rok::core::crypto::{
+    HashAlgorithm, Digest, Sha3_256, Sha3_512, Shake128, Shake256, Hmac, Hkdf,
+    AeadAlgorithm, Aead, X25519, MlKem768, Ed25519, EcCurve, Ecdsa,
+    RsaPublicKey, RsaPrivateKey,
+};
+
+fn main() {
+    println(f"sha256 {HashAlgorithm::Sha256.output_len()} {HashAlgorithm::Sha256.block_len()}");
+    let d = Digest::new(HashAlgorithm::Sha256);
+    d.update("abc");
+    println(f"digest {d.finish().len()}");
+    println(f"sha3 {Sha3_256::digest("a").len()} {Sha3_512::digest("a").len()}");
+    let s = Shake128::new();
+    s.update("a");
+    let t = Shake256::new();
+    t.update("a");
+    println(f"shake {s.squeeze(16).len()} {t.squeeze(32).len()}");
+    let tag = Hmac::mac(HashAlgorithm::Sha256, "key", "msg");
+    println(f"hmac {Hmac::verify(HashAlgorithm::Sha256, "key", "msg", tag)}");
+    let prk = Hkdf::extract(HashAlgorithm::Sha256, "salt", "ikm");
+    let okm = try Hkdf::expand(HashAlgorithm::Sha256, prk, "", 42usize) catch _ { [] };
+    println(f"hkdf {okm.len()}");
+    let key: List<u8> = [];
+    for _ in 0..32 { key.push(7u8); }
+    let nonce: List<u8> = [];
+    for _ in 0..12 { nonce.push(1u8); }
+    let alg = AeadAlgorithm::ChaCha20Poly1305;
+    let a = try Aead::new(alg, key) catch _ { panic("key") };
+    let sealed = try a.seal(nonce, "", "hello world!") catch _ { [] };
+    let opened = try a.open(nonce, "", sealed) catch _ { none };
+    let n = match opened { p: List<u8> => p.len(), _: none => 0usize };
+    println(f"aead {alg.nonce_len()} {alg.tag_len()} {sealed.len()} {n / 4usize}");
+    let pk = try X25519::public_key(key) catch _ { [] };
+    println(f"x25519 {pk.len()}");
+    println(f"mlkem {MlKem768::ENCAPSULATION_KEY_LEN} {MlKem768::DECAPSULATION_KEY_LEN} {MlKem768::CIPHERTEXT_LEN} {MlKem768::SHARED_KEY_LEN}");
+    let epk = try Ed25519::public_key(key) catch _ { [] };
+    let sig = try Ed25519::sign(key, "m") catch _ { [] };
+    println(f"ed25519 {Ed25519::verify(epk, "m", sig)}");
+    let cpk = try Ecdsa::public_key(EcCurve::P256, key) catch _ { [] };
+    let csig = try Ecdsa::sign(EcCurve::P256, HashAlgorithm::Sha256, key, "m") catch _ { [] };
+    println(f"ecdsa {Ecdsa::verify(EcCurve::P256, HashAlgorithm::Sha256, cpk, "m", csig)}");
+    let bad: RsaPublicKey | none = try RsaPublicKey::from_pkcs1_der("x") catch _ { none };
+    let bad2: RsaPrivateKey | none = try RsaPrivateKey::from_pkcs1_der("x") catch _ { none };
+    println(f"rsa {bad is none && bad2 is none}");
+    let h: HashAlgorithm = crypto::sha2::HashAlgorithm::Sha384;
+    let g: crypto::aead::Aead = a;
+    println(f"same type {h.output_len() == 48usize && g.algorithm().key_len() == 32usize}");
+}

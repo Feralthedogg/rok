@@ -1,0 +1,19 @@
+// spec: std 2.15
+// expect-exit: 0
+// expect-stdout:
+// [ab]
+// [ab ]
+// [  ab]
+// [x y]
+
+// The runtime takes `str` by stack copy (`byval`) on 32-bit x86. A
+// leaf wrapper's call to it is a `tail` call; the copy's stores must
+// survive (they did not on i686 Windows at -O2: blank results).
+
+fn main() {
+    println(f"[{"  ab ".trim()}]");
+    println(f"[{"  ab ".trim_start()}]");
+    println(f"[{"  ab ".trim_end()}]");
+    let s = " x y ";
+    println(f"[{s.trim()}]");
+}

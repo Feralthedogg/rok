@@ -661,20 +661,22 @@ fn wit_link_args(w: &rokc_mir::WitLink, tmp: &Path) -> Result<Vec<OsString>, Rok
     let world = dir.join("component.wit");
     std::fs::write(&world, &w.world).map_err(|e| io(&world, e))?;
     for (i, src) in w.sources.iter().enumerate() {
-        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("wit");
-        if src.is_dir() {
-            let to = deps.join(format!("{i}-{stem}"));
+        let stem = src
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("wit");
+        let to = deps.join(format!("{i}-{stem}"));
+        if src.dir {
             std::fs::create_dir_all(&to).map_err(|e| io(&to, e))?;
-            let files = std::fs::read_dir(src).map_err(|e| io(src, e))?;
-            for f in files.filter_map(Result::ok).map(|e| e.path()) {
-                if f.is_file() && f.extension().is_some_and(|x| x == "wit") {
-                    let dst = to.join(f.file_name().unwrap_or_default());
-                    std::fs::copy(&f, &dst).map_err(|e| io(&dst, e))?;
-                }
-            }
-        } else {
-            let dst = deps.join(format!("{i}-{stem}.wit"));
-            std::fs::copy(src, &dst).map_err(|e| io(&dst, e))?;
+        }
+        for (path, text) in &src.files {
+            let dst = if src.dir {
+                to.join(path.file_name().unwrap_or_default())
+            } else {
+                deps.join(format!("{i}-{stem}.wit"))
+            };
+            std::fs::write(&dst, text).map_err(|e| io(&dst, e))?;
         }
     }
     let mut a: Vec<OsString> = vec!["--component-type".into(), dir.into_os_string()];

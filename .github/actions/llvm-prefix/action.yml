@@ -1,10 +1,13 @@
 name: llvm-prefix
 description: >
   The pinned LLVM + MLIR + lld prefix of llvm/build.sh (Windows:
-  llvm/build.ps1), restored from the actions cache and named by
-  ROK_LLVM_PREFIX. With build, a missing prefix is built, stripped and
-  saved instead; without, a missing prefix fails the job. Windows: the
-  MSVC environment is exported for every later step.
+  llvm/build.ps1), named by ROK_LLVM_PREFIX: restored from the actions
+  cache on a GitHub-hosted runner; on a self-hosted one kept in
+  ROK_CI_HOME (the runner's environment), which also holds the cargo
+  target directory (CARGO_TARGET_DIR, one per runner). With build, a
+  missing prefix is built, stripped and saved instead; without, a
+  missing prefix fails the job. Windows: the MSVC environment is
+  exported for every later step.
 
 inputs:
   root:
@@ -13,6 +16,9 @@ inputs:
   build:
     description: Build and save the prefix when the cache has none.
     default: "false"
+  arch:
+    description: The runner architecture (X64, ARM64) whose prefix to take instead of this runner's (an emulated rokc).
+    default: ""
 
 outputs:
   prefix:
@@ -42,44 +48,65 @@ runs:
       shell: bash
       env:
         ROOT: ${{ inputs.root }}
+        ARCH: ${{ inputs.arch }}
+        ENVIRONMENT: ${{ runner.environment }}
+        HASH: ${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root)) }}
       run: |
         v=$(sed -n 's/^VERSION=//p' "${ROOT}llvm/build.sh")
-        if [ "$RUNNER_OS" = Windows ]; then
+        arch=${ARCH:-$RUNNER_ARCH}
+        if [ "$ENVIRONMENT" = self-hosted ]; then
+          home=${ROK_CI_HOME:?the self-hosted runner sets ROK_CI_HOME, its persistent directory (docs/ci.md)}
+          p=$home/llvm-$v-$arch-${HASH:0:16}
+          [ -f "$p/.complete" ] && echo "hit=true" >>"$GITHUB_OUTPUT"
+          echo "CARGO_TARGET_DIR=$home/target/$RUNNER_NAME" >>"$GITHUB_ENV"
+        elif [ "$RUNNER_OS" = Windows ]; then
           p="$LOCALAPPDATA\\rok\\llvm-$v"
         else
           p=$HOME/.cache/rok/llvm-$v
         fi
         echo "prefix=$p" >>"$GITHUB_OUTPUT"
-        echo "key=llvm-$v-$RUNNER_OS-$RUNNER_ARCH" >>"$GITHUB_OUTPUT"
+        echo "key=llvm-$v-$RUNNER_OS-$arch-$HASH" >>"$GITHUB_OUTPUT"
         echo "ROK_LLVM_PREFIX=$p" >>"$GITHUB_ENV"
 
     - id: cache
+      if: runner.environment == 'github-hosted'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.where.outputs.prefix }}
-        key: ${{ steps.where.outputs.key }}-${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root)) }}
+        key: ${{ steps.where.outputs.key }}
         lookup-only: ${{ inputs.build }}
         fail-on-cache-miss: ${{ inputs.build != 'true' }}
 
+    - name: Missing (self-hosted)
+      if: runner.environment == 'self-hosted' && steps.where.outputs.hit != 'true' && inputs.build != 'true'
+      shell: bash
+      run: |
+        echo "::error::no LLVM prefix at $ROK_LLVM_PREFIX (the llvm job builds it)"
+        exit 1
+
     # The build tree needs ~15 GB more than a runner's free disk.
     - name: Free disk (Linux)
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux' && runner.environment == 'github-hosted'
       shell: bash
       run: |
         sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift
         df -h "$HOME"
 
     # clang reads llvm/rok.profdata.xz (indexed format 12: clang 19+);
-    # Ubuntu 24.04's default clang is 18 and its c++ is gcc.
+    # Ubuntu 24.04's default clang is 18 and its c++ is gcc. A
+    # self-hosted runner has clang-19 installed.
     - name: Build (Unix)
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os != 'Windows'
       shell: bash
       env:
         ROOT: ${{ inputs.root }}
+        ENVIRONMENT: ${{ runner.environment }}
       run: |
         if [ "$RUNNER_OS" = Linux ]; then
-          sudo apt-get update -q
-          sudo apt-get install -y -q clang-19
+          if [ "$ENVIRONMENT" = github-hosted ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q clang-19
+          fi
           export CC=clang-19 CXX=clang++-19
         fi
         "${ROOT}llvm/build.sh" "$ROK_LLVM_PREFIX" 2>&1 | tee "$RUNNER_TEMP/llvm-build.log"
@@ -89,7 +116,7 @@ runs:
         fi
 
     - name: Build (Windows)
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os == 'Windows'
       shell: pwsh
       env:
         ROOT: ${{ inputs.root }}
@@ -98,17 +125,19 @@ runs:
     # What rokc_llvm's build.rs does not read: shared libraries, the
     # object libraries, opt-viewer; on Windows also bin/, where lld is five
     # copies, not links (targets/build.sh needs bin/ld.lld on Unix only).
+    # A self-hosted prefix is marked complete last.
     - name: Strip
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true'
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true'
       shell: bash
       run: |
         cd "$ROK_LLVM_PREFIX"
         rm -rf lib/objects-Release share/opt-viewer lib/*.dylib lib/*.so lib/*.so.*
         if [ "$RUNNER_OS" = Windows ]; then rm -rf bin; fi
         du -sh .
+        touch .complete
 
     - name: Save
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true'
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.environment == 'github-hosted'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.where.outputs.prefix }}

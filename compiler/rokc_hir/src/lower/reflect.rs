@@ -341,15 +341,14 @@ fn int_fits(x: HirExpr, from: PrimTy, to: PrimTy, span: rokc_diagnostic::Span) -
 fn method_table(ctx: &LowerCtx<'_>, ty: &HirTy) -> String {
     let mut rows: Vec<(String, String)> = Vec::new();
     let target = super::resolve::method_target_for(ty);
-    for ((tgt, name), ids) in &ctx.env.method_table {
+    for ((tgt, name), ids) in ctx.env.all_methods() {
         if Some(tgt) != target.as_ref() {
             continue;
         }
         for id in ids {
             if ctx
                 .env
-                .method_info
-                .get(id)
+                .method_info(*id)
                 .is_some_and(|i| i.trait_name.is_some())
             {
                 continue;
@@ -376,7 +375,7 @@ fn method_table(ctx: &LowerCtx<'_>, ty: &HirTy) -> String {
     };
     if let Some(base) = base {
         let base = enum_base_name(&base).to_owned();
-        for ((b, name), gms) in &ctx.env.generic_methods {
+        for ((b, name), gms) in ctx.env.all_generic_methods() {
             if *b != base || rows.iter().any(|(n, _)| n == name) {
                 continue;
             }

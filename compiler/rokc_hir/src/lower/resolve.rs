@@ -136,6 +136,7 @@ pub(super) fn resolve_name(
             LookupOutcome::None => {}
         }
     }
+    super::incr::read(|| super::incr::Read::Uses(module.to_owned()));
     if let Some(entries) = uses.get(module) {
         match lookup_in_use_entries_full(entries, segments, &suffix, set) {
             LookupOutcome::Resolved(s) => return Ok(Some(s)),
@@ -170,8 +171,8 @@ pub fn root_path(segments: &[&str], module: &str) -> Option<Vec<String>> {
         "pkg" => {
             let package = package_of(module);
             let mut out = Vec::new();
-            if is_dependency(&package) {
-                out.push(package);
+            if is_dependency(package) {
+                out.push(package.to_owned());
             }
             out.extend(owned(&segments[1..]));
             Some(out)
@@ -290,12 +291,18 @@ pub fn is_dependency(name: &str) -> bool {
 /// The package `module` belongs to: `rok::<tier>` (each library tier is
 /// its own package, spec 5.7), a dependency's name, or `""` — the
 /// package being compiled.
-pub(super) fn package_of(module: &str) -> String {
-    let mut parts = module.split("::");
-    match parts.next() {
-        Some("rok") => format!("rok::{}", parts.next().unwrap_or_default()),
-        Some(first) if is_dependency(first) => first.to_owned(),
-        _ => String::new(),
+pub(super) fn package_of(module: &str) -> &str {
+    let first = module.split("::").next().unwrap_or_default();
+    if first == "rok" {
+        let end = module
+            .match_indices("::")
+            .nth(1)
+            .map_or(module.len(), |(i, _)| i);
+        &module[..end]
+    } else if is_dependency(first) {
+        first
+    } else {
+        ""
     }
 }
 
@@ -463,7 +470,7 @@ pub(super) fn instance(
     if !open.is_empty() || args.contains(&HirTy::Unknown) {
         return None;
     }
-    if defs.generic_structs.contains_key(full) {
+    if defs.generic_struct(full).is_some() {
         return defs
             .instantiate_struct(full, args, span, |def, subst| {
                 mono::generic_struct_fields(def, &|t| {
@@ -517,7 +524,7 @@ pub(super) fn resolve_ty_with_structs(
                 }
                 return HirTy::Path(segs.iter().map(|s| (*s).to_owned()).collect());
             };
-            if sc.names.traits.contains(&full) {
+            if sc.names.is_trait(&full) {
                 let written = segs.join("::");
                 sc.names.error_help(
                     sc.at,
@@ -540,8 +547,7 @@ pub(super) fn resolve_ty_with_structs(
                 // reported by the alias pass.
                 if let Some(t) = sc
                     .names
-                    .plain_aliases
-                    .get(&full)
+                    .plain_alias_ty(&full)
                     .filter(|_| sc.names.alias_depth.get() < 32)
                 {
                     let module = module_of(&full);
@@ -610,10 +616,10 @@ pub(super) fn resolve_ty_with_structs(
             for b in bounds {
                 let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
                 let key = sc.names.trait_key(&segs, sc.module, sc.at);
-                let user_trait = sc.names.traits.contains(&key);
+                let user_trait = sc.names.is_trait(&key);
                 // Bootstrap traits key by their last segment (see
                 // `trait_key`); anything else must name a declared trait.
-                if !user_trait && !sc.names.traits.iter().any(|t| leaf_name(t) == key) {
+                if !user_trait && !sc.names.all_traits().iter().any(|t| leaf_name(t) == key) {
                     sc.names.error(
                         sc.at,
                         format!(
@@ -636,7 +642,7 @@ pub(super) fn resolve_ty_with_structs(
 /// Trait path `p` as written in `module` (`Get<i32, Item = u8>`), its
 /// type arguments resolved by `rec`; its errors go to `at`.
 pub(super) fn trait_ref(
-    names: &TypeNames<'_>,
+    names: &TypeNames,
     p: &rokc_ast::Path,
     module: &str,
     at: rokc_diagnostic::Span,

@@ -41,6 +41,7 @@ fn end_to_end_cases() {
         let f = f.to_string_lossy().into_owned();
         cases.retain(|(name, _)| name.contains(&f));
     }
+    let cases = shard(cases);
 
     let results = par_map(&cases, |(name, path)| {
         let r = run_case(&env, name, path, &scratch);
@@ -91,6 +92,7 @@ fn run_case(
         }
         return check_expect_error(&source, &stderr);
     }
+    check_lints(env, &source, path, &case_dir)?;
     let Some(expected) = parse_expect_exit(&source) else {
         return Err("missing `// expect-exit: N` (or `// expect-error:`) directive".into());
     };
@@ -185,6 +187,42 @@ fn run_case(
         ];
         check_run(&source, &exe, expected, &env)
             .map_err(|e| format!("gc-stress concurrent: {e}"))?;
+    }
+    Ok(())
+}
+
+/// `// expect-lint:`: the `E503` diagnostics of `rokc lint`, as
+/// `line:col headline`, are exactly the directives.
+fn check_lints(
+    env: &Env,
+    source: &str,
+    path: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<(), String> {
+    let want: Vec<&str> = directives(source, "expect-lint:").collect();
+    if want.is_empty() {
+        return Ok(());
+    }
+    let out = rokc_lint(env, path, &dir.join("lint")).map_err(|e| format!("rokc lint: {e}"))?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    let mut got = Vec::new();
+    let mut lines = err.lines();
+    while let Some(l) = lines.next() {
+        let Some(msg) = l
+            .strip_prefix("warning[E503]: ")
+            .or_else(|| l.strip_prefix("error[E503]: "))
+        else {
+            continue;
+        };
+        let at = lines
+            .next()
+            .and_then(|w| w.rsplit(':').nth(1).zip(w.rsplit(':').next()))
+            .map(|(line, col)| format!("{line}:{col}"))
+            .unwrap_or_default();
+        got.push(format!("{at} {msg}"));
+    }
+    if got != want {
+        return Err(format!("lints mismatch\n  want: {want:?}\n  got:  {got:?}"));
     }
     Ok(())
 }

@@ -118,7 +118,8 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         shared: &shared,
         held: &held,
         nodes: HashMap::new(),
-        changed: true,
+        readers: HashMap::new(),
+        dirty: ids.iter().copied().collect(),
         cut: HashMap::new(),
         holds: HashMap::new(),
         cur: FunctionId(0),
@@ -126,16 +127,14 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         breaks: Vec::new(),
         sinks: Vec::new(),
     };
-    while flow.changed {
-        flow.changed = false;
-        flow.sinks.clear();
-        for &id in &ids {
-            flow.function(all[&id]);
-        }
+    let mut sinks = HashMap::new();
+    while let Some(id) = flow.dirty.pop_first() {
+        flow.function(all[&id]);
+        sinks.insert(id, std::mem::take(&mut flow.sinks));
     }
 
     // 3. The sinks.
-    let mut sinks = std::mem::take(&mut flow.sinks);
+    let mut sinks: Vec<_> = sinks.into_values().flatten().collect();
     sinks.sort_by_key(|(span, _, _)| (span.file, span.start));
     let mut seen = HashSet::new();
     for (span, sink, items) in sinks {
@@ -187,8 +186,14 @@ fn frame(
             .unwrap_or_else(|| "a temporary".to_owned())
     };
     let ty_of = |l: LocalId| f.locals.iter().find(|x| x.id == l).map(|x| x.ty.clone());
-    let non_send = |t: &HirTy| *t != HirTy::Unknown && !ctx.has_trait(t, send);
-    let non_sync = |t: &HirTy| sync.is_some_and(|k| *t != HirTy::Unknown && !ctx.has_trait(t, k));
+    let lacks = |t: &HirTy, k: &str| {
+        !matches!(
+            t,
+            HirTy::Unknown | HirTy::Prim(_) | HirTy::Unit | HirTy::Never
+        ) && !ctx.has_trait(t, k)
+    };
+    let non_send = |t: &HirTy| lacks(t, send);
+    let non_sync = |t: &HirTy| sync.is_some_and(|k| lacks(t, k));
     let env_params: HashSet<LocalId> = f
         .params
         .iter()
@@ -375,7 +380,8 @@ impl Walk<'_> {
                 let operands = !matches!(kind, HirExprKind::If { .. } | HirExprKind::Block(_));
                 let mut kids = Vec::new();
                 each_child(e, &mut |c| kids.push(c));
-                let mut pending: Option<HirTy> = None;
+                // Operand types are asked only once a later one suspends.
+                let mut prior: Vec<&HirTy> = Vec::new();
                 for c in kids {
                     let before = self.suspends;
                     match c {
@@ -383,13 +389,14 @@ impl Walk<'_> {
                         Child::B(b) => self.block(b),
                     }
                     if self.suspends > before && self.found.is_none() {
-                        if let Some(t) = pending.take() {
-                            self.found = Some(Found::Temp(t));
+                        if let Some(t) = prior.iter().find(|t| (self.non_send_ty)(t)) {
+                            self.found = Some(Found::Temp((*t).clone()));
                         }
+                        prior.clear();
                     }
                     if let Child::E(x) = c {
-                        if operands && pending.is_none() && (self.non_send_ty)(&x.ty) {
-                            pending = Some(x.ty.clone());
+                        if operands && self.found.is_none() {
+                            prior.push(&x.ty);
                         }
                     }
                 }
@@ -449,7 +456,10 @@ struct Flow<'a> {
     shared: &'a HashMap<FunctionId, String>,
     held: &'a HashMap<FunctionId, Vec<LocalId>>,
     nodes: HashMap<Node, Set>,
-    changed: bool,
+    /// The functions whose walk read each node.
+    readers: HashMap<Node, BTreeSet<FunctionId>>,
+    /// Functions to walk (again): a node they read grew.
+    dirty: BTreeSet<FunctionId>,
     /// Per type (its debug form): holds nothing.
     cut: HashMap<String, bool>,
     /// Per struct / enum: may hold a `fn` value.
@@ -459,12 +469,14 @@ struct Flow<'a> {
     ref_params: Vec<LocalId>,
     /// Values of the enclosing loops / labelled blocks' `break`s.
     breaks: Vec<Set>,
-    /// Sink calls of this pass: span and what their arguments hold.
+    /// Sink calls of the current function's walk: span and what their
+    /// arguments hold.
     sinks: Vec<(rokc_diagnostic::Span, &'static str, Set)>,
 }
 
 impl Flow<'_> {
-    fn get(&self, n: &Node) -> Set {
+    fn get(&mut self, n: &Node) -> Set {
+        self.readers.entry(n.clone()).or_default().insert(self.cur);
         self.nodes.get(n).cloned().unwrap_or_default()
     }
 
@@ -472,11 +484,13 @@ impl Flow<'_> {
         if s.is_empty() {
             return;
         }
-        let e = self.nodes.entry(n).or_default();
+        let e = self.nodes.entry(n.clone()).or_default();
         let before = e.len();
         e.extend(s.iter().copied());
         if e.len() > before {
-            self.changed = true;
+            if let Some(r) = self.readers.get(&n) {
+                self.dirty.extend(r.iter().copied());
+            }
         }
     }
 

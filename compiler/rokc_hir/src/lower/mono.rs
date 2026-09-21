@@ -429,7 +429,7 @@ pub(super) fn monomorphize_on(
 
     // A generic body being checked (`bounds`): the callee's signature
     // only, unless its return type comes from its body.
-    if !infers_ret(fn_def, &ctx.env.may_diverge)
+    if !infers_ret(fn_def, |s| ctx.env.diverges(s))
         && subst_tys
             .iter()
             .chain(&self_hir)
@@ -470,7 +470,7 @@ pub(super) fn monomorphize_on(
     // Resolve the return type up front for recursive calls in the body.
     let mut preview_ret_ty =
         resolve_in_mono(ctx, fn_def, &subst, self_hir.clone(), &sig_ret_ast(fn_def));
-    if infers_ret(fn_def, &ctx.env.may_diverge) {
+    if infers_ret(fn_def, |s| ctx.env.diverges(s)) {
         preview_ret_ty = with_ok(preview_ret_ty, HirTy::Unknown);
     }
     let refs: Vec<(usize, HirTy)> = fn_def
@@ -717,7 +717,7 @@ pub(super) fn lower_fn_inner(
     module: String,
     subst: &HashMap<String, HirTy>,
 ) -> HirFunction {
-    let ret = if env.infer_ret.contains(&id) {
+    let ret = if env.infers_ret(id) {
         let r = decl_ret_ok(env, id);
         if fn_def.body.is_some() {
             super::incr::touch(id);
@@ -726,7 +726,7 @@ pub(super) fn lower_fn_inner(
             }
         }
         Some(r)
-    } else if infers_ret(fn_def, &env.may_diverge) {
+    } else if infers_ret(fn_def, |s| env.diverges(s)) {
         let (r, done) = infer_ret_of(
             env,
             fn_def,
@@ -751,10 +751,7 @@ pub(super) fn lower_fn_inner(
 /// expression or a `return v`) or may diverge on every path (4.3.7,
 /// `may_diverge`): the return type comes from the body. `main` keeps
 /// `()`.
-pub(super) fn infers_ret(
-    f: &FnDef,
-    may_diverge: &std::collections::HashSet<rokc_diagnostic::Span>,
-) -> bool {
+pub(super) fn infers_ret(f: &FnDef, may_diverge: impl Fn(rokc_diagnostic::Span) -> bool) -> bool {
     struct V {
         depth: u32,
         found: bool,
@@ -778,7 +775,7 @@ pub(super) fn infers_ret(
     if f.ret_ty.is_some() || f.is_async || f.is_generator || f.name == "main" {
         return false;
     }
-    if body.trailing.is_some() || may_diverge.contains(&f.span) {
+    if body.trailing.is_some() || may_diverge(f.span) {
         return true;
     }
     let mut v = V {
@@ -799,7 +796,7 @@ fn decl_ret_ok(env: &Env<'_>, id: FunctionId) -> HirTy {
             env.sink.recursive_ret.borrow_mut().push(id);
             HirTy::Unknown
         }
-        None => match &env.decls[id.0 as usize] {
+        None => match env.decl(id).expect("a declaration") {
             MethodOrFn::Fn(f) => {
                 let module = fn_module(env, f);
                 let start = env.sink.next_id.get();
@@ -1338,7 +1335,8 @@ pub(super) fn lower_fn(
 /// parameters bound and its bounds known.
 pub(super) fn decl_sig(env: &Env<'_>, i: usize, base: &FnSig) -> FnSig {
     let no_subst = HashMap::new();
-    let (f, self_ty, module, subst) = match &env.decls[i] {
+    let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
+    let (f, self_ty, module, subst) = match env.decl(id).expect("a declaration") {
         MethodOrFn::Fn(f) => (*f, None, fn_module(env, f), &no_subst),
         MethodOrFn::Method {
             fn_def,

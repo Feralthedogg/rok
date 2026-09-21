@@ -34,6 +34,7 @@ pub enum RootMain {
 
 /// What the driver tells HIR about the build besides the program.
 #[derive(Clone, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)] // independent switches
 pub struct HirInput {
     /// The dependency packages' top-level names (`--extern`).
     /// Visibility stops at a package (`pub(pkg)`, `pub(sub)`), `pkg::`
@@ -72,6 +73,9 @@ pub struct HirInput {
     pub fingerprint: u64,
     /// Where lowered bodies are kept for the next build (spec 9.2.16).
     pub bodies: Option<Bodies>,
+    /// Run the lints that need lowering's type facts (`rokc check` /
+    /// `lint`): `HirModule::lint_hits`.
+    pub lints: bool,
 }
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
@@ -121,6 +125,19 @@ pub struct HirModule {
     pub any_tags: Vec<(HirTy, u32)>,
     /// Bodies replayed from `HirInput::bodies`, of those lowered.
     pub reuse: BodyReuse,
+    /// Findings of the lints that need lowering's type facts
+    /// (`HirInput::lints`).
+    pub lint_hits: Vec<LintHit>,
+}
+
+/// A lint finding; `rokc lint` sets its level.
+#[derive(Clone, Debug)]
+pub struct LintHit {
+    pub lint: &'static str,
+    pub span: Span,
+    pub msg: String,
+    pub secondary: Option<(Span, String)>,
+    pub note: String,
 }
 
 #[derive(Clone, Debug)]

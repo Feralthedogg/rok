@@ -1272,6 +1272,12 @@ fn c_abi_matches_clang() {
             && l.contains("ptr byval({ i64, i64, i64 })")),
         "x86_64 lacks an indirect C call with sret / byval:\n{x86}"
     );
+    // Direct calls too: alias analysis reads `byval` off the call only
+    // (a `tail` call's unmarked caller copy is dead to it).
+    assert!(
+        x86.contains("call double @d4_sum(ptr byval({ double, double, double, double }) align 8"),
+        "x86_64 lacks a direct C call with byval:\n{x86}"
+    );
     let a64 = decls("aarch64-unknown-linux-gnu");
     for want in [
         "declare [3 x float] @v3_scale([3 x float], float)",

@@ -17,6 +17,16 @@ pub mod ecdsa;
 pub mod rsa;
 pub mod mlkem;
 
+pub use sha2::{HashAlgorithm, Digest};
+pub use sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
+pub use hmac::{Hmac, Hkdf};
+pub use aead::{AeadAlgorithm, Aead};
+pub use x25519::X25519;
+pub use mlkem::MlKem768;
+pub use ed25519::Ed25519;
+pub use ecdsa::{EcCurve, Ecdsa};
+pub use rsa::{RsaPublicKey, RsaPrivateKey};
+
 /// Byte input: a list, a view or a string's UTF-8 bytes.
 pub type Bytes = List<u8> | Slice<u8> | str;
 

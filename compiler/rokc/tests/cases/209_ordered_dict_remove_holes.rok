@@ -7,7 +7,7 @@
 // 0 true {}
 
 // Stdlib 2.9.5: OrderedDict / OrderedSet remove in O(1) (holes), order kept
-// across removal, re-insertion appends, holes squeezed before iterating.
+// across removal, re-insertion appends, holes skipped by iteration.
 fn main() -> i32 {
     let d: OrderedDict<str, i32> = OrderedDict::new();
     for i in 0..8 {

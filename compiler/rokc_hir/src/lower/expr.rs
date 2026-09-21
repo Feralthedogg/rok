@@ -738,16 +738,10 @@ pub(super) fn lower_assign(
                 return Some(assign_local(ctx, name, local, value));
             }
             let segs = [name.as_str()];
-            if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
-                let full = ctx
-                    .env
-                    .names
-                    .value_reexports
-                    .get(&full)
-                    .cloned()
-                    .unwrap_or(full);
+            if let Some(full) = ctx.resolve_in(&segs, true) {
+                let full = ctx.env.names.value_reexport(&full).cloned().unwrap_or(full);
                 ctx.check_item_visible(&full, "static");
-                if !ctx.env.mut_statics.contains(&full) {
+                if !ctx.env.is_mut_static(&full) {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
@@ -756,7 +750,7 @@ pub(super) fn lower_assign(
                         ),
                     );
                 }
-                let ty = ctx.env.statics[&full].clone();
+                let ty = ctx.env.static_ty(&full).expect("a static").clone();
                 let v = lower_expected(ctx, value, ty.clone());
                 let value = coerce(ctx, &ty, v, &|| format!("assignment to `{name}`"));
                 return Some(HirStmt::StaticAssign { name: full, value });
@@ -1886,7 +1880,7 @@ pub(super) fn resolve_enum_variant(
     } else if let Some(eid) = ctx.lookup_enum(&full) {
         eid
     } else {
-        let Some(def) = ctx.env.defs.generic_enums.get(&full).copied() else {
+        let Some(def) = ctx.env.defs.generic_enum(&full) else {
             return EnumRes::NotEnum;
         };
         match infer_enum_instance(ctx, def, &full, &vname, arg_tys, segs) {
@@ -1988,8 +1982,7 @@ fn enum_lacks_variant(ctx: &LowerCtx<'_>, segs: &[&str]) -> bool {
     }
     ctx.env
         .defs
-        .generic_enums
-        .get(&full)
+        .generic_enum(&full)
         .is_some_and(|d| d.variants.iter().all(|v| v.name != vname))
 }
 
@@ -2184,7 +2177,7 @@ pub(super) fn lower_struct_init(
         }
     } else if let Some(id) = ctx.lookup_struct(&full) {
         id
-    } else if let Some(def) = ctx.env.defs.generic_structs.get(&full).copied() {
+    } else if let Some(def) = ctx.env.defs.generic_struct(&full) {
         // `Box { v: 5 }`: the expected type picks the instantiation;
         // otherwise infer the type arguments from the field values.
         match &hint {
@@ -3755,7 +3748,7 @@ fn check_arity(
     extra: usize,
     surplus: Vec<HirExpr>,
 ) -> Vec<HirExpr> {
-    if ctx.env.c_variadic.contains(&sig.id) {
+    if ctx.env.is(super::FnSet::CVariadic, sig.id) {
         return surplus
             .into_iter()
             .map(|a| c_vararg_promote(ctx, callee, a))
@@ -3952,7 +3945,7 @@ pub(super) fn call_sig(
     args: &[CallArg],
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    if ctx.env.unsafe_fns.contains(&sig.id) {
+    if ctx.env.is(super::FnSet::Unsafe, sig.id) {
         check_unsafe_call(ctx, callee);
     }
     let (lowered, lets, places) = lower_args_ref(ctx, sig, callee, receiver, args, span);
@@ -3960,10 +3953,7 @@ pub(super) fn call_sig(
     if let Some(out) = out {
         let tys: Vec<HirTy> = out.refs.iter().map(|(_, t)| t.clone()).collect();
         // `rok.OP_assign.TYPE`: the op's result is the new `ref self`.
-        let kind = match (
-            ctx.env.intrinsics.get(&sig.id),
-            <[HirExpr; 2]>::try_from(lowered),
-        ) {
+        let kind = match (ctx.env.intrinsic(sig.id), <[HirExpr; 2]>::try_from(lowered)) {
             (Some(&Intrinsic::Prim(op)), Ok([lhs, rhs])) => HirExprKind::PrimBinOp {
                 op,
                 lhs: Box::new(lhs),
@@ -3988,7 +3978,7 @@ pub(super) fn call_sig(
     }
     // A C function's `fn` parameter is a bare code pointer (an
     // `extern "rok"` one takes the whole `{code, env}`).
-    if ctx.env.extern_fn_ids.contains(&sig.id) {
+    if ctx.env.is(super::FnSet::ExternC, sig.id) {
         for a in &lowered {
             // An `extern "C" fn` value is already a C function pointer.
             if matches!(a.ty, HirTy::Fn(..) | HirTy::Closure { .. })
@@ -4006,10 +3996,7 @@ pub(super) fn call_sig(
         }
     }
     // Stdlib spec 0.3.2: an intrinsic method's call is its primitive op.
-    let kind = match (
-        ctx.env.intrinsics.get(&sig.id),
-        <[HirExpr; 2]>::try_from(lowered),
-    ) {
+    let kind = match (ctx.env.intrinsic(sig.id), <[HirExpr; 2]>::try_from(lowered)) {
         (Some(&Intrinsic::Prim(op)), Ok([lhs, rhs])) => HirExprKind::PrimBinOp {
             op,
             lhs: Box::new(lhs),
@@ -4198,9 +4185,9 @@ pub(super) fn bind_explicit(
         // A bound template's trait parameters come from the bound.
         .skip(
             ctx.env
-                .bound_traits
-                .get(&def.name)
-                .map_or(0, |k| ctx.env.trait_info[k].generics.params.len()),
+                .bound_trait(&def.name)
+                .and_then(|k| ctx.env.trait_of(k))
+                .map_or(0, |t| t.generics.params.len()),
         )
         .filter(|n| !self_ty.is_some_and(|t| ast_ty_mentions(t, n)))
         .collect();
@@ -4484,11 +4471,9 @@ fn drop_glue(
 /// Does `ty`'s `drop` method come from `Drop`?
 fn is_drop_method(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
     let trait_name = match pick_method(ctx, ty, "drop", None) {
-        Ok(Some(MethodPick::Concrete(id))) => ctx
-            .env
-            .method_info
-            .get(&id)
-            .and_then(|i| i.trait_name.clone()),
+        Ok(Some(MethodPick::Concrete(id))) => {
+            ctx.env.method_info(id).and_then(|i| i.trait_name.clone())
+        }
         Ok(Some(MethodPick::Generic(gm))) => gm.info.trait_name.clone(),
         _ => None,
     };
@@ -4982,15 +4967,16 @@ pub(super) fn method_call_on(
         lower_args_only(ctx);
         // A generic impl that would provide it but whose bound fails:
         // name the bound rather than "no method".
-        let unmet = ctx.env.impls.generic().find_map(|gi| {
-            if !gi.methods.contains_key(method) {
-                return None;
-            }
-            ctx.generic_impl_match(gi, &recv_h.ty, 0)
-                .err()
-                .flatten()
-                .map(|b| (gi, b))
-        });
+        let unmet = ctx
+            .env
+            .impls
+            .generic_by(super::Pick::Method(method))
+            .find_map(|gi| {
+                ctx.generic_impl_match(gi, &recv_h.ty, 0)
+                    .err()
+                    .flatten()
+                    .map(|b| (gi, b))
+            });
         if let Some((gi, (bty, bound))) = unmet {
             return ctx.error_expr(
                 span,
@@ -5063,13 +5049,8 @@ fn assign_trait_call(
 ) -> Option<HirExpr> {
     let entry = ctx.env.prec.lookup(op, Fixity::Infix)?;
     let method = entry.method_name.clone();
-    let key = ctx
-        .env
-        .trait_info
-        .keys()
-        .filter(|k| op_trait_matches(entry, k))
-        .min()?
-        .clone();
+    let key = entry.trait_name.clone();
+    ctx.env.trait_of(&key)?;
     let mark = ctx.probe_mark();
     let ty = lower_expected(ctx, target, HirTy::Unknown).ty;
     ctx.rollback(&mark);
@@ -5077,9 +5058,9 @@ fn assign_trait_call(
         return None;
     }
     let env = ctx.env;
-    let intrinsic = method_target_for(&ty)
-        .and_then(|t| env.method_table.get(&(t, method.clone())))
-        .is_some_and(|ids| ids.iter().any(|id| env.intrinsics.contains_key(id)));
+    let intrinsic = env
+        .methods_on(&ty, &method)
+        .is_some_and(|ids| ids.iter().any(|id| env.intrinsic(*id).is_some()));
     if intrinsic {
         return None;
     }
@@ -5135,15 +5116,15 @@ fn pick_by_first_arg<'e>(
     };
     let env = ctx.env;
     let mut cands: Vec<(String, HirTy, MethodPick<'e>)> = Vec::new();
-    let ids = method_target_for(ty).and_then(|t| env.method_table.get(&(t, method.to_owned())));
+    let ids = env.methods_on(ty, method);
     for id in ids.into_iter().flatten() {
-        let tr = env.method_info.get(id).and_then(|i| i.trait_name.clone())?;
+        let tr = env.method_info(*id).and_then(|i| i.trait_name.clone())?;
         if let Some(slot) = ctx.sig_by_id(*id).param_tys.get(1).cloned() {
             cands.push((tr, slot, MethodPick::Concrete(*id)));
         }
     }
     let gis: Vec<_> = ctx
-        .generic_impls(ty, |gi| gi.methods.contains_key(method), 0)
+        .generic_impls(ty, super::Pick::Method(method), 0)
         .collect();
     for (gi, subst) in gis {
         let gm = &gi.methods[method];
@@ -5204,7 +5185,7 @@ fn any_method_call(
         if seen.contains(&base) {
             continue;
         }
-        if let Some(info) = ctx.env.trait_info.get(&base) {
+        if let Some(info) = ctx.env.trait_of(&base) {
             if provider.is_none()
                 && only.is_none_or(|k| k == base)
                 && info.methods.iter().any(|m| m == method)
@@ -5238,12 +5219,12 @@ fn any_method_call(
     // on the implementing type (`Self`), on trait arguments the bound
     // leaves open, or on associated types it doesn't bind.
     let has_args = !bound.args.is_empty();
-    let needs = ctx.env.trait_info[&provider]
-        .needs
-        .get(method)
-        .cloned()
-        .unwrap_or_default();
-    let no_self = ctx.env.trait_info[&provider]
+    let pinfo = ctx
+        .env
+        .trait_of(&provider)
+        .expect("the provider is a trait");
+    let needs = pinfo.needs.get(method).cloned().unwrap_or_default();
+    let no_self = pinfo
         .decls
         .get(method)
         .is_some_and(|d| d.params.first().is_none_or(|p| p.name != "self"));
@@ -5294,7 +5275,7 @@ fn any_method_call(
         .find(|t| {
             bounds
                 .iter()
-                .all(|b| ctx.concrete_impls(t).any(|r| r.satisfies(b)))
+                .all(|b| ctx.env.impls.refs_of(t, &b.path).any(|r| r.satisfies(b)))
         })
         .and_then(|t| match pick_method(ctx, t, method, Some(&provider)) {
             Ok(Some(MethodPick::Concrete(id))) => Some(ctx.sig_by_id(id)),
@@ -5414,7 +5395,7 @@ fn trait_decl_sig(
     bound: &TraitRef,
     method: &str,
 ) -> Option<(Vec<HirTy>, HirTy)> {
-    let info = &ctx.env.trait_info[provider];
+    let info = ctx.env.trait_of(provider)?;
     let def = info.decls.get(method)?;
     if bound.args.len() > info.params.len() {
         return None;
@@ -5830,7 +5811,7 @@ fn build_dispatcher(env: &Env<'_>, d: &AnyDispatch) -> HirFunction {
 /// Spec 5.6 for methods: an inherent method without `pub` is private to
 /// the module of its impl block.
 pub(super) fn check_method_visible(ctx: &LowerCtx<'_>, fn_id: FunctionId, method: &str) {
-    if let Some(info) = ctx.env.method_info.get(&fn_id) {
+    if let Some(info) = ctx.env.method_info(fn_id) {
         check_method_info_visible(ctx, info, method);
     }
 }
@@ -5862,8 +5843,7 @@ pub(super) fn generic_method_for<'e>(
         enum_base_name(&name).to_owned()
     };
     ctx.env
-        .generic_methods
-        .get(&(base, method.to_owned()))
+        .generic_methods(&base, method)
         .map_or(&[], Vec::as_slice)
 }
 
@@ -5894,21 +5874,16 @@ pub(super) fn pick_method<'e>(
         }
     }
     let mut cands: Vec<(Option<&'e str>, MethodPick<'e>)> = Vec::new();
-    if let Some(ids) =
-        method_target_for(ty).and_then(|t| env.method_table.get(&(t, method.to_owned())))
-    {
+    if let Some(ids) = env.methods_on(ty, method) {
         for id in ids {
-            let tn = env
-                .method_info
-                .get(id)
-                .and_then(|i| i.trait_name.as_deref());
+            let tn = env.method_info(*id).and_then(|i| i.trait_name.as_deref());
             cands.push((tn, MethodPick::Concrete(*id)));
         }
     }
     for gm in generic_method_for(ctx, ty, method) {
         cands.push((gm.info.trait_name.as_deref(), MethodPick::Generic(gm)));
     }
-    for (gi, _) in ctx.generic_impls(ty, |gi| gi.methods.contains_key(method), 0) {
+    for (gi, _) in ctx.generic_impls(ty, super::Pick::Method(method), 0) {
         // An empty key: a generic inherent impl (`impl<..> [T; N]`).
         let key = Some(gi.trait_key.as_str()).filter(|k| !k.is_empty());
         cands.push((key, MethodPick::Generic(&gi.methods[method])));
@@ -5962,7 +5937,7 @@ fn core_only_trait(ctx: &LowerCtx<'_>, key: &str) -> bool {
     !ctx.local_uses
         .iter()
         .flatten()
-        .chain(ctx.env.uses.get(&ctx.current_module).into_iter().flatten())
+        .chain(ctx.env.uses_of(&ctx.current_module).into_iter().flatten())
         .any(named)
 }
 
@@ -5975,7 +5950,7 @@ pub(super) fn generic_trait_method_for<'e>(
     method: &str,
 ) -> Result<Option<&'e GenericMethod>, String> {
     let hits: Vec<&'e Impl> = ctx
-        .generic_impls(ty, |gi| gi.methods.contains_key(method), 0)
+        .generic_impls(ty, super::Pick::Method(method), 0)
         .map(|(gi, _)| gi)
         .collect();
     match hits.as_slice() {
@@ -6384,7 +6359,7 @@ fn call_generic_positional(
         .map(|r| r.ty.clone());
     let self_hint = self_hint.or(recv_ty.as_ref());
     // A bound template's signature names `Self` (a type parameter).
-    let hint_self = self_hint.filter(|_| ctx.env.bound_traits.contains_key(&def.name));
+    let hint_self = self_hint.filter(|_| ctx.env.bound_trait(&def.name).is_some());
     // Explicit `::<..>` arguments apply to this call only, not to the
     // generic calls inside its arguments.
     let explicit = std::mem::take(&mut ctx.explicit_generics);
@@ -6759,8 +6734,8 @@ pub(super) fn lower_call(
     // Generic function — monomorphize on the argument types.
     if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
-        let generic_def = ctx.env.generic_fns[&full];
-        if let Some(&op) = ctx.env.generic_intrinsics.get(&generic_def.name) {
+        let generic_def = ctx.env.generic_fn(&full).expect("a generic function");
+        if let Some(&op) = ctx.env.generic_intrinsic(&generic_def.name) {
             if generic_def.is_unsafe {
                 check_unsafe_call(ctx, &full);
             }
@@ -6784,7 +6759,7 @@ pub(super) fn lower_call(
         let gm = ctx
             .canon_type(ty_segs)
             .filter(|_| !ty_segs.is_empty())
-            .and_then(|full| env.generic_methods.get(&(full, (*method).to_owned())))
+            .and_then(|full| env.generic_methods(&full, method))
             .and_then(|v| {
                 v.iter()
                     .find(|g| g.info.trait_name.is_none())
@@ -6851,8 +6826,7 @@ pub(super) fn lower_call(
             && ctx
                 .env
                 .defs
-                .generic_structs
-                .get(&full)
+                .generic_struct(&full)
                 .is_some_and(|d| matches!(d.kind, rokc_ast::StructKind::Tuple(_)))
     });
     if generic_tuple && args.iter().all(|a| matches!(a, CallArg::Positional(_))) {
@@ -6918,7 +6892,7 @@ pub(super) fn lower_call(
     let not_variant = enum_lacks_variant(ctx, &segs);
     let hint = ctx.current_expected().cloned();
     let is_generic_enum_base = ctx.enum_path(&segs).is_some_and(|(full, _)| {
-        ctx.lookup_enum(&full).is_none() && ctx.env.defs.generic_enums.contains_key(&full)
+        ctx.lookup_enum(&full).is_none() && ctx.env.defs.generic_enum(&full).is_some()
     });
     let pre_args: Option<Vec<HirExpr>> = if !not_variant
         && is_generic_enum_base
@@ -7304,10 +7278,9 @@ fn method_by_trait_args(
         return None;
     }
     let args: Vec<HirTy> = written.iter().map(|a| ctx.resolve_ast_ty(a)).collect();
-    let ids =
-        method_target_for(t).and_then(|k| ctx.env.method_table.get(&(k, method.to_owned())))?;
+    let ids = ctx.env.methods_on(t, method)?;
     let mut hits = ids.iter().filter(|id| {
-        ctx.env.method_info.get(id).is_some_and(|i| {
+        ctx.env.method_info(**id).is_some_and(|i| {
             i.trait_name.as_deref() == Some(key) && i.trait_args.starts_with(&args)
         })
     });
@@ -7330,14 +7303,13 @@ fn path_call_via_impls(
 ) -> Option<HirExpr> {
     let trait_key = ctx
         .canon_type(ty_segs)
-        .filter(|f| ctx.env.names.traits.contains(f));
+        .filter(|f| ctx.env.names.is_trait(f));
     if let Some(key) = trait_key {
         // A static method (`TryFrom::try_from(8)`) takes `Self` from the
         // expected type; its first argument is not `self`.
         let static_self = ctx
             .env
-            .trait_info
-            .get(&key)
+            .trait_of(&key)
             .and_then(|i| i.decls.get(method))
             .is_some_and(|d| d.params.first().is_none_or(|p| p.name != "self"))
             .then(|| ctx.current_expected().cloned())
@@ -7466,8 +7438,7 @@ fn path_call_via_impls(
                 .map(|b| b.split('<').next().unwrap_or(b))
                 .find(|k| {
                     ctx.env
-                        .trait_info
-                        .get(*k)
+                        .trait_of(k)
                         .is_some_and(|i| i.decls.contains_key(method))
                 })
                 .map(str::to_owned)
@@ -7639,14 +7610,12 @@ fn call_overload(
     display: &str,
     span: rokc_diagnostic::Span,
 ) -> Option<HirExpr> {
-    let ids =
-        method_target_for(t).and_then(|k| ctx.env.method_table.get(&(k, method.to_owned())))?;
+    let ids = ctx.env.methods_on(t, method)?;
     let traits: Vec<Option<&str>> = ids
         .iter()
         .map(|id| {
             ctx.env
-                .method_info
-                .get(id)
+                .method_info(*id)
                 .and_then(|i| i.trait_name.as_deref())
         })
         .collect();
@@ -7810,8 +7779,7 @@ fn literal_conv_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr, method: &str) 
     };
     untyped_lit_value(receiver)?;
     let expected = ctx.current_expected()?.clone();
-    let ids = method_target_for(&expected)
-        .and_then(|k| ctx.env.method_table.get(&(k, conv.to_owned())))?;
+    let ids = ctx.env.methods_on(&expected, conv)?;
     let params: Vec<HirTy> = ids
         .iter()
         .filter_map(|id| ctx.sig_by_id(*id).param_tys.first().cloned())
@@ -9266,11 +9234,6 @@ pub(super) fn dispatch_user_op(
     dispatch_user_op_lit(ctx, sym, fixity, lhs, rhs, None, span)
 }
 
-/// Whether `t` is the trait that registered `entry` (by full path).
-fn op_trait_matches(entry: &rokc_parser::OpEntry, t: &str) -> bool {
-    t == entry.trait_name
-}
-
 /// `dispatch_user_op`; `lit_rhs`: the right operand's source when it may
 /// be an unsuffixed literal, free to take the impl's `Rhs` type.
 pub(super) fn dispatch_user_op_lit(
@@ -9295,10 +9258,9 @@ pub(super) fn dispatch_user_op_lit(
     let names = &ctx.env.names;
     let cur = &ctx.current_module;
     let visible = names
-        .visibility
-        .get(op_trait)
-        .is_none_or(|&v| super::resolve::visible_from(cur, &module_of(op_trait), v))
-        && super::resolve::hidden_module(&names.mod_vis, cur, op_trait).is_none();
+        .type_vis(op_trait)
+        .is_none_or(|v| super::resolve::visible_from(cur, &module_of(op_trait), v))
+        && names.hidden(cur, op_trait).is_none();
     if !visible {
         return ctx.error_expr(
             span,
@@ -9315,15 +9277,15 @@ pub(super) fn dispatch_user_op_lit(
     if let HirTy::Param(p) = lhs.ty {
         return param_op(ctx, p, sym, &method, op_trait, lhs, rhs, lit_rhs, span);
     }
-    let impls: Vec<FunctionId> = method_target_for(&lhs.ty)
-        .and_then(|t| ctx.env.method_table.get(&(t, method.clone())))
+    let impls: Vec<FunctionId> = ctx
+        .env
+        .methods_on(&lhs.ty, &method)
         .map(|ids| {
             ids.iter()
                 .copied()
                 .filter(|id| {
                     ctx.env
-                        .method_info
-                        .get(id)
+                        .method_info(*id)
                         .and_then(|i| i.trait_name.as_deref())
                         .is_some_and(is_op_trait)
                 })
@@ -9497,7 +9459,7 @@ fn generic_op_by_rhs<'e>(
     let mut exact = Vec::new();
     let mut loose = Vec::new();
     let mut lit = Vec::new();
-    for (gi, mut subst) in ctx.generic_impls(lhs, |gi| gi.methods.contains_key(method), 0) {
+    for (gi, mut subst) in ctx.generic_impls(lhs, super::Pick::Method(method), 0) {
         let gm = &gi.methods[method];
         // No written `Rhs`: the operator traits' default, `Self`.
         let want = match gi.trait_args.first() {
@@ -9609,12 +9571,8 @@ pub(super) fn assoc_const_hits<'e>(
 ) -> Vec<(&'e Impl, HashMap<String, HirTy>)> {
     let env: &'e Env<'e> = ctx.env;
     env.impls
-        .all
-        .iter()
-        .filter(|imp| {
-            traits.is_none_or(|ks| ks.contains(&imp.trait_key))
-                && imp.consts.iter().any(|(n, ..)| n == name)
-        })
+        .with_const(name)
+        .filter(|imp| traits.is_none_or(|ks| ks.contains(&imp.trait_key)))
         .filter_map(|imp| {
             let subst = match &imp.concrete {
                 Some((t, _)) => (t == ty).then(HashMap::new)?,
@@ -9716,7 +9674,7 @@ fn qpath_trait(ctx: &LowerCtx<'_>, q: &rokc_ast::QPath) -> Option<String> {
             .names
             .trait_key(&segs, &ctx.current_module, ctx.here()),
     )
-    .filter(|k| ctx.env.names.traits.contains(k))
+    .filter(|k| ctx.env.names.is_trait(k))
 }
 
 /// `<T as Tr>::N` (an associated const) or `<T as Tr>::m` (a method
@@ -9786,7 +9744,7 @@ fn assoc_const_path(ctx: &mut LowerCtx<'_>, path: &AstPath) -> Option<HirExpr> {
             && segs != ["Self"]
             && (ctx
                 .canon_type(&segs)
-                .is_some_and(|f| !ctx.env.names.traits.contains(&f))
+                .is_some_and(|f| !ctx.env.names.is_trait(&f))
                 || matches!(crate::ty::resolve_ty(&owner), HirTy::Prim(_)))
         {
             let ty = ctx.resolve_ast_ty(&owner);
@@ -9871,22 +9829,14 @@ pub(super) fn lower_path(
             };
             ty.and_then(|t| const_owner(ctx, &t))
                 .map(|o| format!("{o}::{}", name.name))
-                .filter(|k| ctx.env.consts.contains_key(k))
+                .filter(|k| ctx.env.konst(k).is_some())
         }
         _ => None,
     };
-    if let Some(full) =
-        assoc.or_else(|| ctx.resolve_in(&segs, &ctx.env.consts, &ctx.env.const_leaves))
-    {
-        let full = ctx
-            .env
-            .names
-            .value_reexports
-            .get(&full)
-            .cloned()
-            .unwrap_or(full);
+    if let Some(full) = assoc.or_else(|| ctx.resolve_in(&segs, false)) {
+        let full = ctx.env.names.value_reexport(&full).cloned().unwrap_or(full);
         ctx.check_item_visible(&full, "const");
-        let (ty, value) = ctx.env.consts[&full].clone();
+        let (ty, value) = ctx.env.konst(&full).expect("a const").clone();
         // An impl const `m::T::N` resolves its type and value in `m`.
         let owner = module_of(&full);
         let owner_segs: Vec<&str> = owner.split("::").collect();
@@ -9920,16 +9870,10 @@ pub(super) fn lower_path(
         return super::const_eval::const_item(ctx, &full, v);
     }
     // Module-level `static` — a load through the global address.
-    if let Some(full) = ctx.resolve_in(&segs, &ctx.env.statics, &ctx.env.static_leaves) {
-        let full = ctx
-            .env
-            .names
-            .value_reexports
-            .get(&full)
-            .cloned()
-            .unwrap_or(full);
+    if let Some(full) = ctx.resolve_in(&segs, true) {
+        let full = ctx.env.names.value_reexport(&full).cloned().unwrap_or(full);
         ctx.check_item_visible(&full, "static");
-        let ty = ctx.env.statics[&full].clone();
+        let ty = ctx.env.static_ty(&full).expect("a static").clone();
         return HirExpr {
             kind: HirExprKind::StaticRef(full),
             ty,
@@ -9955,7 +9899,7 @@ pub(super) fn lower_path(
             ty: HirTy::Fn(sig.param_tys, Box::new(sig.ret_ty), {
                 // An `unsafe fn` / C function value keeps its unsafety.
                 let mut b = ctx.env.names.all_auto();
-                b.unsafe_fn = ctx.env.unsafe_fns.contains(&sig.id);
+                b.unsafe_fn = ctx.env.is(super::FnSet::Unsafe, sig.id);
                 b
             }),
             span,
@@ -9963,7 +9907,7 @@ pub(super) fn lower_path(
     }
     if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
-        let def = ctx.env.generic_fns[&full];
+        let def = ctx.env.generic_fn(&full).expect("a generic function");
         // `id::<i32>`: every type argument given — that instance's value.
         let targs = path
             .segments
@@ -10365,15 +10309,13 @@ fn handler_name(c: &rokc_ast::LitCand) -> String {
 
 /// The leaf name of the type a handler declares it returns.
 fn handler_ret_leaf(ctx: &LowerCtx<'_>, name: &str) -> Option<String> {
-    if let Some(def) = ctx.env.generic_fns.get(name) {
+    if let Some(def) = ctx.env.generic_fn(name) {
         let rokc_ast::TyKind::Path(p) = &def.ret_ty.as_ref()?.kind else {
             return None;
         };
         return p.segments.last().map(|s| s.name.clone());
     }
-    if !ctx.env.fn_table.contains_key(name) {
-        return None;
-    }
+    ctx.env.sig(name)?;
     match &ctx.sig_of_key(name).ret_ty {
         HirTy::Struct(id) => Some(leaf_name(enum_base_name(&ctx.struct_def(*id).name)).to_owned()),
         HirTy::Enum(id) => Some(leaf_name(enum_base_name(&ctx.enum_def(*id).name)).to_owned()),
@@ -10430,7 +10372,7 @@ fn lower_magic(
         return poison(span);
     };
     let name = handler_name(c);
-    let def = ctx.env.generic_fns.get(&name).copied();
+    let def = ctx.env.generic_fn(&name);
     // The handler's last parameter is a variadic `...T`.
     let variadic_at = match def {
         Some(d) => d
@@ -10440,9 +10382,7 @@ fn lower_magic(
             .map(|_| d.params.len() - 1),
         None => ctx
             .env
-            .fn_table
-            .get(&name)
-            .inspect(|s| super::incr::log_sig(&name, s))
+            .sig(&name)
             .filter(|s| s.variadic)
             .map(|s| s.param_tys.len() - 1),
     };

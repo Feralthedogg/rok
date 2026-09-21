@@ -1,42 +1,74 @@
 // rok::core::collections::dict — `Dict<K, V>`, a hash map (stdlib spec
-// 2.9.3): open addressing with linear probing over a power-of-two
-// table. One object holds the length, the capacity, the slots in use
-// (tombstones too) and the current table, swapped on growth. Iteration
-// order is unspecified.
+// 2.9.3), compact: entries are appended to dense key / value / hash
+// arrays, and a power-of-two index of linear-probed slots maps a hash to
+// its entry. A table of at most `SMALL` entries has no index: lookup
+// scans the hashes. `remove` leaves a hole; holes are squeezed out when
+// the entries are full. One object holds the counts and the current
+// arrays, swapped on growth. Iteration follows the entries, so it is in
+// insertion order (which `OrderedDict` relies on; for `Dict` the spec
+// leaves it unspecified).
 
-/// The dict's object. The table: per slot a key, a value and a state
-/// (0 empty, 1 full, 2 deleted). `keys` / `vals` have one more slot that
-/// stays zero: a deleted slot's key and value are overwritten with it,
-/// so a tombstone keeps nothing alive.
+/// The dict's object. `keys` / `vals` have one more slot that stays
+/// zero: a hole's key and value are overwritten with it, so a removed
+/// entry keeps nothing alive. `meta` holds `cap` entry hashes (0: a
+/// hole), then `slots` index slots (0: empty, else entry + 1). An index
+/// slot of a removed entry stays, pointing at the hole: a tombstone,
+/// passed over because no lookup hash is 0. Index slots in use never
+/// exceed `cap`, at most 2/3 of `slots`, so probing always ends.
 pub struct DictHead<K, V> {
     len: usize;
+    n: usize;
     cap: usize;
-    used: usize;
+    slots: usize;
     keys: GcBuf<K>;
     vals: GcBuf<V>;
-    state: GcBuf<u8>;
+    meta: GcBuf<u64>;
 }
 
-/// Home slot of hash `h` in a table of `mask + 1` slots: the hash
-/// mixed first, so a weak one (an integer's own value) still spreads
-/// over the low bits.
-const fn home(h: u64, mask: usize) -> usize {
+/// Entries a table holds without an index.
+const SMALL: usize = 16;
+
+/// `find`'s answer for an absent key.
+const ABSENT: usize = usize::MAX;
+
+/// `k.hash()` mixed, so a weak hash (an integer's own value) still
+/// spreads over the low bits; never 0, which marks a hole.
+#[inline]
+const fn mix(h: u64) -> u64 {
     let x = h.wrapping_mul(0x9E37_79B9_7F4A_7C15u64);
-    ((x ^ (x >> 32u64)) as usize) & mask
+    let y = x ^ (x >> 32u64);
+    if y == 0u64 { 1u64 } else { y }
 }
 
-/// An empty table of `cap` slots.
+/// Index slots for `cap` entries: none up to `SMALL`, else a power of
+/// two of at least 3/2 `cap`.
+#[track_caller]
+const fn index_slots(cap: usize) -> usize {
+    if cap <= SMALL {
+        return 0;
+    }
+    let want = cap_add(cap, cap / 2);
+    let s = 32usize;
+    while s < want {
+        s = cap_mul(s, 2);
+    }
+    s
+}
+
+/// An empty table of `cap` entries.
 #[track_caller]
 const fn new_table<K, V>(cap: usize) -> DictHead<K, V> {
     unsafe {
         let n = cap_add(cap, 1);
+        let slots = index_slots(cap);
         DictHead {
             len: 0,
+            n: 0,
             cap,
-            used: 0,
+            slots,
             keys: buf_new(buf_len(n, size_of::<K>())),
             vals: buf_new(buf_len(n, size_of::<V>())),
-            state: buf_new(buf_len(cap, 1)),
+            meta: buf_new(buf_len(cap_add(cap, slots), 8)),
         }
     }
 }
@@ -64,16 +96,12 @@ impl<K: Hash, V> Dict<K, V> {
         Dict::with_capacity(4)
     }
 
+    /// Room for `cap` entries before the first growth.
     #[track_caller]
     pub const fn with_capacity(cap: usize) -> Dict<K, V> {
         unsafe {
-            let c = 8usize;
-            let want = cap_mul(cap, 2);
-            while c < want {
-                c = cap_mul(c, 2);
-            }
             let h: GcBuf<DictHead<K, V>> = buf_new(1);
-            h[0] = new_table(c);
+            h[0] = new_table(cap);
             Dict { h }
         }
     }
@@ -88,56 +116,71 @@ impl<K: Hash, V> Dict<K, V> {
         self.len() == 0
     }
 
-    /// The slot holding `k`, or the capacity when absent.
-    const fn find(self, k: K) -> usize {
+    /// The entry holding `k` (mixed hash `h`), or `ABSENT`.
+    const fn find(self, k: K, h: u64) -> usize {
         unsafe {
             let s = self.h[0];
-            let cap = self.h[0].cap;
-            let mask = cap - 1;
-            let i = home(k.hash(), mask);
-            for _ in 0..cap {
-                let st = s.state[i];
-                if st == 0u8 {
-                    return cap;
+            if s.slots == 0 {
+                for i in 0..s.n {
+                    if s.meta[i] == h && s.keys[i] == k {
+                        return i;
+                    }
                 }
-                if st == 1u8 && s.keys[i] == k {
-                    return i;
+                return ABSENT;
+            }
+            let mask = s.slots - 1;
+            let i = (h as usize) & mask;
+            loop {
+                let e = s.meta[s.cap + i];
+                if e == 0u64 {
+                    return ABSENT;
+                }
+                let at = (e - 1u64) as usize;
+                if s.meta[at] == h && s.keys[at] == k {
+                    return at;
                 }
                 i = (i + 1) & mask;
             }
-            cap
         }
     }
 
-    /// Store into the first non-full slot of `k`'s probe run (`k` is
-    /// known to be absent and the table to have room).
-    const fn place(self, k: K, v: V) {
+    /// Append `k` (absent, mixed hash `h`) and `v`; the entries have
+    /// room.
+    const fn append(self, k: K, v: V, h: u64) {
         unsafe {
             let s = self.h[0];
-            let mask = self.h[0].cap - 1;
-            let i = home(k.hash(), mask);
-            while s.state[i] == 1u8 {
-                i = (i + 1) & mask;
+            let at = s.n;
+            s.keys[at] = k;
+            s.vals[at] = v;
+            s.meta[at] = h;
+            if s.slots != 0 {
+                let mask = s.slots - 1;
+                let i = (h as usize) & mask;
+                while s.meta[s.cap + i] != 0u64 {
+                    i = (i + 1) & mask;
+                }
+                s.meta[s.cap + i] = (at + 1) as u64;
             }
-            if s.state[i] == 0u8 {
-                self.h[0].used += 1;
-            }
-            s.keys[i] = k;
-            s.vals[i] = v;
-            s.state[i] = 1u8;
+            self.h[0].n = at + 1;
             self.h[0].len += 1;
         }
     }
 
-    /// Rebuild into a table of `cap` slots (drops tombstones).
-    const fn rehash(self, cap: usize) {
+    /// Make room for one more entry: squeeze out the holes when they
+    /// are more than half the entries, else grow by half.
+    #[track_caller]
+    const fn grow(self) {
         unsafe {
             let old = self.h[0];
-            let old_cap = self.h[0].cap;
+            let cap = old.cap;
+            if old.len * 2 >= cap {
+                cap = cap_add(cap, cap / 2).max(4);
+            }
             self.h[0] = new_table(cap);
-            for i in 0..old_cap {
-                if old.state[i] == 1u8 {
-                    self.place(old.keys[i], old.vals[i]);
+            for i in 0..old.n {
+                let h = old.meta[i];
+                if h != 0u64 {
+                    self.append(old.keys[i], old.vals[i], h);
                 }
             }
         }
@@ -146,31 +189,26 @@ impl<K: Hash, V> Dict<K, V> {
     /// Insert or replace; the old value, or `none`.
     pub const fn insert(self, k: K, v: V) -> V | none {
         unsafe {
-            let cap = self.h[0].cap;
-            let at = self.find(k);
-            if at < cap {
+            let h = mix(k.hash());
+            let at = self.find(k, h);
+            if at != ABSENT {
                 let s = self.h[0];
                 let old = s.vals[at];
                 s.vals[at] = v;
                 return old;
             }
-            // Load factor 3/4, tombstones included.
-            if (self.h[0].used + 1) * 4 > cap * 3 {
-                let grown = cap;
-                if (self.len() + 1) * 2 > cap {
-                    grown = cap_mul(cap, 2);
-                }
-                self.rehash(grown);
+            if self.h[0].n == self.h[0].cap {
+                self.grow();
             }
-            self.place(k, v);
+            self.append(k, v, h);
             none
         }
     }
 
     pub const fn get(self, k: K) -> V | none {
         unsafe {
-            let at = self.find(k);
-            if at == self.h[0].cap {
+            let at = self.find(k, mix(k.hash()));
+            if at == ABSENT {
                 return none;
             }
             let s = self.h[0];
@@ -179,42 +217,45 @@ impl<K: Hash, V> Dict<K, V> {
     }
 
     pub const fn contains_key(self, k: K) -> bool {
-        unsafe {
-            self.find(k) < self.h[0].cap
-        }
+        self.find(k, mix(k.hash())) != ABSENT
     }
 
     pub const fn remove(self, k: K) -> V | none {
         unsafe {
-            let cap = self.h[0].cap;
-            let at = self.find(k);
-            if at == cap {
+            let at = self.find(k, mix(k.hash()));
+            if at == ABSENT {
                 return none;
             }
             let s = self.h[0];
             let v = s.vals[at];
-            s.keys[at] = s.keys[cap];
-            s.vals[at] = s.vals[cap];
-            s.state[at] = 2u8;
+            s.keys[at] = s.keys[s.cap];
+            s.vals[at] = s.vals[s.cap];
+            s.meta[at] = 0u64;
             self.h[0].len -= 1;
             v
         }
     }
 
-    /// The first full slot at or after `from`, or the capacity.
+    /// Drop every entry (a fresh small table).
+    pub(pkg) const fn clear(self) {
+        unsafe {
+            self.h[0] = new_table(4);
+        }
+    }
+
+    /// The first live entry at or after `from`, or `n`.
     const fn next_full(self, from: usize) -> usize {
         unsafe {
             let s = self.h[0];
-            let cap = self.h[0].cap;
             let i = from;
-            while i < cap && s.state[i] != 1u8 {
+            while i < s.n && s.meta[i] == 0u64 {
                 i += 1;
             }
             i
         }
     }
 
-    /// The keys, lazily (2.9.3; order unspecified).
+    /// The keys, lazily (2.9.3; insertion order).
     pub const fn keys(self) -> KeysIter<K, V> {
         KeysIter { d: self, at: 0 }
     }
@@ -295,7 +336,7 @@ impl<K: Hash, V> Iterator for KeysIter<K, V> {
     const fn next(ref self) -> K | none {
         unsafe {
             let i = self.d.next_full(self.at);
-            if i >= self.d.h[0].cap {
+            if i >= self.d.h[0].n {
                 return none;
             }
             self.at = i + 1;
@@ -315,7 +356,7 @@ impl<K: Hash, V> Iterator for ValuesIter<K, V> {
     const fn next(ref self) -> V | none {
         unsafe {
             let i = self.d.next_full(self.at);
-            if i >= self.d.h[0].cap {
+            if i >= self.d.h[0].n {
                 return none;
             }
             self.at = i + 1;
@@ -335,7 +376,7 @@ impl<K: Hash, V> Iterator for EntriesIter<K, V> {
     const fn next(ref self) -> (K, V) | none {
         unsafe {
             let i = self.d.next_full(self.at);
-            if i >= self.d.h[0].cap {
+            if i >= self.d.h[0].n {
                 return none;
             }
             self.at = i + 1;
@@ -384,8 +425,8 @@ impl<K: Hash, V> Index<K> for Dict<K, V> {
     #[track_caller]
     const fn index(self, k: K) -> V {
         unsafe {
-            let at = self.find(k);
-            if at == self.h[0].cap {
+            let at = self.find(k, mix(k.hash()));
+            if at == ABSENT {
                 return panic("Dict: key not found");
             }
             let s = self.h[0];

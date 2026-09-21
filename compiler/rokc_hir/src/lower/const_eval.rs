@@ -1387,9 +1387,9 @@ impl Bodies for CtxBodies<'_, '_> {
                 return Callee::Refused(not_const(&name(&f.name)));
             }
             (f, origin.is_some_and(|(_, std)| std))
-        } else if let Some(decl) = env.decls.get(id.0 as usize) {
+        } else if let Some(decl) = env.decl(id) {
             let def = decl.def();
-            if env.extern_fn_ids.contains(&id) || env.rok_externs.contains(&id) {
+            if env.is(super::FnSet::ExternC, id) || env.is(super::FnSet::RokExtern, id) {
                 return Callee::Extern(def.name.clone());
             }
             let module = match decl {
@@ -1412,7 +1412,6 @@ impl Bodies for CtxBodies<'_, '_> {
             if !env.sink.const_lowering.borrow_mut().insert(id) {
                 return Callee::Refused(format!("`{}` depends on itself", name(&def.name)));
             }
-            super::incr::log_body(id, def);
             let f = super::collect::lower_decl(env, id.0 as usize, false);
             env.sink.const_lowering.borrow_mut().remove(&id);
             (f, is_std(&module))
@@ -1534,7 +1533,7 @@ fn is_const_fn(ctx: &LowerCtx<'_>, id: FunctionId) -> bool {
     if let Some(&(is_const, _)) = env.sink.fn_origin.borrow().get(&id) {
         return is_const;
     }
-    env.decls.get(id.0 as usize).is_some_and(|d| {
+    env.decl(id).is_some_and(|d| {
         let def = d.def();
         def.attrs
             .iter()

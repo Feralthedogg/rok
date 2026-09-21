@@ -1,0 +1,17 @@
+// spec: 002.09.3-impl-overlap
+// expect-error: conflicting implementations of trait `rok::core::ops::DotEq`
+
+// spec 2.9.3: the library's own impls are checked with the library, but
+// a package impl is checked against them: core's blanket
+// `impl<T: PartialEq> DotEq<List<T>> for T` already covers `P`.
+#[derive(PartialEq)]
+struct P {
+    x: i32;
+}
+
+impl DotEq<List<P>> for P {
+    type Output = List<bool>;
+    fn dot_eq(self, rhs: List<P>) -> List<bool> { return [true]; }
+}
+
+fn main() {}

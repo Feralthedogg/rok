@@ -1,0 +1,65 @@
+// spec: std 209-collections §2.9.3
+// expect-exit: 0
+// expect-stdout:
+// {"b": 2, "c": 3, "a": 4}
+// 20 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+// 13 [1, 2, 4, 5, 7, 8, 10, 11, 13, 14, 16, 17, 19] 10 none 19
+// 1000 499500 true false
+// 3 [997, 998, 999] 2994
+// {7} 0 {} 1
+// true 1 {"x": 1}
+
+// A dict's entries are dense and in insertion order (the spec leaves the
+// order unspecified; OrderedDict relies on it): small tables scan, big
+// ones (over 16 entries) have an index; removal leaves holes that churn
+// squeezes out; a removed key inserted again goes last.
+fn keys(d: Dict<i64, i64>) -> List<i64> {
+    d.keys().collect()
+}
+
+fn main() {
+    let s: Dict<str, i64> = Dict::new();
+    s.insert("a", 1);
+    s.insert("b", 2);
+    s.insert("c", 3);
+    s.remove("a");
+    s.insert("a", 4);
+    println(f"{s:?}");
+
+    let d: Dict<i64, i64> = Dict::new();
+    for i in 0..20i64 { d.insert(i, i); }
+    println(f"{d.len()} {keys(d):?}");
+    for i in 0..20i64 {
+        if i % 3 == 0 { d.remove(i); }
+    }
+    d.insert(30, 30);
+    d.remove(30);
+    d.insert(30, 30);
+    d.remove(30);
+    println(f"{d.len()} {keys(d):?} {d.get(10):?} {d.get(18):?} {d[19]}");
+
+    let big: Dict<i64, i64> = Dict::with_capacity(0);
+    for i in 0..1000i64 { big[i] = i; }
+    let sum: i64 = 0;
+    for (_, v) in big { sum += v; }
+    println(f"{big.len()} {sum} {big.contains_key(999)} {big.contains_key(1000)}");
+    // Churn: the newest three stay, each later key comes and goes.
+    for i in 0..997i64 { big.remove(i); }
+    for r in 0..50i64 {
+        big.insert(2000 + r, r);
+        big.remove(2000 + r);
+    }
+    let t: i64 = 0;
+    for k in big.keys() { t += k; }
+    println(f"{big.len()} {keys(big):?} {t}");
+
+    let st: Set<i64> = {7, 8};
+    st.remove(8);
+    let o: OrderedDict<str, i64> = OrderedDict::new();
+    o.insert("x", 1);
+    o.insert("y", 2);
+    o.clear();
+    println(f"{st:?} {o.len()} {o:?} {st.len()}");
+    o.insert("x", 1);
+    println(f"{o.contains_key("x")} {o.get("x"):?} {o:?}");
+}

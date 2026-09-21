@@ -217,8 +217,8 @@ impl<T> Table<T> {
 // blocks during a call's turn joins that call's set, and the host
 // delivers its event to that call. A call returns its result
 // (`task.return`) in its own turn: one whose future finished in another
-// call's turn is woken through its bell, a unit stream whose read waits
-// in its set. With nothing left to run a call returns WAIT (the host
+// call's turn is woken through its bell, a unit stream made when it
+// first rings, whose read waits in its set. With nothing left to run a call returns WAIT (the host
 // calls back with the next event in its set), or EXIT once it has
 // returned and nothing in its set or of the rok tasks waits. Sockets
 // (preview 2 pollables) and timers are waited on in the turn: until one
@@ -254,8 +254,6 @@ extern "C" {
     fn rok_wit_bell_read(h: i32, p: i32, n: i32) -> i32;
     #[link_name = "[async-lower][stream-write-unit]"]
     fn rok_wit_bell_write(h: i32, p: i32, n: i32) -> i32;
-    #[link_name = "[stream-cancel-read-unit]"]
-    fn rok_wit_bell_cancel(h: i32) -> i32;
     #[link_name = "[stream-drop-readable-unit]"]
     fn rok_wit_bell_drop_readable(h: i32);
     #[link_name = "[stream-drop-writable-unit]"]
@@ -294,10 +292,10 @@ const WAIT: i32 = 2;
 #[cfg(target_os = "wasi")]
 struct Call {
     set: i32;
-    bell_r: i32;
-    bell_w: i32;
-    /// A read of the bell waits in `set`.
-    armed: List<bool>;
+    /// Its bell's ends `[readable, writable]` (0: none yet).
+    bell: List<i32>;
+    /// Its bell rang, its event not yet delivered.
+    rung: List<bool>;
     /// Operations waiting in `set`.
     waits: List<i32>;
     task: List<rok::core::task::Task<bool>?>;
@@ -376,8 +374,8 @@ fn check_loop() {
 #[cfg(target_os = "wasi")]
 fn deliver(c: Call, code: i32, h: i32, payload: i32) {
     let l = LOOP;
-    if code == EVENT_STREAM_READ && h == c.bell_r {
-        c.armed[0] = false;
+    if code == EVENT_STREAM_READ && h == c.bell[0] {
+        c.rung[0] = false;
         return;
     }
     let p = match l.waiting.get(h) {
@@ -423,19 +421,16 @@ pub fn async_start<T>(f: AsyncFuture<T>, ret: fn(T)) -> i32 {
     let l = LOOP;
     let id = l.ids[0] + 1;
     l.ids[0] = id;
-    let bell = unsafe { rok_wit_bell_new() };
     let c = Call {
         set: unsafe { rok_wit_set_new() },
-        bell_r: bell as i32,
-        bell_w: (bell >> 32) as i32,
-        armed: [false],
+        bell: [0, 0],
+        rung: [false],
         waits: [0],
         task: [none],
         ret: List::new(),
         returned: [false],
     };
     unsafe {
-        rok_wit_join(c.bell_r, c.set);
         rok_wit_context_set(id);
     }
     l.calls.insert(id, c);
@@ -509,11 +504,8 @@ fn turn(id: i32, c: Call) -> i32 {
     }
     // The others whose futures finished here return in their own turns.
     for o in l.calls.values() {
-        if o.armed[0] && !o.ret.is_empty() {
-            if unsafe { rok_wit_bell_write(o.bell_w, 0, 1) } == BLOCKED {
-                panic("wit: a call's bell did not ring");
-            }
-            o.armed[0] = false;
+        if !o.rung[0] && !o.ret.is_empty() {
+            ring(o);
         }
     }
     l.ids[1] = 0;
@@ -523,21 +515,14 @@ fn turn(id: i32, c: Call) -> i32 {
     unsafe { rok_stdio_flush() };
     if c.waits[0] == 0 && c.returned[0] && !pending {
         unsafe {
-            if c.armed[0] {
-                rok_wit_bell_cancel(c.bell_r);
+            if c.bell[0] != 0 {
+                rok_wit_bell_drop_readable(c.bell[0]);
+                rok_wit_bell_drop_writable(c.bell[1]);
             }
-            rok_wit_bell_drop_readable(c.bell_r);
-            rok_wit_bell_drop_writable(c.bell_w);
             rok_wit_set_drop(c.set);
         }
         l.calls.remove(id);
         return EXIT;
-    }
-    if !c.returned[0] && !c.armed[0] {
-        if unsafe { rok_wit_bell_read(c.bell_r, 0, 1) } != BLOCKED {
-            panic("wit: a call's bell rang unread");
-        }
-        c.armed[0] = true;
     }
     // A socket or timer waits too: the host calls back once others ran
     // (the set's events are taken then).
@@ -545,6 +530,23 @@ fn turn(id: i32, c: Call) -> i32 {
         return YIELD;
     }
     WAIT | (c.set << 4)
+}
+
+/// Wake call `c`: an event in its set.
+#[cfg(target_os = "wasi")]
+fn ring(c: Call) {
+    unsafe {
+        if c.bell[0] == 0 {
+            let ends = rok_wit_bell_new();
+            c.bell[0] = ends as i32;
+            c.bell[1] = (ends >> 32) as i32;
+            rok_wit_join(c.bell[0], c.set);
+        }
+        if rok_wit_bell_read(c.bell[0], 0, 1) != BLOCKED || rok_wit_bell_write(c.bell[1], 0, 1) == BLOCKED {
+            panic("wit: a call's bell did not ring");
+        }
+    }
+    c.rung[0] = true;
 }
 
 /// How long a turn may wait for sockets and timers: while the host may

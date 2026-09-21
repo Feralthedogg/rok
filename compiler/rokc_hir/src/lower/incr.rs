@@ -3,17 +3,20 @@
 //! (closures, instances, type instances, `any` tags, warnings), is kept
 //! as a unit and replayed in a later build instead of lowered again.
 //!
-//! A unit is keyed by the program's interface (`interface_key`: every
-//! item but the bodies of the plain declarations, positions left out)
-//! and the declaration itself (its body with positions). Lowering a
-//! body reads the shared state; each read that could come out
-//! otherwise in another build is logged with its answer (`Lookup`).
-//! A unit replays when every read answers alike now and the files its
-//! spans point into outside its body are unchanged. The functions,
-//! types and inference variables it made are renumbered from where
-//! this build's counters stand, and the older ones it names by what
-//! the reads answer now. Otherwise the body is lowered and the unit
-//! made anew: a miss is always safe.
+//! A unit is keyed by what every lowering sees alike (`global_key`:
+//! target, flags, operators, lang slots) and the declaration itself
+//! (its name and its body with positions). Lowering a body reads the
+//! program's interface and the shared state; each read is logged: of
+//! the interface (`Read`: a signature, a type, a trait, an impl list,
+//! a name resolution ..) with a fingerprint of its answer, of the
+//! shared state (`Lookup`) with the answer. A unit replays when every
+//! read answers alike now and the files its spans point into outside
+//! its body are unchanged, so an edit elsewhere re-lowers only the
+//! bodies that read what it changed. The functions, types and inference
+//! variables it made are renumbered from where this build's counters
+//! stand, and the older ones it names by name or by what the reads
+//! answer now. Otherwise the body is lowered and the unit made anew: a
+//! miss is always safe.
 //!
 //! A body is plain when nothing else is derived from it: not generic,
 //! not `const`, its return type written (or `()`), not a trait's
@@ -29,7 +32,10 @@ use rokc_diagnostic::{RokDiagnostic, Span};
 use rokc_ir_common::FunctionId;
 
 use super::expr::AnyDispatch;
-use super::{AliasUse, Env, FnSig, MethodOrFn, RefOut, mangle_inst, ty_mangle};
+use super::{
+    AliasUse, Env, FnSig, GenericMethod, MethodInfo, MethodOrFn, RefOut, TraitInfo, mangle_inst,
+    ty_mangle,
+};
 use crate::{EnumId, HirEnumDef, HirFunction, HirStructDef, HirTy, StructId};
 
 /// Where an embedder keeps units between builds, and the errors of
@@ -89,10 +95,89 @@ pub(super) enum Lookup {
     /// `inferred_ret`'s entry (`Some(None)`: being inferred).
     #[allow(clippy::option_option)]
     InferredRet(FunctionId, Option<Option<HirTy>>),
-    /// The signature at a `fn_table` key, by its hash.
-    Sig(String, u64),
-    /// A declaration (its body evaluated), by its hash.
-    Body(FunctionId, u64),
+}
+
+/// A read of the program's interface (the tables collected from its
+/// items), answered by `Incr::answer`'s fingerprint.
+#[derive(Clone, Debug)]
+pub(super) enum Read {
+    /// `fn_table`: a declaration's signature, or none.
+    Sig(String),
+    /// `generic_fns`: a generic function's template.
+    Generic(String),
+    /// Function and generic function keys by last segment.
+    FnLeaf(String),
+    ExternFn(String),
+    /// The concrete methods of a name on a type.
+    Methods(HirTy, String),
+    /// Every concrete method.
+    AllMethods,
+    /// Every generic method template.
+    AllGenericMethods,
+    MethodInfo(FunctionId),
+    GenericMethods(String, String),
+    KeyOf(FunctionId),
+    InferRet(FunctionId),
+    MayDiverge(Span),
+    Intrinsic(FunctionId),
+    GenericIntrinsic(String),
+    /// Membership in one of the sets of functions (`FnSet`).
+    FnIn(u8, FunctionId),
+    ItemVis(String),
+    FieldVis(String),
+    Const(String),
+    ConstLeaf(String),
+    Static(String),
+    StaticLeaf(String),
+    MutStatic(String),
+    TraitInfo(String),
+    NegAuto(String, String),
+    NonExhaustive(String),
+    BoundMethod(String, String),
+    BoundTrait(String),
+    /// A declaration (its signature, body and impl).
+    Decl(FunctionId),
+    /// The generic body at a span failed its check (`bounds::in_failed`).
+    CheckFailed(Span),
+    /// A module's `use` entries.
+    Uses(String),
+    /// Every generic impl.
+    GenericImpls,
+    /// The generic impls of a trait.
+    GenericImplsOf(String),
+    /// The generic impls with a method.
+    GenericImplsWith(String),
+    /// The impls with an associated const.
+    ImplConsts(String),
+    /// The trait refs of the concrete impls on a type.
+    ImplsOn(HirTy),
+    /// Those of one trait.
+    ImplsOnOf(HirTy, String),
+    /// The targets of a trait's concrete impls.
+    ImplsOf(String),
+    /// The type key a path names from a module (`TypeNames::canon`).
+    Canon(Vec<String>, String),
+    /// A type-namespace key exists (an item or a re-export).
+    Type(String),
+    TypeLeaf(String),
+    TypeVis(String),
+    ModVis(String),
+    Reexport(String),
+    Trait(String),
+    Traits,
+    Variant(String),
+    VariantLeaf(String),
+    NameConst(String),
+    NameConstLeaf(String),
+    ValueReexport(String),
+    GenericAlias(String),
+    AnyGenericAlias,
+    PlainAlias(String),
+    DefaultedLeaf(String),
+    StructDef(StructId),
+    EnumDef(EnumId),
+    GenericStruct(String),
+    GenericEnum(String),
 }
 
 /// An `InstanceWarns` change.
@@ -132,6 +217,8 @@ struct Head {
     start: Counts,
     end: Counts,
     lookups: Vec<Lookup>,
+    /// Its reads of the interface, each with its answer's fingerprint.
+    reads: Vec<(Read, u64)>,
     /// Files its spans point into outside its body: path, the end of
     /// the line its furthest span there ends on, and the hash of the
     /// text up to it (the spans' positions, and what they show).
@@ -200,8 +287,66 @@ codec_enum!(Lookup {
     AnyTag(x0, x1),
     AnyDispatch(x0, x1, x2, x3),
     InferredRet(x0, x1),
-    Sig(x0, x1),
-    Body(x0, x1),
+});
+codec_enum!(Read {
+    Sig(x0),
+    Generic(x0),
+    FnLeaf(x0),
+    ExternFn(x0),
+    Methods(x0, x1),
+    AllMethods,
+    AllGenericMethods,
+    MethodInfo(x0),
+    GenericMethods(x0, x1),
+    KeyOf(x0),
+    InferRet(x0),
+    MayDiverge(x0),
+    Intrinsic(x0),
+    GenericIntrinsic(x0),
+    FnIn(x0, x1),
+    ItemVis(x0),
+    FieldVis(x0),
+    Const(x0),
+    ConstLeaf(x0),
+    Static(x0),
+    StaticLeaf(x0),
+    MutStatic(x0),
+    TraitInfo(x0),
+    NegAuto(x0, x1),
+    NonExhaustive(x0),
+    BoundMethod(x0, x1),
+    BoundTrait(x0),
+    Decl(x0),
+    CheckFailed(x0),
+    Uses(x0),
+    GenericImpls,
+    GenericImplsOf(x0),
+    GenericImplsWith(x0),
+    ImplConsts(x0),
+    ImplsOn(x0),
+    ImplsOnOf(x0, x1),
+    ImplsOf(x0),
+    Canon(x0, x1),
+    Type(x0),
+    TypeLeaf(x0),
+    TypeVis(x0),
+    ModVis(x0),
+    Reexport(x0),
+    Trait(x0),
+    Traits,
+    Variant(x0),
+    VariantLeaf(x0),
+    NameConst(x0),
+    NameConstLeaf(x0),
+    ValueReexport(x0),
+    GenericAlias(x0),
+    AnyGenericAlias,
+    PlainAlias(x0),
+    DefaultedLeaf(x0),
+    StructDef(x0),
+    EnumDef(x0),
+    GenericStruct(x0),
+    GenericEnum(x0),
 });
 codec_enum!(WarnEvent {
     Instance(x0, x1),
@@ -244,6 +389,7 @@ codec_struct!(Head {
     start,
     end,
     lookups,
+    reads,
     deps,
     bases,
     named
@@ -288,12 +434,12 @@ impl Codec for Unit {
 
 /// A lowering being recorded.
 struct Rec {
-    /// Struct and enum ids below these are the program's own types
-    /// (the same in every build of the interface).
-    base: (u32, u32),
     lookups: Vec<Lookup>,
     /// Keys looked up so far (the first answer is the one that counts).
     seen: HashSet<String>,
+    reads: Vec<Read>,
+    /// The reads so far, encoded.
+    read_seen: HashSet<Vec<u8>>,
     warns: Vec<WarnEvent>,
     /// Functions whose entries in the tables by function this lowering
     /// may have set or removed, and keys of the tables by key.
@@ -317,13 +463,25 @@ pub(super) fn log(key: impl FnOnce() -> String, answer: impl FnOnce() -> Lookup)
     });
 }
 
-/// `log` of a struct (`enum_`: enum) id lookup by path: answers other
-/// than one of the program's own types.
+/// Log a read of the interface (while a unit is recorded).
+pub(super) fn read(r: impl FnOnce() -> Read) {
+    REC.with(|rec| {
+        if let Some(rec) = rec.borrow_mut().as_mut() {
+            let r = r();
+            let mut e = Enc::new(true);
+            r.enc(&mut e);
+            if rec.read_seen.insert(e.buf) {
+                rec.reads.push(r);
+            }
+        }
+    });
+}
+
+/// `log` of a struct (`enum_`: enum) id lookup by path.
 pub(super) fn log_type(enum_: bool, key: &str, found: Option<u32>) {
     REC.with(|r| {
         if let Some(rec) = r.borrow_mut().as_mut() {
-            let base = if enum_ { rec.base.1 } else { rec.base.0 };
-            if found.is_some_and(|id| id < base) || !rec.seen.insert(format!("t{enum_}|{key}")) {
+            if !rec.seen.insert(format!("t{enum_}|{key}")) {
                 return;
             }
             rec.lookups.push(if enum_ {
@@ -365,11 +523,16 @@ pub(super) fn log_warn(e: impl FnOnce() -> WarnEvent) {
 /// The incremental state of one `lower_full`.
 pub(super) struct Incr<'a> {
     cache: &'a dyn BodyCache,
-    /// `interface_key`.
+    /// `interface_key` (generic body checks).
     interface: u64,
+    /// `global_key` (units).
+    global: u64,
     /// Per declaration: plain (see the module doc).
     plain: Vec<bool>,
-    base: (u32, u32),
+    /// Fingerprints of the reads answered so far (by encoding).
+    answers: std::cell::RefCell<HashMap<Vec<u8>, Option<u64>>>,
+    /// `fn_table` keys by `stable_name`, where it differs (`None`: two).
+    raw_keys: std::cell::OnceCell<HashMap<String, Option<String>>>,
     /// Per file: each line's end and the hash of the text up to it.
     lines: std::cell::RefCell<HashMap<u32, Vec<(u32, u64)>>>,
     names: std::cell::RefCell<Names>,
@@ -382,19 +545,76 @@ pub(super) struct Incr<'a> {
 struct Names {
     /// Functions, structs, enums looked at so far.
     done: [usize; 3],
+    decls: bool,
     by_id: HashMap<(u8, u32), String>,
     by_name: HashMap<(u8, String), Option<u32>>,
+}
+
+/// `name` with each type id `ty_mangle` writes in the target of a
+/// method key (`Struct12` in `Struct12__len`, `Enum3`) replaced by
+/// `f(enum, id)` (`None`: no name).
+fn map_type_ids(name: &str, f: impl Fn(bool, u32) -> Option<String>) -> Option<String> {
+    let Some(head) = name.find("__") else {
+        return Some(name.to_owned());
+    };
+    let mut out = String::with_capacity(name.len());
+    let mut rest = &name[..head];
+    while let Some(i) = rest
+        .find("Struct")
+        .into_iter()
+        .chain(rest.find("Enum"))
+        .min()
+    {
+        let enum_ = rest[i..].starts_with("Enum");
+        let tag = if enum_ { "Enum" } else { "Struct" };
+        let digits = rest[i + tag.len()..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let end = i + tag.len() + digits;
+        out.push_str(&rest[..i]);
+        match rest[i + tag.len()..end].parse::<u32>() {
+            Ok(id) => out.push_str(&f(enum_, id)?),
+            Err(_) => out.push_str(&rest[i..end]),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out.push_str(&name[head..]);
+    Some(out)
+}
+
+/// `name` with the types its method key names by id named by their own
+/// names: alike in every build.
+fn stable_name(name: &str) -> String {
+    map_type_ids(name, |enum_, id| {
+        Some(crate::type_name(enum_, id).map_or_else(
+            || format!("{}{id}", if enum_ { "Enum" } else { "Struct" }),
+            |t| format!("{{{t}}}"),
+        ))
+    })
+    .unwrap_or_default()
 }
 
 impl Names {
     fn update(&mut self, env: &Env<'_>) {
         let mut add = |k: u8, id: u32, name: String| {
+            let name = if k == 0 { stable_name(&name) } else { name };
             self.by_name
                 .entry((k, name.clone()))
                 .and_modify(|v| *v = None)
                 .or_insert(Some(id));
             self.by_id.insert((k, id), name);
         };
+        // The declarations, by `fn_table` key.
+        if !self.decls {
+            self.decls = true;
+            let mut keys: Vec<(&FunctionId, &String)> = env.key_of.iter().collect();
+            keys.sort();
+            for (id, k) in keys {
+                add(0, id.0, k.clone());
+            }
+        }
         let extras = env.sink.extras.borrow();
         for f in extras.iter().skip(self.done[0]) {
             add(0, f.id.0, f.name.clone());
@@ -444,8 +664,10 @@ impl<'a> Incr<'a> {
         Self {
             cache,
             interface,
+            global: global_key(env, input),
             plain,
-            base: declared(env),
+            answers: std::cell::RefCell::new(HashMap::new()),
+            raw_keys: std::cell::OnceCell::new(),
             lines: std::cell::RefCell::new(HashMap::new()),
             names: std::cell::RefCell::new(Names::default()),
             reuse: std::cell::Cell::new(BodyReuse::default()),
@@ -520,12 +742,18 @@ impl<'a> Incr<'a> {
         let mut e = Enc::new(true);
         def.enc(&mut e);
         let path = env.sources.path(def.span.file).unwrap_or_default();
-        let key = [&(i as u64).to_le_bytes()[..], path.as_bytes(), &e.buf]
+        let id = FunctionId(u32::try_from(i).unwrap_or(u32::MAX));
+        let name = env
+            .key_of
+            .get(&id)
+            .map(|k| stable_name(k))
+            .unwrap_or_default();
+        let key = [name.as_bytes(), path.as_bytes(), &e.buf]
             .iter()
-            .fold(self.interface, |h, part| rokc_core::hash::fast_add(h, part));
+            .fold(self.global, |h, part| rokc_core::hash::fast_add(h, part));
         let mut r = self.reuse.get();
         r.lowered += 1;
-        if let Some(f) = self.cache.get(key).and_then(|u| self.replay(env, &u)) {
+        if let Some(f) = self.cache.get(key).and_then(|u| self.replay(env, i, &u)) {
             r.replayed += 1;
             self.reuse.set(r);
             return f;
@@ -535,9 +763,10 @@ impl<'a> Incr<'a> {
         let before = Sizes::of(env);
         REC.with(|r| {
             *r.borrow_mut() = Some(Rec {
-                base: self.base,
                 lookups: Vec::new(),
                 seen: HashSet::new(),
+                reads: Vec::new(),
+                read_seen: HashSet::new(),
                 warns: Vec::new(),
                 touched: Vec::new(),
                 keys: Vec::new(),
@@ -724,10 +953,34 @@ impl<'a> Incr<'a> {
         e.home = Some((span.file, span.start, span.end));
         e.ids = Some(Vec::new());
         body.enc(&mut e);
+        // Reads of what it made itself follow from its other reads.
+        let made = |r: &Read| {
+            let mut e = Enc::new(false);
+            e.ids = Some(Vec::new());
+            r.enc(&mut e);
+            e.ids.into_iter().flatten().any(|(k, id)| match k {
+                IdKind::Function => (start.next_id..end.next_id).contains(&id),
+                IdKind::Struct => (start.structs..end.structs).contains(&id),
+                IdKind::Enum => (start.enums..end.enums).contains(&id),
+                IdKind::InferVar => true,
+            })
+        };
+        let reads = rec
+            .reads
+            .into_iter()
+            .filter(|r| !made(r))
+            .map(|r| match r {
+                Read::Sig(k) => Read::Sig(stable_name(&k)),
+                r => r,
+            })
+            .map(|r| Some((self.answer(env, &r)?, r)))
+            .map(|a| a.map(|(h, r)| (r, h)))
+            .collect::<Option<Vec<_>>>()?;
         let mut head = Head {
             start,
             end,
             lookups: rec.lookups,
+            reads,
             deps: Vec::new(),
             bases,
             named: Vec::new(),
@@ -770,19 +1023,18 @@ impl<'a> Incr<'a> {
         written: impl Iterator<Item = (IdKind, u32)>,
     ) -> Option<Vec<(u8, u32, String)>> {
         let mut seen = HashSet::new();
-        let decls = u32::try_from(env.decls.len()).ok()?;
         let mut names = self.names.borrow_mut();
         names.update(env);
         let mut out = Vec::new();
         for (kind, id) in written {
-            let (fixed, from, to) = match kind {
-                IdKind::Function => (decls, start.next_id, end.next_id),
-                IdKind::Struct => (self.base.0, start.structs, end.structs),
-                IdKind::Enum => (self.base.1, start.enums, end.enums),
-                IdKind::InferVar => (0, start.infer_vars, end.infer_vars),
+            let (from, to) = match kind {
+                IdKind::Function => (start.next_id, end.next_id),
+                IdKind::Struct => (start.structs, end.structs),
+                IdKind::Enum => (start.enums, end.enums),
+                IdKind::InferVar => (start.infer_vars, end.infer_vars),
             };
             let k = (kind_tag(kind), id);
-            if id >= fixed && !(from..to).contains(&id) && seen.insert(k) {
+            if id != NO_ID && !(from..to).contains(&id) && seen.insert(k) {
                 out.push((k.0, id, names.name_of(k.0, id)?.to_owned()));
             }
         }
@@ -790,7 +1042,7 @@ impl<'a> Incr<'a> {
     }
 
     /// Replay `u` when it holds for this build (see the module doc).
-    fn replay(&self, env: &Env<'_>, u: &Unit) -> Option<HirFunction> {
+    fn replay(&self, env: &Env<'_>, decl: usize, u: &Unit) -> Option<HirFunction> {
         let sink = &env.sink;
         let head = &u.head;
         for (path, at, hash) in &head.deps {
@@ -799,7 +1051,7 @@ impl<'a> Incr<'a> {
                 return None;
             }
         }
-        let ids = Ids::new(head, counts(env), self.base, env.decls.len());
+        let ids = Ids::new(head, counts(env));
         {
             let mut names = self.names.borrow_mut();
             names.update(env);
@@ -812,6 +1064,24 @@ impl<'a> Incr<'a> {
         }
         if !head.lookups.iter().all(|l| answers(env, &ids, l)) {
             return None;
+        }
+        for (r, h) in &head.reads {
+            // A read naming no id is asked as it is.
+            let mut e = Enc::new(true);
+            e.ids = Some(Vec::new());
+            r.enc(&mut e);
+            let renumbered;
+            let r = if e.ids.take().is_some_and(|v| v.is_empty()) {
+                r
+            } else {
+                renumbered = ids.read(r)?;
+                e = Enc::new(true);
+                renumbered.enc(&mut e);
+                &renumbered
+            };
+            if self.answer_at(env, e.buf, r) != Some(*h) {
+                return None;
+            }
         }
         let map = |kind, id| ids.map(kind, id);
         let mut d = Dec::new(&u.body);
@@ -837,11 +1107,19 @@ impl<'a> Incr<'a> {
                     f.name = format!("{p}{}", f.id.0);
                 }
             }
-            f
+            f.name = map_type_ids(&f.name, |enum_, id| {
+                let k = if enum_ { IdKind::Enum } else { IdKind::Struct };
+                let tag = if enum_ { "Enum" } else { "Struct" };
+                Some(format!("{tag}{}", ids.map(k, id)?))
+            })?;
+            Some(f)
         };
-        sink.extras
-            .borrow_mut()
-            .extend(b.extras.into_iter().map(renamed));
+        let extras = b
+            .extras
+            .into_iter()
+            .map(renamed)
+            .collect::<Option<Vec<_>>>()?;
+        sink.extras.borrow_mut().extend(extras);
         let (struct_bases, enum_bases) = head.bases.split_at(b.structs.len());
         {
             let mut table = env.defs.struct_table.borrow_mut();
@@ -871,7 +1149,12 @@ impl<'a> Incr<'a> {
             set(
                 &mut sink.inferred_fns.borrow_mut(),
                 e.id,
-                e.inferred_fn.map(|(at, f)| (now.next_id + at, f)),
+                e.inferred_fn.map(|(at, mut f)| {
+                    if let Some(n) = decl_name(env, f.id) {
+                        f.name = n;
+                    }
+                    (now.next_id + at, f)
+                }),
             );
             if e.track_caller {
                 sink.track_caller.borrow_mut().insert(e.id);
@@ -919,7 +1202,30 @@ impl<'a> Incr<'a> {
         env.names.alias_uses.borrow_mut().extend(b.alias_uses);
         sink.next_id
             .set(head.end.next_id - head.start.next_id + now.next_id);
-        Some(b.func)
+        let mut func = b.func;
+        func.name = decl_name(env, FunctionId(u32::try_from(decl).ok()?))?;
+        Some(func)
+    }
+
+    /// The `fn_table` key whose `stable_name` is `k` (`k` when none).
+    fn raw_key<'k>(&'k self, env: &'k Env<'_>, k: &'k str) -> &'k str {
+        let keys = self.raw_keys.get_or_init(|| {
+            let mut m: HashMap<String, Option<String>> = HashMap::new();
+            for raw in env.fn_table.keys() {
+                let s = stable_name(raw);
+                if s != *raw {
+                    m.entry(s)
+                        .and_modify(|v| *v = None)
+                        .or_insert_with(|| Some(raw.clone()));
+                }
+            }
+            m
+        });
+        match keys.get(k) {
+            Some(Some(raw)) => raw,
+            Some(None) => "",
+            None => k,
+        }
     }
 }
 
@@ -931,10 +1237,20 @@ struct Ids {
     start: Counts,
     end: Counts,
     now: Counts,
-    base: (u32, u32),
-    decls: u32,
     learned: std::cell::RefCell<HashMap<(u8, u32), u32>>,
 }
+
+/// The name declaration `id` is lowered under: a method's key may name
+/// types by id (`Struct12__len`), so a replayed one takes this build's.
+fn decl_name(env: &Env<'_>, id: FunctionId) -> Option<String> {
+    Some(match env.decls.get(id.0 as usize)? {
+        MethodOrFn::Fn(f) => f.name.clone(),
+        MethodOrFn::Method { key, .. } => key.clone(),
+    })
+}
+
+/// The id of no function (a signature made up for a call).
+const NO_ID: u32 = u32::MAX;
 
 const fn kind_tag(k: IdKind) -> u8 {
     match k {
@@ -946,46 +1262,28 @@ const fn kind_tag(k: IdKind) -> u8 {
 }
 
 impl Ids {
-    fn new(head: &Head, now: Counts, base: (u32, u32), decls: usize) -> Self {
+    fn new(head: &Head, now: Counts) -> Self {
         Self {
             start: head.start,
             end: head.end,
             now,
-            base,
-            decls: u32::try_from(decls).unwrap_or(u32::MAX),
             learned: std::cell::RefCell::new(HashMap::new()),
         }
     }
 
     /// The id `id` of `kind` of the unit is in this build.
     fn map(&self, kind: IdKind, id: u32) -> Option<u32> {
-        let (from, to, now, fixed) = match kind {
-            IdKind::Function => (
-                self.start.next_id,
-                self.end.next_id,
-                self.now.next_id,
-                self.decls,
-            ),
-            IdKind::Struct => (
-                self.start.structs,
-                self.end.structs,
-                self.now.structs,
-                self.base.0,
-            ),
-            IdKind::Enum => (
-                self.start.enums,
-                self.end.enums,
-                self.now.enums,
-                self.base.1,
-            ),
+        let (from, to, now) = match kind {
+            IdKind::Function => (self.start.next_id, self.end.next_id, self.now.next_id),
+            IdKind::Struct => (self.start.structs, self.end.structs, self.now.structs),
+            IdKind::Enum => (self.start.enums, self.end.enums, self.now.enums),
             IdKind::InferVar => (
                 self.start.infer_vars,
                 self.end.infer_vars,
                 self.now.infer_vars,
-                0,
             ),
         };
-        if id < fixed {
+        if id == NO_ID {
             Some(id)
         } else if (from..to).contains(&id) {
             Some(id - from + now)
@@ -1010,14 +1308,22 @@ impl Ids {
         }
     }
 
-    /// `ty` with its ids as this build numbers them.
-    fn ty(&self, ty: &HirTy) -> Option<HirTy> {
+    /// `v` with its ids as this build numbers them.
+    fn renumber<T: Codec>(&self, v: &T) -> Option<T> {
         let mut e = Enc::new(true);
-        ty.enc(&mut e);
+        v.enc(&mut e);
         let map = |kind, id| self.map(kind, id);
         let mut d = Dec::new(&e.buf);
         d.ids = Some(&map);
-        HirTy::dec(&mut d)
+        T::dec(&mut d)
+    }
+
+    fn ty(&self, ty: &HirTy) -> Option<HirTy> {
+        self.renumber(ty)
+    }
+
+    fn read(&self, r: &Read) -> Option<Read> {
+        self.renumber(r)
     }
 
     fn tys(&self, tys: &[HirTy]) -> Option<Vec<HirTy>> {
@@ -1025,43 +1331,441 @@ impl Ids {
     }
 }
 
-/// How many structs and enums the program declares: they come first,
-/// in item order (the instances follow), so their ids are the same in
-/// every build of the interface.
-fn declared(env: &Env<'_>) -> (u32, u32) {
-    let n = |x: usize| u32::try_from(x).unwrap_or(u32::MAX);
-    let structs = env.defs.structs.borrow();
-    let enums = env.defs.enums.borrow();
-    (
-        n(structs
-            .iter()
-            .position(|s| !s.generic_args.is_empty())
-            .unwrap_or(structs.len())),
-        n(enums
-            .iter()
-            .position(|e| !e.generic_args.is_empty())
-            .unwrap_or(enums.len())),
-    )
+codec_struct!(MethodInfo {
+    module,
+    vis,
+    trait_name,
+    trait_args
+});
+codec_struct!(GenericMethod { def, self_ty, info });
+codec_struct!(TraitInfo {
+    methods,
+    supers,
+    needs,
+    decls,
+    module,
+    params,
+    generics,
+    super_tys,
+    assoc,
+    consts
+});
+
+/// A fingerprint of interface values: positions left out, ids by their
+/// build-independent names.
+struct Fp(Enc);
+
+impl Fp {
+    fn new() -> Self {
+        let mut e = Enc::new(false);
+        e.ids = Some(Vec::new());
+        e.no_ids = true;
+        Self(e)
+    }
+
+    fn add<T: Codec>(&mut self, v: &T) -> &mut Self {
+        v.enc(&mut self.0);
+        self
+    }
+
+    fn opt<T>(&mut self, v: Option<T>, f: impl FnOnce(&mut Self, T)) -> &mut Self {
+        match v {
+            Some(v) => {
+                self.0.u(1);
+                f(self, v);
+            }
+            None => self.0.u(0),
+        }
+        self
+    }
+
+    fn debug(&mut self, v: &impl std::fmt::Debug) -> &mut Self {
+        self.0.bytes(format!("{v:?}").as_bytes());
+        self
+    }
+
+    fn finish(mut self, names: &Names) -> Option<u64> {
+        for (k, id) in self.0.ids.take().unwrap_or_default() {
+            match k {
+                _ if id == NO_ID => self.0.bytes(b"!"),
+                IdKind::InferVar => self.0.u(u64::from(id)),
+                k => self.0.bytes(names.name_of(kind_tag(k), id)?.as_bytes()),
+            }
+        }
+        Some(rokc_core::hash::fast(&self.0.buf))
+    }
 }
 
-/// The hash of `v`'s encoding, positions in.
-fn hash_of<T: Codec>(v: &T) -> u64 {
-    let mut e = Enc::new(true);
-    v.enc(&mut e);
-    rokc_core::hash::fast(&e.buf)
+/// A declaration as lowering reads it.
+fn fp_decl(f: &mut Fp, d: &MethodOrFn<'_>) {
+    match d {
+        MethodOrFn::Fn(def) => {
+            f.add(&0u8).add(*def);
+        }
+        MethodOrFn::Method {
+            fn_def,
+            self_ty,
+            module,
+            key,
+            subst,
+        } => {
+            f.add(&1u8)
+                .add(&**fn_def)
+                .add(self_ty)
+                .add(module)
+                .add(&stable_name(key))
+                .add(subst);
+        }
+    }
 }
 
-/// Log a read of the signature at `fn_table` key `key`.
-pub(super) fn log_sig(key: &str, sig: &FnSig) {
-    log(
-        || format!("s|{key}"),
-        || Lookup::Sig(key.to_owned(), hash_of(sig)),
+fn fp_impl(f: &mut Fp, i: &super::Impl) {
+    f.add(&i.trait_key)
+        .add(&i.trait_args)
+        .add(&i.assoc)
+        .add(&i.generics)
+        .add(&i.where_clause)
+        .add(&i.self_ty)
+        .add(&i.module)
+        .add(&i.methods)
+        .add(&i.consts)
+        .add(&i.concrete);
+}
+
+/// Keys by last segment, the ones of `leaf` in order.
+fn leaf_keys(l: &super::Leaves, leaf: &str) -> Vec<String> {
+    let mut v = l.get(leaf).cloned().unwrap_or_default();
+    v.sort();
+    v
+}
+
+impl Incr<'_> {
+    /// The fingerprint of what `r` reads now (`None`: not readable).
+    fn answer(&self, env: &Env<'_>, r: &Read) -> Option<u64> {
+        let mut e = Enc::new(true);
+        r.enc(&mut e);
+        self.answer_at(env, e.buf, r)
+    }
+
+    /// `answer` of `r`, encoded as `key`.
+    fn answer_at(&self, env: &Env<'_>, key: Vec<u8>, r: &Read) -> Option<u64> {
+        if let Some(a) = self.answers.borrow().get(&key) {
+            return *a;
+        }
+        let a = self.answer_now(env, r);
+        self.answers.borrow_mut().insert(key, a);
+        a
+    }
+
+    #[allow(clippy::too_many_lines)] // one arm per table
+    fn answer_now(&self, env: &Env<'_>, r: &Read) -> Option<u64> {
+        let mut f = Fp::new();
+        let names = &env.names;
+        match r {
+            Read::Sig(k) => {
+                f.add(&env.fn_table.get(self.raw_key(env, k)).cloned());
+            }
+            Read::Generic(k) => {
+                f.opt(env.generic_fns.get(k), |f, d| {
+                    f.add(*d);
+                });
+            }
+            Read::FnLeaf(k) => {
+                let l = env.fn_leaves.get_or_init(|| {
+                    super::leaves(env.fn_table.keys().chain(env.generic_fns.keys()))
+                });
+                f.add(&leaf_keys(l, k));
+            }
+            Read::ExternFn(k) => {
+                f.add(&env.extern_fns.get(k).cloned());
+            }
+            Read::Methods(ty, m) => {
+                let ids = super::method_target_for(ty)
+                    .and_then(|t| env.method_table.get(&(t, m.clone())));
+                f.add(&ids.cloned());
+            }
+            Read::AllMethods => {
+                // Order-free: the sum of the entries' fingerprints.
+                let mut sum = 0u64;
+                let mut names_now = self.names.borrow_mut();
+                names_now.update(env);
+                for ((t, m), ids) in &env.method_table {
+                    let mut g = Fp::new();
+                    match t {
+                        super::MethodTarget::Struct(id) => g.add(&0u8).add(id),
+                        super::MethodTarget::Enum(id) => g.add(&1u8).add(id),
+                        super::MethodTarget::Mangled(s) => g.add(&2u8).add(&stable_name(s)),
+                    };
+                    g.add(m).add(ids);
+                    sum = sum.wrapping_add(g.finish(&names_now)?);
+                }
+                f.add(&sum);
+            }
+            Read::AllGenericMethods => {
+                f.add(&env.generic_methods);
+            }
+            Read::MethodInfo(id) => {
+                f.opt(env.method_info.get(id), |f, i| {
+                    f.add(i);
+                });
+            }
+            Read::GenericMethods(b, m) => {
+                f.opt(env.generic_methods.get(&(b.clone(), m.clone())), |f, v| {
+                    f.add(&(v.len() as u64));
+                    for g in v {
+                        f.add(g);
+                    }
+                });
+            }
+            Read::KeyOf(id) => {
+                f.add(&env.key_of.get(id).map(|k| stable_name(k)));
+            }
+            Read::InferRet(id) => {
+                f.add(&env.infer_ret.contains(id));
+            }
+            Read::MayDiverge(at) => {
+                f.add(&env.may_diverge.contains(at));
+            }
+            Read::Intrinsic(id) => {
+                f.debug(&env.intrinsics.get(id));
+            }
+            Read::GenericIntrinsic(k) => {
+                f.debug(&env.generic_intrinsics.get(k));
+            }
+            Read::FnIn(set, id) => {
+                f.add(&super::FnSet::of(*set)?.contains(env, *id));
+            }
+            Read::ItemVis(k) => {
+                f.add(&env.item_visibility.get(k).copied());
+            }
+            Read::FieldVis(k) => {
+                f.add(&env.field_vis.get(k).cloned());
+            }
+            Read::Const(k) => {
+                f.add(&env.consts.get(k).cloned());
+            }
+            Read::ConstLeaf(k) => {
+                f.add(&leaf_keys(&super::leaves(env.consts.keys()), k));
+            }
+            Read::Static(k) => {
+                f.add(&env.statics.get(k).cloned());
+            }
+            Read::StaticLeaf(k) => {
+                f.add(&leaf_keys(&super::leaves(env.statics.keys()), k));
+            }
+            Read::MutStatic(k) => {
+                f.add(&env.mut_statics.contains(k));
+            }
+            Read::TraitInfo(k) => {
+                f.opt(env.trait_info.get(k), |f, t| {
+                    f.add(t);
+                });
+            }
+            Read::NegAuto(b, k) => {
+                f.add(&env.neg_auto.contains(&(b.clone(), k.clone())));
+            }
+            Read::NonExhaustive(k) => {
+                f.add(&env.non_exhaustive.contains(k));
+            }
+            Read::BoundMethod(t, m) => {
+                f.opt(env.bound_methods.get(&(t.clone(), m.clone())), |f, g| {
+                    f.add(g);
+                });
+            }
+            Read::BoundTrait(k) => {
+                f.add(&env.bound_traits.get(k).cloned());
+            }
+            Read::Decl(id) => {
+                f.opt(env.decls.get(id.0 as usize), fp_decl);
+            }
+            Read::CheckFailed(at) => {
+                f.add(&env.sink.failed.borrow().contains(at));
+            }
+            Read::Uses(m) => {
+                f.debug(&env.names.uses.get(m));
+            }
+            Read::GenericImpls => {
+                for i in env.impls.all.iter().filter(|i| i.is_generic()) {
+                    fp_impl(&mut f, i);
+                }
+            }
+            Read::GenericImplsOf(k) => {
+                for i in env
+                    .impls
+                    .all
+                    .iter()
+                    .filter(|i| i.is_generic() && i.trait_key == *k)
+                {
+                    fp_impl(&mut f, i);
+                }
+            }
+            Read::GenericImplsWith(m) => {
+                let with = |i: &&super::Impl| i.is_generic() && i.methods.contains_key(m);
+                for i in env.impls.all.iter().filter(with) {
+                    fp_impl(&mut f, i);
+                }
+            }
+            Read::ImplConsts(n) => {
+                let with = |i: &&super::Impl| i.consts.iter().any(|(c, ..)| c == n);
+                for i in env.impls.all.iter().filter(with) {
+                    fp_impl(&mut f, i);
+                }
+            }
+            Read::ImplsOn(ty) => {
+                let refs: Vec<&crate::TraitRef> = env.impls.refs_on(ty).collect();
+                f.add(&(refs.len() as u64));
+                for r in refs {
+                    f.add(r);
+                }
+            }
+            Read::ImplsOnOf(ty, k) => {
+                let refs: Vec<&crate::TraitRef> = env.impls.refs_of(ty, k).collect();
+                f.add(&(refs.len() as u64));
+                for r in refs {
+                    f.add(r);
+                }
+            }
+            Read::ImplsOf(k) => {
+                let tys: Vec<&HirTy> = env.impls.tys_of(k).collect();
+                f.add(&(tys.len() as u64));
+                for t in tys {
+                    f.add(t);
+                }
+            }
+            Read::Canon(segs, module) => {
+                let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
+                let errors = names.diags.borrow().len();
+                let full = names.canon(&segs, module, &[], Span::DUMMY);
+                let failed = names.diags.borrow().len() != errors;
+                names.diags.borrow_mut().truncate(errors);
+                f.add(&full).add(&failed);
+            }
+            Read::Type(k) => {
+                f.add(&names.names.contains(k));
+            }
+            Read::TypeLeaf(k) => {
+                let l = names.leaves.get_or_init(|| {
+                    super::leaves(names.names.iter().chain(names.reexports.keys()))
+                });
+                f.add(&leaf_keys(l, k));
+            }
+            Read::TypeVis(k) => {
+                f.add(&names.visibility.get(k).copied());
+            }
+            Read::ModVis(k) => {
+                f.add(&names.mod_vis.get(k).copied());
+            }
+            Read::Reexport(k) => {
+                f.add(&names.reexports.get(k).cloned());
+            }
+            Read::Trait(k) => {
+                f.add(&names.traits.contains(k));
+            }
+            Read::Traits => {
+                f.add(&names.traits);
+            }
+            Read::Variant(k) => {
+                f.add(&names.variants.contains(k));
+            }
+            Read::VariantLeaf(k) => {
+                let l = names
+                    .variant_leaves
+                    .get_or_init(|| super::leaves(&names.variants));
+                f.add(&leaf_keys(l, k));
+            }
+            Read::NameConst(k) => {
+                f.add(&names.consts.get(k).cloned());
+            }
+            Read::NameConstLeaf(k) => {
+                let l = names
+                    .const_leaves
+                    .get_or_init(|| super::leaves(names.consts.keys()));
+                f.add(&leaf_keys(l, k));
+            }
+            Read::ValueReexport(k) => {
+                f.add(&names.value_reexports.get(k).cloned());
+            }
+            Read::GenericAlias(k) => {
+                f.add(&names.generic_aliases.get(k).cloned());
+            }
+            Read::AnyGenericAlias => {
+                f.add(&!names.generic_aliases.is_empty());
+            }
+            Read::DefaultedLeaf(k) => {
+                f.add(&env.defs.defaulted_leaves.contains(k));
+            }
+            Read::PlainAlias(k) => {
+                f.add(&names.plain_aliases.get(k).cloned());
+            }
+            Read::StructDef(id) => {
+                let structs = env.defs.structs.borrow();
+                f.opt(structs.get(id.0 as usize), |f, d| {
+                    f.add(&crate::type_name(false, id.0))
+                        .add(&d.repr)
+                        .add(&d.def_id)
+                        .add(&d.fields)
+                        .add(&d.generic_args)
+                        .add(&d.union_kind)
+                        .add(&d.niche);
+                });
+            }
+            Read::EnumDef(id) => {
+                let enums = env.defs.enums.borrow();
+                f.opt(enums.get(id.0 as usize), |f, d| {
+                    f.add(&crate::type_name(true, id.0))
+                        .add(&d.repr)
+                        .add(&d.def_id)
+                        .add(&d.variants)
+                        .add(&d.generic_args);
+                });
+            }
+            Read::GenericStruct(k) => {
+                f.opt(env.defs.generic_structs.get(k), |f, d| {
+                    f.add(*d);
+                });
+            }
+            Read::GenericEnum(k) => {
+                f.opt(env.defs.generic_enums.get(k), |f, d| {
+                    f.add(*d);
+                });
+            }
+        }
+        let mut names = self.names.borrow_mut();
+        names.update(env);
+        f.finish(&names)
+    }
+}
+
+/// What every lowering sees alike: the build's target and flags, the
+/// operators, the lang slots, the literal handlers.
+fn global_key(env: &Env<'_>, input: &crate::HirInput) -> u64 {
+    let mut e = Enc::new(false);
+    input.fingerprint.enc(&mut e);
+    e.bytes(
+        format!(
+            "{:?} {} {:?} {} {} {} {:?}",
+            (&input.packages, &input.lib, &input.prebuilt),
+            input.check_library,
+            input.root_main,
+            input.inline_prebuilt,
+            input.pointer_width,
+            input.stdcall_system,
+            input.no_implicit_rok,
+        )
+        .as_bytes(),
     );
-}
-
-/// Log a use of declaration `id`'s body (a compile-time evaluation).
-pub(super) fn log_body(id: FunctionId, def: &FnDef) {
-    log(|| format!("b|{}", id.0), || Lookup::Body(id, hash_of(def)));
+    let mut ops: Vec<String> = env.prec.entries().map(|o| format!("{o:?}")).collect();
+    ops.sort();
+    let mut lang: Vec<String> = env.names.lang.entries().map(|l| format!("{l:?}")).collect();
+    lang.sort();
+    let shapes = env
+        .literal_shapes
+        .iter()
+        .map(|h| format!("{:?} {} {}", h.shape, h.name, h.priority));
+    for s in ops.into_iter().chain(lang).chain(shapes) {
+        e.bytes(s.as_bytes());
+    }
+    rokc_core::hash::fast(&e.buf)
 }
 
 /// Set or remove the entry at `k`.
@@ -1240,11 +1944,6 @@ fn answers(env: &Env<'_>, ids: &Ids, l: &Lookup) -> bool {
                 .map(|d| d.id);
             fun(r, now)
         }
-        Lookup::Sig(key, h) => env.fn_table.get(key).is_some_and(|s| hash_of(s) == *h),
-        Lookup::Body(id, h) => env
-            .decls
-            .get(id.0 as usize)
-            .is_some_and(|d| hash_of(d.def()) == *h),
         Lookup::InferredRet(id, r) => {
             let Some(id) = ids.map(IdKind::Function, id.0) else {
                 return false;

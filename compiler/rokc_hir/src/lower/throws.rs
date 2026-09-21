@@ -1097,7 +1097,7 @@ pub(super) fn hook_call(
     msg: &str,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
-    let Some(sig) = ctx.env.fn_table.get(hook) else {
+    let Some(sig) = ctx.env.sig(hook) else {
         return ctx.error_expr(
             span,
             format!("internal: runtime hook `{hook}` is not declared"),
@@ -1214,7 +1214,7 @@ pub(super) fn uncaught_in_main(
         span,
     };
     // `if #which == 0 { report(describe(#err0)) } ... report(describe(#errN))`
-    let Some(sig) = ctx.env.fn_table.get("rok_uncaught_error_at").cloned() else {
+    let Some(sig) = ctx.env.sig("rok_uncaught_error_at").cloned() else {
         return HirBlock {
             stmts: vec![HirStmt::Expr(ctx.error_expr(
                 span,

@@ -8,7 +8,8 @@
 # wasm32-wasi (a preview 2 component) and wasm32-wasi-threads (preview 1
 # with wasi-threads) run under wasmtime v46.0.3, the last release with
 # wasi-threads, fetched (SHA-256 checked) into the cache of
-# targets/build.sh; wasm32-unknown-unknown runs under node (18+) with the
+# targets/build.sh, as is wac v0.12.0, which composes the components of
+# the `wasm-plug` cases; wasm32-unknown-unknown runs under node (18+) with the
 # shipped rok.mjs. The targets' runtimes are built first
 # (targets/build.sh). Needs rustup, curl and, for the browser, node.
 set -eu
@@ -56,14 +57,41 @@ fi
 runner=$cache/$name/wasmtime
 [ "$os" = windows ] && runner=$runner.exe
 
+# wac, which composes the `wasm-plug` cases' components (none ships for
+# Windows on arm64: those cases are skipped there).
+WAC=v0.12.0
+case $arch-$os in
+aarch64-macos) wac=aarch64-apple-darwin wac_sha=891af0e6d591481daed3a7c52a3dc20fd34cc326e6e955d4c8fd85c4b1835e3d ;;
+x86_64-macos) wac=x86_64-apple-darwin wac_sha=805ff57132b81dfcd1f25632e5928eac1d5a1e1a32dead48e73f108571da4e17 ;;
+aarch64-linux) wac=aarch64-unknown-linux-musl wac_sha=80fe01c4cbf1e59526069d46f51a8a396be6f8df09ecc060d949181a317c08f5 ;;
+x86_64-linux) wac=x86_64-unknown-linux-musl wac_sha=7cd490edbd452221ef89e6750fc43eacc9b71b1242095eb577cb9a3bf0d3beda ;;
+x86_64-windows) wac=x86_64-pc-windows-gnu wac_sha=33d92a2a73db1f8de69538038e594a14cc8f9e6feb8138bf29fdaf2598d425d9 ;;
+*) wac= ;;
+esac
+ROK_TEST_WAC=
+if [ -n "$wac" ]; then
+	ROK_TEST_WAC=$cache/wac-$WAC-$wac
+	[ "$os" = windows ] && ROK_TEST_WAC=$ROK_TEST_WAC.exe
+	if [ ! -f "$ROK_TEST_WAC" ]; then
+		curl -fsSL --retry 3 -o "$ROK_TEST_WAC.part" "https://github.com/bytecodealliance/wac/releases/download/$WAC/wac-cli-$wac"
+		mv "$ROK_TEST_WAC.part" "$ROK_TEST_WAC"
+	fi
+	got=$( (shasum -a 256 "$ROK_TEST_WAC" 2>/dev/null || sha256sum "$ROK_TEST_WAC") | cut -d' ' -f1)
+	if [ "$got" != "$wac_sha" ]; then
+		echo "checksum mismatch for $ROK_TEST_WAC: $got" >&2
+		exit 1
+	fi
+	chmod +x "$ROK_TEST_WAC"
+fi
+
 [ $# -gt 0 ] || set -- wasm32-wasi wasm32-wasi-threads wasm32-unknown-unknown
 "$here/build.sh" "$@"
 
-export ROK_REQUIRE_LLVM=1 ROK_TEST_WASM_RUNNER="$runner"
+export ROK_REQUIRE_LLVM=1 ROK_TEST_WASM_RUNNER="$runner" ROK_TEST_WAC
 for t in "$@"; do
 	for o in "" -O2; do
 		echo "== $t ${o:--O0}"
 		ROK_TEST_TARGET=$t ROK_TEST_OPT=$o cargo test --test integration --test differential
 	done
 done
-cargo test --test cli -- cross_targets browser_module_exports_to_js profile_guided_optimization_on_wasm32_wasi
+cargo test --test cli -- cross_targets browser_module_exports_to_js profile_guided_optimization_on_wasm32_wasi wit_prebuilt_dependency_carries_its_wit

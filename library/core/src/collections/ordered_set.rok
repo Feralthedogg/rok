@@ -46,7 +46,7 @@ impl<T: Hash> OrderedSet<T> {
     }
 
     /// The members in insertion order, lazily.
-    pub const fn iter(self) -> ListIter<T> {
+    pub const fn iter(self) -> KeysIter<T, bool> {
         self.d.keys()
     }
 
@@ -104,9 +104,9 @@ impl<T: Hash + Clone> Clone for OrderedSet<T> {
 
 /// `for x in s`, in insertion order (2.9.9).
 impl<T: Hash> IntoIterator for OrderedSet<T> {
-    type IntoIter = ListIter<T>;
+    type IntoIter = KeysIter<T, bool>;
     type Item = T;
-    const fn into_iter(self) -> ListIter<T> {
+    const fn into_iter(self) -> KeysIter<T, bool> {
         self.iter()
     }
 }

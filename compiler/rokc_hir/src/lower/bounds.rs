@@ -104,7 +104,7 @@ fn in_trait<'a>(
 /// `r` (a bound on `self_ty`) with the trait's omitted arguments taken
 /// from its parameter defaults (`Add` is `Add<Self>`, spec 2.10.5).
 fn complete(ctx: &LowerCtx<'_>, mut r: TraitRef, self_ty: &HirTy) -> TraitRef {
-    let Some(info) = ctx.env.trait_info.get(&r.path) else {
+    let Some(info) = ctx.env.trait_of(&r.path) else {
         return r;
     };
     for gp in info.generics.params.iter().skip(r.args.len()) {
@@ -130,8 +130,7 @@ fn bound_on(rcx: &LowerCtx<'_>, b: &Ty, module: &str, self_ty: &HirTy) -> Option
     let r = rcx.bound_ref(b, module, |t| rcx.resolve_ast_ty(t))?;
     rcx.env
         .names
-        .traits
-        .contains(&r.path)
+        .is_trait(&r.path)
         .then(|| complete(rcx, r, self_ty))
 }
 
@@ -152,7 +151,7 @@ pub(super) fn traits_of(ctx: &LowerCtx<'_>, p: u32) -> Vec<TraitRef> {
         if out.contains(&r) {
             continue;
         }
-        if let Some(info) = ctx.env.trait_info.get(&r.path) {
+        if let Some(info) = ctx.env.trait_of(&r.path) {
             let mut subst = TySubst::new();
             let rcx = in_trait(ctx, info, &r, &me, &mut subst);
             for st in info.super_tys.iter().rev() {
@@ -193,7 +192,7 @@ pub(super) fn project(
         return Some(t);
     }
     let (r, decl) = all.iter().filter(wanted).find_map(|r| {
-        let info = ctx.env.trait_info.get(&r.path)?;
+        let info = ctx.env.trait_of(&r.path)?;
         let bounds = info.assoc.iter().find(|(n, _)| n == name)?;
         Some((r, &bounds.1))
     })?;
@@ -212,7 +211,7 @@ pub(super) fn project(
     let HirTy::Param(q) = t else {
         unreachable!("fresh makes a Param")
     };
-    let info = &ctx.env.trait_info[&r.path];
+    let info = ctx.env.trait_of(&r.path).expect("a trait");
     let mut subst = TySubst::new();
     let rcx = in_trait(ctx, info, r, &HirTy::Param(p), &mut subst);
     for b in decl {
@@ -235,7 +234,7 @@ pub(super) fn bound_method<'e>(
     traits_of(ctx, p)
         .iter()
         .filter(|r| only.is_none_or(|k| k == r.path))
-        .find_map(|r| env.bound_methods.get(&(r.path.clone(), method.to_owned())))
+        .find_map(|r| env.bound_method(&r.path, method))
 }
 
 /// `bind_self` for a bound template (`bound_methods`): the trait's
@@ -246,13 +245,13 @@ pub(super) fn bind_trait_args(
     p: u32,
     subst: &mut HashMap<String, HirTy>,
 ) {
-    let Some(key) = ctx.env.bound_traits.get(&fn_def.name) else {
+    let Some(key) = ctx.env.bound_trait(&fn_def.name) else {
         return;
     };
     let Some(r) = traits_of(ctx, p).into_iter().find(|r| r.path == *key) else {
         return;
     };
-    let info = &ctx.env.trait_info[key];
+    let info = ctx.env.trait_of(key).expect("a trait");
     for (gp, a) in info.generics.params.iter().zip(r.args) {
         let (rokc_ast::GenericParam::Type { name, .. }
         | rokc_ast::GenericParam::Const { name, .. }) = gp;
@@ -526,7 +525,9 @@ fn check_one(
     let self_param = match self_of {
         SelfOf::Trait(key) => {
             let me = fresh(env, "Self".to_owned());
-            let args = env.trait_info[*key]
+            let args = env
+                .trait_of(key)
+                .expect("a trait")
                 .generics
                 .params
                 .iter()
@@ -636,11 +637,11 @@ pub(super) fn assoc_const(
         if traits.is_some_and(|ts| !ts.contains(&r.path)) {
             return None;
         }
-        let info = ctx.env.trait_info.get(&r.path)?;
+        let info = ctx.env.trait_of(&r.path)?;
         let (_, ty) = info.consts.iter().find(|(n, _)| n == name)?;
         Some((r, ty.clone()))
     })?;
-    let info = &ctx.env.trait_info[&r.path];
+    let info = ctx.env.trait_of(&r.path).expect("a trait");
     let mut subst = TySubst::new();
     let ty = in_trait(ctx, info, &r, &me, &mut subst).resolve_ast_ty(&decl);
     let span = ctx.here();
@@ -691,5 +692,8 @@ pub(super) fn no_method(ctx: &LowerCtx<'_>, p: u32, method: &str, span: Span) ->
 /// impl (its errors repeat the check's)?
 pub(super) fn in_failed(env: &Env<'_>) -> bool {
     let failed = env.sink.failed.borrow();
-    !failed.is_empty() && env.sink.bodies.borrow().iter().any(|s| failed.contains(s))
+    env.sink.bodies.borrow().iter().any(|s| {
+        super::incr::read(|| super::incr::Read::CheckFailed(*s));
+        failed.contains(s)
+    })
 }
