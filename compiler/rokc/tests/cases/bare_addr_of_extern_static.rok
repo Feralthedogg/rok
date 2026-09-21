@@ -1,0 +1,23 @@
+// only-os: macos linux
+// expect-exit: 0
+// spec: std 101-ptr §1.1.2
+// expect-stdout:
+// 1 5 5
+
+// `addr_of` of a C library's `static` (stdlib 1.1.2). The UCRT has no
+// data export to use: Windows is skipped.
+use rok::bare::ptr::addr_of;
+
+extern "C" {
+    // getopt(3)'s next index; 1 before any call.
+    static mut optind: i32;
+}
+
+fn main() -> i32 {
+    let po = addr_of(optind);
+    let before = unsafe { optind };
+    unsafe { po.write(5); }
+    println(f"{before} {unsafe { optind }} {unsafe { po.read() }}");
+    unsafe { po.write(before); }
+    0
+}

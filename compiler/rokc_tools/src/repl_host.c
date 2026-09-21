@@ -1377,9 +1377,11 @@ static char *read_ir(size_t n) {
 void rok_runtime_yield(void);
 void rok_leave_native(void);
 void rok_set_exit_hook(void (*)(int));
-// The runtime's TLS block (803); `ROK_TLS_YIELD_FLAG` comes from
-// `tls_abi` (build.rs).
-extern __declspec(thread) unsigned char rok_tls[];
+// This thread's runtime TLS block (803), from the runtime's accessor:
+// clang guards a C `extern __declspec(thread)` access with
+// `__dyn_tls_on_demand_init`, which needs the MSVC CRT.
+// `ROK_TLS_YIELD_FLAG` comes from `tls_abi` (build.rs).
+unsigned char *rokr_tls_addr(void);
 
 // A failed cell leaves the session as it was before it, like a forked
 // snapshot: before the cell, with the runtime's other threads stopped at
@@ -2016,7 +2018,7 @@ int main(void) {
     if (!book) return 1;
     book->cap = (BOOK_SIZE - sizeof *book) / sizeof *book->regions;
     main_thread = GetCurrentThreadId();
-    main_yield = rok_tls + ROK_TLS_YIELD_FLAG;
+    main_yield = rokr_tls_addr() + ROK_TLS_YIELD_FLAG;
     rok_set_exit_hook(on_exit_hook);
     SetUnhandledExceptionFilter(on_fault);
     AddVectoredExceptionHandler(1, on_overflow);

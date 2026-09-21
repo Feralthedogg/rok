@@ -156,7 +156,7 @@ pub fn setup() -> Option<Env> {
 /// `setup` for what runs without LLVM (`-O0` through the native
 /// backend: REPL cells).
 pub fn setup_runtime() -> Env {
-    let workspace = std::fs::canonicalize(workspace()).unwrap();
+    let workspace = rokc_core::real_path(workspace()).unwrap();
     let bootstrap = workspace.join("library/core/lib.rok");
     assert!(bootstrap.exists(), "missing {bootstrap:?}");
 

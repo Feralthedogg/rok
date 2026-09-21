@@ -2208,7 +2208,7 @@ fn custom_target_file() {
         fs::hard_link(ROKC, &exe).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(
-            fs::canonicalize(Path::new(ROKC).parent().unwrap().join("../lib/rok/targets"))
+            rokc_core::real_path(Path::new(ROKC).parent().unwrap().join("../lib/rok/targets"))
                 .unwrap()
                 .join(&host.name),
             sys.join("lib/rok/targets/mine"),

@@ -46,6 +46,8 @@ fn end_to_end_cases() {
         let r = run_case(&env, name, path, &scratch);
         if r.is_ok() {
             println!("ok    {name}");
+            // Only failures keep their outputs (CI disks are small).
+            let _ = fs::remove_dir_all(scratch.join(name));
         }
         r.map_err(|e| format!("{name}: {e}"))
     });
@@ -204,7 +206,7 @@ fn check_run(
         return Err(format!("exit={exit} (expected {expected})"));
     }
     // Library panic locations are absolute: relative to the workspace.
-    let root = fs::canonicalize(workspace()).unwrap();
+    let root = rokc_core::real_path(workspace()).unwrap();
     let root = format!("{}/", root.display()).replace('\\', "/");
     let got = String::from_utf8_lossy(&run.stderr)
         .replace('\\', "/")

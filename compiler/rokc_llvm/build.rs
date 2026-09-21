@@ -85,10 +85,8 @@ fn main() {
                 n.strip_prefix("lib")?.strip_suffix(".a")?
             }
             .to_owned();
-            ["lld", "MLIR", "LLVM"]
-                .iter()
-                .any(|p| n.starts_with(p))
-                .then_some(n)
+            // `LLVM-C.lib` (MSVC) is the import library of LLVM-C.dll.
+            (["lld", "MLIR", "LLVM"].iter().any(|p| n.starts_with(p)) && n != "LLVM-C").then_some(n)
         })
         .collect();
     names.sort_by_key(|n| {

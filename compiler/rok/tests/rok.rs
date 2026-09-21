@@ -51,11 +51,16 @@ fn llvm() -> bool {
     found
 }
 
+/// `s` as a ROKON string literal (Windows paths have backslashes).
+fn q(s: impl std::fmt::Display) -> String {
+    rokc_rokon::quote(&s.to_string())
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rok-test-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    fs::canonicalize(dir).unwrap()
+    rokc_core::real_path(dir).unwrap()
 }
 
 fn write(path: &Path, text: &str) {
@@ -165,6 +170,7 @@ fn add_lock_update_offline_remove() {
     let repo = root.join("greet");
     let c1 = commit(&repo, &[("src/lib.rok", LIB_V1)]);
     let url = repo.display().to_string();
+    let qurl = q(&url);
     let app = root.join("app");
     write(
         &app.join("src/main.rok"),
@@ -178,7 +184,7 @@ fn add_lock_update_offline_remove() {
         manifest,
         APP0.replace(
             "    },",
-            &format!("        \"greet\": Dep::git(\"{url}\"),\n    }},")
+            &format!("        \"greet\": Dep::git({qurl}),\n    }},")
         )
     );
     let lock = read(&app.join("rok.lock"));
@@ -192,7 +198,7 @@ fn add_lock_update_offline_remove() {
         "{lock}"
     );
     for want in [
-        format!("\"{url}\""),
+        qurl.clone(),
         format!("commit: \"{c1}\",\n            tree: \"{tree}\",\n        }},\n    ],\n}}\n"),
     ] {
         assert!(lock.contains(&want), "{lock}");
@@ -257,7 +263,7 @@ fn add_lock_update_offline_remove() {
     ));
     assert!(
         read(&app.join("rok.rokon"))
-            .contains(&format!("\"greet\": Dep::git(\"{url}\", tag: \"v1\"),"))
+            .contains(&format!("\"greet\": Dep::git({qurl}, tag: \"v1\"),"))
     );
     assert!(read(&app.join("rok.lock")).contains("tag: \"v1\""));
     assert!(read(&app.join("rok.lock")).contains(&format!("commit: \"{c1}\"")));
@@ -302,8 +308,8 @@ fn transitive_dependencies_and_conflicts() {
             (
                 "rok.rokon",
                 &format!(
-                    "Package {{ name: \"a\", deps: {{ \"b\": Dep::git(\"{}\") }} }}\n",
-                    b.display()
+                    "Package {{ name: \"a\", deps: {{ \"b\": Dep::git({}) }} }}\n",
+                    q(b.display())
                 ),
             ),
         ],
@@ -699,7 +705,7 @@ fn named_environments() {
     // In an environment, path dependencies are absolute.
     assert!(
         read(&home.join("envs/work/rok.rokon"))
-            .contains(&format!("\"greet\": Dep::path(\"{}\"),", lib.display()))
+            .contains(&format!("\"greet\": Dep::path({}),", q(lib.display())))
     );
     assert_eq!(deps(&home, &elsewhere, &["--env", "work"])[0].0, "greet");
     // Outside a project: `default` (empty), then what `env use` chose,
@@ -736,7 +742,7 @@ fn named_environments() {
     ok(&rok(&home, &root, &["env", "import", "fromproj", "proj"]));
     assert!(
         read(&home.join("envs/fromproj/rok.rokon"))
-            .contains(&format!("\"g\": Dep::path(\"{}\"), // here", lib.display()))
+            .contains(&format!("\"g\": Dep::path({}), // here", q(lib.display())))
     );
 
     // `env shell`: $SHELL with ROK_ENV and rok on PATH.
@@ -1172,9 +1178,9 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     let c1 = stone(&num, "num", "1.0.0", "", &[("src/lib.rok", one)]);
     let tree1 = git(&num, &["rev-parse", "HEAD^{tree}"]);
     let line = format!(
-        "Stone {{ name: \"num\", vers: \"1.0.0\", deps: [], source: Dep::git(\"{}\", rev: \
+        "Stone {{ name: \"num\", vers: \"1.0.0\", deps: [], source: Dep::git({}, rev: \
          \"{c1}\"), cksum: \"{tree1}\", yanked: false }}\n",
-        num.display()
+        q(num.display())
     );
     assert_eq!(ok(&rok(home, &num, &["publish"])), line);
     assert_eq!(ok(&rok(home, &num, &["publish", "--index", &reg])), line);
@@ -1493,9 +1499,10 @@ fn stones_publish_add_update_yank() {
         git(&index, &["config", kv[0], kv[1]]);
     }
     let reg = index.display().to_string();
+    let qreg = q(&reg);
     write(
         &home.join("config.rokon"),
-        &format!("Config {{ registry: \"{reg}\" }}\n"),
+        &format!("Config {{ registry: {qreg} }}\n"),
     );
     let num = root.join("num");
     let tree1 = publish_stones(&root, &home, &index);
@@ -1513,7 +1520,7 @@ fn stones_publish_add_update_yank() {
     let lock = read(&app.join("rok.lock"));
     assert_eq!(locked_stones(&lock), ["geom@0.3.0", "num@1.1.0"]);
     assert!(
-        lock.contains("source: Dep::registry(") && lock.contains(&format!("\"{reg}\"")),
+        lock.contains("source: Dep::registry(") && lock.contains(&qreg),
         "{lock}"
     );
     let names: Vec<String> = deps(&home, &app, &[]).into_iter().map(|(n, _)| n).collect();
@@ -1616,7 +1623,7 @@ fn stones_publish_add_update_yank() {
     // A per-dependency index.
     ok(&rok(&home, &app, &["add", "geom@0.3", "--registry", &reg]));
     assert!(read(&app.join("rok.rokon")).contains(&format!(
-        "\"geom\": Dep::version(\"0.3\", registry: \"{reg}\"),"
+        "\"geom\": Dep::version(\"0.3\", registry: {qreg}),"
     )));
 }
 
@@ -1667,7 +1674,8 @@ fn native_packages() {
         git(&index, &["config", kv[0], kv[1]]);
     }
     let reg = index.display().to_string();
-    let config = format!("Config {{ registry: \"{reg}\" }}\n");
+    let qreg = q(&reg);
+    let config = format!("Config {{ registry: {qreg} }}\n");
     write(&home.join("config.rokon"), &config);
 
     // The archives: `lib/` and a license, packed by `tar`.
@@ -2146,9 +2154,10 @@ fn stone_features_round_trip() {
         git(&index, &["config", kv[0], kv[1]]);
     }
     let reg = index.display().to_string();
+    let qreg = q(&reg);
     write(
         &home.join("config.rokon"),
-        &format!("Config {{ registry: \"{reg}\" }}\n"),
+        &format!("Config {{ registry: {qreg} }}\n"),
     );
     let num = root.join("num");
     stone_meta(

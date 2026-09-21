@@ -6,7 +6,6 @@
 // 2 9
 // 3 b c
 // 6 6
-// 1 5 5
 
 // `addr_of` of a `static` (stdlib 1.1.2): statics live in data sections,
 // so the pointer is valid for the whole run; a lazy one is initialized
@@ -20,11 +19,6 @@ static TABLE: [i32; 4] = [10, 20, 30, 40];
 static ORIGIN: Pt = Pt { x: 2, y: 9 };
 static NAMES: List<str> = make_names();
 static SIX: i64 = six();
-
-extern "C" {
-    // getopt(3)'s next index; 1 before any call.
-    static mut optind: i32;
-}
 
 fn make_names() -> List<str> {
     return [f"{churn(3)}", "b", "c"];
@@ -60,11 +54,5 @@ fn main() -> i32 {
 
     let ps = addr_of(SIX);
     println(f"{unsafe { ps.read() }} {SIX}");
-
-    let po = addr_of(optind);
-    let before = unsafe { optind };
-    unsafe { po.write(5); }
-    println(f"{before} {unsafe { optind }} {unsafe { po.read() }}");
-    unsafe { po.write(before); }
     0
 }

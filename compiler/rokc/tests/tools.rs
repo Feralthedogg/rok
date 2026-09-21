@@ -676,7 +676,7 @@ fn lsp_sees_prebuilt_dependencies() {
     let main = app.join("src/main.rok");
     let src = "use util::hello;\nlet x = hello();\nprintln(f\"{x}\");\n";
     std::fs::write(&main, src).unwrap();
-    let uri = format!("file://{}", main.display());
+    let uri = rokc_tools::lsp::path_to_uri(&main.display().to_string(), cfg!(windows));
     let doc = format!(r#"{{"uri":"{uri}","languageId":"rok","version":1,"text":{src:?}}}"#);
     let at =
         format!(r#"{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":1,"character":10}}}}"#);
@@ -723,7 +723,10 @@ fn lsp_sees_prebuilt_dependencies() {
     };
     assert!(reply(2).contains("Says hi."), "{stdout}");
     let def = reply(3);
-    let want = format!("file://{}", util.join("src/lib.rok").display());
+    let want = rokc_tools::lsp::path_to_uri(
+        &util.join("src/lib.rok").display().to_string(),
+        cfg!(windows),
+    );
     assert!(def.contains(&want), "{def}");
     assert!(def.contains(r#""start":{"line":1,"#), "{def}");
 }

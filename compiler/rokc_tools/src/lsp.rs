@@ -1271,7 +1271,7 @@ fn uri_to_path(uri: &str, windows: bool) -> String {
 
 /// The `file://` URI of a path (Windows: `C:\a b\x` is
 /// `file:///C:/a%20b/x`).
-fn path_to_uri(path: &str, windows: bool) -> String {
+pub fn path_to_uri(path: &str, windows: bool) -> String {
     let path = if windows {
         let p = path.replace('\\', "/");
         match p.strip_prefix("//") {

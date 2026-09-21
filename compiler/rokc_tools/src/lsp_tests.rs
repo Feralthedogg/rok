@@ -4,7 +4,7 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use crate::lsp::serve;
+use crate::lsp::{path_to_uri, serve};
 use rokc_diagnostic::Json;
 
 fn frame(msg: &Json) -> String {
@@ -94,7 +94,7 @@ fn scripted_session() {
     std::fs::create_dir_all(&dir).unwrap();
     // A lone file: the anonymous package.
     let file = dir.join("demo.rok");
-    let uri = format!("file://{}", file.display());
+    let uri = path_to_uri(&file.display().to_string(), cfg!(windows));
     let uri = uri.as_str();
 
     let completing = format!("{SRC}let t = p.\n");
@@ -275,7 +275,7 @@ fn members_references_rename() {
     let dir = std::env::temp_dir().join(format!("rokc-lsp-members-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("members.rok");
-    let uri = format!("file://{}", file.display());
+    let uri = path_to_uri(&file.display().to_string(), cfg!(windows));
     let uri = uri.as_str();
     let rename = |id, line, col, name: &str| {
         let mut p = at(uri, line, col);
@@ -463,7 +463,7 @@ fn unsaved_submodule_buffer() {
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/main.rok"), "mod m;\n\nlet x: i32 = m::v();\n").unwrap();
     std::fs::write(dir.join("src/m.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
-    let uri = format!("file://{}", dir.join("src/m.rok").display());
+    let uri = path_to_uri(&dir.join("src/m.rok").display().to_string(), cfg!(windows));
     let uri = uri.as_str();
     let open = notify(
         "textDocument/didOpen",

@@ -1,9 +1,11 @@
+// only-os: macos linux
 // expect-exit: 0
 // expect-stdout:
 // hello
 // hello
 // hello
 
+// The UCRT's stdout is in text mode: `puts` writes CRLF on Windows.
 extern "C" {
     fn puts(s: str) -> i32;
 }

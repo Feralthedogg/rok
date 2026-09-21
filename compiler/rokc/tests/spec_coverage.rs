@@ -55,7 +55,7 @@ fn spec_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("ROK_SPEC_DIR") {
         return Some(PathBuf::from(d));
     }
-    let ws = fs::canonicalize(common::workspace()).ok()?;
+    let ws = rokc_core::real_path(common::workspace()).ok()?;
     ["spec/en", "spec/ko"].iter().find_map(|lang| {
         ws.ancestors()
             .map(|a| a.join(lang))
@@ -444,7 +444,7 @@ fn spec_coverage_report() {
 
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || {
-            fs::canonicalize(common::workspace())
+            rokc_core::real_path(common::workspace())
                 .unwrap()
                 .join("target")
         },

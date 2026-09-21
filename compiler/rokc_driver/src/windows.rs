@@ -107,6 +107,9 @@ pub fn link_args(
     // Nothing refers to the TLS directory but the loader. (`/include`
     // takes the symbol, C names `_`-prefixed on x86.)
     a.push(format!("/include:{}_tls_used", t.c_symbol_prefix).into());
+    // The PE timestamp and PDB signature: a hash of the output, so equal
+    // inputs link to equal files.
+    a.push("/Brepro".into());
     if debug {
         a.push("/debug".into());
     }

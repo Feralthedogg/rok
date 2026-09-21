@@ -825,7 +825,10 @@ mod tests {
             locate(Some("https://h/a"), "z.tgz").unwrap(),
             "https://h/a/z.tgz"
         );
-        assert_eq!(locate(Some("/v"), "z.tgz").unwrap(), "/v/z.tgz");
+        assert_eq!(
+            locate(Some("/v"), "z.tgz").unwrap(),
+            Path::new("/v").join("z.tgz").display().to_string()
+        );
         assert_eq!(locate(None, "file:///z").unwrap(), "file:///z");
         assert!(locate(None, "z.tgz").is_err());
         assert_eq!(dir_of("https://h/a/m.rokon"), "https://h/a");
