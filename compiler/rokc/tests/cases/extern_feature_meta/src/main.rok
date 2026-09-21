@@ -1,0 +1,17 @@
+// spec: §6.3.6 §6.8.11 §9.2.3
+// rokc-arg: --extern mdep=tests/cases/extern_feature_meta/mdep
+// rokc-arg: --extern-feature mdep=loud --cfg feature=quiet
+// expect-exit: 0
+// expect-stdout:
+// loud loud
+
+// A dependency's `#[cfg(feature)]` meta blocks follow its own features,
+// not the package's: its derive is the `loud` one, here as in it.
+use mdep::Tag;
+
+#[derive(Tag)]
+struct Mine {}
+
+fn main() {
+    println(f"{mdep::own()} {Mine {}.tag()}");
+}

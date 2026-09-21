@@ -1,0 +1,29 @@
+// The component `../main.rok` imports: async exports whose calls run
+// at once, one woken by another's.
+ffi::wit::export { "../src/wit/svc.wit" }
+
+use wasi::clocks::monotonic_clock;
+use rok::core::channel::{Sender, channel};
+
+static SIGNAL: List<Sender<u32>> = List::new();
+
+#[wit::export]
+async fn sleep_add(a: u32, ms: u32) -> u32 {
+    await monotonic_clock::wait_for(ms as u64 * 1000000u64);
+    a + 10u32
+}
+
+#[wit::export]
+async fn wait_signal() -> u32 {
+    let (tx, rx) = channel::<u32>();
+    SIGNAL.push(tx);
+    match await rx.recv_async() {
+        v: u32 => v,
+        none => 0u32,
+    }
+}
+
+#[wit::export]
+async fn signal(v: u32) {
+    try! SIGNAL[0].send(v);
+}

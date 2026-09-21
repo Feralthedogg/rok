@@ -38,8 +38,18 @@ try {
             Write-Output "downloading $url"
             $Archive = Join-Path $tmp 'rok.zip'
             Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $Archive
+            Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile "$Archive.sha256"
         }
         if (-not (Test-Path $Archive)) { throw "$Archive does not exist" }
+        # A download is checked against its release's .sha256, an archive
+        # file against the one beside it, if any.
+        if (Test-Path "$Archive.sha256") {
+            $want = ((Get-Content -Raw "$Archive.sha256").Trim() -split '\s+')[0].ToLower()
+            $got = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLower()
+            if ($got -ne $want) {
+                throw "$Archive has SHA-256 $got, but its .sha256 says $want (a damaged or altered download)"
+            }
+        }
         Expand-Archive -Path $Archive -DestinationPath "$tmp\files"
         $bin = Get-ChildItem -Directory "$tmp\files\*\bin" | Select-Object -First 1
         if (-not $bin) { throw "$Archive is not a rok toolchain (no bin\)" }

@@ -696,6 +696,8 @@ impl Repl {
         let new = self
             .keep(&mut r, may_drop)
             .map_err(|(n, e)| Fail::Unkept(n, e))?;
+        let edited = new.is_some();
+        let new = new.unwrap_or_default();
         lap.mark("bindings");
         self.built += 1;
         let mut opts = self.opts.clone();
@@ -715,7 +717,20 @@ impl Repl {
             define: new.iter().map(|b| b.sym.clone()).collect(),
             statics: self.statics.iter().cloned().collect(),
         });
-        let (ir, out) = match r.cell_code(&opts) {
+        // MIR lowering reads the front end's per-thread state: on the
+        // compile thread too.
+        let code = crate::analysis::isolate(move || {
+            if edited {
+                r.relower();
+            }
+            let code = r.cell_code(&opts);
+            (r, code)
+        });
+        let (r, code) = code.map_err(|e| {
+            SourceMap::new().report(&crate::analysis::ice(&e));
+            Fail::Reported
+        })?;
+        let (ir, out) = match code {
             Ok(x) => x,
             Err(d) => {
                 r.report(&d);
@@ -759,17 +774,18 @@ impl Repl {
     /// the HIR and, at the end of the block, the stores of every
     /// binding back to its slot (a `let` can be assigned).
     /// A binding later cells could not use is an error (its name and
-    /// why), unless it is one of `may_drop`.
+    /// why), unless it is one of `may_drop`. `None`: the HIR is as it
+    /// was; else its MIR must be lowered again.
     fn keep(
         &self,
         r: &mut CompileResult,
         may_drop: &[String],
-    ) -> Result<Vec<Binding>, (String, String)> {
+    ) -> Result<Option<Vec<Binding>>, (String, String)> {
         let Some(hir) = r.modules.first_mut().map(|m| &mut m.hir) else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let Some(main) = hir.functions.iter().position(|f| f.name == "main") else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         // The `let`s before the cell's block load the old bindings.
         let mut outer: Vec<LocalId> = Vec::new();
@@ -793,7 +809,7 @@ impl Repl {
             }
         }
         let Some((at, block)) = cell else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
         let locals = &hir.functions[main].locals;
         let local = |id: LocalId| locals.iter().find(|l| l.id == id);
@@ -896,8 +912,7 @@ impl Repl {
                 b.stmts.extend(stores);
             }
         }
-        r.relower();
-        Ok(new.into_iter().map(|(b, _)| b).collect())
+        Ok(Some(new.into_iter().map(|(b, _)| b).collect()))
     }
 
     /// Build and start the host in the background (the first cell
@@ -1046,7 +1061,14 @@ impl Repl {
                 (at.0, at.1 + 1),
             );
         }
-        let r = s.compile_source(src, &path, map);
+        let (text, at) = (src.to_owned(), path.clone());
+        let r = match crate::analysis::isolate(move || s.compile_source(&text, &at, map)) {
+            Ok(r) => r,
+            Err(e) => {
+                SourceMap::new().report(&crate::analysis::ice(&e));
+                return None;
+            }
+        };
         if !r.has_errors() {
             return Some(r);
         }
@@ -1101,8 +1123,8 @@ impl Repl {
     /// Check a session source (`source`) for the tools, reporting
     /// nothing: the analysis and the path its spans name.
     pub fn analyze(&self, src: &str) -> (Analysis, String) {
-        let (mut s, path) = self.compiler();
-        let a = crate::analysis::analyze(&mut s, src, &path, &[]);
+        let (s, path) = self.compiler();
+        let a = crate::analysis::analyze(s, src, &path, &[]);
         (a, path.display().to_string())
     }
 

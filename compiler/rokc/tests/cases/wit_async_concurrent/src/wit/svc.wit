@@ -1,0 +1,12 @@
+package test:conc;
+
+interface svc {
+    sleep-add: async func(a: u32, ms: u32) -> u32;
+    wait-signal: async func() -> u32;
+    signal: async func(v: u32);
+}
+
+world provider {
+    import wasi:clocks/monotonic-clock@0.3.0;
+    export svc;
+}

@@ -199,21 +199,58 @@ fn run(c: &mut Command, what: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Check `archive` against the SHA-256 in `sum` (a release's
+/// `<archive>.sha256`: the hex digest, then optionally the file name).
+fn check_sum(archive: &Path, sum: &Path, what: &str) -> Result<(), String> {
+    let text = std::fs::read_to_string(sum).map_err(|e| format!("{}: {e}", sum.display()))?;
+    let want = text
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if want.len() != 64 || !want.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("{}: not a SHA-256 digest", sum.display()));
+    }
+    let bytes = std::fs::read(archive).map_err(|e| format!("{}: {e}", archive.display()))?;
+    let got = rokc_core::hash::hex(&rokc_core::hash::sha256(&bytes));
+    if got != want {
+        return Err(format!(
+            "{what} has SHA-256 {got}, but its .sha256 says {want} (a damaged or altered download)"
+        ));
+    }
+    Ok(())
+}
+
 /// Unpack `from` (a directory, a `.tar[.gz]`, a `.zip` (Windows' `tar`
 /// reads it), or an `http(s)://` URL of one) into `tmp`; the
-/// toolchain's top directory there.
+/// toolchain's top directory there. A download is checked against the
+/// `.sha256` beside it at the same place, an archive file against its
+/// `.sha256` when one is beside it.
 fn unpack(from: &str, tmp: &Path) -> Result<PathBuf, String> {
     let mut archive = PathBuf::from(from);
-    if from.starts_with("https://") || from.starts_with("http://") {
-        // `tar` tells the format by the content.
-        archive = tmp.join("download");
+    let curl = |url: &str, to: &Path| {
         run(
             Command::new("curl")
                 .args(["-fsSL", "--proto", "=https,http", "-o"])
-                .arg(&archive)
-                .arg(from),
-            &format!("curl {from}"),
-        )?;
+                .arg(to)
+                .arg(url),
+            &format!("curl {url}"),
+        )
+    };
+    if from.starts_with("https://") || from.starts_with("http://") {
+        // `tar` tells the format by the content.
+        archive = tmp.join("download");
+        let sum = tmp.join("download.sha256");
+        curl(from, &archive)?;
+        curl(&format!("{from}.sha256"), &sum)?;
+        check_sum(&archive, &sum, from)?;
+    } else {
+        let mut sum = archive.clone().into_os_string();
+        sum.push(".sha256");
+        let sum = PathBuf::from(sum);
+        if archive.is_file() && sum.is_file() {
+            check_sum(&archive, &sum, from)?;
+        }
     }
     let files = tmp.join("files");
     if archive.is_dir() {

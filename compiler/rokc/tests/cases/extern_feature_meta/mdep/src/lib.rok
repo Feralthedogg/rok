@@ -1,0 +1,27 @@
+pub trait Tag {
+    fn tag(self) -> str;
+}
+
+// Which block registers `Tag` is the dependency's own feature `loud`.
+#[cfg(feature = "loud")]
+#[impl_derive(Tag)]
+pub @derive {
+    impl pkg::Tag for @Self {
+        fn tag(self) -> str { return "loud"; }
+    }
+}
+
+#[cfg(not(feature = "loud"))]
+#[impl_derive(Tag)]
+pub @derive {
+    impl pkg::Tag for @Self {
+        fn tag(self) -> str { return "quiet"; }
+    }
+}
+
+#[derive(Tag)]
+pub struct Own {}
+
+pub fn own() -> str {
+    return Own {}.tag();
+}

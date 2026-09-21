@@ -44,6 +44,75 @@ pub fn check(
     (result, diags)
 }
 
+/// Run `f` (a compile) on the compile thread: a panic there or on a
+/// thread it spawns (an internal compiler error) is `Err(message)` for
+/// the caller to report, and the caller goes on.
+///
+/// Compiles run one at a time on one long-lived thread, so the compiler's per-thread state
+/// carries from one to the next as on a single thread (a REPL cell's
+/// front end, then its codegen). rokc aborts on panic, so the panicking
+/// thread is parked forever instead of unwinding (the next compile gets
+/// a new thread): what it holds stays allocated, and a later panic of a
+/// compile already given up (a sibling parse thread) may be blamed on
+/// the one running then. A panic on a thread that called `isolate` is
+/// fatal as before.
+pub fn isolate<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    use std::sync::Mutex;
+    use std::sync::mpsc::{Sender, channel};
+    type Job = Box<dyn FnOnce() + Send>;
+    type Fail = Box<dyn FnOnce(String) + Send>;
+    static WORKER: Mutex<Option<Sender<Job>>> = Mutex::new(None);
+    /// Fails the running compile.
+    static FAIL: Mutex<Option<Fail>> = Mutex::new(None);
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    thread_local! {
+        static CALLER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    fn lock<V>(m: &Mutex<V>) -> std::sync::MutexGuard<'_, V> {
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    HOOK.call_once(|| {
+        let fatal = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if CALLER.with(std::cell::Cell::get) {
+                return fatal(info);
+            }
+            let fail = lock(&FAIL).take();
+            match fail {
+                Some(fail) => fail(info.to_string()),
+                None => eprintln!("rokc: internal compiler error: {info}"),
+            }
+            loop {
+                std::thread::park();
+            }
+        }));
+    });
+    CALLER.with(|c| c.set(true));
+    let (tx, rx) = channel::<Result<T, String>>();
+    let failed = tx.clone();
+    *lock(&FAIL) = Some(Box::new(move |e| drop(failed.send(Err(e)))));
+    let job: Job = Box::new(move || drop(tx.send(Ok(f()))));
+    let mut worker = lock(&WORKER);
+    let send = worker.get_or_insert_with(|| {
+        let (jobs, next) = channel::<Job>();
+        // The stack of rokc's main thread (address space until used).
+        std::thread::Builder::new()
+            .name("compile".into())
+            .stack_size(1 << 30)
+            .spawn(move || next.into_iter().for_each(|job| job()))
+            .expect("spawn the compile thread");
+        jobs
+    });
+    send.send(job).expect("the compile thread waits for jobs");
+    let r = rx.recv().expect("a compile replies or fails");
+    lock(&FAIL).take();
+    if r.is_err() {
+        // Parked, or waiting on a parked thread.
+        *worker = None;
+    }
+    r
+}
+
 /// One check of a buffer.
 pub struct Analysis {
     pub diags: Vec<RokDiagnostic>,
@@ -54,20 +123,39 @@ pub struct Analysis {
     pub sources: Vec<SourceFile>,
 }
 
-/// Check `source` as the root file `path` (no codegen).
+/// Check `source` as the root file `path` (no codegen), `isolate`d: an
+/// internal compiler error is the analysis's one diagnostic.
 pub fn analyze(
-    session: &mut Session,
+    mut session: Session,
     source: &str,
     path: &Path,
     levels: &[(Level, String)],
 ) -> Analysis {
-    let (r, diags) = check(session, Some(source), path, levels, None);
-    Analysis {
-        diags,
-        source_map: r.source_map,
-        hir: r.modules.into_iter().next().map(|m| m.hir),
-        sources: r.sources,
-    }
+    let (source, path, levels) = (source.to_owned(), path.to_owned(), levels.to_vec());
+    isolate(move || {
+        let (r, diags) = check(&mut session, Some(&source), &path, &levels, None);
+        Analysis {
+            diags,
+            source_map: r.source_map,
+            hir: r.modules.into_iter().next().map(|m| m.hir),
+            sources: r.sources,
+        }
+    })
+    .unwrap_or_else(|e| Analysis {
+        diags: vec![ice(&e)],
+        source_map: rokc_interface::SourceMap::new(),
+        hir: None,
+        sources: Vec::new(),
+    })
+}
+
+/// The diagnostic of an `isolate`d compile's panic.
+pub fn ice(message: &str) -> RokDiagnostic {
+    RokDiagnostic::error(
+        rokc_diagnostic::ErrorKind::Internal,
+        Span::default(),
+        format!("internal compiler error: {message}"),
+    )
 }
 
 impl Analysis {

@@ -835,6 +835,30 @@ fn pinned_toolchains() {
         .unwrap();
     assert!(tar.success());
     ok(&tc(&["install", "9.10", "--from", "tc.tar.gz"]));
+    // An archive is checked against the `.sha256` beside it, a download
+    // against the one at its URL (which must exist).
+    let sum = root.join("tc.tar.gz.sha256");
+    write(&sum, &format!("{}  tc.tar.gz\n", "0".repeat(64)));
+    fails(
+        &tc(&["install", "9.10", "--from", "tc.tar.gz"]),
+        "its .sha256 says 0000",
+    );
+    let good = format!("{}  tc.tar.gz\n", sha256_of(&root.join("tc.tar.gz")));
+    write(&sum, &good);
+    ok(&tc(&["install", "9.10", "--from", "tc.tar.gz"]));
+    let url = format!("http://127.0.0.1:{}/tc.tar.gz", serve_dir(root.clone()));
+    ok(&tc(&["install", "9.10", "--from", &url]));
+    write(&sum, &format!("{}\n", "f".repeat(64)));
+    fails(
+        &tc(&["install", "9.10", "--from", &url]),
+        "its .sha256 says ffff",
+    );
+    fs::remove_file(&sum).unwrap();
+    fails(
+        &tc(&["install", "9.10", "--from", &url]),
+        "tc.tar.gz.sha256",
+    );
+    write(&sum, &good);
     assert!(
         home.join(format!("toolchains/9.10.0-{host}/bin/rokc"))
             .is_file()
@@ -1649,6 +1673,81 @@ fn sh(dir: &Path, cmd: &str, args: &[&str]) {
         "{cmd} {args:?}: {}",
         text(&out.stderr)
     );
+}
+
+/// `install.sh --archive` checks the archive against the `.sha256`
+/// beside it before unpacking.
+#[cfg(unix)]
+#[test]
+fn install_sh_checks_sums() {
+    let root = scratch("install-sh");
+    let home = root.join("home");
+    fake_toolchain(&root.join("stage/rok-9.9.1"), "9.9.1");
+    let tar = Command::new("tar")
+        .current_dir(root.join("stage"))
+        .args(["-czf", "../rok.tar.gz", "rok-9.9.1"])
+        .status()
+        .unwrap();
+    assert!(tar.success());
+    let install = || {
+        Command::new("sh")
+            .arg(workspace().join("install.sh"))
+            .args(["--archive", "rok.tar.gz"])
+            .current_dir(&root)
+            .env("ROK_HOME", &home)
+            .output()
+            .unwrap()
+    };
+    let sum = root.join("rok.tar.gz.sha256");
+    write(&sum, &format!("{}  rok.tar.gz\n", "a".repeat(64)));
+    fails(&install(), "its .sha256 says aaaa");
+    assert!(!home.join("toolchains").exists());
+    write(
+        &sum,
+        &format!("{}  rok.tar.gz\n", sha256_of(&root.join("rok.tar.gz"))),
+    );
+    assert!(ok(&install()).contains("rok 9.9.1 is installed"));
+    let host = env!("ROK_HOST");
+    assert!(
+        home.join(format!("toolchains/9.9.1-{host}/bin/rokc"))
+            .is_file()
+    );
+}
+
+/// `GET /<name>` of the files in `dir` on `http://127.0.0.1:<port>`
+/// (the port); 404 for others.
+#[cfg(unix)]
+fn serve_dir(dir: PathBuf) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let mut conn = conn.unwrap();
+            let mut reader = BufReader::new(conn.try_clone().unwrap());
+            let mut start = String::new();
+            reader.read_line(&mut start).unwrap();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header.trim_end().is_empty() {
+                    break;
+                }
+            }
+            let name = start
+                .split(' ')
+                .nth(1)
+                .unwrap_or("/")
+                .trim_start_matches('/');
+            let (code, body) = fs::read(dir.join(name)).map_or((404, Vec::new()), |b| (200, b));
+            let _ = write!(
+                conn,
+                "HTTP/1.1 {code} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = conn.write_all(&body);
+        }
+    });
+    port
 }
 
 #[cfg(unix)]

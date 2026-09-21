@@ -1451,6 +1451,17 @@ pub extern "C" fn rok_io_poll(out: *mut u8, max: usize) -> i32 {
     }
 }
 
+/// Whether a watch is armed: what the one-thread executor could wait for.
+#[cfg(target_os = "wasi")]
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_io_armed() -> i32 {
+    watch::SET.lock.lock();
+    // SAFETY: under the lock.
+    let any = unsafe { &*watch::SET.armed.get() }.iter().any(|a| *a != 0);
+    watch::SET.lock.unlock();
+    i32::from(any)
+}
+
 /// The one-thread executor's wait: the watched fds' events (as
 /// [`rok_io_poll`]) or `timeout_ns` (< 0: no limit), whichever comes
 /// first; the count (0: timed out). Nothing watched and no limit is a

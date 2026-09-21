@@ -1098,11 +1098,13 @@ pub fn host_leave() {
 }
 
 /// One turn of the host's loop (inside `host_enter`): every runnable
-/// task and due timer, until none is left, sleeping until the next timer
-/// while `may_sleep()`; then the nanoseconds to that timer (-1: none).
-pub fn host_run(may_sleep: fn() -> bool) -> i64 {
+/// task and due timer, until none is left; then the wait for sockets and
+/// timers, at most `slice()` ns (< 0: until nothing is left to wait for;
+/// 0: none), and what it woke. Whether a socket or timer still waits.
+pub fn host_run(slice: fn() -> i64) -> bool {
     let w = current_worker();
     let pool = w.pool;
+    let waited = false;
     loop {
         if let t: TaskRef = find_task(w) {
             run(t);
@@ -1118,8 +1120,17 @@ pub fn host_run(may_sleep: fn() -> bool) -> i64 {
         if next == 0 {
             continue;
         }
-        if next < 0 || !may_sleep() {
-            return next;
+        let armed = io_armed();
+        if next < 0 && !armed {
+            return false;
+        }
+        let s = if waited { 0 } else { slice() };
+        if s == 0 {
+            return true;
+        }
+        if s > 0 {
+            waited = true;
+            next = if next < 0 { s } else { next.min(s) };
         }
         solo_wait(next);
     }
@@ -1833,6 +1844,13 @@ fn solo_wait(next: i64) {
 fn solo_wait(next: i64) {
     unsafe { rok_thread_sleep_ns(next) };
 }
+
+/// A socket is watched (only the solo executor watches them itself).
+#[cfg(target_os = "wasi")]
+fn io_armed() -> bool { unsafe { rok_io_armed() } != 0 }
+
+#[cfg(not(target_os = "wasi"))]
+fn io_armed() -> bool { false }
 
 /// Completes once `fd` may be readable (`await task::readable(fd)`
 /// after a read hit `WouldBlock`); it may also complete spuriously, so

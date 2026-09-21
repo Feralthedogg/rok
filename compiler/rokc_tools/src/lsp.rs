@@ -295,10 +295,10 @@ impl<W: Write> Server<W> {
                 let root_text = open
                     .or_else(|| std::fs::read_to_string(&root).ok())
                     .unwrap_or_default();
-                analyze(&mut self.session(false), &root_text, &root, levels)
+                analyze(self.session(false), &root_text, &root, levels)
             }
-            Some(_) => analyze(&mut self.session(false), text, path, levels),
-            None => analyze(&mut self.session(true), text, path, levels),
+            Some(_) => analyze(self.session(false), text, path, levels),
+            None => analyze(self.session(true), text, path, levels),
         }
     }
 

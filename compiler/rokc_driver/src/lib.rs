@@ -435,6 +435,16 @@ pub fn compile_source(
     config: &CompilerConfig,
     files: &mut SourceMap,
 ) -> Result<CompiledProject, Vec<RokDiagnostic>> {
+    // Tests of the tools' survival: a debug rokc panics on a root file
+    // containing `ROKC_TEST_ICE`.
+    if cfg!(debug_assertions) {
+        if let Some(m) = std::env::var("ROKC_TEST_ICE")
+            .ok()
+            .filter(|m| !m.is_empty())
+        {
+            assert!(!source.contains(&m), "ROKC_TEST_ICE");
+        }
+    }
     let mut diags: Vec<RokDiagnostic> = Vec::new();
     let (mut config, prebuilt) = load_prebuilt(config, &mut diags);
     if !diags.is_empty() {
@@ -687,23 +697,42 @@ fn compile_unit_in(
     let ext = prec.ext_ops();
     relex_metas(&mut metas, &ext);
     let cfg_env = cfg_env(config);
+    // Per package: the user's, then each library root's.
+    let cfgs: Vec<CfgEnv> = std::iter::once(cfg_env.clone())
+        .chain(roots.iter().map(|(prefix, _)| {
+            let p = prefix.join("::");
+            // The library being built has the build's features; a
+            // prebuilt one those it was built with; others none.
+            if lib == Some(p.as_str()) {
+                cfg_env.clone()
+            } else {
+                let built = prebuilt.iter().find(|b| b.rokhir.name == p);
+                package_cfg(config, Some(built.map_or(&[], |b| &b.rokhir.features)))
+            }
+        }))
+        .collect();
+    let root_dir_kw = path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let pkgs = package_roots(&root_dir_kw, &roots);
+    // A meta block or keyword handler is judged by the cfg of the
+    // package that defines it (6.6.13: a false one registers nothing).
+    let holds = |file: &str, attrs: &[rokc_ast::Attribute]| {
+        package_of(&pkgs, Path::new(file)).is_some_and(|(i, _)| cfg::attrs_pass(attrs, &cfgs[i]))
+    };
     let mut meta_table = MetaTable::default();
     diags.extend(
         metas
             .metas
             .into_iter()
-            .filter(|m| cfg::attrs_pass(&m.cfg, &cfg_env))
+            .filter(|m| holds(&m.file, &m.cfg))
             .filter_map(|m| meta_table.add(m)),
     );
     let meta_table = std::sync::Arc::new(meta_table);
-    let root_dir_kw = path
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    // 6.6.13: a handler whose cfg is false registers nothing.
     let kw_defs = metas
         .keywords
         .into_iter()
-        .filter(|d| cfg::attrs_pass(&d.cfg, &cfg_env))
+        .filter(|d| holds(&d.file, &d.cfg))
         .collect();
     let keywords = keyword_tables(kw_defs, path, &root_dir_kw, &roots, &mut diags);
     let (lib_lits, user_lits) =
@@ -716,19 +745,7 @@ fn compile_unit_in(
             literals: std::sync::Arc::clone(if i == 0 { &user_lits } else { &lib_lits }),
             key: std::sync::OnceLock::new(),
             target: config.target.clone(),
-            cfg: match roots
-                .get(i.wrapping_sub(1))
-                .map(|(prefix, _)| prefix.join("::"))
-            {
-                // The library being built has the build's features; a
-                // prebuilt one those it was built with; others none.
-                None => cfg_env.clone(),
-                Some(p) if lib == Some(p.as_str()) => cfg_env.clone(),
-                Some(p) => {
-                    let built = prebuilt.iter().find(|b| b.rokhir.name == p);
-                    package_cfg(config, Some(built.map_or(&[], |b| &b.rokhir.features)))
-                }
-            },
+            cfg: cfgs[i].clone(),
         })
         .collect();
     let incr = incr::current();
@@ -1866,10 +1883,11 @@ fn cached<T: Clone>(
         return parse(files);
     }
     let key = format!("{}|{key}", files.len());
-    let mut slot = slot
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((k, added, v)) = slot.as_ref() {
+    let lock = || {
+        slot.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    if let Some((k, added, v)) = lock().as_ref() {
         if *k == key {
             for (path, text) in added {
                 files.add(path.clone(), text.clone());
@@ -1877,10 +1895,12 @@ fn cached<T: Clone>(
             return v.clone();
         }
     }
+    // Not under the lock: a parse that never returns (a tool's
+    // compiler panic, `rokc_tools::analysis::isolate`) must not hold it.
     let before = files.len();
     let v = parse(files);
     let added = files.files()[before..].to_vec();
-    *slot = Some((key, added, v.clone()));
+    *lock() = Some((key, added, v.clone()));
     v
 }
 
@@ -1994,6 +2014,18 @@ fn package_roots(user_dir: &Path, roots: &[LibRoot]) -> Vec<(PathBuf, Vec<String
     pkgs
 }
 
+/// The package (index, entry) of `pkgs` owning `file`: the closest
+/// package directory.
+fn package_of<'a>(
+    pkgs: &'a [(PathBuf, Vec<String>)],
+    file: &Path,
+) -> Option<(usize, &'a (PathBuf, Vec<String>))> {
+    pkgs.iter()
+        .enumerate()
+        .filter(|(_, (dir, _))| file.starts_with(dir))
+        .max_by_key(|(_, (dir, _))| dir.components().count())
+}
+
 /// The package index and absolute path of `handler` defined in `file`:
 /// the closest package directory owns the file; its path below that
 /// directory is the module path (`a/b.rok` → `a::b`); the build's entry
@@ -2006,11 +2038,7 @@ fn handler_path(
     handler: &str,
 ) -> Option<(usize, Vec<String>)> {
     let file = Path::new(file);
-    let (i, (dir, root)) = pkgs
-        .iter()
-        .enumerate()
-        .filter(|(_, (dir, _))| file.starts_with(dir))
-        .max_by_key(|(_, (dir, _))| dir.components().count())?;
+    let (i, (dir, root)) = package_of(pkgs, file)?;
     let mut path = root.clone();
     let rel = file.strip_prefix(dir).unwrap_or(file).with_extension("");
     let segs: Vec<String> = rel

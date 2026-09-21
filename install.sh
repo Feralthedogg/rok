@@ -54,6 +54,19 @@ host_triple() {
   esac
 }
 
+# Check archive $1 against the SHA-256 in $2 (a release's .sha256).
+check_sum() {
+  want=$(awk '{ print tolower($1); exit }' "$2")
+  if command -v sha256sum >/dev/null 2>&1; then
+    got=$(sha256sum "$1" | awk '{ print $1 }')
+  elif command -v shasum >/dev/null 2>&1; then
+    got=$(shasum -a 256 "$1" | awk '{ print $1 }')
+  else
+    die "sha256sum or shasum is needed to check $1"
+  fi
+  [ "$got" = "$want" ] || die "$1 has SHA-256 $got, but its .sha256 says $want (a damaged or altered download)"
+}
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rok-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -68,8 +81,12 @@ else
     say "downloading $url"
     archive="$tmp/rok.tar.gz"
     curl -fsSL --proto '=https' -o "$archive" "$url" || die "cannot download $url"
+    curl -fsSL --proto '=https' -o "$archive.sha256" "$url.sha256" || die "cannot download $url.sha256"
   fi
   [ -f "$archive" ] || die "$archive does not exist"
+  # A download is checked against its release's .sha256, an archive
+  # file against the one beside it, if any.
+  if [ -f "$archive.sha256" ]; then check_sum "$archive" "$archive.sha256"; fi
   mkdir "$tmp/files"
   tar -xzf "$archive" -C "$tmp/files" || die "cannot unpack $archive"
   src=$(find "$tmp/files" -mindepth 2 -maxdepth 2 -name bin -type d | head -n 1)
@@ -77,7 +94,7 @@ else
   src=$(dirname "$src")
 fi
 
-full=$("$src/bin/rokc" --version | awk '{ print $2 }') || die "cannot run $src/bin/rokc"
+full=$("$src/bin/rokc" --version | awk 'NR == 1 { print $2 }') || die "cannot run $src/bin/rokc"
 # The toolchain's own rok installs it (and checks it).
 ROK_HOME=$home "$src/bin/rok" -q toolchain install "$full" --from "$src"
 ROK_HOME=$home "$src/bin/rok" -q toolchain default "$full"

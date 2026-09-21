@@ -1,0 +1,33 @@
+// only-target: wasm32-wasi
+// wasm-plug: plug/main.rok
+// expect-exit: 0
+// expect-stdout:
+// first 12 then 11
+// signal 7
+
+// Stdlib 1.8: async export calls run concurrently (WASI preview 3
+// tasks). Two calls of `sleep-add` at once: the shorter one returns
+// first. `wait-signal` waits for what a later call (`signal`) sends: its
+// future finishes in the other call's turn and it returns in its own.
+ffi::wit::import { "wit/consumer.wit" }
+
+use test::conc::svc;
+
+#[wit::export]
+async fn run() -> Result<(), ()> {
+    let order: List<u32> = List::new();
+    let a = task::spawn_local(async {
+        order.push(await svc::sleep_add(1u32, 60u32));
+    });
+    let b = task::spawn_local(async {
+        order.push(await svc::sleep_add(2u32, 1u32));
+    });
+    await a;
+    await b;
+    println(f"first {order[0]} then {order[1]}");
+    let w = task::spawn_local(svc::wait_signal());
+    await task::yield_now();
+    await svc::signal(7u32);
+    println(f"signal {await w}");
+    Result::Ok(())
+}

@@ -1,0 +1,51 @@
+// only-target: wasm32-wasi
+// needs: net
+// expect-exit: 0
+// expect-stdout:
+// echo: hello (server read 5)
+// echo: again (server read 5) before the wait: true
+// waited true
+
+// Stdlib 1.8: sockets inside an async export (a WASI preview 3
+// command's `run`). Their readiness is waited on in the export's turn:
+// with nothing else pending until a socket is ready, and while a
+// subtask (`wait-for`) is pending too, in slices between the host's
+// events, so the echo is done long before the subtask returns.
+ffi::wit::import { "wit" }
+
+use wasi::clocks::monotonic_clock;
+use rok::std::net::{SocketAddr, TcpListener};
+use rok::std::net;
+use rok::std::io::byte_buf;
+
+async fn echo(word: str) -> str {
+    let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+    let l = try! TcpListener::bind(any);
+    let addr = try! l.local_addr();
+    let server = task::spawn_local(async {
+        let (s, _) = try! await l.accept_async();
+        let buf = byte_buf(64);
+        let n = try! await s.read_async(buf);
+        try! await s.write_all_async(buf[0:n]);
+        s.close();
+        n
+    });
+    let c = try! await net::tcp_connect_async(f"{addr}");
+    try! await c.write_all_async(word);
+    let back = byte_buf(64);
+    let n = try! await c.read_async(back);
+    c.close();
+    f"{try! str::from_utf8(back[0:n])} (server read {await server})"
+}
+
+#[wit::export]
+async fn run() -> Result<(), ()> {
+    println(f"echo: {await echo("hello")}");
+    let t0 = monotonic_clock::now();
+    let wait = task::spawn_local(monotonic_clock::wait_for(500000000u64));
+    let e = await echo("again");
+    println(f"echo: {e} before the wait: {monotonic_clock::now() - t0 < 400000000u64}");
+    await wait;
+    println(f"waited {monotonic_clock::now() - t0 >= 500000000u64}");
+    Result::Ok(())
+}

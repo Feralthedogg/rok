@@ -731,6 +731,120 @@ fn lsp_sees_prebuilt_dependencies() {
     assert!(def.contains(r#""start":{"line":1,"#), "{def}");
 }
 
+/// An internal compiler error (`ROKC_TEST_ICE`, a debug rokc's) in an
+/// analysis is that buffer's diagnostic; the server keeps serving.
+#[test]
+fn lsp_survives_a_compiler_panic() {
+    let dir = scratch("lsp-ice");
+    let main = dir.join("main.rok");
+    let uri = rokc_tools::lsp::path_to_uri(&main.display().to_string(), cfg!(windows));
+    let mut child = Command::new(ROKC)
+        .current_dir(&dir)
+        .env("ROK_HOME", workspace())
+        .env("ROKC_TEST_ICE", "ice-here")
+        .arg("lsp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let send = |stdin: &mut std::process::ChildStdin, m: String| {
+        stdin.write_all(frame(&m).as_bytes()).unwrap();
+    };
+    // The next message whose text contains `want`.
+    let mut next = |want: &str| loop {
+        let mut len = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "server gone");
+            match line.trim_end().strip_prefix("Content-Length: ") {
+                Some(n) => len = n.parse().unwrap(),
+                None if line.trim_end().is_empty() => break,
+                None => {}
+            }
+        }
+        let mut body = vec![0; len];
+        stdout.read_exact(&mut body).unwrap();
+        let body = String::from_utf8(body).unwrap();
+        if body.contains(want) {
+            break body;
+        }
+    };
+    let good = "let x = 1;\nprintln(f\"{x}\");\n";
+    let bad = format!("{good}// ice-here\n");
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#.into(),
+    );
+    send(
+        &mut stdin,
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{{"textDocument":{{"uri":"{uri}","languageId":"rok","version":1,"text":{bad:?}}}}}}}"#
+        ),
+    );
+    let diags = next("publishDiagnostics");
+    assert!(
+        diags.contains("internal compiler error") && diags.contains("ROKC_TEST_ICE"),
+        "{diags}"
+    );
+    send(
+        &mut stdin,
+        format!(
+            r#"{{"jsonrpc":"2.0","method":"textDocument/didChange","params":{{"textDocument":{{"uri":"{uri}","version":2}},"contentChanges":[{{"text":{good:?}}}]}}}}"#
+        ),
+    );
+    let diags = next("publishDiagnostics");
+    assert!(diags.contains(r#""diagnostics":[]"#), "{diags}");
+    send(
+        &mut stdin,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{{"textDocument":{{"uri":"{uri}"}},"position":{{"line":1,"character":11}}}}}}"#
+        ),
+    );
+    let hover = next(r#""id":2"#);
+    assert!(hover.contains("i32"), "{hover}");
+    send(
+        &mut stdin,
+        r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#.into(),
+    );
+    send(&mut stdin, r#"{"jsonrpc":"2.0","method":"exit"}"#.into());
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+}
+
+/// A compiler panic on a cell fails that cell; the session goes on.
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+fn repl_survives_a_compiler_panic() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let out = piped_env(
+        ROKC,
+        &["repl", "--rokr", &rokr],
+        "let x = 40;\nx + 1 // ice-here\nx + 2\n",
+        &[("ROKC_TEST_ICE", "ice-here")],
+    );
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "i32: 42\n", "{stderr}");
+    assert!(
+        stderr.contains("internal compiler error") && stderr.contains("ROKC_TEST_ICE"),
+        "{stderr}"
+    );
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+}
+
 #[test]
 fn check_reads_stdin() {
     let out = piped(
