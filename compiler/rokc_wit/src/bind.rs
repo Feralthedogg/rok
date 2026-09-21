@@ -27,8 +27,10 @@ use crate::resolve::{
 };
 use crate::{Loaded, Request};
 
-/// The support library the generated code calls.
+/// The support library the generated code calls: memory, blocks,
+/// handles (`W`); the async ABI, which runs on the executor (`A`).
 const W: &str = "rok::bare::ffi::wit";
+const A: &str = "rok::std::wit";
 const LIST: &str = "rok::core::collections::list::List";
 const RESULT: &str = "rok::core::error::Result";
 const FUTURE: &str = "rok::core::future::AsyncFuture";
@@ -586,7 +588,7 @@ impl Fx<'_, '_> {
                 } else {
                     "stream_out"
                 };
-                vec![self.let_("i32", &format!("{W}::{f}({ops}(), {v})"))]
+                vec![self.let_("i32", &format!("{A}::{f}({ops}(), {v})"))]
             }
             View::ErrorContext => vec![self.let_("i32", &format!("{v}.raw()"))],
             View::Flags(_, names) => vec![self.flag_bits(&names, v)],
@@ -792,7 +794,7 @@ impl Fx<'_, '_> {
                 } else {
                     "stream_in"
                 };
-                self.let_(&self.g.rty(t)?, &format!("{W}::{f}({ops}(), {h})"))
+                self.let_(&self.g.rty(t)?, &format!("{A}::{f}({ops}(), {h})"))
             }
             View::ErrorContext => {
                 let h = next();
@@ -1414,8 +1416,8 @@ impl Gen<'_> {
             ("h: i32, a: i32, n: i32", "h, a, n")
         };
         let text = format!(
-            "pub(pkg) fn {id}() -> {W}::{ops}<{ty}> {{
-    {W}::{ops} {{
+            "pub(pkg) fn {id}() -> {A}::{ops}<{ty}> {{
+    {A}::{ops} {{
         new: || -> i64 {{ unsafe {{ {new}() }} }},
         read: |{rp}| -> i32 {{ unsafe {{ {read}({ra}) }} }},
         write: |{rp}| -> i32 {{ unsafe {{ {write}({ra}) }} }},
@@ -1574,7 +1576,7 @@ impl Gen<'_> {
         let ps = params.join(", ");
         Ok(if f.is_async {
             format!(
-                "    pub async fn {name}({ps}){ret} {{\n{pre}        let w_st: i32 = unsafe {{\n{lowering}        }};\n        await {W}::subtask(w_st);\n        unsafe {{\n{lifting}        }}\n    }}\n"
+                "    pub async fn {name}({ps}){ret} {{\n{pre}        let w_st: i32 = unsafe {{\n{lowering}        }};\n        await {A}::subtask(w_st);\n        unsafe {{\n{lifting}        }}\n    }}\n"
             )
         } else {
             format!(
@@ -1704,12 +1706,12 @@ impl Gen<'_> {
             out: String::new(),
             n: 0,
         };
-        fx.line(&format!("{W}::async_enter();"));
+        fx.line(&format!("{A}::async_enter();"));
         let names: Vec<String> = (0..cparams.len()).map(|i| format!("a{i}")).collect();
         let vals = fx.lift_params(f, pmem, names.clone())?;
         let mut fut = user_call(f, call, &vals);
         if throwing(f.result.as_ref()).is_some() {
-            fut = format!("{W}::catching_async({fut})");
+            fut = format!("{A}::catching_async({fut})");
         }
         let body = fx.out;
         let mut gx = Fx {
@@ -1754,7 +1756,7 @@ impl Gen<'_> {
             "#[export_name(\"{lift}\")]
 extern \"C\" fn {id}({}) -> i32 {{
     unsafe {{
-{body}        {W}::async_start({fut}, |w_r: {rty}| {{
+{body}        {A}::async_start({fut}, |w_r: {rty}| {{
     unsafe {{
 {ret_body}    }}
         }})
@@ -1762,7 +1764,7 @@ extern \"C\" fn {id}({}) -> i32 {{
 }}
 #[export_name(\"{callback}\")]
 extern \"C\" fn {cid}(a0: i32, a1: i32, a2: i32) -> i32 {{
-    {W}::async_event(a0, a1, a2)
+    {A}::async_event(a0, a1, a2)
 }}
 ",
             ps.join(", ")

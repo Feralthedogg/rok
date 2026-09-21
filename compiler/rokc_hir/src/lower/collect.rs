@@ -279,6 +279,7 @@ pub fn lower_full(
         uses,
         reexports,
     ));
+    early.extend(check_tiers(raw_uses, &owned.items, &input.item_modules));
     // Diagnostics emitted during pre-body passes (impl-target validation
     // etc.) — folded into module.diagnostics once the module exists.
     let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
@@ -1244,6 +1245,7 @@ pub fn lower_full(
         inferred_ret: std::cell::RefCell::default(),
         inferred_fns: std::cell::RefCell::default(),
         bodies_done: std::cell::Cell::new(false),
+        sig_pass: std::cell::Cell::new(None),
         recursive_ret: std::cell::RefCell::default(),
         call_sites: std::cell::RefCell::default(),
         tentative_ret: std::cell::RefCell::default(),
@@ -1826,21 +1828,32 @@ pub fn lower_full(
     // I::Item | none`, `v: <S as Tr>::Out`) waited for the impls: resolve
     // them now, an instance's under its arguments.
     resolve_projection_aliases(&env);
-    resolve_open_members(&env, &struct_decls, &enum_decls);
     // Every declaration's signature types, now that every item and impl
-    // is registered (a projection in a signature resolves too).
-    let sigs: HashMap<FunctionId, FnSig> = (0..env.decls.len())
+    // is registered (a projection in a signature resolves too). Array
+    // lengths that call `const fn`s need their signatures: those wait
+    // for a second round.
+    let mut waiting: Vec<FunctionId> = Vec::new();
+    let mut sigs: HashMap<FunctionId, FnSig> = (0..env.decls.len())
         .map(|i| {
             let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
             let base = &env.fn_table[&env.key_of[&id]];
-            (id, mono::decl_sig(&env, i, base))
+            env.sink.sig_pass.set(Some(false));
+            let sig = mono::decl_sig(&env, i, base);
+            if env.sink.sig_pass.get() == Some(true) {
+                waiting.push(id);
+            }
+            (id, sig)
         })
         .collect();
-    for sig in env.fn_table.values_mut() {
-        if let Some(s) = sigs.get(&sig.id) {
-            sig.clone_from(s);
-        }
+    env.sink.sig_pass.set(None);
+    install_sigs(&mut env, &sigs);
+    for id in waiting {
+        let base = &env.fn_table[&env.key_of[&id]];
+        let sig = mono::decl_sig(&env, id.0 as usize, base);
+        sigs.insert(id, sig);
     }
+    install_sigs(&mut env, &sigs);
+    resolve_open_members(&env, &struct_decls, &enum_decls);
     // Spec 5.9.4: extern functions share one namespace; declaring one
     // twice with different signatures is an error. The toolchain's
     // runtime declarations (`rok::core::rt`, `extern "rok"`, 8.5) are the
@@ -2226,6 +2239,82 @@ fn show_nested_fn_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiag
 /// left open (a projection) when their type was first defined: a declared
 /// one (`structs[i]` / `enums[i]`) or a generic instance under its
 /// arguments. A union's storage is fixed at registration.
+/// Stdlib 0.1.2: `rok::bare` names neither `rok::core` nor `rok::std`, and
+/// `rok::core` does not name `rok::std` (in its `use`s and every path it
+/// writes).
+fn check_tiers(
+    raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
+    items: &[Item],
+    modules: &[String],
+) -> Vec<rokc_diagnostic::RokDiagnostic> {
+    struct Paths<'a> {
+        tier: &'static str,
+        out: &'a mut Vec<rokc_diagnostic::RokDiagnostic>,
+    }
+    impl Paths<'_> {
+        fn check(&mut self, p: &rokc_ast::Path) {
+            let [r, t, ..] = p.segments.as_slice() else {
+                return;
+            };
+            let forbidden = match self.tier {
+                "rok::bare" => ["core", "std"].contains(&t.name.as_str()),
+                _ => t.name == "std",
+            };
+            if r.name == "rok" && forbidden {
+                self.out.push(rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Module,
+                    p.span,
+                    format!(
+                        "`{}` must not depend on `rok::{}` (stdlib spec 0.1.2)",
+                        self.tier, t.name
+                    ),
+                ));
+            }
+        }
+    }
+    impl crate::walk::AstVisitor for Paths<'_> {
+        fn path(&mut self, p: &rokc_ast::Path) {
+            self.check(p);
+        }
+    }
+    let tier = |module: &str| match package_of(module) {
+        "rok::bare" => Some("rok::bare"),
+        "rok::core" => Some("rok::core"),
+        _ => None,
+    };
+    let mut out = Vec::new();
+    for (item, module) in items.iter().zip(modules) {
+        if let Some(tier) = tier(module) {
+            crate::walk::walk_item(
+                &mut Paths {
+                    tier,
+                    out: &mut out,
+                },
+                item,
+            );
+        }
+    }
+    for (module, _, tree) in raw_uses {
+        if let Some(tier) = tier(module) {
+            Paths {
+                tier,
+                out: &mut out,
+            }
+            .check(&tree.prefix);
+        }
+    }
+    out
+}
+
+/// Put each declaration's signature in `fn_table` (aliases included).
+fn install_sigs(env: &mut Env<'_>, sigs: &HashMap<FunctionId, FnSig>) {
+    for sig in env.fn_table.values_mut() {
+        if let Some(s) = sigs.get(&sig.id) {
+            sig.clone_from(s);
+        }
+    }
+}
+
 fn resolve_open_members(env: &Env<'_>, structs: &[&AstStructDef], enums: &[&AstEnumDef]) {
     let open = |t: &HirTy| {
         let mut o = Vec::new();
@@ -5761,7 +5850,7 @@ fn const_arg_value(t: &Ty, names: &TypeNames, module: &str) -> Option<i128> {
         AstTyKind::Path(p) => rokc_ast::ConstExpr::Path(p.clone()),
         _ => return None,
     };
-    names.const_int(&c, module)
+    names.const_int(&c, module, &|_| None)
 }
 
 /// `v` as a const type argument.

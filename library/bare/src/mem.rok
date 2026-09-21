@@ -15,6 +15,45 @@ extern "rok" {
     fn rok_free(ptr: usize);
 }
 
+// `GcBuf<T>` (stdlib 2.9.12, re-exported as
+// `rok::core::collections::raw::GcBuf`): one GC reference to an object
+// holding a run of `T`s, compiler-known. The functions are compiler
+// intrinsics (unchecked indexing); their bodies never run.
+
+pub struct GcBuf<T> {}
+
+/// The method forms of `buf_new` / `buf_get` / `buf_set` (2.9.12).
+impl<T> GcBuf<T> {
+    pub const unsafe fn new(len: usize) -> GcBuf<T> { unsafe { buf_new(len) } }
+    pub const unsafe fn get(self, i: usize) -> T { unsafe { buf_get(self, i) } }
+    pub const unsafe fn set(self, i: usize, v: T) { unsafe { buf_set(self, i, v); } }
+}
+
+/// A zeroed buffer of `len` elements; `T` comes from the slot's type.
+#[intrinsic("rok.buf_new")]
+pub unsafe fn buf_new<T>(len: usize) -> GcBuf<T> {
+    buf_new(len)
+}
+
+/// Element `i` (no bounds check).
+#[intrinsic("rok.buf_get")]
+pub unsafe fn buf_get<T>(buf: GcBuf<T>, i: usize) -> T {
+    buf_get(buf, i)
+}
+
+/// Store element `i` (no bounds check).
+#[intrinsic("rok.buf_set")]
+pub unsafe fn buf_set<T>(buf: GcBuf<T>, i: usize, v: T) {
+    buf_set(buf, i, v);
+}
+
+/// Whether `a` and `b` are one buffer (identity, not contents). Pins
+/// nothing.
+#[intrinsic("rok.buf_same")]
+pub fn buf_same<T>(a: GcBuf<T>, b: GcBuf<T>) -> bool {
+    buf_same(a, b)
+}
+
 /// Plain old data: every bit pattern of the type is a valid value, its
 /// layout is fixed and it has no `Drop` (spec 1.3.3). User structs opt
 /// in with `#[derive(Pod)]` (`#[repr(C)]` / `#[repr(transparent)]`).

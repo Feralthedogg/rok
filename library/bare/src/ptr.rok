@@ -153,7 +153,7 @@ impl<T> ManyPtr<T> {
     pub unsafe fn slice(self, len: usize) -> Slice<T> {
         // A buffer reference sits `HEADER_SIZE` before element 0, like a
         // `str` literal's bytes (`rok_str_bytes_buf`).
-        let buf: GcBuf<T> = rok::bare::mem::transmute_unchecked(self.address - 16);
+        let buf: rok::bare::mem::GcBuf<T> = rok::bare::mem::transmute_unchecked(self.address - 16);
         Slice::from_raw_parts(buf, 0, len)
     }
 }

@@ -10,7 +10,7 @@
 pub mod wit;
 
 use rok::bare::ptr::ConstPtr;
-use rok::core::collections::raw::{GcBuf, buf_new};
+use rok::bare::mem::{GcBuf, buf_new};
 
 extern "rok" {
     fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;

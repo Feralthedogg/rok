@@ -18,6 +18,9 @@ use rokc_ast::{
 /// body.
 pub trait AstVisitor {
     fn expr(&mut self, _e: &Expr) {}
+    /// Every path written: in expressions, types, patterns and an impl's
+    /// trait.
+    fn path(&mut self, _p: &rokc_ast::Path) {}
     fn stmt(&mut self, _s: &Stmt) {}
     fn ty(&mut self, _t: &Ty) {}
     fn bind(&mut self, _name: &str) {}
@@ -76,6 +79,9 @@ pub fn walk_item(v: &mut impl AstVisitor, item: &Item) {
             }
         }
         Item::Impl(impl_def) => {
+            if let Some(t) = &impl_def.trait_path {
+                v.path(t);
+            }
             walk_ty(v, &impl_def.self_ty);
             for ii in &impl_def.items {
                 match ii {
@@ -244,6 +250,7 @@ fn walk_args(v: &mut impl AstVisitor, args: &[CallArg]) {
 }
 
 fn walk_path_generics(v: &mut impl AstVisitor, p: &rokc_ast::Path) {
+    v.path(p);
     for seg in &p.segments {
         for g in &seg.generics {
             walk_ty(v, g);

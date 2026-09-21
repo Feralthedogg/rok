@@ -1,7 +1,9 @@
 // rok::bare::ffi::wit — what the bindings `ffi::wit::import` /
 // `ffi::wit::export` generate (stdlib spec 1.8) run on: linear memory
 // reads and writes at canonical ABI addresses (`i32`), the blocks the
-// canonical ABI lowers strings and lists into, and resource handles.
+// canonical ABI lowers strings and lists into, resource handles and
+// `error-context`. The async ABI, which runs on the executor, is
+// `rok::std::wit` (bare does not depend on core, stdlib 0.1.2).
 //
 // Blocks come from the C allocator, as do the ones the host fills
 // through `cabi_realloc` (wasi-libc's): a lifted string or list frees
@@ -9,13 +11,10 @@
 
 use rok::bare::ptr::{ConstPtr, Ptr, from_exposed_provenance};
 use rok::bare::mem::reinterpret;
-use rok::core::future::{AsyncFuture, Context, Future, Poll, TryAsyncFuture, Waker};
-use rok::core::channel::{Receiver, channel};
 
 extern "rok" {
     fn rok_alloc_raw(size: usize, align: usize, zeroed: i32) -> usize;
     fn rok_free(ptr: usize);
-    fn rok_stdio_flush() -> i32;
 }
 
 const fn at<T>(a: i32) -> Ptr<T> { unsafe { from_exposed_provenance::<T>(a as u32 as usize) } }
@@ -48,6 +47,11 @@ pub const fn char_from(x: i32) -> char {
 
 /// A discriminant out of range.
 pub const fn bad_case() -> ! { panic("wit: invalid variant case") }
+
+/// A copy or call that did not finish at once.
+pub const BLOCKED: i32 = -1;
+/// A copy's result: the other end was dropped.
+pub const DROPPED: i32 = 1;
 
 /// A block freed by `free`.
 pub unsafe fn free(a: i32) { rok_free(a as u32 as usize); }
@@ -207,508 +211,15 @@ impl<T> Table<T> {
     }
 }
 
-// ---- the component model's async ABI (WASI preview 3) ----
-//
-// Async imports return a subtask; stream and future copies may block.
-// An async export call is a task lifted with a callback: its call and
-// each event the host delivers to it run every runnable rok task
-// (`task::host_run`), whichever call they serve. Calls run concurrently,
-// each with its own waitable set (its id is the task's context): what
-// blocks during a call's turn joins that call's set, and the host
-// delivers its event to that call. A call returns its result
-// (`task.return`) in its own turn: one whose future finished in another
-// call's turn is woken through its bell, a unit stream made when it
-// first rings, whose read waits in its set. With nothing left to run a call returns WAIT (the host
-// calls back with the next event in its set), or EXIT once it has
-// returned and nothing in its set or of the rok tasks waits. Sockets
-// (preview 2 pollables) and timers are waited on in the turn: until one
-// is ready while no event can come, else for a slice, then YIELD and
-// take the set's events (`waitable-set.poll`): nothing waits for a
-// pollable and the component model's events at once. A synchronous task
-// (`main`, a sync export) cannot block (the component model traps), so a
-// wait outside an async export is an error.
-//
-// `future<T>` is an `AsyncFuture<T>`, `stream<T>` a channel `Receiver<T>`:
-// a task copies between the component model's value and the rok one.
-
 #[cfg(target_os = "wasi")]
 #[link(wasm_import_module = "$root")]
 extern "C" {
-    #[link_name = "[waitable-set-new]"]
-    fn rok_wit_set_new() -> i32;
-    #[link_name = "[waitable-set-poll]"]
-    fn rok_wit_set_poll(set: i32, ret: i32) -> i32;
-    #[link_name = "[waitable-set-drop]"]
-    fn rok_wit_set_drop(set: i32);
-    #[link_name = "[waitable-join]"]
-    fn rok_wit_join(w: i32, set: i32);
-    #[link_name = "[subtask-drop]"]
-    fn rok_wit_subtask_drop(h: i32);
-    #[link_name = "[context-get-0]"]
-    fn rok_wit_context_get() -> i32;
-    #[link_name = "[context-set-0]"]
-    fn rok_wit_context_set(v: i32);
-    #[link_name = "[stream-new-unit]"]
-    fn rok_wit_bell_new() -> i64;
-    #[link_name = "[async-lower][stream-read-unit]"]
-    fn rok_wit_bell_read(h: i32, p: i32, n: i32) -> i32;
-    #[link_name = "[async-lower][stream-write-unit]"]
-    fn rok_wit_bell_write(h: i32, p: i32, n: i32) -> i32;
-    #[link_name = "[stream-drop-readable-unit]"]
-    fn rok_wit_bell_drop_readable(h: i32);
-    #[link_name = "[stream-drop-writable-unit]"]
-    fn rok_wit_bell_drop_writable(h: i32);
     #[link_name = "[error-context-new-utf8]"]
     fn rok_wit_ec_new(p: i32, n: i32) -> i32;
     #[link_name = "[error-context-debug-message-utf8]"]
     fn rok_wit_ec_message(h: i32, ret: i32);
     #[link_name = "[error-context-drop]"]
     fn rok_wit_ec_drop(h: i32);
-}
-
-#[cfg(target_os = "wasi")]
-#[link(wasm_import_module = "[export]$root")]
-extern "C" {
-    #[link_name = "[task-cancel]"]
-    fn rok_wit_task_cancel();
-}
-
-/// A copy or call that did not finish at once.
-pub const BLOCKED: i32 = -1;
-/// A subtask's state: it returned.
-const RETURNED: i32 = 2;
-/// Event codes.
-const EVENT_SUBTASK: i32 = 1;
-const EVENT_STREAM_READ: i32 = 2;
-const EVENT_TASK_CANCELLED: i32 = 6;
-/// A copy's result: the other end was dropped.
-pub const DROPPED: i32 = 1;
-/// What a call's turn tells the host.
-const EXIT: i32 = 0;
-const YIELD: i32 = 1;
-const WAIT: i32 = 2;
-
-/// An async export call in flight.
-#[cfg(target_os = "wasi")]
-struct Call {
-    set: i32;
-    /// Its bell's ends `[readable, writable]` (0: none yet).
-    bell: List<i32>;
-    /// Its bell rang, its event not yet delivered.
-    rung: List<bool>;
-    /// Operations waiting in `set`.
-    waits: List<i32>;
-    task: List<rok::core::task::Task<bool>?>;
-    /// Its `task.return`, made in its own turn once its future is done.
-    ret: List<fn()>;
-    returned: List<bool>;
-}
-
-/// The event loop's state.
-#[cfg(target_os = "wasi")]
-struct Loop {
-    /// What waits, by waitable.
-    waiting: Dict<i32, Waiting>;
-    /// The calls in flight, by id.
-    calls: Dict<i32, Call>;
-    /// `[last id, the call whose turn runs (0: none)]`.
-    ids: List<i32>;
-    /// Inside an async export's call or callback.
-    active: List<bool>;
-}
-
-#[cfg(target_os = "wasi")]
-static LOOP: Loop = Loop {
-    waiting: Dict::new(),
-    calls: Dict::new(),
-    ids: [0, 0],
-    active: [false],
-};
-
-/// An operation the host completes later: its event's payload.
-pub struct Waiting {
-    /// `[done, payload]`.
-    cell: List<i32>;
-    waker: List<Waker?>;
-    /// The call whose set it waits in.
-    call: i32;
-}
-
-impl Future for Waiting {
-    type Output = i32;
-    const fn poll(ref self, ref ctx: Context) -> Poll<i32> {
-        if self.cell[0] != 0 {
-            return Poll::Ready(self.cell[1]);
-        }
-        self.waker[0] = ctx.waker();
-        Poll::Pending
-    }
-}
-
-/// Wait for waitable `h`'s next event (an operation on it blocked).
-#[cfg(target_os = "wasi")]
-pub fn wait(h: i32) -> Waiting {
-    check_loop();
-    let l = LOOP;
-    let id = l.ids[1];
-    let c = match l.calls.get(id) {
-        c: Call => c,
-        none => panic("wit: a wait outside an async export call's turn"),
-    };
-    unsafe { rok_wit_join(h, c.set) };
-    c.waits[0] = c.waits[0] + 1;
-    let p = Waiting { cell: [0, 0], waker: [none], call: id };
-    l.waiting.insert(h, p);
-    p
-}
-
-/// What may wait runs inside an async export.
-#[cfg(target_os = "wasi")]
-fn check_loop() {
-    if !LOOP.active[0] {
-        panic("wit: an async import, stream or future blocked outside an async export (a synchronous task cannot wait); call it from an `async` export");
-    }
-}
-
-/// The host's event for waitable `h`, delivered to call `c`.
-#[cfg(target_os = "wasi")]
-fn deliver(c: Call, code: i32, h: i32, payload: i32) {
-    let l = LOOP;
-    if code == EVENT_STREAM_READ && h == c.bell[0] {
-        c.rung[0] = false;
-        return;
-    }
-    let p = match l.waiting.get(h) {
-        p: Waiting => p,
-        none => return,
-    };
-    // A subtask reports its start too; it is done once it returned (or
-    // was cancelled).
-    if code == EVENT_SUBTASK && payload < RETURNED {
-        return;
-    }
-    l.waiting.remove(h);
-    if let o: Call = l.calls.get(p.call) {
-        o.waits[0] = o.waits[0] - 1;
-    }
-    if code == EVENT_SUBTASK {
-        unsafe { rok_wit_subtask_drop(h) };
-    } else {
-        // Out of the set, which may be dropped before the next wait.
-        unsafe { rok_wit_join(h, 0) };
-    }
-    p.cell[0] = 1;
-    p.cell[1] = payload;
-    if let w: Waker = p.waker[0] {
-        w.wake();
-    }
-}
-
-/// An async import's call: `status` is its subtask (state and handle);
-/// done once it returned.
-#[cfg(target_os = "wasi")]
-pub async fn subtask(status: i32) {
-    if status & 15 == RETURNED {
-        return;
-    }
-    await wait(status >> 4);
-}
-
-/// An async export's call: `ret` returns the result of `f` (the
-/// component model's `task.return`). The status for the host.
-#[cfg(target_os = "wasi")]
-pub fn async_start<T>(f: AsyncFuture<T>, ret: fn(T)) -> i32 {
-    let l = LOOP;
-    let id = l.ids[0] + 1;
-    l.ids[0] = id;
-    let c = Call {
-        set: unsafe { rok_wit_set_new() },
-        bell: [0, 0],
-        rung: [false],
-        waits: [0],
-        task: [none],
-        ret: List::new(),
-        returned: [false],
-    };
-    unsafe {
-        rok_wit_context_set(id);
-    }
-    l.calls.insert(id, c);
-    l.ids[1] = id;
-    c.task[0] = rok::core::task::spawn_local(async {
-        let v = await f;
-        c.ret.push(|| ret(v));
-        true
-    });
-    turn(id, c)
-}
-
-/// Entering an async export (its call or callback).
-#[cfg(target_os = "wasi")]
-pub fn async_enter() {
-    rok::core::task::host_enter();
-    LOOP.active[0] = true;
-}
-
-/// The host's event for an async export call (its callback).
-#[cfg(target_os = "wasi")]
-pub fn async_event(code: i32, h: i32, payload: i32) -> i32 {
-    async_enter();
-    let id = unsafe { rok_wit_context_get() };
-    let c = match LOOP.calls.get(id) {
-        c: Call => c,
-        none => panic("wit: an event for no async export call"),
-    };
-    LOOP.ids[1] = id;
-    if code == EVENT_TASK_CANCELLED {
-        if let t: rok::core::task::Task<bool> = c.task[0] {
-            t.cancel();
-        }
-    } else if code != 0 {
-        deliver(c, code, h, payload);
-    } else {
-        // After a YIELD: the events its set holds meanwhile.
-        let b = Blocks::new();
-        let a = b.alloc(8, 4);
-        loop {
-            let e = unsafe { rok_wit_set_poll(c.set, a) };
-            if e == 0 {
-                break;
-            }
-            deliver(c, e, unsafe { load_i32(a) }, unsafe { load_i32(a + 4) });
-        }
-        b.free();
-    }
-    turn(id, c)
-}
-
-/// Run what is runnable; what the host is to do next for call `c`:
-/// EXIT, YIELD (a socket or timer waits) or WAIT on its set.
-#[cfg(target_os = "wasi")]
-fn turn(id: i32, c: Call) -> i32 {
-    let l = LOOP;
-    let pending = rok::core::task::host_run(slice);
-    if let r: fn() = c.ret.pop() {
-        r();
-        c.returned[0] = true;
-        // What lowering the result started (a returned stream's copy).
-        pending = rok::core::task::host_run(slice);
-    } else if !c.returned[0] {
-        if let t: rok::core::task::Task<bool> = c.task[0] {
-            // Cancelled before it had a result.
-            if t.is_finished() {
-                unsafe { rok_wit_task_cancel() };
-                c.returned[0] = true;
-            }
-        }
-    }
-    // The others whose futures finished here return in their own turns.
-    for o in l.calls.values() {
-        if !o.rung[0] && !o.ret.is_empty() {
-            ring(o);
-        }
-    }
-    l.ids[1] = 0;
-    l.active[0] = false;
-    rok::core::task::host_leave();
-    // What it printed, as a command's exit would.
-    unsafe { rok_stdio_flush() };
-    if c.waits[0] == 0 && c.returned[0] && !pending {
-        unsafe {
-            if c.bell[0] != 0 {
-                rok_wit_bell_drop_readable(c.bell[0]);
-                rok_wit_bell_drop_writable(c.bell[1]);
-            }
-            rok_wit_set_drop(c.set);
-        }
-        l.calls.remove(id);
-        return EXIT;
-    }
-    // A socket or timer waits too: the host calls back once others ran
-    // (the set's events are taken then).
-    if pending {
-        return YIELD;
-    }
-    WAIT | (c.set << 4)
-}
-
-/// Wake call `c`: an event in its set.
-#[cfg(target_os = "wasi")]
-fn ring(c: Call) {
-    unsafe {
-        if c.bell[0] == 0 {
-            let ends = rok_wit_bell_new();
-            c.bell[0] = ends as i32;
-            c.bell[1] = (ends >> 32) as i32;
-            rok_wit_join(c.bell[0], c.set);
-        }
-        if rok_wit_bell_read(c.bell[0], 0, 1) != BLOCKED || rok_wit_bell_write(c.bell[1], 0, 1) == BLOCKED {
-            panic("wit: a call's bell did not ring");
-        }
-    }
-    c.rung[0] = true;
-}
-
-/// How long a turn may wait for sockets and timers: while the host may
-/// deliver an event a slice, else until they are ready (nothing else can
-/// wake a task). The component model cannot wait for a preview 2
-/// pollable and its own events at once.
-#[cfg(target_os = "wasi")]
-fn slice() -> i64 {
-    if LOOP.waiting.is_empty() { -1 } else { SLICE_NS }
-}
-
-#[cfg(target_os = "wasi")]
-const SLICE_NS: i64 = 10000000;
-
-/// A throwing async export's future, its error in the result.
-pub async fn catching_async<T, E>(f: TryAsyncFuture<T, E>) -> Result<T, E> {
-    let v = try await f catch e { return Result::Err(e); };
-    Result::Ok(v)
-}
-
-/// What one future type's values need: the component model's built-ins
-/// for it and its values' layout.
-pub struct FutureOps<T> {
-    pub new: fn() -> i64;
-    pub read: fn(i32, i32) -> i32;
-    pub write: fn(i32, i32) -> i32;
-    pub drop_readable: fn(i32);
-    pub drop_writable: fn(i32);
-    pub size: i32;
-    pub align: i32;
-    /// The value at an address (freeing what it points to).
-    pub lift: fn(i32) -> T;
-    /// The value stored at an address, into blocks.
-    pub lower: fn(T, i32, Blocks);
-}
-
-/// `stream<T>`'s: as `FutureOps`, copies of many values.
-pub struct StreamOps<T> {
-    pub new: fn() -> i64;
-    pub read: fn(i32, i32, i32) -> i32;
-    pub write: fn(i32, i32, i32) -> i32;
-    pub drop_readable: fn(i32);
-    pub drop_writable: fn(i32);
-    pub size: i32;
-    pub align: i32;
-    pub lift: fn(i32) -> T;
-    pub lower: fn(T, i32, Blocks);
-}
-
-/// The readable end of future `h` as a rok future.
-#[cfg(target_os = "wasi")]
-pub async fn future_in<T>(ops: FutureOps<T>, h: i32) -> T {
-    let b = Blocks::new();
-    let a = b.alloc(ops.size, ops.align);
-    let r = (ops.read)(h, a);
-    if r == BLOCKED {
-        r = await wait(h);
-    }
-    (ops.drop_readable)(h);
-    if r != 0 {
-        panic("wit: a future's writer was dropped before it wrote");
-    }
-    let v = (ops.lift)(a);
-    b.free();
-    v
-}
-
-/// A new future whose value `f`'s is: its readable end.
-#[cfg(target_os = "wasi")]
-pub fn future_out<T>(ops: FutureOps<T>, f: AsyncFuture<T>) -> i32 {
-    check_loop();
-    let ends = (ops.new)();
-    let w = (ends >> 32) as i32;
-    rok::core::task::spawn_local(async {
-        let v = await f;
-        let b = Blocks::new();
-        let a = b.alloc(ops.size, ops.align);
-        (ops.lower)(v, a, b);
-        if (ops.write)(w, a) == BLOCKED {
-            await wait(w);
-        }
-        (ops.drop_writable)(w);
-        b.free();
-    });
-    ends as i32
-}
-
-/// Values read at once.
-const CHUNK: i32 = 64;
-
-/// The readable end of stream `h` as a channel, until its writer drops.
-#[cfg(target_os = "wasi")]
-pub fn stream_in<T: Send>(ops: StreamOps<T>, h: i32) -> Receiver<T> {
-    check_loop();
-    let (tx, rx) = channel::<T>();
-    rok::core::task::spawn_local(async {
-        let b = Blocks::new();
-        let a = b.alloc(ops.size * CHUNK, ops.align);
-        loop {
-            let r = (ops.read)(h, a, CHUNK);
-            if r == BLOCKED {
-                r = await wait(h);
-            }
-            let n = (r as u32 >> 4) as i32;
-            for i in 0..n {
-                try! tx.send((ops.lift)(a + i * ops.size));
-            }
-            if r & 15 == DROPPED {
-                break;
-            }
-        }
-        (ops.drop_readable)(h);
-        tx.close();
-        b.free();
-    });
-    rx
-}
-
-/// A new stream of `rx`'s values (until its senders close): its
-/// readable end.
-#[cfg(target_os = "wasi")]
-pub fn stream_out<T>(ops: StreamOps<T>, rx: Receiver<T>) -> i32 {
-    check_loop();
-    let ends = (ops.new)();
-    let w = (ends >> 32) as i32;
-    rok::core::task::spawn_local(async {
-        let gone = false;
-        while !gone {
-            let first = match await rx.recv_async() {
-                v: T => v,
-                none => break,
-            };
-            let vals: List<T> = [first];
-            while vals.len() < CHUNK as usize {
-                match rx.try_recv() {
-                    v: T => vals.push(v),
-                    none => break,
-                }
-            }
-            let b = Blocks::new();
-            let n = vals.len() as i32;
-            let a = b.alloc(ops.size * n, ops.align);
-            for i in 0..vals.len() {
-                (ops.lower)(vals[i], a + i as i32 * ops.size, b);
-            }
-            let done = 0;
-            while done < n {
-                let r = (ops.write)(w, a + done * ops.size, n - done);
-                if r == BLOCKED {
-                    r = await wait(w);
-                }
-                done += (r as u32 >> 4) as i32;
-                if r & 15 == DROPPED {
-                    gone = true;
-                    break;
-                }
-            }
-            b.free();
-        }
-        (ops.drop_writable)(w);
-    });
-    ends as i32
 }
 
 /// The component model's `error-context`: a message for debugging,
@@ -744,7 +255,7 @@ impl ErrorContext {
 }
 
 #[cfg(target_os = "wasi")]
-impl rok::core::marker::Drop for ErrorContext {
+impl Drop for ErrorContext {
     fn drop(ref self) {
         unsafe { rok_wit_ec_drop(self.handle) };
     }

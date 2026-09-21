@@ -890,7 +890,7 @@ pub enum HirTy {
         ok: Box<HirTy>,
         err: Box<HirTy>,
     },
-    /// `rok::core::collections::raw::GcBuf<T>`: a GC object holding a
+    /// `rok::bare::mem::GcBuf<T>` (re-exported as `rok::core::collections::raw::GcBuf`): a GC object holding a
     /// run of `T`s (the storage of `List` / `Dict` / `Set`). One `GcRef`
     /// word; its length lives with whoever owns it.
     GcBuf(Box<HirTy>),

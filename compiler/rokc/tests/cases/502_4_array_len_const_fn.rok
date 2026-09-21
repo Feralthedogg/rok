@@ -1,0 +1,43 @@
+// Spec 5.2.4: array lengths in item types (struct fields, signatures,
+// statics, generic structs and fns) use the full const evaluator:
+// `const fn` calls, consts defined by them and const parameters.
+// expect-exit: 0
+// expect-stdout:
+// 5 7 3 7 11
+// 4
+// 5 9
+const fn f(x: usize) -> usize {
+    x * 2 + 1
+}
+
+const N: usize = f(2);
+
+struct S {
+    a: [i32; N];
+    b: [i32; f(3)];
+}
+
+fn take(xs: [i32; f(1)]) -> usize {
+    xs.len()
+}
+
+static T: [u8; f(0)] = [7];
+
+struct G<const K: usize> {
+    v: [i32; f(K) - 1];
+}
+
+fn gen<const K: usize>(xs: [i32; f(K)]) -> usize {
+    xs.len()
+}
+
+fn main() {
+    let s = S { a: [0; N], b: [1; f(3)] };
+    let l: [i32; f(N)] = [0; 11];
+    println(f"{s.a.len()} {s.b.len()} {take([1, 2, 3])} {T[0]} {l.len()}");
+    let g = G::<2> { v: [0; 4] };
+    println(f"{g.v.len()}");
+    println(f"{gen::<2>([0; 5])} {gen::<4>([0; 9])}");
+}
+
+// spec: 005.02-const §5.2.4

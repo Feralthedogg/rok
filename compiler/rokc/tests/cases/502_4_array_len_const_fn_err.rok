@@ -1,0 +1,32 @@
+// Spec 5.2.4: an item-level array length the const evaluator rejects is
+// an error, wherever the type is written.
+// expect-error: array length must be a compile-time integer (spec 2.11.5): calls `plain`, which is not a `const fn` (spec 5.2.5)
+// expect-error: array length must be a compile-time integer (spec 2.11.5): length -1 is out of range
+// expect-error: array length must be a compile-time integer (spec 2.11.5): attempt to multiply with overflow
+fn plain() -> usize {
+    3
+}
+
+const fn neg() -> i64 {
+    -1
+}
+
+const fn boom(x: usize) -> usize {
+    x * 10000000000000000000
+}
+
+struct S {
+    a: [i32; plain()];
+}
+
+fn take(xs: [i32; neg()]) {}
+
+struct G<const K: usize> {
+    v: [i32; boom(K)];
+}
+
+fn main() {
+    let g = G::<2> { v: [0; 4] };
+}
+
+// spec: 005.02-const §5.2.4

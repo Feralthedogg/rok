@@ -208,8 +208,11 @@ pub fn root_path(segments: &[&str], module: &str) -> Option<Vec<String>> {
 
 /// The compiler-known GC buffer type (`HirTy::GcBuf`), declared in core
 /// so the name resolves.
-pub const GC_BUF: &str = "rok::core::collections::raw::GcBuf";
+pub const GC_BUF: &str = "rok::bare::mem::GcBuf";
 pub const MLIR_TYPE: &str = "rok::bare::mlir::__mlir_type";
+
+/// An array type whose length waits for the full const evaluator.
+pub(super) const OPEN_LEN: &str = "[_; _]";
 
 /// Core traits the compiler names that have no lang slot (stdlib 0.4).
 pub const COPY_TRAIT: &str = "rok::core::marker::Copy";
@@ -578,21 +581,20 @@ pub(super) fn resolve_ty_with_structs(
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {
-            // `[T; N]` / `[T; M * N]` under bound const parameters.
-            let n = params
-                .and_then(|ps| {
-                    super::const_eval::syntactic_int(len, &|name| {
-                        ps.get(name).and_then(HirTy::as_const).map(|c| c.0)
-                    })
-                })
-                .or_else(|| sc.names.const_int(len, sc.module))
-                .and_then(|n| u32::try_from(n).ok());
-            let Some(n) = n else {
+            // `[T; N]` / `[T; M * N]` under bound const parameters. A
+            // length beyond the pre-body evaluator (a `const fn` call)
+            // stays open: `resolve_open_members` evaluates it once bodies
+            // can be lowered.
+            let param = |name: &str| params?.get(name).and_then(HirTy::as_const).map(|c| c.0);
+            let Some(n) = sc.names.const_int(len, sc.module, &param) else {
+                return HirTy::Path(vec![OPEN_LEN.to_owned()]);
+            };
+            let Ok(n) = u32::try_from(n) else {
                 // Located at the type: field types resolve outside any item pass.
                 let at = if ty.span.is_dummy() { sc.at } else { ty.span };
                 sc.names.error(
                     at,
-                    "array length must be a compile-time integer (spec 2.11.5)".to_owned(),
+                    format!("array length must be a compile-time integer (spec 2.11.5): length {n} is out of range"),
                 );
                 return HirTy::Any;
             };

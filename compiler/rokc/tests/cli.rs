@@ -1900,6 +1900,68 @@ fn check_library_checks_every_body() {
     );
 }
 
+/// Stdlib 0.1.2: `rok::bare` names neither `rok::core` nor `rok::std`, and
+/// `rok::core` does not name `rok::std` (copies of the tiers, with one
+/// module each that does).
+#[test]
+fn library_tiers_depend_only_downward() {
+    fn copy(from: &Path, to: &Path) {
+        for e in fs::read_dir(from).unwrap() {
+            let p = e.unwrap().path();
+            let dest = to.join(p.file_name().unwrap());
+            if p.is_dir() {
+                copy(&p, &dest);
+            } else {
+                put(&dest, fs::read(&p).unwrap()).unwrap();
+            }
+        }
+    }
+    let dir = scratch("tiers");
+    let lib = workspace().join("library");
+    for tier in ["bare", "core"] {
+        copy(&lib.join(tier), &dir.join(tier));
+        let root = dir.join(tier).join("src/lib.rok");
+        let text = fs::read_to_string(&root).unwrap();
+        put(&root, format!("{text}\npub mod leak;\n")).unwrap();
+    }
+    put(
+        dir.join("bare/src/leak.rok"),
+        "use rok::core::sync::Mutex;\n\npub fn n() -> usize { rok::std::env::args().len() }\n",
+    )
+    .unwrap();
+    put(
+        dir.join("core/src/leak.rok"),
+        "pub fn n() -> usize { rok::std::env::args().len() }\n",
+    )
+    .unwrap();
+    put(dir.join("main.rok"), "fn main() {}\n").unwrap();
+    let (core, bare) = (dir.join("core/src/lib.rok"), dir.join("bare/src/lib.rok"));
+    let std = lib.join("std/src/lib.rok");
+    let out = rokc(
+        None,
+        &dir,
+        &[
+            "check",
+            "main.rok",
+            "--bootstrap",
+            core.to_str().unwrap(),
+            "--bootstrap",
+            std.to_str().unwrap(),
+            "--bootstrap",
+            bare.to_str().unwrap(),
+        ],
+    );
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    for want in [
+        "`rok::bare` must not depend on `rok::core` (stdlib spec 0.1.2)",
+        "`rok::bare` must not depend on `rok::std` (stdlib spec 0.1.2)",
+        "`rok::core` must not depend on `rok::std` (stdlib spec 0.1.2)",
+    ] {
+        assert!(err.contains(want), "{want}\n{err}");
+    }
+}
+
 #[test]
 fn emit_expanded_prints_meta_expansions() {
     // Spec 6.9.9: `--emit=expanded` writes what user derives /

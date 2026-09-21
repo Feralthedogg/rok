@@ -5,7 +5,7 @@
 
 use rok::bare::mem::transmute_unchecked;
 use rok::bare::ptr::{ConstPtr, ManyPtr, Ptr, size_of};
-use rok::core::collections::raw::GcBuf;
+use rok::bare::mem::GcBuf;
 
 extern "rok" {
     fn rok_gc_collect();

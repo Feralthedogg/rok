@@ -1,7 +1,8 @@
 // rok::std tier — target-dependent.
 // Owns: fs, net, time, thread (OS), io (stdin/out/err), env, process, path,
 // crypto (the OS random source),
-// rokon (the ROKON data format).
+// rokon (the ROKON data format), wit (the component model's async ABI
+// under WIT bindings).
 // Modules are pub(shy) so glob imports do not pull them in implicitly.
 
 pub mod crypto;
@@ -14,3 +15,4 @@ pub mod process;
 pub mod rokon;
 pub mod thread;
 pub mod time;
+pub mod wit;

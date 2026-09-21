@@ -565,20 +565,31 @@ impl TypeNames {
     }
 
     /// A pre-body integer constant (array lengths in signatures and
-    /// fields, const arguments of trait paths): literals and module
-    /// `const`s as `module` names them (its `use`s included), through
-    /// `const_eval::syntactic_int`.
-    fn const_int(&self, c: &rokc_ast::ConstExpr, module: &str) -> Option<i128> {
-        self.const_int_in(c, module, &std::cell::RefCell::new(Vec::new()))
+    /// fields, const arguments of trait paths): literals, bound const
+    /// parameters (`param`) and module `const`s as `module` names them
+    /// (its `use`s included), through `const_eval::syntactic_int`.
+    /// `None` for anything else (a `const fn` call): it waits for the
+    /// full evaluator.
+    fn const_int(
+        &self,
+        c: &rokc_ast::ConstExpr,
+        module: &str,
+        param: &dyn Fn(&str) -> Option<i128>,
+    ) -> Option<i128> {
+        self.const_int_in(c, module, param, &std::cell::RefCell::new(Vec::new()))
     }
 
     fn const_int_in(
         &self,
         c: &rokc_ast::ConstExpr,
         module: &str,
+        param: &dyn Fn(&str) -> Option<i128>,
         seen: &std::cell::RefCell<Vec<String>>,
     ) -> Option<i128> {
         const_eval::syntactic_int(c, &|path| {
+            if let Some(v) = param(path) {
+                return Some(v);
+            }
             let segs: Vec<&str> = path.split("::").collect();
             let key = self.const_key(&segs, module)?;
             if seen.borrow().contains(&key) {
@@ -586,7 +597,7 @@ impl TypeNames {
             }
             seen.borrow_mut().push(key.clone());
             let value = rokc_ast::ConstExpr::Expr(Box::new(self.name_const(&key)?.1.clone()));
-            let v = self.const_int_in(&value, &module_of(&key), seen);
+            let v = self.const_int_in(&value, &module_of(&key), &|_| None, seen);
             seen.borrow_mut().pop();
             v
         })
@@ -2265,6 +2276,9 @@ struct ClosureSink {
     /// Every reachable body is lowered: a later inference (a signature
     /// asked for by a check) must leave no functions behind.
     bodies_done: std::cell::Cell<bool>,
+    /// The first round of signature types (`Some`): whether a type
+    /// waited for the full const evaluator.
+    sig_pass: std::cell::Cell<Option<bool>>,
     /// Call sites of the implicit-generic instances being lowered
     /// (spec 4.2.2: their body errors point at the call too).
     call_sites: std::cell::RefCell<Vec<(String, rokc_diagnostic::Span)>>,
@@ -3763,6 +3777,60 @@ impl<'a> LowerCtx<'a> {
         const_eval::eval_scalar(self, &e)
     }
 
+    /// An array type's length (`None`: not known; an error is reported
+    /// unless it waits for the signature pass's second round or an
+    /// unbound const parameter).
+    fn array_len(&self, len: &rokc_ast::ConstExpr) -> Option<u32> {
+        // Before the signatures are known no body can be lowered:
+        // a length beyond the pre-body evaluator waits for the
+        // signature pass's second round.
+        if let Some(pending) = self.env.sink.sig_pass.get() {
+            let param = |name: &str| {
+                self.ty_subst
+                    .get(name)
+                    .and_then(HirTy::as_const)
+                    .map(|c| c.0)
+            };
+            let names = &self.env.names;
+            if let Some(n) = names.const_int(len, &self.current_module, &param) {
+                if let Ok(n) = u32::try_from(n) {
+                    return Some(n);
+                }
+            }
+            if !pending {
+                self.env.sink.sig_pass.set(Some(true));
+            }
+            return None;
+        }
+        // Spec 2.11.5: `[T; N]`, `[T; M * N]`, `[T; f(N)]`.
+        let n = self
+            .eval_const_msg(len)
+            .and_then(|v| u32::try_from(v).map_err(|_| format!("length {v} is out of range")));
+        match n {
+            Ok(n) => Some(n),
+            // A const parameter not bound yet (argument hints
+            // before inference): no type yet, not an error.
+            Err(_)
+                if self
+                    .ty_subst
+                    .values()
+                    .any(|t| matches!(t, HirTy::OpenConst(_))) =>
+            {
+                None
+            }
+            Err(why) => {
+                self.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "array length must be a compile-time integer (spec 2.11.5): \
+                             {why}"
+                    ),
+                );
+                None
+            }
+        }
+    }
+
     fn resolve_ty_inner(&self, ty: &rokc_ast::Ty) -> HirTy {
         let rec = |t: &rokc_ast::Ty| self.resolve_ty_inner(t);
         match &ty.kind {
@@ -3904,33 +3972,8 @@ impl<'a> LowerCtx<'a> {
                         other => other,
                     };
                 }
-                // Spec 2.11.5: `[T; N]`, `[T; M * N]`.
-                let n = self.eval_const_msg(len).and_then(|v| {
-                    u32::try_from(v).map_err(|_| format!("length {v} is out of range"))
-                });
-                match n {
-                    Ok(n) => HirTy::Array(Box::new(rec(elem)), n),
-                    // A const parameter not bound yet (argument hints
-                    // before inference): no type yet, not an error.
-                    Err(_)
-                        if self
-                            .ty_subst
-                            .values()
-                            .any(|t| matches!(t, HirTy::OpenConst(_))) =>
-                    {
-                        HirTy::Unknown
-                    }
-                    Err(why) => {
-                        self.emit_error(
-                            rokc_diagnostic::ErrorKind::Type,
-                            format!(
-                                "array length must be a compile-time integer (spec 2.11.5): \
-                                 {why}"
-                            ),
-                        );
-                        HirTy::Unknown
-                    }
-                }
+                self.array_len(len)
+                    .map_or(HirTy::Unknown, |n| HirTy::Array(Box::new(rec(elem)), n))
             }
             AstTyKind::Const(c) => match self.eval_const_arg(c) {
                 Ok((v, p)) => HirTy::Const(v, p),
