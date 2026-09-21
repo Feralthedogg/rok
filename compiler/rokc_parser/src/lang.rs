@@ -42,7 +42,7 @@ pub const KNOWN_SLOTS: &[&str] = &[
     "display_trait",
     "debug_trait",
     "future_trait",
-    // operator / comparison trait slots (0.4.3; `library/core/ops.rok`, `marker.rok`)
+    // operator / comparison trait slots (0.4.3; `library/core/src/ops.rok`, `marker.rok`)
     "add_trait",
     "sub_trait",
     "mul_trait",

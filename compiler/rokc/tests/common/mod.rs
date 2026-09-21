@@ -157,7 +157,7 @@ pub fn setup() -> Option<Env> {
 /// backend: REPL cells).
 pub fn setup_runtime() -> Env {
     let workspace = rokc_core::real_path(workspace()).unwrap();
-    let bootstrap = workspace.join("library/core/lib.rok");
+    let bootstrap = workspace.join("library/core/src/lib.rok");
     assert!(bootstrap.exists(), "missing {bootstrap:?}");
 
     // `cargo test` doesn't rebuild the staticlib on its own (rokc must not
@@ -222,9 +222,9 @@ pub fn rokc_build(env: &Env, src: &Path, exe: &Path) -> std::io::Result<Output> 
         .arg("--bootstrap")
         .arg(&env.bootstrap)
         .arg("--bootstrap")
-        .arg(env.workspace.join("library/std/lib.rok"))
+        .arg(env.workspace.join("library/std/src/lib.rok"))
         .arg("--bootstrap")
-        .arg(env.workspace.join("library/bare/lib.rok"))
+        .arg(env.workspace.join("library/bare/src/lib.rok"))
         .arg("--rokr")
         .arg(&env.rokr)
         .args(env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))

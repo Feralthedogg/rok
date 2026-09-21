@@ -74,8 +74,9 @@ quarters of `compiler/rokc/tests/cases` built with it at `-O2` (a third
 of them as x86_64 Linux objects, so the X86 back end is profiled too).
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other
-Windows architecture) into `rok-msvc.profdata.tar.xz`. Both need
-~25 GB of scratch space. Regenerate after a change of the pinned LLVM or
+Windows architecture) into `rok-msvc.profdata.tar.xz`. `train-pgo.sh`
+peaks at ~5 GB of scratch space and takes about 35 minutes on a 10-core
+Apple Silicon machine. Regenerate after a change of the pinned LLVM or
 a large change of what rokc asks LLVM to do; a stale profile still
 builds, with less benefit.
 
@@ -89,6 +90,14 @@ only and links with the system's `cc`, reports `llvm: none` in
 `ROK_REQUIRE_LLVM=1`). A `ROK_LLVM_PREFIX` that does
 not hold this LLVM with MLIR, lld and the dsymutil sources fails the
 build. `dist.sh` runs `build.sh` when no prefix is given.
+
+rokc registers only the MLIR dialects it lowers to and those
+`__mlir_op` offers (`register_dialects` / `register_passes` in
+`src/shim.cpp`), so the linker leaves the rest of MLIR out. It exports
+the non-weak symbols of the MLIR it links and all of LLVMSupport /
+LLVMDemangle, for MLIR plugins to bind to (`write_exports` in
+`build.rs`: `-exported_symbols_list` on macOS, `--dynamic-list` on
+Linux, with `nm`); everything else is dead-stripped.
 
 Homebrew's `llvm` (22.1.8) has static LLVM and MLIR archives but ships lld
 only as shared libraries, so it cannot serve as the prefix; release and

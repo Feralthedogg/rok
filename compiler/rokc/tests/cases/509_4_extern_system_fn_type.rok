@@ -1,0 +1,51 @@
+// spec: §5.9.4 §5.9.10
+// only-pointer-width: 64
+// expect-exit: 0
+// expect-stdout:
+// 3 2 1 0
+// 0 1 2 3
+// 1 -1
+
+// 5.9.4: `extern "system" fn(..)` follows the rules of `extern "C"
+// fn(..)`, and where `"system"` is `"C"` (every 64-bit target) it is the
+// same type: an `extern "system"` callback goes to C's `qsort` through
+// either, and either kind of definition fills either slot. (32-bit x86
+// Windows, where it is `stdcall`: `509_2_extern_system_stdcall_value`.)
+use rok::bare::alloc::{Layout, alloc};
+use rok::bare::ptr::{CPtr, Ptr};
+
+extern "C" {
+    fn qsort(base: Ptr<i32>, n: usize, size: usize, cmp: extern "system" fn(Ptr<i32>, Ptr<i32>) -> i32);
+}
+
+extern "system" fn descending(a: Ptr<i32>, b: Ptr<i32>) -> i32 {
+    let (x, y) = unsafe { (a.read(), b.read()) };
+    if x < y { 1 } else if x > y { -1 } else { 0 }
+}
+
+extern "C" fn ascending(a: Ptr<i32>, b: Ptr<i32>) -> i32 {
+    -descending(a, b)
+}
+
+fn sorted(p: Ptr<i32>, cmp: extern "C" fn(Ptr<i32>, Ptr<i32>) -> i32) -> str {
+    unsafe { qsort(p, 4usize, 4usize, cmp) };
+    let out: List<str> = List::new();
+    for i in 0..4usize {
+        out.push(f"{unsafe { p.add(i).read() }}");
+    }
+    out.join(" ")
+}
+
+fn main() throws (rok::bare::alloc::LayoutError) {
+    let raw: CPtr<u8> = unsafe { alloc(try Layout::array::<i32>(4usize)) };
+    let p = rok::bare::ptr_cast::<i32>(raw.as_ptr() ?? panic("alloc failed"));
+    for i in 0..4usize {
+        unsafe { p.add(i).write([2, 0, 3, 1][i]) };
+    }
+    let sys: extern "system" fn(Ptr<i32>, Ptr<i32>) -> i32 = descending;
+    let c: extern "C" fn(Ptr<i32>, Ptr<i32>) -> i32 = sys;
+    println(sorted(p, c));
+    let back: extern "system" fn(Ptr<i32>, Ptr<i32>) -> i32 = ascending;
+    println(sorted(p, back));
+    println(f"{sys(p, p.add(1usize))} {back(p, p.add(1usize))}");
+}

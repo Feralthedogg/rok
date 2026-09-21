@@ -275,6 +275,7 @@ fn doc_writes_html_with_links_and_search_index() {
     );
     let ext = format!("util={}", dep.display());
     let (_, err) = exit(&rokc(&dir, &["doc", "--extern", &ext]), 0);
+    let err = err.replace('\\', "/");
     assert!(err.contains("target/doc/index.html"), "{err}");
     let read = |p: &str| fs::read_to_string(dir.join("target/doc").join(p)).unwrap();
 
@@ -348,6 +349,7 @@ fn doc_writes_html_with_links_and_search_index() {
 fn doc_std_documents_the_library() {
     let dir = scratch("doc-std");
     let (_, err) = exit(&rokc(&dir, &["doc", "--std"]), 0);
+    let err = err.replace('\\', "/");
     assert!(err.contains("target/doc/index.html"), "{err}");
     let read = |p: &str| fs::read_to_string(dir.join("target/doc").join(p)).unwrap();
     let index = read("index.html");

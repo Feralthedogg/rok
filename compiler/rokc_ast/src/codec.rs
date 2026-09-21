@@ -310,7 +310,8 @@ codec_struct!(Ty { kind, span });
 codec_struct!(FnTyBounds {
     auto,
     unsafe_fn,
-    c_abi
+    c_abi,
+    system
 });
 codec_enum!(TyKind {
     Path(x0),

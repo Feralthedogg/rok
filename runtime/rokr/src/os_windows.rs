@@ -208,7 +208,7 @@ pub const fn fd_of(s: win::SOCKET) -> i32 {
 // Errors
 // ---------------------------------------------------------------------
 
-/// `IoErrorKind` discriminants (library/std/io.rok declares the same).
+/// `IoErrorKind` discriminants (library/std/src/io.rok declares the same).
 mod kind {
     pub const OTHER: i32 = 0;
     pub const NOT_FOUND: i32 = 1;

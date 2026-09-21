@@ -43,6 +43,20 @@ pub(super) fn set_pointer_width(bits: u32) {
     POINTER_WIDTH.set(if bits == 0 { 64 } else { bits });
 }
 
+thread_local! {
+    /// `HirInput::stdcall_system` of the program being lowered.
+    static STDCALL_SYSTEM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(super) fn set_stdcall_system(on: bool) {
+    STDCALL_SYSTEM.set(on);
+}
+
+/// `extern "system"` is `stdcall` on the target (a type of its own).
+pub(super) fn stdcall_system() -> bool {
+    STDCALL_SYSTEM.get()
+}
+
 /// Bits of `usize` / `isize` on the target.
 pub(super) fn pointer_width() -> u32 {
     POINTER_WIDTH.get()

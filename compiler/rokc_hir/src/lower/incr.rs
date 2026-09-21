@@ -1293,8 +1293,12 @@ fn interface_key(
     e.bytes(format!("{:?}", (&input.packages, &input.lib, &input.prebuilt)).as_bytes());
     e.bytes(
         format!(
-            "{} {:?} {} {}",
-            input.check_library, input.root_main, input.inline_prebuilt, input.pointer_width
+            "{} {:?} {} {} {}",
+            input.check_library,
+            input.root_main,
+            input.inline_prebuilt,
+            input.pointer_width,
+            input.stdcall_system
         )
         .as_bytes(),
     );

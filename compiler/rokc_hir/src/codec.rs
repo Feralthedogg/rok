@@ -301,7 +301,8 @@ codec_struct!(TraitRef { path, args, binds });
 codec_struct!(FnBounds {
     auto,
     unsafe_fn,
-    c_abi
+    c_abi,
+    stdcall
 });
 impl Codec for HirTy {
     fn enc(&self, e: &mut Enc) {

@@ -1,0 +1,85 @@
+// needs: net
+// expect-exit: 0
+// expect-stdout:
+// shutdown(Read): read 0
+// close: InvalidInput socket is closed
+// shutdown(Both) + close: finished
+// listener close: InvalidInput socket is closed
+// registrations left: 0
+
+// std 3.2: a socket operation pending when another task shuts the
+// socket down or closes it completes: after `shutdown` a read sees the
+// end of stream, after `close` it fails as on any closed socket
+// (`InvalidInput`). Neither raises a poller event for the waiter, so
+// both wake it.
+use rok::std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
+use rok::std::io::{IoError, byte_buf};
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+let listener = try! TcpListener::bind(any);
+
+/// Until `n` wakers are parked (a loaded machine may take long).
+async fn parked(n: usize) {
+    let deadline = Instant::now() + Duration::sec(60);
+    while task::registrations() < n && Instant::now() < deadline {
+        await task::yield_now();
+    }
+}
+
+fn pair(l: TcpListener) -> (TcpStream, TcpStream) {
+    let c = try! TcpStream::connect(try! l.local_addr());
+    let (s, _) = try! l.accept();
+    (c, s)
+}
+
+fn outcome(r: usize | IoError) -> str {
+    match r {
+        n: usize => f"read {n}",
+        e: IoError => f"{e.kind:?} {e.message}",
+    }
+}
+
+async fn read_in_task(s: TcpStream) -> Task<usize | IoError> {
+    let t = task::spawn(async {
+        let r: usize | IoError = try await s.read_async(byte_buf(16)) catch e { e };
+        r
+    });
+    await parked(1);
+    t
+}
+
+let (c1, s1) = pair(listener);
+let t1 = await read_in_task(s1);
+try! s1.shutdown(Shutdown::Read);
+println(f"shutdown(Read): {outcome(await t1)}");
+c1.close();
+s1.close();
+
+let (c2, s2) = pair(listener);
+let t2 = await read_in_task(s2);
+s2.close();
+println(f"close: {outcome(await t2)}");
+c2.close();
+
+let (c3, s3) = pair(listener);
+let t3 = await read_in_task(s3);
+try! s3.shutdown(Shutdown::Both);
+s3.close();
+await t3;
+println("shutdown(Both) + close: finished");
+c3.close();
+
+let idle = try! TcpListener::bind(any);
+let acc = task::spawn(async {
+    let r: str = try {
+        await idle.accept_async();
+        "accepted"
+    } catch e: IoError { f"{e.kind:?} {e.message}" };
+    r
+});
+await parked(1);
+idle.close();
+println(f"listener close: {await acc}");
+println(f"registrations left: {task::registrations()}");
+
+// spec: std 302-net §3.2.0

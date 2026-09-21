@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use common::{Env, ROKC, assert_exit, put, scratch, setup, text, workspace};
+use common::{Env, ROKC, assert_exit, exe_name, put, scratch, setup, text, workspace};
 use rokc_target::{Libc, ObjectFormat, TargetSpec};
 
 /// `rokc <args>` in `cwd`, with the repo's library and (when given) the
@@ -53,7 +53,7 @@ fn new_bin_package_runs_from_its_directory() {
     let out = rokc(Some(&env), &dir, &["-q", "build", "app/src/util/x.rok"]);
     assert_exit(&out, 0);
     assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
-    assert!(app.join("target/debug/app").is_file());
+    assert!(app.join("target/debug").join(exe_name("app")).is_file());
 
     assert_exit(&rokc(None, &dir, &["--cwd=app", "clean"]), 0);
     assert!(!app.join("target").exists());
@@ -170,7 +170,7 @@ fn unchanged_package_is_fresh() {
     // A file the package does not use is still one of its sources.
     put(app.join("src/other.rok"), "fn f() {}\n").unwrap();
     assert!(built(&["build", "-g"]).0);
-    put(app.join("target/debug/app"), "").unwrap();
+    put(app.join("target/debug").join(exe_name("app")), "").unwrap();
     assert!(built(&["build", "-g"]).0);
     // A `#[path]` module outside the package is a source too.
     put(dir.join("shared.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
@@ -531,88 +531,112 @@ fn incremental_checks_generic_bodies() {
 
 /// A library package builds by units: an edit recompiles its unit
 /// alone, the archive is a clean build's, and two such libraries with
-/// copies of the same instances link into one program.
+/// copies of the same instances link into one program. A library names
+/// no symbol of a dependency it does not use: built against the edited
+/// dependency, it recompiles nothing, and its archive built against the
+/// old one still links (lld fails on what a member it pulls leaves
+/// undefined). Cross targets (`targets/build.sh`) link only.
 #[test]
 fn library_builds_by_units() {
     let Some(env) = setup() else { return };
-    for opt in ["-O0", "-O2"] {
-        let dir = scratch(&format!("units_lib{opt}"));
-        let (a, b) = (dir.join("liba"), dir.join("libb"));
-        let app = dir.join("app");
-        for d in [&a, &b, &app] {
-            fs::create_dir_all(d).unwrap();
+    let targets = Path::new(ROKC).parent().unwrap().join("../lib/rok/targets");
+    let cross = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+        .into_iter()
+        .filter(|t| targets.join(t).is_dir());
+    for target in std::iter::once(None).chain(cross.map(Some)) {
+        for opt in ["-O0", "-O2"] {
+            library_units(&env, target, opt);
         }
-        put(
-            a.join("src/lib.rok"),
-            "mod util;\n\nstatic NAMES: List<str> = [\"x\", \"yy\"];\n\n\
-             pub fn total(n: i64) -> i64 {\n    let t: i64 = 0;\n    for i in 0..n {\n        \
-             t += util::weight(f\"p{i}\");\n    }\n    t + NAMES.len() as i64\n}\n",
-        )
-        .unwrap();
-        let util = "pub fn weight(s: str) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
-                    d[s] = s.len() as i64;\n    d.get(s) ?? 0\n}\n";
-        put(a.join("src/util.rok"), util).unwrap();
-        put(
-            b.join("src/lib.rok"),
-            "pub fn words(n: i64) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
-             for i in 0..n {\n        d[f\"w{i}\"] = i;\n    }\n    d.get(\"w2\") ?? 0\n}\n",
-        )
-        .unwrap();
-        put(
-            app.join("src/main.rok"),
-            "use liba::total;\nuse libb::words;\n\nprintln(f\"{total(3)} {words(4)}\");\n",
-        )
-        .unwrap();
-        let profile = if opt == "-O2" { "release" } else { "debug" };
-        let archive = |d: &Path, n: &str| d.join(format!("target/{profile}/lib{n}.a"));
-        let (lib_a, lib_b) = (archive(&a, "liba"), archive(&b, "libb"));
-        let extern_a = format!("liba={}", lib_a.display());
-        let build = |args: &[&str]| {
-            let out = rokc(Some(&env), &dir, &[&["build", "-vv", opt], args].concat());
-            assert_exit(&out, 0);
-            let mut units: Vec<String> = text(&out.stderr)
-                .lines()
-                .filter_map(|l| l.trim().strip_prefix("Compiled unit "))
-                .map(str::to_owned)
-                .collect();
-            units.sort();
-            units
-        };
-        let run = || {
-            let extern_b = format!("libb={}", lib_b.display());
-            let exe = dir.join("app.bin");
-            let out = rokc(
-                Some(&env),
-                &dir,
-                &[
-                    "build", "-q", opt, "app", "--extern", &extern_a, "--extern", &extern_b, "-o",
-                ]
-                .into_iter()
-                .chain([exe.to_str().unwrap()])
-                .collect::<Vec<_>>(),
-            );
-            assert_exit(&out, 0);
-            text(&Command::new(&exe).output().unwrap().stdout)
-        };
-        assert!(build(&["liba"]).len() > 2);
-        // Built after `liba`: its GC types follow `liba`'s.
-        build(&["libb", "--extern", &extern_a]);
-        assert_eq!(run(), "8 2\n");
-        put(
-            a.join("src/util.rok"),
-            util.replace("as i64;", "as i64 + 1;"),
-        )
-        .unwrap();
-        assert_eq!(build(&["liba"]), ["liba::util"], "{opt}");
-        assert_eq!(run(), "11 2\n");
-        let incremental = fs::read(&lib_a).unwrap();
-        fs::remove_dir_all(a.join("target")).unwrap();
-        build(&["liba"]);
-        assert!(
-            incremental == fs::read(&lib_a).unwrap(),
-            "{opt}: not the clean build's archive"
-        );
     }
+}
+
+fn library_units(env: &Env, target: Option<&str>, opt: &str) {
+    let dir = scratch(&format!("units_lib{}{opt}", target.unwrap_or("")));
+    let (a, b) = (dir.join("liba"), dir.join("libb"));
+    let app = dir.join("app");
+    for d in [&a, &b, &app] {
+        fs::create_dir_all(d).unwrap();
+    }
+    put(
+        a.join("src/lib.rok"),
+        "mod util;\n\nstatic NAMES: List<str> = [\"x\", \"yy\"];\n\n\
+         pub fn total(n: i64) -> i64 {\n    let t: i64 = 0;\n    for i in 0..n {\n        \
+         t += util::weight(f\"p{i}\");\n    }\n    t + NAMES.len() as i64\n}\n",
+    )
+    .unwrap();
+    let util = "pub fn weight(s: str) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
+                d[s] = s.len() as i64;\n    d.get(s) ?? 0\n}\n";
+    put(a.join("src/util.rok"), util).unwrap();
+    put(
+        b.join("src/lib.rok"),
+        "pub fn words(n: i64) -> i64 {\n    let d: Dict<str, i64> = Dict::new();\n    \
+         for i in 0..n {\n        d[f\"w{i}\"] = i;\n    }\n    d.get(\"w2\") ?? 0\n}\n",
+    )
+    .unwrap();
+    put(
+        app.join("src/main.rok"),
+        "use liba::total;\nuse libb::words;\n\nprintln(f\"{total(3)} {words(4)}\");\n",
+    )
+    .unwrap();
+    let profile = if opt == "-O2" { "release" } else { "debug" };
+    let out_dir = target.map_or(profile.to_owned(), |t| format!("{t}/{profile}"));
+    let archive = |d: &Path, n: &str| d.join(format!("target/{out_dir}/lib{n}.a"));
+    let (lib_a, lib_b) = (archive(&a, "liba"), archive(&b, "libb"));
+    let extern_a = format!("liba={}", lib_a.display());
+    let target_arg = target.map(|t| format!("--target={t}"));
+    // The host's runtime, or the target's beside rokc.
+    let rokc_t = |args: &[&str]| {
+        let args: Vec<&str> = args.iter().copied().chain(target_arg.as_deref()).collect();
+        rokc(target.is_none().then_some(env), &dir, &args)
+    };
+    let what = format!("{target:?} {opt}");
+    let build = |args: &[&str]| {
+        let out = rokc_t(&[&["build", "-vv", opt], args].concat());
+        assert_exit(&out, 0);
+        let mut units: Vec<String> = text(&out.stderr)
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("Compiled unit "))
+            .map(str::to_owned)
+            .collect();
+        units.sort();
+        units
+    };
+    // The program's output (a cross target's links only).
+    let run = |want: &str| {
+        let extern_b = format!("libb={}", lib_b.display());
+        let exe = dir.join("app.bin");
+        let exe_s = exe.display().to_string();
+        let out = rokc_t(&[
+            "build", "-q", opt, "app", "--extern", &extern_a, "--extern", &extern_b, "-o", &exe_s,
+        ]);
+        assert_exit(&out, 0);
+        if target.is_none() {
+            let got = text(&Command::new(&exe).output().unwrap().stdout);
+            assert_eq!(got, want, "{what}");
+        }
+    };
+    assert!(build(&["liba"]).len() > 2);
+    // Built after `liba`: its GC types follow `liba`'s.
+    build(&["libb", "--extern", &extern_a]);
+    run("8 2\n");
+    put(
+        a.join("src/util.rok"),
+        util.replace("as i64;", "as i64 + 1;"),
+    )
+    .unwrap();
+    assert_eq!(build(&["liba"]), ["liba::util"], "{what}");
+    run("11 2\n");
+    let old_b = fs::read(&lib_b).unwrap();
+    let units: Vec<String> = Vec::new();
+    assert_eq!(build(&["libb", "--extern", &extern_a]), units, "{what}");
+    assert!(old_b == fs::read(&lib_b).unwrap(), "{what}");
+    let incremental = fs::read(&lib_a).unwrap();
+    fs::remove_dir_all(a.join("target")).unwrap();
+    build(&["liba"]);
+    assert!(
+        incremental == fs::read(&lib_a).unwrap(),
+        "{what}: not the clean build's archive"
+    );
 }
 
 /// An anonymous file builds by units too, kept per file in the target
@@ -827,7 +851,7 @@ fn lone_file_is_an_anonymous_package() {
     // `run` of a lone file leaves no target/ behind; `build` uses one.
     assert!(!dir.join("target").exists());
     assert_exit(&rokc(Some(&env), &dir, &["build", "hello.rok"]), 0);
-    assert!(dir.join("target/debug/hello").is_file());
+    assert!(dir.join("target/debug").join(exe_name("hello")).is_file());
 
     // Spec 4.16.8: no file submodules.
     put(dir.join("m.rok"), "fn f() {}\n").unwrap();
@@ -934,6 +958,10 @@ fn fmt_writes_lf_and_keeps_literal_crlf() {
 #[test]
 fn symbols_follow_the_mangling_scheme() {
     let Some(env) = setup() else { return };
+    if cfg!(windows) {
+        eprintln!("skipped: a PE executable's symbols are in its PDB");
+        return;
+    }
     if Command::new("nm").arg("--version").output().is_err() {
         eprintln!("skipped: no nm");
         return;
@@ -1041,12 +1069,11 @@ fn sysroot_is_beside_rokc() {
     let dir = scratch("sysroot");
     let sys = dir.join("sys");
     fs::create_dir_all(sys.join("bin")).unwrap();
-    fs::create_dir_all(sys.join("lib/rok/core")).unwrap();
     let rokc_exe = sys
         .join("bin")
         .join(format!("rokc{}", std::env::consts::EXE_SUFFIX));
     fs::copy(ROKC, &rokc_exe).unwrap();
-    put(sys.join("lib/rok/core/lib.rok"), "fn (\n").unwrap();
+    put(sys.join("lib/rok/core/src/lib.rok"), "fn (\n").unwrap();
     put(dir.join("x.rok"), "let x = 1;\n").unwrap();
     let run = |args: &[&str]| {
         Command::new(&rokc_exe)
@@ -1060,8 +1087,8 @@ fn sysroot_is_beside_rokc() {
     let stderr = |o: &std::process::Output| text(&o.stderr).replace('\\', "/");
     let out = run(&["check", "x.rok"]);
     assert_exit(&out, 1);
-    assert!(stderr(&out).contains("sys/lib/rok/core/lib.rok"));
-    put(sys.join("lib/rok/core/lib.rok"), "").unwrap();
+    assert!(stderr(&out).contains("sys/lib/rok/core/src/lib.rok"));
+    put(sys.join("lib/rok/core/src/lib.rok"), "").unwrap();
     let out = run(&["run", "x.rok"]);
     assert_exit(&out, 1);
     let err = stderr(&out);
@@ -1474,7 +1501,11 @@ fn extern_dependencies_are_top_level_names() {
         ],
     );
     assert_exit(&out, 0);
-    assert!(dir.join("app/target/release/app").is_file());
+    assert!(
+        dir.join("app/target/release")
+            .join(exe_name("app"))
+            .is_file()
+    );
     assert_exit(&rokc(None, &dir, &["build", "app", "--extern", "g=x.a"]), 1);
     // Without it, `greet` is unknown.
     assert_exit(&rokc(Some(&env), &dir, &["check", "app"]), 1);
@@ -2242,7 +2273,7 @@ fn custom_target_file() {
     // Without --rokr: the runtime of target `mine`.
     let out = rokc(None, &dir, &["build", "h.rok", "--target", "mine.rokon"]);
     assert_exit(&out, 1);
-    let err = text(&out.stderr);
+    let err = text(&out.stderr).replace('\\', "/");
     assert!(
         err.contains("no runtime for mine:") && err.contains("targets/mine"),
         "{err}"

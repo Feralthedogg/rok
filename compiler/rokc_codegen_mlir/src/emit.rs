@@ -3429,9 +3429,10 @@ impl<'a> FnEmit<'a> {
                 args,
                 arg_tys,
                 ret_ty,
-                abi: Abi::C { variadic, .. },
+                abi: Abi::C { variadic, system },
             } => {
-                // A call through an `extern "C" fn` pointer (spec 5.9.4).
+                // A call through an `extern "C"` / `extern "system"` fn
+                // pointer (spec 5.9.4).
                 let fn_ty = MirTy::Fn(arg_tys.clone(), Box::new(ret_ty.clone()));
                 let ptr = self.materialize_operand(callee, &fn_ty);
                 let what = "a call through an `extern \"C\" fn` pointer";
@@ -3443,7 +3444,7 @@ impl<'a> FnEmit<'a> {
                     arg_tys,
                     ret_ty,
                     *variadic,
-                    false,
+                    *system,
                 ) {
                     self.emit_c_call(&dst, arg_tys, ret_ty, &abi, Callee::Ptr(&ptr), args);
                 }
@@ -3986,18 +3987,15 @@ impl<'a> FnEmit<'a> {
 
     fn emit_fn_addr(&mut self, callee: FunctionId, fn_ty: &MirTy) -> String {
         let name = self.fns[&callee].name.clone();
-        if self.fns[&callee].stdcall {
-            return self.unsupported(
-                "an `extern \"system\"` function as a value: it is `stdcall` on this target, \
-                 not an `extern \"C\" fn`",
-            );
-        }
-        if self.fns[&callee].c.as_ref().is_some_and(|a| a.variadic) {
-            // An `llvm.func`: no `func.constant` of it.
+        let f = &self.fns[&callee];
+        if f.stdcall || f.c.as_ref().is_some_and(|a| a.variadic) {
+            // An `llvm.func` (a definition's C entry, else the
+            // declaration): no `func.constant` of it.
+            let sym = f.c_entry.as_ref().map_or(name, |(entry, _)| entry.clone());
             let dst = self.fresh_value();
             let _ = writeln!(
                 self.body,
-                "    {dst} = llvm.mlir.addressof @{name} : !llvm.ptr"
+                "    {dst} = llvm.mlir.addressof @{sym} : !llvm.ptr"
             );
             return dst;
         }
@@ -4712,9 +4710,10 @@ impl<'a> FnEmit<'a> {
                         a => a.to_owned(),
                     })
                     .collect();
+                let cc = if abi.stdcall { "x86_stdcallcc " } else { "" };
                 let _ = writeln!(
                     self.body,
-                    "    {lhs}llvm.call {p}({list}) {{arg_attrs = [{}]}} : !llvm.ptr, ({tlist}) -> {rty}",
+                    "    {lhs}llvm.call {cc}{p}({list}) {{arg_attrs = [{}]}} : !llvm.ptr, ({tlist}) -> {rty}",
                     attrs.join(", ")
                 );
             }

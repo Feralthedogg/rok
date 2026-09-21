@@ -97,6 +97,19 @@ fn main() {
             n.clone(),
         )
     });
+    if !msvc {
+        // MLIR plugins bind to the MLIR rokc links and the LLVM support
+        // library under it (spec bare 1.10.2): rokc exports those, and
+        // the rest of the toolchain is dead-stripped. Support and
+        // Demangle go in whole, so plugins find all of it.
+        let exports = out.join("exports");
+        write_exports(&out.join("librokc_llvm_shim.a"), &lib, &names, &exports);
+        println!("cargo:exports={}", exports.display());
+        names.retain(|n| !EXPORTED_LIBS.contains(&n.as_str()));
+        for n in EXPORTED_LIBS {
+            println!("cargo:rustc-link-lib=static:+whole-archive,-bundle={n}");
+        }
+    }
     if apple || msvc {
         for n in &names {
             println!("cargo:rustc-link-lib=static:-bundle={n}");
@@ -134,6 +147,132 @@ fn main() {
     for l in system {
         println!("cargo:rustc-link-lib=dylib={l}");
     }
+}
+
+/// The LLVM libraries rokc exports whole besides MLIR.
+const EXPORTED_LIBS: [&str; 2] = ["LLVMSupport", "LLVMDemangle"];
+
+/// The globals of an archive member: defined (weak ones apart where nm
+/// tells them: ELF's `W` / `V`), and undefined (weak undefined ones load
+/// no member and are left out).
+#[derive(Default)]
+struct Member {
+    defs: Vec<String>,
+    weak: Vec<String>,
+    undefs: Vec<String>,
+}
+
+/// The members of `archive` (`nm -P -g`, plus `flags`).
+fn members(archive: &Path, flags: &[&str]) -> Vec<Member> {
+    let out = Command::new("nm")
+        .args(["-P", "-g"])
+        .args(flags)
+        .arg(archive)
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run nm: {e}"));
+    assert!(out.status.success(), "nm failed on {}", archive.display());
+    let mut v: Vec<Member> = Vec::new();
+    // `name type [value size]`; a member starts with `<name>:`.
+    for l in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut f = l.split_whitespace();
+        let Some(n) = f.next() else { continue };
+        let ty = f.next();
+        if ty.is_none() && n.ends_with(':') {
+            v.push(Member::default());
+            continue;
+        }
+        let (Some(ty), Some(m)) = (ty, v.last_mut()) else {
+            continue;
+        };
+        let n = n.to_owned();
+        match ty {
+            "U" => m.undefs.push(n),
+            "W" | "V" => m.weak.push(n),
+            "w" | "v" => {}
+            _ => m.defs.push(n),
+        }
+    }
+    v
+}
+
+/// The symbols rokc exports, for its link (`cargo:exports`): the
+/// non-weak globals of every MLIR archive member the link loads (found
+/// as the linker does: members defining what the shim and the members
+/// loaded so far leave undefined) and of the whole [`EXPORTED_LIBS`].
+/// Weak definitions (template instances) stay internal: a plugin has its
+/// own, and dyld would bind each use of an exported one at launch. Mach-O
+/// takes one name per line (`-exported_symbols_list`), ELF a dynamic
+/// list.
+fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path) {
+    use std::collections::{HashMap, HashSet};
+    let archives: Vec<(PathBuf, bool)> = std::iter::once((shim.to_owned(), false))
+        .chain(names.iter().map(|n| {
+            let exported = n.starts_with("MLIR") || EXPORTED_LIBS.contains(&n.as_str());
+            (lib.join(format!("lib{n}.a")), exported)
+        }))
+        .collect();
+    let all: Vec<_> = archives.iter().map(|(a, _)| members(a, &[])).collect();
+    let mut definer: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (a, ms) in all.iter().enumerate() {
+        for (m, member) in ms.iter().enumerate() {
+            for d in member.defs.iter().chain(&member.weak) {
+                definer.entry(d).or_insert((a, m));
+            }
+        }
+    }
+    let whole = |a: usize| {
+        a == 0
+            || EXPORTED_LIBS
+                .iter()
+                .any(|n| archives[a].0.ends_with(format!("lib{n}.a")))
+    };
+    let mut work: Vec<(usize, usize)> = (0..all.len())
+        .filter(|&a| whole(a))
+        .flat_map(|a| (0..all[a].len()).map(move |m| (a, m)))
+        .collect();
+    let mut loaded: HashSet<(usize, usize)> = work.iter().copied().collect();
+    while let Some((a, m)) = work.pop() {
+        for u in &all[a][m].undefs {
+            if let Some(&d) = definer.get(u.as_str()) {
+                if loaded.insert(d) {
+                    work.push(d);
+                }
+            }
+        }
+    }
+    let apple = env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
+    let mut syms = Vec::new();
+    for (a, (path, exported)) in archives.iter().enumerate() {
+        if !exported || !(0..all[a].len()).any(|m| loaded.contains(&(a, m))) {
+            continue;
+        }
+        // Mach-O's nm types weak definitions as others: it omits them
+        // with --no-weak.
+        let strong: Option<HashSet<String>> = apple.then(|| {
+            members(path, &["--defined-only", "--no-weak"])
+                .into_iter()
+                .flat_map(|m| m.defs)
+                .collect()
+        });
+        for (m, member) in all[a].iter().enumerate() {
+            if loaded.contains(&(a, m)) {
+                syms.extend(
+                    (member.defs.iter())
+                        .filter(|d| strong.as_ref().is_none_or(|s| s.contains(*d)))
+                        .cloned(),
+                );
+            }
+        }
+    }
+    syms.sort();
+    syms.dedup();
+    let text = if apple {
+        syms.join("\n") + "\n"
+    } else {
+        let list: Vec<String> = syms.iter().map(|s| format!("  {s};")).collect();
+        format!("{{\n{}\n}};\n", list.join("\n"))
+    };
+    std::fs::write(to, text).unwrap();
 }
 
 fn default_prefix() -> Option<PathBuf> {

@@ -10,7 +10,8 @@
 # the third as x86_64 Linux objects, so both main back ends are warm.
 # The rest of the cases and bench/ are left to measure the result.
 # macOS with Xcode's command line tools; workdir (default
-# $ROK_LLVM_CACHE/pgo) needs ~25 GB and is deleted afterwards.
+# $ROK_LLVM_CACHE/pgo) peaks at ~5 GB and is deleted afterwards; about
+# 35 minutes on 10 cores.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)

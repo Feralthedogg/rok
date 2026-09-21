@@ -672,7 +672,9 @@ impl Printer {
                 if bounds.unsafe_fn {
                     self.s("unsafe ");
                 }
-                if bounds.c_abi {
+                if bounds.system {
+                    self.s("extern \"system\" ");
+                } else if bounds.c_abi {
                     self.s("extern \"C\" ");
                 }
                 self.s("fn(");

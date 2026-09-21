@@ -119,7 +119,7 @@ build options:
   --mlir-pass <pass>           extra MLIR pass, before the LLVM
                                lowering (repeatable)
   --bootstrap <file>           library root to preload (repeatable; default:
-                               <sysroot>/lib/rok/{core,std,bare}/lib.rok)
+                               <sysroot>/lib/rok/{core,std,bare}/src/lib.rok)
   --rokr <lib>                 runtime library: path, or name for -l<name>
                                (default: <sysroot>/lib/librokr.a)
   -L <dir>                     native library search directory, before

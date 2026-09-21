@@ -5,7 +5,8 @@
 // CPUs) on OS threads that live as long as the process, the blocking
 // lane (`spawn_blocking`) and the I/O driver. `block_on` and the sync
 // `par::*` entry points attach the calling thread as a guest worker
-// until their future is done; nothing is started per call.
+// until their future and the `spawn_local` tasks pinned to it are done;
+// nothing is started per call.
 //
 // Without threads (`rok_cpu_count() == 0`: wasm32-wasi, the browser) the
 // pool is solo: no pool, monitor or driver thread; the guest runs every
@@ -887,8 +888,8 @@ fn remove_timers(t: TaskRef) {
     }
 }
 
-/// Run tasks on `w` until `main` is done (`none`: forever, or for an
-/// orphan until its local tasks are).
+/// Run tasks on `w` until `main` and its other local tasks are done
+/// (`none`: forever, or for an orphan until its local tasks are).
 fn work(w: Worker, main: TaskRef | none) {
     let pool = w.pool;
     let ran: i64 = 0;
@@ -901,11 +902,9 @@ fn work(w: Worker, main: TaskRef | none) {
             unsafe { rok_session_leave() };
             return;
         }
-        if let m: TaskRef = main {
-            if is_done(m) {
-                unsafe { rok_session_leave() };
-                return;
-            }
+        if main is TaskRef && guest_done(w) {
+            unsafe { rok_session_leave() };
+            return;
         }
         if let t: TaskRef = find_task(w) {
             run(t);
@@ -939,10 +938,7 @@ fn work(w: Worker, main: TaskRef | none) {
             run(t);
             continue;
         }
-        let done = match main {
-            m: TaskRef => is_done(m),
-            none => false,
-        };
+        let done = main is TaskRef && guest_done(w);
         // The timers again: one added after the flag went up wakes us,
         // one added before is seen here.
         next = fire_timers(pool);
@@ -1008,8 +1004,16 @@ const fn poll_fn<F: Future>(fut: F, slot: GcBuf<F::Output>) -> fn(Context) -> bo
     }
 }
 
+/// A guest's `main` and the `spawn_local` tasks pinned to it are done
+/// (`main` is one of its local tasks).
+fn guest_done(w: Worker) -> bool {
+    atomic_load(w.locals, 0, SeqCst) == 0
+}
+
 /// Run `main` as a task local to this thread, which works as a guest of
-/// the executor until it is done. Tasks it spawned keep running.
+/// the executor until it is done, and so are the `spawn_local` tasks
+/// pinned to it: they may hold values that are not `Send`, so no other
+/// thread can take them over. Tasks it spawned keep running.
 fn run_guest(main: fn(Context) -> bool) {
     if current() is Worker {
         panic("task::block_on inside a running task (it would deadlock); use `await`");
@@ -1020,7 +1024,8 @@ fn run_guest(main: fn(Context) -> bool) {
     unsafe { rok_task_worker_clear() };
 }
 
-/// Run `fut` to completion from synchronous code (2.20.6).
+/// Run `fut` to completion from synchronous code (2.20.6). It returns
+/// once the `spawn_local` tasks pinned to this thread are done too.
 pub fn block_on<F: Future>(fut: F) -> F::Output {
     unsafe {
         let slot: GcBuf<F::Output> = buf_new(1);
@@ -1722,6 +1727,13 @@ pub fn unpark(key: usize) {
 /// odd, so never a GC address (8-aligned) at any pointer width.
 const fn io_key(fd: i32, write: i32) -> usize {
     (fd as usize) * 4 + (write as usize) * 2 + 1
+}
+
+/// Wake every task waiting on `fd`'s readiness: after a `shutdown` or
+/// a close, which may raise no poller event (stdlib 2.18.1).
+pub fn wake_io(fd: i32) {
+    unpark(io_key(fd, 0));
+    unpark(io_key(fd, 1));
 }
 
 /// Start the driver thread once: it blocks in kqueue / epoll and

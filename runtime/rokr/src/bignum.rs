@@ -1,4 +1,4 @@
-//! `int` limb kernels (`library/core/num/bigint.rok`): the quadratic
+//! `int` limb kernels (`library/core/src/num/bigint.rok`): the quadratic
 //! inner loops over `GcBuf<u32>` limbs (little-endian, base 2^32), which
 //! run several times faster here than as rok loops. The library does
 //! the rest (signs, normalization, Karatsuba, allocation). None of these

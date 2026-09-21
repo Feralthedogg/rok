@@ -398,10 +398,15 @@ fn count(n: i32) -> isize {
     }
 }
 
-/// One `recv` into `dst` (`len` bytes): the count or `-error`.
+/// One `recv` into `dst` (`len` bytes): the count or `-error`. After
+/// `shutdown(Read)` it is the end of stream, as on Unix (Winsock fails
+/// with `WSAESHUTDOWN`).
 pub fn recv(s: SOCKET, dst: *mut u8, len: usize) -> isize {
     // SAFETY: the caller passes a writable region of `len` bytes.
-    count(unsafe { wsa_recv(s, dst, len.min(i32::MAX as usize) as i32, 0) })
+    match count(unsafe { wsa_recv(s, dst, len.min(i32::MAX as usize) as i32, 0) }) {
+        n if n == -(win::WSAESHUTDOWN as isize) => 0,
+        n => n,
+    }
 }
 
 /// One `send` of `src` (`len` bytes): the count or `-error`.

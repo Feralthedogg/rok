@@ -346,6 +346,10 @@ fn glue_code(
     }
     // Statics.
     for s in &module.statics {
+        // A prebuilt package's statics are its `.a`'s.
+        if pkgs.link.in_prebuilt(&s.name) {
+            continue;
+        }
         let name = pkgs.static_sym(&s.name);
         let sym = ctx.sym(&name);
         let (size, align) = t.size_align(&s.ty);
@@ -356,9 +360,9 @@ fn glue_code(
         }
         let lazy = pkgs.lazy_statics.get(&s.name).cloned();
         if prebuilt_static(&s.name) {
-            // A prebuilt library's `.init` is in its `.a`; an earlier REPL
-            // cell's stays to itself (a private copy here).
-            if let Some(init) = lazy.filter(|_| !pkgs.link.in_prebuilt(&s.name)) {
+            // An earlier REPL cell's `.init` stays to itself (a private
+            // copy here).
+            if let Some(init) = lazy {
                 let state = ctx.sym(&format!("{name}.state"));
                 let init = ctx.sym(&init);
                 let f_sym = ctx.sym(&format!("{name}.init"));

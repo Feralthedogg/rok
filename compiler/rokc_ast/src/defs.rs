@@ -598,6 +598,8 @@ pub struct FnTyBounds {
     pub unsafe_fn: bool,
     /// `extern "C" fn(..)`.
     pub c_abi: bool,
+    /// `extern "system" fn(..)` (with `c_abi`).
+    pub system: bool,
 }
 
 #[derive(Clone, Debug)]

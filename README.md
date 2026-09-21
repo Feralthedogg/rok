@@ -58,7 +58,7 @@ $ROK_HOME/
 ├── bin/{rok,rokc,rokls}              proxies: run the same-named binary of the active toolchain
 ├── toolchains/<version>-<triple>/    self-contained toolchain
 │   ├── bin/{rok,rokc,rokls}
-│   └── lib/librokr.a, lib/rok/{core,std,bare}/, lib/rok/targets/<triple>/
+│   └── lib/librokr.a, lib/rok/{core,std,bare}/src/, lib/rok/targets/<triple>/
 ├── cache/                            git, registry, script locks
 ├── envs/<name>/, envs/CURRENT        named environments
 └── config.rokon                      Config { registry: "..", toolchain: ".." }

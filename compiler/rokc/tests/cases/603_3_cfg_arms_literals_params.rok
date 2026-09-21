@@ -1,0 +1,71 @@
+// spec: §6.1.3 §6.3.7
+// expect-exit: 0
+// expect-stdout:
+// 6 1
+// one other
+// 4
+
+// Spec 6.1.3 / 6.3.7: `#[cfg]` on match arms, struct literal fields and
+// fn parameters. A false parameter leaves the signature, so calls pass
+// what the filtered signature takes.
+struct S {
+    a: i32;
+    #[cfg(feature = "x")]
+    b: i32;
+}
+
+fn add(a: i32, #[cfg(feature = "x")] b: i32, #[cfg(not(feature = "x"))] c: i64) -> i64 {
+    #[cfg(feature = "x")]
+    return (a + b) as i64;
+    #[cfg(not(feature = "x"))]
+    return a as i64 + c;
+}
+
+trait Tr {
+    fn f(self, #[cfg(feature = "x")] n: i32) -> i32;
+}
+
+impl Tr for S {
+    fn f(self, #[cfg(feature = "x")] n: i32) -> i32 {
+        #[cfg(feature = "x")]
+        return self.a + n;
+        #[cfg(not(feature = "x"))]
+        return self.a;
+    }
+}
+
+fn run(f: fn() -> i32) -> i32 {
+    f()
+}
+
+fn name(n: i32) -> str {
+    match n {
+        #[cfg(feature = "x")]
+        1 => "one (x)",
+        #[cfg(not(feature = "x"))]
+        1 => "one",
+        #[cfg(feature = "nope")]
+        2 => undefined_name(),
+        _ => "other",
+    }
+}
+
+fn main() {
+    let s = S {
+        a: 1,
+        #[cfg(feature = "x")]
+        b: 2,
+        #[cfg(feature = "nope")]
+        c: undefined_value,
+    };
+    #[cfg(feature = "x")]
+    println(f"{add(1, 2)} {s.f(10)} {s.b}");
+    #[cfg(not(feature = "x"))]
+    println(f"{add(1, 5i64)} {s.f()}");
+    println(f"{name(1)} {name(2)}");
+    // A first field's attribute still reads as a struct literal; a
+    // first statement's as a trailing closure body.
+    let t = S { #[cfg(feature = "nope")] z: 0, a: 4, #[cfg(feature = "x")] b: 5 };
+    let r = run { #[cfg(feature = "nope")] undefined_call(); t.a };
+    println(f"{r}");
+}

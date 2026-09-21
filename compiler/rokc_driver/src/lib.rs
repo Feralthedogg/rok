@@ -276,18 +276,22 @@ fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
 /// prefix and root file.
 type LibRoot = (Vec<String>, PathBuf);
 
-/// The bootstrap roots `files` names, with `bare/lib.rok` beside a
-/// `core/lib.rok` added when missing: core is built on bare (stdlib 0.1).
+/// The tier a bootstrap root names: `core` for `<libs>/core/src/lib.rok`.
+fn tier_of(root: &Path) -> Option<&str> {
+    root.parent()?.parent()?.file_name()?.to_str()
+}
+
+/// The bootstrap roots `files` names, with `bare/src/lib.rok` beside a
+/// `core/src/lib.rok` added when missing: core is built on bare (stdlib 0.1).
 #[must_use]
 pub fn bootstrap_tiers(files: &[PathBuf]) -> Vec<PathBuf> {
-    let tier = |f: &PathBuf| f.parent().and_then(Path::file_name).map(ToOwned::to_owned);
     let mut out = files.to_vec();
-    if !files.iter().any(|f| tier(f).is_some_and(|t| t == "bare")) {
+    if !files.iter().any(|f| tier_of(f) == Some("bare")) {
         out.extend(
             files
                 .iter()
-                .filter(|f| tier(f).is_some_and(|t| t == "core"))
-                .filter_map(|c| Some(c.parent()?.parent()?.join("bare/lib.rok")))
+                .filter(|f| tier_of(f) == Some("core"))
+                .filter_map(|c| Some(c.parent()?.parent()?.parent()?.join("bare/src/lib.rok")))
                 .filter(|b| b.is_file())
                 .take(1),
         );
@@ -295,18 +299,13 @@ pub fn bootstrap_tiers(files: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
-/// Each bootstrap file as `rok::<tier>` (`library/core/lib.rok` →
+/// Each bootstrap file as `rok::<tier>` (`library/core/src/lib.rok` →
 /// `rok::core`), then each `--extern` dependency under its own name.
 fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
     let mut out: Vec<LibRoot> = bootstrap_tiers(&config.bootstrap_files)
         .iter()
         .map(|root| {
-            let tier = root
-                .parent()
-                .and_then(|d| d.file_name())
-                .and_then(|n| n.to_str())
-                .unwrap_or("core")
-                .to_owned();
+            let tier = tier_of(root).unwrap_or("core").to_owned();
             (vec!["rok".to_owned(), tier], root.clone())
         })
         .collect();
@@ -534,8 +533,10 @@ fn compile_std(
             )
         })
         .collect();
-    let src_dir = match tiers.first().and_then(|(_, d)| d.parent()) {
-        Some(d) if tiers.iter().all(|(_, t)| t.parent() == Some(d)) => d.to_path_buf(),
+    // Each tier's sources are `<libs>/<tier>/src`; the interface is rooted at `<libs>`.
+    let libs = |t: &Path| t.parent().and_then(Path::parent).map(Path::to_path_buf);
+    let src_dir = match tiers.first().and_then(|(_, d)| libs(d)) {
+        Some(d) if tiers.iter().all(|(_, t)| libs(t).as_ref() == Some(&d)) => d,
         _ => return Err(no_dir()),
     };
     let Some(m) = p.modules.first_mut() else {
@@ -559,8 +560,10 @@ fn compile_std(
             .cloned()
             .collect();
         let tier = dir
-            .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            .strip_prefix(&src_dir)
+            .unwrap_or(dir)
+            .to_string_lossy()
+            .replace('\\', "/");
         for (rel, text) in rokhir::interface(&p.sources, sources, pkg, dir, &seeds, false) {
             files.push((format!("{tier}/{rel}"), text));
         }
@@ -873,6 +876,7 @@ fn compile_unit_in(
         root_main,
         inline_prebuilt: config.inline_prebuilt,
         pointer_width: config.target.pointer_width,
+        stdcall_system: config.target.stdcall_system(),
         item_modules,
         no_implicit_rok: NO_IMPLICIT.with(std::cell::RefCell::take),
         fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
@@ -2305,7 +2309,7 @@ mod tests {
     /// library.
     fn compile(src: &str, triple: &str) -> super::CompiledModule {
         let core =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/core/lib.rok");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/core/src/lib.rok");
         let config = super::CompilerConfig {
             bootstrap_files: vec![core],
             anonymous: true,
@@ -2342,7 +2346,7 @@ mod tests {
     fn usize_range_follows_the_pointer_width() {
         let src = "const BIG: usize = 4294967295 + 1;\nfn main() { let n = BIG; }\n";
         let core =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/core/lib.rok");
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library/core/src/lib.rok");
         let errs = |triple: &str| {
             let config = super::CompilerConfig {
                 bootstrap_files: vec![core.clone()],

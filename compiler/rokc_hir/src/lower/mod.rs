@@ -556,6 +556,7 @@ impl TypeNames<'_> {
             auto: keys,
             unsafe_fn: bounds.unsafe_fn,
             c_abi: bounds.c_abi,
+            stdcall: bounds.system && const_eval::stdcall_system(),
         }
     }
 
@@ -977,6 +978,9 @@ struct Env<'a> {
     /// `extern "C" fn` definitions (spec 5.9.10): with `extern_fn_ids`,
     /// the named functions an `extern "C" fn(..)` value can point to.
     c_defs: std::collections::HashSet<FunctionId>,
+    /// `extern "system"` declarations and definitions where `"system"`
+    /// is `stdcall` (else empty): `extern "system" fn(..)` values.
+    stdcall_fns: std::collections::HashSet<FunctionId>,
     prec: &'a PrecTable,
     sink: ClosureSink,
     /// Visibility of every value-namespace item, keyed by full name.
@@ -1452,6 +1456,11 @@ fn fn_mismatch_hint(slot: &HirTy, ty: &HirTy) -> &'static str {
         " — an `extern \"C\" fn` value is a bare C function pointer, not a rok `fn` value \
          (spec 5.9.4)"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
+        if want.stdcall != have.stdcall)
+    {
+        " — `extern \"system\" fn` is `stdcall` on this target, not `extern \"C\" fn` \
+         (spec 5.9.4)"
+    } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
         if !fn_bounds_fit(want, have))
     {
         " — a `fn` value must already carry the bound in its type; only a named \
@@ -1467,9 +1476,12 @@ fn fn_mismatch_hint(slot: &HirTy, ty: &HirTy) -> &'static str {
 }
 
 /// Spec 5.9.4: a named C-ABI function (an `extern` block declaration
-/// or an `extern "C" fn` definition) fills an `extern "C" fn(..)` slot
-/// (or such a member of a sum slot) as its own address: the value is
-/// retyped, and MIR takes the thin code pointer (the C ABI entry).
+/// or an `extern "C"` / `extern "system"` fn definition) fills an
+/// `extern "C" fn(..)` slot (or such a member of a sum slot) as its own
+/// address: the value is retyped, and MIR takes the thin code pointer
+/// (the C ABI entry). Where `"system"` is `stdcall`, a `"system"`
+/// function fills only an `extern "system" fn(..)` slot, and the rest
+/// only an `extern "C" fn(..)` one.
 fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
     let (HirExprKind::FnRef(id), HirTy::Fn(va, vr, have)) = (&value.kind, &value.ty) else {
         return value;
@@ -1482,9 +1494,9 @@ fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
         HirTy::Sum(vs) => vs.iter().find(fits),
         s => Some(s).filter(fits),
     };
-    if target.is_none() {
+    let Some(HirTy::Fn(_, _, want)) = target else {
         return value;
-    }
+    };
     if !(ctx.env.extern_fn_ids.contains(id) || ctx.env.c_defs.contains(id)) {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
@@ -1493,8 +1505,24 @@ fn c_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, mut value: HirExpr) -> HirExpr {
                 .to_owned(),
         );
     }
+    let stdcall = ctx.env.stdcall_fns.contains(id);
+    if stdcall != want.stdcall {
+        let (is, slot) = if stdcall {
+            ("an `extern \"system\"`", "`extern \"C\" fn(..)`")
+        } else {
+            ("a C", "`extern \"system\" fn(..)`")
+        };
+        ctx.emit_error(
+            rokc_diagnostic::ErrorKind::Type,
+            format!(
+                "{is} function is no {slot} value: `\"system\"` is `stdcall` on this \
+                 target (spec 5.9.4)"
+            ),
+        );
+    }
     let mut bounds = have.clone();
     bounds.c_abi = true;
+    bounds.stdcall = want.stdcall;
     value.ty = HirTy::Fn(va.clone(), vr.clone(), bounds);
     value
 }
@@ -1506,6 +1534,7 @@ fn fn_bounds_fit(want: &crate::FnBounds, have: &crate::FnBounds) -> bool {
     want.auto.iter().all(|b| have.auto.contains(b))
         && (!have.unsafe_fn || want.unsafe_fn)
         && want.c_abi == have.c_abi
+        && want.stdcall == have.stdcall
 }
 
 /// A `fn` value with more auto-trait bounds than the slot (or the
@@ -2448,11 +2477,13 @@ impl<'a> LowerCtx<'a> {
                 let (bounds, kw): (String, &str) = match ty {
                     HirTy::Fn(_, _, b) => (
                         b.auto.iter().flat_map(|k| [" + ", leaf_name(k)]).collect(),
-                        match (b.unsafe_fn, b.c_abi) {
-                            (true, true) => "unsafe extern \"C\" fn",
-                            (true, false) => "unsafe fn",
-                            (false, true) => "extern \"C\" fn",
-                            (false, false) => kw,
+                        match (b.unsafe_fn, b.c_abi, b.stdcall) {
+                            (true, true, true) => "unsafe extern \"system\" fn",
+                            (false, true, true) => "extern \"system\" fn",
+                            (true, true, false) => "unsafe extern \"C\" fn",
+                            (true, false, _) => "unsafe fn",
+                            (false, true, false) => "extern \"C\" fn",
+                            (false, false, _) => kw,
                         },
                     ),
                     _ => (String::new(), kw),

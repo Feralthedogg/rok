@@ -226,6 +226,7 @@ pub fn lower_full(
     resolve::set_packages(input.packages.clone());
     resolve::set_no_implicit(input.no_implicit_rok.clone());
     super::const_eval::set_pointer_width(input.pointer_width);
+    super::const_eval::set_stdcall_system(input.stdcall_system);
     crate::clear_type_names();
     // A prebuilt-library build: every body of that package is a root.
     let lib_pkg: Option<String> = input.lib.clone();
@@ -1276,6 +1277,7 @@ pub fn lower_full(
         rok_externs: rok_externs.clone(),
         c_variadic: c_variadic.clone(),
         c_defs: std::collections::HashSet::new(),
+        stdcall_fns: std::collections::HashSet::new(),
         prec,
         sink,
         item_visibility,
@@ -1732,10 +1734,12 @@ pub fn lower_full(
         // The prebuilt standard library's interface keeps its bodies
         // (compile-time evaluation runs them); its `.a` has the code of
         // those named alike in every build (not trait defaults, named
-        // after the build's type numbering).
+        // after the build's type numbering). A prebuilt package's lazy
+        // statics are initialized by its `.a`.
         let stable = matches!(d, MethodOrFn::Fn(_)) || link_names.contains_key(&i);
         let std_fn = std_prebuilt && within(&package_of(&module), "rok");
-        let linked = f.body.is_none() || (std_fn && stable && in_archive(f));
+        let linked =
+            f.body.is_none() || is_lazy_init_fn(&f.name) || (std_fn && stable && in_archive(f));
         let prebuilt_fn = linked
             && !(extern_fn_ids.contains(&id) || rok_externs.contains(&id))
             && input
@@ -1810,6 +1814,9 @@ pub fn lower_full(
     env.infer_ret = infer_ret;
     env.unsafe_fns = unsafe_fns;
     env.c_defs = c_defs.iter().copied().collect();
+    if input.stdcall_system {
+        env.stdcall_fns.clone_from(&system_fns);
+    }
     env.sink
         .next_id
         .set(u32::try_from(env.decls.len()).expect("FunctionId overflow"));
@@ -5141,7 +5148,8 @@ fn canon_ast_ty(
         // bounds (`+ Send`) don't separate: such a value also fits the
         // plain `fn` impl.
         AstTyKind::Fn(params, ret, b) => {
-            let kind = format!("fn/{}/{}", b.unsafe_fn, b.c_abi);
+            let stdcall = b.system && super::const_eval::stdcall_system();
+            let kind = format!("fn/{}/{}/{stdcall}", b.unsafe_fn, b.c_abi);
             let args = std::iter::once(&**ret)
                 .chain(params)
                 .map(rec)

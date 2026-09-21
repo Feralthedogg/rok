@@ -51,6 +51,11 @@ fn llvm() -> bool {
     found
 }
 
+/// The executable file `name` builds to.
+fn exe(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// `s` as a ROKON string literal (Windows paths have backslashes).
 fn q(s: impl std::fmt::Display) -> String {
     rokc_rokon::quote(&s.to_string())
@@ -204,12 +209,10 @@ fn add_lock_update_offline_remove() {
         assert!(lock.contains(&want), "{lock}");
     }
     let checkout = home.join("cache/git/checkouts").join(&c1);
+    let slashes = |s: String| s.replace('\\', "/");
     assert_eq!(
-        deps(&home, &app, &[]),
-        [(
-            "greet".to_owned(),
-            checkout.join("src/lib.rok").display().to_string()
-        )]
+        slashes(deps(&home, &app, &[])[0].1.clone()),
+        slashes(checkout.join("src/lib.rok").display().to_string())
     );
 
     // A new commit upstream: builds keep the locked one; `update` moves.
@@ -355,9 +358,12 @@ fn transitive_dependencies_and_conflicts() {
         &app,
         &["add", "c", "--path", "../other_b", "--dev"],
     ));
+    // On one line or one entry per line, by the other entries' widths
+    // (the scratch path's).
+    let manifest = read(&app.join("rok.rokon")).replace(['\n', ' ', ','], "");
     assert!(
-        read(&app.join("rok.rokon"))
-            .contains("    dev_deps: {\n        \"c\": Dep::path(\"../other_b\"),\n    },\n}\n")
+        manifest.contains("dev_deps:{\"c\":Dep::path(\"../other_b\")}"),
+        "{manifest}"
     );
     // Dev dependencies are for tests only.
     assert_eq!(deps(&home, &app, &[]).len(), 2);
@@ -520,7 +526,7 @@ fn rok_add_writes_canonical_rokon() {
     let out = rok(&home, &app, &["build"]);
     if llvm() {
         ok(&out);
-        assert!(app.join("target/debug/hello").is_file());
+        assert!(app.join("target/debug").join(exe("hello")).is_file());
     }
     write(&app.join("rok.rokon"), "Package { name: \"My_App\" }\n");
     fails(&rok(&home, &app, &["check"]), "try `my_app`");
@@ -543,7 +549,7 @@ fn rok_add_writes_canonical_rokon() {
     );
     if llvm() {
         assert_eq!(ok(&rok(&home, &app, &["-q", "run"])), "3\n");
-        assert!(app.join("target/debug/my-app").is_file());
+        assert!(app.join("target/debug").join(exe("my-app")).is_file());
     }
 }
 
@@ -703,9 +709,11 @@ fn named_environments() {
         &["add", "--env", "work", "greet", "--path", "lib1"],
     ));
     // In an environment, path dependencies are absolute.
+    let manifest = read(&home.join("envs/work/rok.rokon"));
+    let want = q(lib.display().to_string().replace('\\', "/"));
     assert!(
-        read(&home.join("envs/work/rok.rokon"))
-            .contains(&format!("\"greet\": Dep::path({}),", q(lib.display())))
+        manifest.contains(&format!("\"greet\": Dep::path({want}),")),
+        "{manifest}"
     );
     assert_eq!(deps(&home, &elsewhere, &["--env", "work"])[0].0, "greet");
     // Outside a project: `default` (empty), then what `env use` chose,
@@ -752,12 +760,13 @@ fn named_environments() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"echo \"env=$ROK_ENV\"; command -v rok\n")
-        .unwrap();
+    // Windows: %COMSPEC%, whatever SHELL says.
+    let script: &[u8] = if cfg!(windows) {
+        b"echo env=%ROK_ENV%\r\nwhere rok\r\n"
+    } else {
+        b"echo \"env=$ROK_ENV\"; command -v rok\n"
+    };
+    child.stdin.take().unwrap().write_all(script).unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = ok(&out);
     assert!(stdout.contains("env=work"), "{stdout}");
@@ -793,7 +802,7 @@ fn fake_toolchain(dir: &Path, version: &str) {
     fs::copy(ROK, dir.join("bin/rok")).unwrap();
     write(&dir.join("bin/rokls"), "");
     write(&dir.join("lib/librokr.a"), "");
-    write(&dir.join("lib/rok/core/lib.rok"), "");
+    write(&dir.join("lib/rok/core/src/lib.rok"), "");
 }
 
 #[cfg(unix)]
@@ -959,7 +968,7 @@ fn build_run_and_repl_with_dependencies() {
         &["add", "greet", "--git", &repo.display().to_string()],
     ));
     assert_eq!(ok(&rok(&home, &app, &["-q", "run"])), "2\n");
-    assert!(app.join("target/debug/app").is_file());
+    assert!(app.join("target/debug").join(exe("app")).is_file());
     // `repl <path>`: the session has the program's imports and dependencies.
     let mut child = rok_cmd(&home, &root, &["-q", "repl", "app"])
         .stdin(Stdio::piped())
@@ -976,7 +985,7 @@ fn build_run_and_repl_with_dependencies() {
     let out = child.wait_with_output().unwrap();
     assert_eq!(ok(&out), "2\ni32\ni32: 3\n", "{}", text(&out.stderr));
     ok(&rok(&home, &app, &["-q", "build", "--release"]));
-    assert!(app.join("target/release/app").is_file());
+    assert!(app.join("target/release").join(exe("app")).is_file());
     ok(&rok(&home, &app, &["-q", "clean"]));
     assert!(!app.join("target").exists());
 

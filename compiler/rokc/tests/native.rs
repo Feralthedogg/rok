@@ -228,7 +228,7 @@ fn stack_overflow_is_reported() {
         .arg("--bootstrap")
         .arg(&env.bootstrap)
         .arg("--bootstrap")
-        .arg(env.workspace.join("library/std/lib.rok"))
+        .arg(env.workspace.join("library/std/src/lib.rok"))
         .arg("--rokr")
         .arg(&env.rokr)
         .args(std::env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
@@ -338,7 +338,7 @@ fn shutdown_stops_other_threads() {
         .arg("--bootstrap")
         .arg(&env.bootstrap)
         .arg("--bootstrap")
-        .arg(env.workspace.join("library/std/lib.rok"))
+        .arg(env.workspace.join("library/std/src/lib.rok"))
         .arg("--rokr")
         .arg(&env.rokr)
         .args(std::env::var("ROK_TEST_OPT").ok().filter(|o| !o.is_empty()))
@@ -943,7 +943,7 @@ fn c_fn_ptr_null_niche() {
     fs::write(dir.join("side.c"), NICHE_C).unwrap();
     fs::write(dir.join("main.rok"), NICHE_ROK).unwrap();
     let obj = dir.join("main.o");
-    let bare = env.workspace.join("library/bare/lib.rok");
+    let bare = env.workspace.join("library/bare/src/lib.rok");
     ok(&build(
         &env,
         &dir.join("main.rok"),
@@ -1141,7 +1141,7 @@ fn repr_layouts_match_clang() {
     fs::write(dir.join("side.c"), REPR_C).unwrap();
     fs::write(dir.join("main.rok"), REPR_ROK).unwrap();
     let obj = dir.join("main.o");
-    let bare = env.workspace.join("library/bare/lib.rok");
+    let bare = env.workspace.join("library/bare/src/lib.rok");
     ok(&build(
         &env,
         &dir.join("main.rok"),

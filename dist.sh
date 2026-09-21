@@ -5,7 +5,7 @@
 #     rok-<version>-<triple>/
 #       bin/{rok,rokc,rokls}                (Windows: .exe)
 #       lib/librokr.a                       (Windows: rokr.lib)
-#       lib/rok/{core,std,bare}/
+#       lib/rok/{core,std,bare}/src/      the standard library sources
 #       lib/rok/targets/<triple>/   what --target links (targets/build.sh)
 #       install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE
 #       COPYING.mingw-w64 (Windows module definitions embedded in rokc)
@@ -76,8 +76,8 @@ done
   exit 1
 }
 runtime/rokr/localize.sh "$target/$rt" "$stage/lib/$rt"
-# The library sources, without build output.
-tar -C library --exclude target -cf - core std bare | tar -C "$stage/lib/rok" -xf -
+# The library sources.
+tar -C library -cf - core/src std/src bare/src | tar -C "$stage/lib/rok" -xf -
 cp -R "${CARGO_TARGET_DIR:-target}/lib/rok/targets" "$stage/lib/rok/"
 cp install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE \
   compiler/rokc_driver/windows/COPYING.mingw-w64 "$stage/"

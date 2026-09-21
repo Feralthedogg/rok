@@ -340,7 +340,7 @@ impl CompileResult {
 
 /// The standard library and the runtime of this `rokc` (spec 9.2.19).
 ///
-/// They are under its sysroot (the executable's `..`: `lib/rok/{core,std,bare}/`,
+/// They are under its sysroot (the executable's `..`: `lib/rok/{core,std,bare}/src/`,
 /// `lib/librokr.a`, `lib\rokr.lib` on Windows), else, for a build in the
 /// repository, its `library/` and the runtime cargo puts beside `rokc`. `ROK_HOME`
 /// plays no part. Each `Err` lists where it looked.
@@ -369,15 +369,15 @@ pub fn sysroot() -> Sysroot {
     let lib_dirs = [root.join(SYSROOT_LIBS), dev];
     let libs = lib_dirs
         .iter()
-        .find(|d| d.join("core/lib.rok").is_file())
+        .find(|d| d.join("core/src/lib.rok").is_file())
         .map(|d| bootstrap_roots(d))
         .ok_or_else(|| {
             format!(
                 "the standard library is missing: no {} (the sysroot of {}) nor {} (a build in \
-                 the repository); reinstall the toolchain, or pass --bootstrap <core/lib.rok>",
-                lib_dirs[0].join("core/lib.rok").display(),
+                 the repository); reinstall the toolchain, or pass --bootstrap <core/src/lib.rok>",
+                lib_dirs[0].join("core/src/lib.rok").display(),
                 exe.display(),
-                lib_dirs[1].join("core/lib.rok").display(),
+                lib_dirs[1].join("core/src/lib.rok").display(),
             )
         });
     let rt_lib = TargetSpec::host().runtime_lib();
@@ -398,15 +398,15 @@ pub fn sysroot() -> Sysroot {
     }
 }
 
-/// The library roots to preload from a library directory: `core/lib.rok`,
+/// The library roots to preload from a library directory: `core/src/lib.rok`,
 /// then `std` / `bare` when present (no implicit glob: user code names
 /// them).
 fn bootstrap_roots(libs: &Path) -> Vec<PathBuf> {
-    let mut out = vec![libs.join("core/lib.rok")];
+    let mut out = vec![libs.join("core/src/lib.rok")];
     out.extend(
         ["std", "bare"]
             .iter()
-            .map(|tier| libs.join(tier).join("lib.rok"))
+            .map(|tier| libs.join(tier).join("src/lib.rok"))
             .filter(|p| p.is_file()),
     );
     out

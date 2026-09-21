@@ -51,13 +51,6 @@ impl Target {
         }
     }
 
-    /// `extern "system"` is `stdcall` here (32-bit x86 Windows, spec
-    /// 5.9.2), not the C ABI.
-    #[must_use]
-    pub fn stdcall_system(&self) -> bool {
-        self.arch == "x86" && self.os == "windows"
-    }
-
     /// Built-in target `name` (tests).
     #[must_use]
     pub fn builtin(name: &str) -> Self {

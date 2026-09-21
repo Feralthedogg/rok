@@ -235,6 +235,13 @@ macro_rules! spec {
         const FIELDS: &[&str] = &[$(stringify!($f)),*];
 
         impl TargetSpec {
+    /// `extern "system"` is `stdcall` here (32-bit x86 Windows, spec
+    /// 5.9.2), not the C ABI.
+    #[must_use]
+    pub fn stdcall_system(&self) -> bool {
+        self.arch == "x86" && self.os == "windows"
+    }
+
             fn fields(&self) -> Vec<(&'static str, Value)> {
                 vec![$((stringify!($f), self.$f.to_value())),*]
             }

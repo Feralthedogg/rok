@@ -131,7 +131,7 @@ fn until_nul(buf: &[u8]) -> &[u8] {
 /// First resolver code: `getaddrinfo` failure `e` is `EAI_BASE + |e|`.
 pub const EAI_BASE: i32 = 100_000;
 
-/// `IoErrorKind` discriminants (library/std/io.rok declares the same).
+/// `IoErrorKind` discriminants (library/std/src/io.rok declares the same).
 mod kind {
     pub const OTHER: i32 = 0;
     pub const NOT_FOUND: i32 = 1;

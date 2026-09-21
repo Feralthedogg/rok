@@ -47,7 +47,9 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
-    cmd.arg("--git-dir")
+    // Checkouts hold the committed bytes (the package hash is over them):
+    // no line-ending conversion, whatever `core.autocrlf` says.
+    cmd.args(["-c", "core.autocrlf=false", "--git-dir"])
         .arg(dir)
         .args(args)
         .env_remove("GIT_DIR")

@@ -792,7 +792,7 @@ impl<'a> Parser<'a> {
             let attrs = self.cfg_only_attrs("a statement");
             let marks = (self.pending_stmts.len(), self.lifted.len());
             if let Some(stmt) = self.parse_top_stmt() {
-                if self.stmt_dropped(&attrs, marks) {
+                if self.cfg_drops(&attrs, marks) {
                     continue;
                 }
                 stmts.push(stmt);
@@ -933,10 +933,21 @@ impl<'a> Parser<'a> {
     /// item, follows them.
     fn at_attributed_stmt(&mut self) -> bool {
         let save = self.pos;
-        while matches!(self.peek(), TokenKind::HashLBracket) {
+        self.pos = self.past_attrs(save);
+        let stmt = self.pos != save && !self.at_item_start();
+        self.pos = save;
+        stmt
+    }
+
+    /// The index after the `#[..]` attributes starting at token `i`.
+    fn past_attrs(&self, mut i: usize) -> usize {
+        while matches!(
+            self.tokens.get(i).map(|t| &t.kind),
+            Some(TokenKind::HashLBracket)
+        ) {
             let mut depth = 0usize;
-            while let Some(t) = self.tokens.get(self.pos) {
-                self.pos += 1;
+            while let Some(t) = self.tokens.get(i) {
+                i += 1;
                 match t.kind {
                     TokenKind::HashLBracket | TokenKind::LBracket => depth += 1,
                     TokenKind::RBracket => depth -= 1,
@@ -947,13 +958,12 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        let stmt = self.pos != save && !self.at_item_start();
-        self.pos = save;
-        stmt
+        i
     }
 
-    /// The outer attributes of a statement or tuple variant field
-    /// (`what`), which keeps none: only `#[cfg]` may be there (spec 6.1.3).
+    /// The outer attributes of a statement, match arm, struct literal
+    /// field, parameter or tuple variant field (`what`), which keeps
+    /// none: only `#[cfg]` may be there (spec 6.1.3).
     fn cfg_only_attrs(&mut self, what: &str) -> Vec<Attribute> {
         let attrs = self.parse_outer_attrs();
         for a in &attrs {
@@ -973,9 +983,10 @@ impl<'a> Parser<'a> {
         attrs
     }
 
-    /// Spec 6.3.7: whether `attrs` drop the statement just parsed; the
-    /// statements and nested fns it queued since `marks` go with it.
-    fn stmt_dropped(&mut self, attrs: &[Attribute], (pending, lifted): (usize, usize)) -> bool {
+    /// Spec 6.3.7: whether `attrs` drop the statement, arm, literal field
+    /// or parameter just parsed; the statements and nested fns it queued
+    /// since `marks` go with it.
+    fn cfg_drops(&mut self, attrs: &[Attribute], (pending, lifted): (usize, usize)) -> bool {
         if !self.cfg_off(attrs) {
             return false;
         }
@@ -1230,14 +1241,20 @@ impl<'a> Parser<'a> {
     }
 
     /// A `fn` type behind `unsafe` (calling it needs an unsafe scope,
-    /// 4.15) and / or `extern "C"` (a C function pointer, 5.9.4).
+    /// 4.15) and / or `extern "C"` / `extern "system"` (a C function
+    /// pointer, 5.9.4).
     fn parse_marked_fn_type(&mut self, start: Span) -> Option<TyKind> {
         let unsafe_fn = self.eat(&TokenKind::Unsafe);
+        let mut system = false;
         if !unsafe_fn {
             self.bump(); // `extern`
             if let TokenKind::StrLit(abi) = self.peek().clone() {
-                if abi != "C" {
-                    self.error(start, format!("unsupported ABI `\"{abi}\"` (only \"C\")"));
+                system = abi == "system";
+                if abi != "C" && !system {
+                    self.error(
+                        start,
+                        format!("unsupported ABI `\"{abi}\"` (only \"C\" or \"system\")"),
+                    );
                 }
             }
             self.bump(); // ABI string
@@ -1248,6 +1265,7 @@ impl<'a> Parser<'a> {
                 bounds.unsafe_fn = true;
             } else {
                 bounds.c_abi = true;
+                bounds.system = system;
             }
         }
         Some(t.kind)
@@ -2719,7 +2737,12 @@ impl<'a> Parser<'a> {
             if self.eat_c_variadic(&mut attrs) {
                 break;
             }
-            params.push(self.parse_param()?);
+            let p_attrs = self.cfg_only_attrs("a parameter");
+            let marks = (self.pending_stmts.len(), self.lifted.len());
+            let param = self.parse_param()?;
+            if !self.cfg_drops(&p_attrs, marks) {
+                params.push(param);
+            }
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
@@ -3780,7 +3803,7 @@ impl<'a> Parser<'a> {
             let attrs = self.cfg_only_attrs("a statement");
             let marks = (self.pending_stmts.len(), self.lifted.len());
             if let Some((stmt, is_trailing)) = self.parse_stmt() {
-                if self.stmt_dropped(&attrs, marks) {
+                if self.cfg_drops(&attrs, marks) {
                     continue;
                 }
                 if is_trailing && matches!(self.peek(), TokenKind::RBrace) {
@@ -4899,6 +4922,8 @@ impl<'a> Parser<'a> {
                 let arms = self.with_struct_expr(true, |p| {
                     let mut arms = Vec::new();
                     while !matches!(p.peek(), TokenKind::RBrace | TokenKind::Eof) {
+                        let attrs = p.cfg_only_attrs("a match arm");
+                        let marks = (p.pending_stmts.len(), p.lifted.len());
                         let pat = p.parse_pattern()?;
                         let guard = if p.eat(&TokenKind::If) {
                             Some(p.parse_expr()?)
@@ -4908,7 +4933,9 @@ impl<'a> Parser<'a> {
                         p.expect(&TokenKind::FatArrow, "`=>`")?;
                         let body = p.parse_arm_body()?;
                         p.eat(&TokenKind::Comma);
-                        arms.push(MatchArm { pat, guard, body });
+                        if !p.cfg_drops(&attrs, marks) {
+                            arms.push(MatchArm { pat, guard, body });
+                        }
                     }
                     Some(arms)
                 })?;
@@ -6016,6 +6043,8 @@ impl<'a> Parser<'a> {
 
     /// `peek_struct_init_body` for the `{` at token `brace`.
     fn struct_init_body_at(&self, brace: usize) -> bool {
+        // A first field's `#[cfg]` is skipped.
+        let brace = self.past_attrs(brace + 1) - 1;
         let after_brace = self.tokens.get(brace + 1).map(|t| &t.kind);
         match after_brace {
             Some(TokenKind::RBrace | TokenKind::DotDot) => true,
@@ -6046,6 +6075,8 @@ impl<'a> Parser<'a> {
                 spread = Some(Box::new(base));
                 break;
             }
+            let attrs = self.cfg_only_attrs("a struct literal field");
+            let marks = (self.pending_stmts.len(), self.lifted.len());
             let name = if let Some(n) = self.peek_name() {
                 self.bump();
                 n
@@ -6070,7 +6101,9 @@ impl<'a> Parser<'a> {
                     }),
                 }
             };
-            fields.push((name, value));
+            if !self.cfg_drops(&attrs, marks) {
+                fields.push((name, value));
+            }
             if !self.eat(&TokenKind::Comma) {
                 break;
             }

@@ -869,6 +869,7 @@ impl<'a> FnBuilder<'a> {
                 let callee_op = self.lower_expr_to_operand(callee);
                 if callee.ty.is_c_fn() {
                     // A C function pointer: no env, the C ABI.
+                    let stdcall = matches!(&callee.ty, HirTy::Fn(_, _, b) if b.stdcall);
                     return RValue::CallIndirect {
                         callee: callee_op,
                         args: args.iter().map(|a| self.lower_expr_to_operand(a)).collect(),
@@ -876,7 +877,7 @@ impl<'a> FnBuilder<'a> {
                         ret_ty: self.ty(ret_ty),
                         abi: Abi::C {
                             variadic: false,
-                            system: false,
+                            system: stdcall,
                         },
                     };
                 }

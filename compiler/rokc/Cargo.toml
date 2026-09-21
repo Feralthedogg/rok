@@ -14,12 +14,13 @@ path = "src/main.rs"
 rokc_core = { workspace = true }
 rokc_fmt = { workspace = true }
 rokc_interface = { workspace = true }
+# Its build script lists the symbols rokc exports (build.rs).
+rokc_llvm = { workspace = true }
 rokc_tools = { workspace = true }
 
 [dev-dependencies]
 rokc_diagnostic = { workspace = true }
 rokc_lexer = { workspace = true }
-rokc_llvm = { workspace = true }
 rokc_parser = { workspace = true }
 rokc_rokon = { workspace = true }
 rokc_target = { workspace = true }

@@ -1,12 +1,33 @@
-// spec: §5.9.2 §5.9.4
+// spec: §5.9.4 §5.9.2 §5.9.10
 // only-target: i686-pc-windows-msvc
-// expect-error: an `extern "system"` function as a value: it is `stdcall` on this target, not an `extern "C" fn`
+// expect-exit: 0
+// expect-stdout:
+// true 14 true
 
-// 5.9.4: a C function pointer is `extern "C" fn` only; on 32-bit x86
-// Windows an `extern "system"` function is `stdcall`, so it has no
-// such value.
+// 5.9.4: on 32-bit x86 Windows an `extern "system"` function is an
+// `extern "system" fn(..)` value: a stdcall callback handed to Windows
+// (`EnumSystemCodePagesW` calls it per code page) and called through
+// the pointer from rok (the callee pops its arguments: a caller that
+// popped them too would unbalance the stack).
+use rok::bare::ptr::Ptr;
+
+extern "system" {
+    fn EnumSystemCodePagesW(cb: extern "system" fn(Ptr<u16>) -> i32, flags: u32) -> i32;
+}
+
+static SEEN: Atomic<i32> = Atomic::new(0);
+
+extern "system" fn count(name: Ptr<u16>) -> i32 {
+    SEEN.fetch_add(1);
+    1
+}
+
 extern "system" fn twice(x: i32) -> i32 { x * 2 }
 
-fn call(f: extern "C" fn(i32) -> i32, x: i32) -> i32 { f(x) }
+fn call(f: extern "system" fn(i32) -> i32, x: i32) -> i32 { f(x) }
 
-println(f"{call(twice, 7)}");
+fn main() {
+    // CP_INSTALLED
+    let ok = unsafe { EnumSystemCodePagesW(count, 1u32) };
+    println(f"{ok != 0} {call(twice, 7)} {SEEN.load() > 0}");
+}

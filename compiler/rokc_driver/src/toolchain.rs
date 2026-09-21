@@ -949,7 +949,7 @@ pub fn cache_dir() -> Option<PathBuf> {
     let exe = rokc_core::current_exe()?;
     let bin = exe.parent()?;
     let sysroot = bin.parent()?;
-    Some(if sysroot.join("lib/rok/core").is_dir() {
+    Some(if sysroot.join("lib/rok/core/src").is_dir() {
         sysroot.join("lib/rok-cache")
     } else {
         bin.join("rok-cache")

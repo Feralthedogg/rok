@@ -58,6 +58,8 @@ pub struct HirInput {
     /// Bits of `usize` / `isize` (the target's pointer width) for
     /// literal ranges and constant evaluation; 0 means 64.
     pub pointer_width: u32,
+    /// `extern "system"` is `stdcall`, not `"C"` (32-bit x86 Windows).
+    pub stdcall_system: bool,
     /// The module path (`a::b`, `""` at the root) of each item of the
     /// program, by index; missing ones are at the root. HIR qualifies
     /// the item names with it.
@@ -804,6 +806,9 @@ pub struct FnBounds {
     pub unsafe_fn: bool,
     /// `extern "C" fn(..)` (spec 5.9.4): a thin C function pointer.
     pub c_abi: bool,
+    /// `extern "system" fn(..)` where it is `stdcall` (32-bit x86
+    /// Windows; elsewhere it is `extern "C" fn`), with `c_abi`.
+    pub stdcall: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -255,7 +255,7 @@ fn verify(top: &Path, version: &str) -> Result<String, String> {
     for need in [
         format!("bin/{}", exe_name("rok")),
         format!("lib/{}", rokc_target::TargetSpec::host().runtime_lib()),
-        "lib/rok/core/lib.rok".to_owned(),
+        "lib/rok/core/src/lib.rok".to_owned(),
     ] {
         if !top.join(&need).exists() {
             return Err(format!("incomplete toolchain: no {need}"));

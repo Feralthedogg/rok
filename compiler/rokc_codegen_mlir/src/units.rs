@@ -128,18 +128,13 @@ impl Core {
     /// `pkgs` as a unit names symbols: the user package's hash the
     /// placeholder, copies renamed (`Pkgs::unit_copies`).
     pub fn unit_pkgs(&self, pkgs: &mut Pkgs) {
-        self.hide_hash(&mut pkgs.link);
-        pkgs.unit_copies = true;
-    }
-
-    /// `link` with the user package's hash the placeholder.
-    pub fn hide_hash(&self, link: &mut Link) {
-        let own = own_package(link).to_owned();
-        for (p, h) in &mut link.packages {
+        let own = own_package(&pkgs.link).to_owned();
+        for (p, h) in &mut pkgs.link.packages {
             if *p == own {
                 h.clone_from(&self.placeholder);
             }
         }
+        pkgs.unit_copies = true;
     }
 }
 
@@ -251,7 +246,8 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         .filter(|f| f.facts.role == FnRole::Main && f.facts.linkage == Linkage::Defined)
         .map(|f| f.id)
         .collect();
-    for s in &module.statics {
+    // A prebuilt package's statics are its `.a`'s.
+    for s in module.statics.iter().filter(|s| !link.in_prebuilt(&s.name)) {
         glue_calls.extend(s.init_fn.filter(|i| index.contains_key(i)));
         statics[glue].insert(s.name.clone());
     }
@@ -376,6 +372,7 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         m: module,
         index: &index,
         symbols: &symbols,
+        pkgs: &pkgs,
         core: &core,
         tables: &fn_tables,
         init_fns: module.statics.iter().filter_map(|s| s.init_fn).collect(),
@@ -504,6 +501,8 @@ struct Shared<'a> {
     m: &'a MirModule,
     index: &'a HashMap<FunctionId, usize>,
     symbols: &'a HashMap<FunctionId, String>,
+    /// Symbol naming as the units do (`Core::unit_pkgs`).
+    pkgs: &'a Pkgs,
     core: &'a Core,
     /// The GC type ids of each function's allocations.
     tables: &'a HashMap<FunctionId, Vec<usize>>,
@@ -528,9 +527,13 @@ impl Key<'_> {
         let s = self.s;
         let (m, core) = (s.m, s.core);
         let _ = writeln!(self.b, "{}\n{}\n{}", s.salt, unit.name, unit.glue);
-        // The link names the packages and what is prebuilt.
+        // The link names the packages and what is prebuilt; a package's
+        // hash only through the symbols the unit names, so an edit to one
+        // recompiles the units that refer to it.
         let mut link = m.link.clone();
-        core.hide_hash(&mut link);
+        for (_, h) in &mut link.packages {
+            h.clear();
+        }
         let _ = writeln!(self.b, "{link:?}");
         let by_symbol = |ids: &mut Vec<&MirFunction>| {
             ids.sort_by(|a, b| s.symbols[&a.id].cmp(&s.symbols[&b.id]));
@@ -568,8 +571,9 @@ impl Key<'_> {
         {
             let _ = write!(
                 self.b,
-                "static {} {:?} {} {} {:?} ",
+                "static {} {} {:?} {} {} {:?} ",
                 st.name,
+                s.pkgs.static_sym(&st.name),
                 core.lazy_statics.get(&st.name),
                 st.is_mut,
                 st.is_extern,

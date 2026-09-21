@@ -447,14 +447,26 @@ impl Sock {
         }
     }
 
+    /// Close the fd; a task waiting on its readiness wakes and finds it
+    /// closed (the kernel sends no event for a closed fd).
     fn close(self) {
         unsafe {
             let fd = self.fd[0];
             if fd >= 0 {
                 self.fd[0] = -1;
                 rok_os_close(fd);
+                task::wake_io(fd);
             }
         }
+    }
+
+    /// `shutdown(2)`; waiting tasks wake to see the end of stream or the
+    /// write error.
+    fn shutdown(self, how: Shutdown) throws (IoError) {
+        let h = match how { Shutdown::Read => 0, Shutdown::Write => 1, Shutdown::Both => 2 };
+        let fd = try self.live();
+        try check(unsafe { rok_net_shutdown(fd, h) } as i64, "shutdown");
+        task::wake_io(fd);
     }
 
     /// After a `WouldBlock`: throw it (non-blocking mode) or wait for
@@ -743,14 +755,7 @@ impl TcpStream {
     pub fn peer_addr(self) throws (IoError) -> SocketAddr { try self.sock.addr(1) }
     pub fn local_addr(self) throws (IoError) -> SocketAddr { try self.sock.addr(0) }
 
-    pub fn shutdown(self, how: Shutdown) throws (IoError) {
-        let h = match how {
-            Shutdown::Read => 0,
-            Shutdown::Write => 1,
-            Shutdown::Both => 2,
-        };
-        try check(unsafe { rok_net_shutdown(try self.sock.live(), h) } as i64, "shutdown");
-    }
+    pub fn shutdown(self, how: Shutdown) throws (IoError) { try self.sock.shutdown(how); }
 
     pub fn set_nodelay(self, nodelay: bool) throws (IoError) {
         try self.sock.setopt(1, if nodelay { 1i64 } else { 0i64 });
@@ -1210,10 +1215,7 @@ impl UnixStream {
 
     pub fn local_addr(self) throws (IoError) -> Path | none { try unix_path(self.sock, 0) }
 
-    pub fn shutdown(self, how: Shutdown) throws (IoError) {
-        let h = match how { Shutdown::Read => 0, Shutdown::Write => 1, Shutdown::Both => 2 };
-        try check(unsafe { rok_net_shutdown(try self.sock.live(), h) } as i64, "shutdown");
-    }
+    pub fn shutdown(self, how: Shutdown) throws (IoError) { try self.sock.shutdown(how); }
 
     pub const fn set_read_timeout(self, dur: Duration | none) throws (IoError) { self.sock.set_timeout(0, dur); }
 

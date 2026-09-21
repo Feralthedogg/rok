@@ -89,7 +89,7 @@ println(f\"{twice(s)}\");
 #[test]
 fn scripted_session() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let bootstrap = workspace.join("library/core/lib.rok");
+    let bootstrap = workspace.join("library/core/src/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     // A lone file: the anonymous package.
@@ -271,7 +271,7 @@ println(f\"{u}\");
 #[test]
 fn members_references_rename() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let bootstrap = workspace.join("library/core/lib.rok");
+    let bootstrap = workspace.join("library/core/src/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-members-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("members.rok");
@@ -458,7 +458,7 @@ fn manifest_buffer() {
 #[test]
 fn unsaved_submodule_buffer() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let bootstrap = workspace.join("library/core/lib.rok");
+    let bootstrap = workspace.join("library/core/src/lib.rok");
     let dir = std::env::temp_dir().join(format!("rokc-lsp-sub-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/main.rok"), "mod m;\n\nlet x: i32 = m::v();\n").unwrap();

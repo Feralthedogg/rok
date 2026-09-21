@@ -38,14 +38,18 @@ fn main() {
         "cargo:rustc-env=ROK_HOST={}",
         std::env::var("TARGET").unwrap_or_default()
     );
-    // rokc exports its globals, so MLIR plugins built with undefined
-    // MLIR / LLVM symbols bind to rokc's own (and the linker keeps them).
+    // rokc exports what rokc_llvm lists (MLIR and LLVM's support
+    // library), so MLIR plugins built with those symbols undefined bind
+    // to rokc's own; the linker strips the rest. No list: no LLVM.
     if std::env::var("CARGO_PKG_NAME").as_deref() == Ok("rokc") {
-        let flag = if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
-            "-Wl,-export_dynamic"
-        } else {
-            "-Wl,--export-dynamic"
-        };
-        println!("cargo:rustc-link-arg-bin=rokc={flag}");
+        println!("cargo:rerun-if-env-changed=DEP_ROKC_LLVM_EXPORTS");
+        if let Ok(list) = std::env::var("DEP_ROKC_LLVM_EXPORTS") {
+            let flag = if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+                format!("-Wl,-exported_symbols_list,{list}")
+            } else {
+                format!("-Wl,--dynamic-list={list}")
+            };
+            println!("cargo:rustc-link-arg-bin=rokc={flag}");
+        }
     }
 }

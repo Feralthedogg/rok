@@ -4,12 +4,25 @@
 // expect-error: `not(..)` takes exactly one predicate
 // expect-error: `#[cold]` cannot be attached to a tuple variant field; only `#[cfg]` can
 // expect-error: the value of cfg key `feature` must be a string
+// expect-error: `#[inline]` cannot be attached to a parameter; only `#[cfg]` can
+// expect-error: `#[cold]` cannot be attached to a match arm; only `#[cfg]` can
+// expect-error: `#[deprecated]` cannot be attached to a struct literal field; only `#[cfg]` can
 
-// Only `#[cfg]` goes on a statement or a tuple variant field, and a
-// malformed predicate is an error whether the statement stays or not.
+// Only `#[cfg]` goes on a statement, match arm, struct literal field,
+// parameter or tuple variant field, and a malformed predicate is an
+// error whether the statement stays or not.
 enum E {
     A(#[cold] i32),
     B(#[cfg(feature = 1)] i32),
+}
+
+struct P { a: i32; }
+
+fn f(#[inline] a: i32) -> i32 {
+    match a {
+        #[cold]
+        _ => P { #[deprecated] a: 1 }.a,
+    }
 }
 
 fn main() {
