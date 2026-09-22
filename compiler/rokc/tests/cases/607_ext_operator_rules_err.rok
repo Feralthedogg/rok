@@ -36,3 +36,4 @@ impl V {
 }
 
 fn main() -> i32 { return 0; }
+// spec: refs-lang §1.10.4 §6.7.13

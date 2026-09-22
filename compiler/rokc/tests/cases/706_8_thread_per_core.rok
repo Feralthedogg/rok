@@ -1,0 +1,72 @@
+// refs-lang 7.6.8: with `ROK_THREAD_PER_CORE=1` every task stays on one
+// worker: tasks spawned off the pool take the workers in turn, a task's
+// children stay on its worker, and a task woken from another worker
+// (a channel send) resumes on its own. `ROK_WORKERS` sets the pool size.
+// run-env: ROK_WORKERS=3
+// run-env: ROK_THREAD_PER_CORE=1
+// expect-exit: 0
+// expect-stdout:
+// workers 3
+// homes 3
+// stayed true
+// woken on home true
+use rok::std::thread;
+
+fn here() -> u64 {
+    thread::current().id().as_u64()
+}
+
+async fn hop() -> bool {
+    let at = here();
+    let same = true;
+    for i in 0..50 {
+        await task::yield_now();
+        same = same && here() == at;
+    }
+    let child = task::spawn(async { here() });
+    let c = await child;
+    same && c == at
+}
+
+async fn run() -> i32 {
+    println(f"workers {task::workers()}");
+    let tasks: List<Task<(u64, bool)>> = List::new();
+    for i in 0..6 {
+        tasks.push(task::spawn(async {
+            let at = here();
+            (at, await hop() && here() == at)
+        }));
+    }
+    let homes: List<u64> = List::new();
+    let ok = true;
+    for t in tasks {
+        let (at, fine) = await t;
+        ok = ok && fine;
+        if !homes.contains(at) {
+            homes.push(at);
+        }
+    }
+    println(f"homes {homes.len()}");
+    println(f"stayed {ok}");
+    let (tx, rx) = channel::<i32>();
+    let waiter = task::spawn(async {
+        let at = here();
+        let v = await rx.recv_async();
+        v == 7 && here() == at
+    });
+    let sender = task::spawn(async {
+        for i in 0..20 {
+            await task::yield_now();
+        }
+        try! tx.send(7);
+    });
+    await sender;
+    println(f"woken on home {await waiter}");
+    0
+}
+
+fn main() -> i32 {
+    task::block_on(run())
+}
+
+// spec: 007.06-scheduler §7.6.8

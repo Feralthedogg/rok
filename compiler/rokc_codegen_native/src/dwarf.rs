@@ -3,9 +3,10 @@
 //! one subprogram per function with a source position, named by its rok
 //! path; its parameters and named locals in their stack slots (`fp`
 //! relative), in lexical blocks; their types (primitives, structs with
-//! field names, tuples, `str`, `any`, arrays, tagged sums as variant
-//! parts, `GcBuf` references as pointers to their objects); a line
-//! table. Generated functions (the C `main`, ..) get a subprogram too.
+//! field names, tuples, `str`, `any` (recursive), arrays, tagged sums as
+//! variant parts, `GcBuf` references and closures' environments as
+//! pointers to their objects; scalar returns); a line table. Generated
+//! functions (the C `main`, ..) get a subprogram too.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -100,6 +101,7 @@ const A_ARRAY_OPEN: u8 = 16;
 const A_VARIANT_PART: u8 = 17;
 const A_VARIANT: u8 = 18;
 const A_DISCR: u8 = 19;
+const A_SUB_RET: u8 = 20;
 
 fn uleb(b: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -164,22 +166,20 @@ fn abbrevs(split: bool) -> Vec<u8> {
             cu_end,
         ],
     );
-    add(
-        A_SUB,
-        DW_TAG_SUBPROGRAM,
-        true,
-        &[
-            (DW_AT_NAME, DW_FORM_STRING),
-            (DW_AT_DECL_FILE, DW_FORM_UDATA),
-            (DW_AT_DECL_LINE, DW_FORM_UDATA),
-            (DW_AT_LOW_PC, DW_FORM_ADDR),
-            (
-                DW_AT_HIGH_PC,
-                if split { DW_FORM_ADDR } else { DW_FORM_DATA4 },
-            ),
-            (DW_AT_FRAME_BASE, DW_FORM_EXPRLOC),
-        ],
-    );
+    let sub = [
+        (DW_AT_NAME, DW_FORM_STRING),
+        (DW_AT_DECL_FILE, DW_FORM_UDATA),
+        (DW_AT_DECL_LINE, DW_FORM_UDATA),
+        (DW_AT_LOW_PC, DW_FORM_ADDR),
+        (
+            DW_AT_HIGH_PC,
+            if split { DW_FORM_ADDR } else { DW_FORM_DATA4 },
+        ),
+        (DW_AT_FRAME_BASE, DW_FORM_EXPRLOC),
+        (DW_AT_TYPE, DW_FORM_REF4),
+    ];
+    add(A_SUB, DW_TAG_SUBPROGRAM, true, &sub[..6]);
+    add(A_SUB_RET, DW_TAG_SUBPROGRAM, true, &sub);
     let var = [
         (DW_AT_NAME, DW_FORM_STRING),
         (DW_AT_DECL_FILE, DW_FORM_UDATA),
@@ -311,6 +311,22 @@ fn abbrevs(split: bool) -> Vec<u8> {
     b
 }
 
+/// The type reference to the `any` being described, patched once it is
+/// written: an `any` inside a type stored in one is that variant part.
+const ANY_SELF: u32 = u32::MAX;
+
+/// While the `any` is described: where references to it were written,
+/// and the types written since that hold one (as the LLVM path does,
+/// they leave the cache with it done), by key and DIE offset.
+#[derive(Default)]
+struct AnyOpen {
+    fixups: Vec<usize>,
+    held: Vec<String>,
+    held_offs: std::collections::HashSet<u32>,
+    /// The last reference to it or to a held type.
+    last: Option<usize>,
+}
+
 /// The `.debug_info` unit being written: type DIEs by key.
 struct Info<'a> {
     b: Vec<u8>,
@@ -321,6 +337,8 @@ struct Info<'a> {
     /// Structs being described, by key: a reference back to one (a
     /// `GcBuf` field) is a declaration, completed by name.
     building: HashMap<String, String>,
+    /// The `any` being described ([`ANY_SELF`] refers to it).
+    any_open: Option<AnyOpen>,
     /// `.debug_ranges`, entries relative to the unit's `low_pc`.
     ranges: Vec<u8>,
     ranges_relocs: Vec<Reloc>,
@@ -333,6 +351,31 @@ struct Info<'a> {
 impl Info<'_> {
     fn u32(&mut self, v: u32) {
         self.b.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// A reference to type DIE `ty`.
+    fn type_ref(&mut self, ty: u32) {
+        let at = self.b.len();
+        if let Some(open) = &mut self.any_open {
+            if ty == ANY_SELF {
+                open.fixups.push(at);
+            }
+            if ty == ANY_SELF || open.held_offs.contains(&ty) {
+                open.last = Some(at);
+            }
+        }
+        self.u32(ty);
+    }
+
+    /// Cache type DIE `off` (written from `start` on) under `key`.
+    fn cache(&mut self, key: String, start: usize, off: u32) {
+        if let Some(open) = &mut self.any_open {
+            if open.last.is_some_and(|p| p >= start) {
+                open.held.push(key.clone());
+                open.held_offs.insert(off);
+            }
+        }
+        self.types.insert(key, off);
     }
 
     /// Offset `v` into debug section `sect` (an index of `Obj::extra`).
@@ -425,12 +468,12 @@ impl Info<'_> {
         if at < 256 {
             self.b.push(A_MEMBER1);
             cstr(&mut self.b, name);
-            self.u32(ty);
+            self.type_ref(ty);
             self.b.push(at as u8);
         } else {
             self.b.push(A_MEMBER4);
             cstr(&mut self.b, name);
-            self.u32(ty);
+            self.type_ref(ty);
             self.u32(at);
         }
     }
@@ -438,7 +481,7 @@ impl Info<'_> {
     fn pointer_to(&mut self, ty: u32) -> u32 {
         let o = self.b.len() as u32;
         self.b.push(A_PTR_TO);
-        self.u32(ty);
+        self.type_ref(ty);
         uleb(&mut self.b, u64::from(self.t.pointer_width / 8));
         o
     }
@@ -449,6 +492,7 @@ impl Info<'_> {
         if let Some(o) = self.types.get(&key) {
             return Some(*o);
         }
+        let start = self.b.len();
         let off = match d {
             DebugTy::Mir(t) => return self.ty(t),
             // Shown as the value; the variable's location goes through
@@ -461,30 +505,58 @@ impl Info<'_> {
                 if let Some(e) = self.debug_ty(elem) {
                     let items = self.b.len() as u32;
                     self.b.push(A_ARRAY_OPEN);
-                    self.u32(e);
+                    self.type_ref(e);
                     m.push(("items".to_owned(), items, HEADER_SIZE));
                 }
                 let obj = self.structure(name, HEADER_SIZE, &m);
                 self.pointer_to(obj)
             }
             // A pointer to the object: its header, then the value.
-            DebugTy::Boxed(value) => {
+            DebugTy::Boxed(name, value) => {
                 let mut m = self.header()?;
                 let mut size = HEADER_SIZE;
                 if let Some(v) = self.debug_ty(value) {
                     m.push(("value".to_owned(), v, HEADER_SIZE));
                     size += self.t.size_align(&value.mir()).0;
                 }
-                let obj = self.structure("box", size, &m);
+                let obj = self.structure(name, size, &m);
                 self.pointer_to(obj)
             }
             DebugTy::Any => {
+                if self.any_open.is_some() {
+                    return Some(ANY_SELF);
+                }
+                self.any_open = Some(AnyOpen::default());
                 let m = self.m;
-                self.variant_part("any", &rokc_mir::any_ty(), &m.debug.any)?
+                let off = self.variant_part("any", &rokc_mir::any_ty(), &m.debug.any);
+                let open = self.any_open.take().unwrap_or_default();
+                let off = off?;
+                for at in open.fixups {
+                    self.b[at..at + 4].copy_from_slice(&off.to_le_bytes());
+                }
+                for key in open.held {
+                    self.types.remove(&key);
+                }
+                off
             }
             DebugTy::Sum(name, mir, variants) => self.variant_part(name, mir, variants)?,
+            // `{code, env}`, the env a pointer to its object.
+            DebugTy::Closure(mir, env) => {
+                let MirTy::Tuple(ps) = mir else {
+                    return self.ty(mir);
+                };
+                let code = self.ty(&ps[0])?;
+                let env = self.debug_ty(env)?;
+                let at = self.t.field_offsets(mir);
+                let size = self.t.size_align(mir).0;
+                self.structure(
+                    "closure",
+                    size,
+                    &[("code".into(), code, at[0]), ("env".into(), env, at[1])],
+                )
+            }
         };
-        self.types.insert(key, off);
+        self.cache(key, start, off);
         Some(off)
     }
 
@@ -572,6 +644,7 @@ impl Info<'_> {
             self.types.insert(decl, o);
             return Some(o);
         }
+        let start = self.b.len();
         let t = self.t;
         let w = t.pointer_width / 8;
         let size = t.size_align(ty).0;
@@ -640,14 +713,14 @@ impl Info<'_> {
                 let base = self.ty(&elem)?;
                 let o = self.b.len() as u32;
                 self.b.push(A_ARRAY);
-                self.u32(base);
+                self.type_ref(base);
                 self.b.push(A_SUBRANGE);
                 uleb(&mut self.b, u64::from(n));
                 self.b.push(0);
                 o
             }
         };
-        self.types.insert(key, off);
+        self.cache(key, start, off);
         Some(off)
     }
 
@@ -756,6 +829,7 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
         t,
         m,
         building: HashMap::new(),
+        any_open: None,
         ranges: Vec::new(),
         ranges_relocs: Vec::new(),
         cu_low: if obj.elf {
@@ -797,13 +871,18 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
     }
     // Types first, so variables refer back to them.
     for f in &fns {
-        for v in &f.debug.as_ref().expect("debug").0.vars {
+        let d = &f.debug.as_ref().expect("debug").0;
+        for v in &d.vars {
             info.debug_ty(&v.ty);
+        }
+        if let Some(p) = d.ret {
+            info.base(p);
         }
     }
     for f in &fns {
         let (d, offs) = f.debug.as_ref().expect("debug");
-        info.b.push(A_SUB);
+        let ret = d.ret.and_then(|p| info.base(p));
+        info.b.push(if ret.is_some() { A_SUB_RET } else { A_SUB });
         cstr(&mut info.b, &d.name);
         uleb(&mut info.b, u64::from(fid(d.file)));
         uleb(&mut info.b, u64::from(d.line));
@@ -816,6 +895,9 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
         // The frame pointer: `x29` / `rbp`.
         info.b
             .extend_from_slice(&[1, if obj.x86 { DW_OP_REG6 } else { DW_OP_REG29 }]);
+        if let Some(r) = ret {
+            info.type_ref(r);
+        }
         // Scopes that hold a variable (or one that does).
         let mut live: Vec<u32> = Vec::new();
         for v in &d.vars {
@@ -871,7 +953,7 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
 }
 
 /// The variables of scope `id` and its lexical blocks (those holding a
-/// variable), nested.
+/// variable of their own), nested.
 fn scope(
     info: &mut Info<'_>,
     id: u32,
@@ -888,6 +970,16 @@ fn scope(
     }
     for &(c, parent) in &d.scopes {
         if parent != id || !live.contains(&c) {
+            continue;
+        }
+        // Without variables of its own, its blocks go in the parent (as
+        // LLVM writes them).
+        let own = d
+            .vars
+            .iter()
+            .any(|v| v.scope == c && info.debug_ty(&v.ty).is_some());
+        if !own {
+            scope(info, c, d, live, f, ranges_sect, var_die);
             continue;
         }
         info.b.push(A_BLOCK);

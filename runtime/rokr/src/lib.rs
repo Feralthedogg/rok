@@ -218,6 +218,22 @@ pub unsafe extern "C" fn rok_gc_unpin(obj: *mut u8) {
     unsafe { rokr_gc::unpin(obj) };
 }
 
+/// A weak reference cell to `obj` (802 §8.2.8; `rok::bare::gc::Weak`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_weak_new(obj: *mut u8) -> *mut u8 {
+    rokr_gc::weak_new(obj)
+}
+
+/// The referent of a weak cell, null once collected.
+///
+/// # Safety
+/// `cell` must come from `rok_gc_weak_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_gc_weak_get(cell: *mut u8) -> *mut u8 {
+    // SAFETY: caller contract.
+    unsafe { rokr_gc::weak_get(cell) }
+}
+
 /// Register `word` (a static's reference word) as a GC root for the
 /// rest of the process. Compiled code calls it at startup.
 #[unsafe(no_mangle)]

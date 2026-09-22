@@ -1,3 +1,4 @@
+// spec: refs-lang §5.9.4
 // expect-error: an `extern "C" fn` value is a bare C function pointer
 // A C function pointer does not flow into a rok `fn` slot (spec 5.9.4):
 // other ABI, no env.

@@ -1,3 +1,4 @@
+// spec: refs-lang §0.5.3
 // spec: std 002-import §0.2.4 §0.2.6
 // expect-error: cannot find function `Path::new` in this scope
 // expect-error: cannot find type `Ptr` in this scope

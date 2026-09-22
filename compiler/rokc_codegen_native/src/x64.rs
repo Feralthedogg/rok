@@ -2,9 +2,9 @@
 //!
 //! Frame: `rbp` pushed, `rbp` = it, then the slots, with the outgoing
 //! argument area at `rsp`. Values: `rax rcx rdx r8 r9`, `xmm0`..`xmm3`;
-//! pointer bases `r10 r11`. Only caller-saved registers, so nothing is
-//! saved and unwinding sees a plain `rbp` frame (Windows: `rsi` / `rdi`,
-//! which it preserves, are kept in `xmm4` / `xmm5` around a block copy).
+//! pointer bases `r10 r11`. Only registers caller-saved in both
+//! conventions (Windows keeps `rsi` / `rdi` and `xmm6`.. too), so
+//! nothing is saved and unwinding sees a plain `rbp` frame.
 //! Every LIR value lives in its slot; within straight-line code the
 //! emitter remembers which register still holds a slot's value (`Held`)
 //! and delays the store into a slot written and read once (`Pend`), as
@@ -32,6 +32,11 @@ const XMM0: u32 = 0;
 const XMM1: u32 = 1;
 /// Value registers, picked by `pick`.
 const POOL: [u32; 5] = [RAX, RCX, RDX, R8, R9];
+
+/// Every function's prologue (then the frame's `sub rsp`, which `rbp`
+/// undoes): `push rbp; mov rbp, rsp`. The unwind encodings
+/// (`coff::X64_UNWIND`, Mach-O's `rbp` frame mode) say this.
+pub const PROLOGUE: [u8; 4] = [0x55, 0x48, 0x89, 0xe5];
 const FP_POOL: [u32; 4] = [XMM0, XMM1, 2, 3];
 /// Integer argument registers.
 const ARGS: [u32; 6] = [RDI, RSI, RDX, RCX, 8, 9];
@@ -723,7 +728,7 @@ impl Em<'_> {
     }
 
     fn prologue(&mut self) {
-        self.bytes(&[0x55, 0x48, 0x89, 0xe5]); // push rbp; mov rbp, rsp
+        self.bytes(&PROLOGUE);
         let n = self.frame;
         let pages = n / PAGE;
         if pages > 8 {
@@ -1795,6 +1800,22 @@ mod tests {
             waits: Waits::default(),
             flags: None,
         }
+    }
+
+    /// The unwind encodings describe `PROLOGUE` only: no register
+    /// callee-saved in either convention (`rbx`, `rsi` / `rdi` on
+    /// Windows, `r12`..`r15`, `xmm6`..) may hold a value.
+    #[test]
+    fn values_stay_in_caller_saved_registers() {
+        for r in POOL.iter().chain(&[R10, R11]) {
+            assert!(![3, RSI, RDI, 12, 13, 14, 15].contains(r), "r{r}");
+        }
+        assert!(FP_POOL.iter().all(|x| *x < 6));
+        let code = bytes(|e| {
+            e.frame = 3 * PAGE + 32;
+            e.prologue();
+        });
+        assert_eq!(code[..4], PROLOGUE);
     }
 
     /// The bytes `f` writes, checked against the reference assembler's

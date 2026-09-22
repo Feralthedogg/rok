@@ -1,3 +1,4 @@
+// spec: refs-lang §8.6.10
 // expect-exit: 0
 // expect-stdout: a=1 b=-2 c=3.5 s=hi u=200
 // C default argument promotions (spec 8.6.10): `bool` / `i16` / `u8`

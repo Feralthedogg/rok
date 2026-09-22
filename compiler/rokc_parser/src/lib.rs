@@ -16,7 +16,7 @@ mod tests;
 
 pub use cfg::CfgEnv;
 pub use keyword::{KeywordDef, KeywordTable, apply_keywords, check_keyword, collect_keywords};
-pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table};
+pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table, collect_lang_table_onto};
 pub use parser::literal::{
     ArgKind, LitRule, LiteralDef, LiteralTable, PatElem, PatKind, Pattern, Shape, collect_literals,
     parse_pattern,

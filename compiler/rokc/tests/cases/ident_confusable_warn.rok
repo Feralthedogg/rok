@@ -1,3 +1,4 @@
+// spec: refs-lang §1.4.3
 // expect-exit: 0
 // expect-stdout: 1 2 1 1
 // expect-warning: identifier `σ2` looks like `σ²`

@@ -29,6 +29,7 @@
 use super::*;
 
 /// One type parameter (or projection) being checked.
+#[derive(Clone)]
 pub(super) struct ParamInfo {
     pub(super) name: String,
     bounds: Vec<TraitRef>,

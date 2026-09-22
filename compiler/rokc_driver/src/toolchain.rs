@@ -570,7 +570,7 @@ pub fn link_object(
         }
         // Apple's clang links for the machine it runs as (not rokc's,
         // under Rosetta) unless told.
-        if t != TargetSpec::host() || apple {
+        if !t.is_host() || apple {
             link.arg(format!("--target={}", cc_target(t)));
         }
         // core's float methods call libm; glibc keeps it out of libc.

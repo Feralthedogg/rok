@@ -7,3 +7,4 @@
 fn twice(x: i32) -> i32 { x * 2 }
 
 println("unreached");
+// spec: std §0.4.8

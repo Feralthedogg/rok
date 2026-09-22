@@ -4,8 +4,8 @@
 //! `.data`), so `/opt:ref` drops what nothing uses; their relocations,
 //! the unwind tables `.pdata` / `.xdata` (every function is a
 //! frame-pointer frame: the unwinder takes the stack pointer back from
-//! it) in COMDATs associated with the code, symbols and the string
-//! table; a big object (`/bigobj`) past 65279 sections. No debug info
+//! it; arm64 functions past 1 MiB in fragments) in COMDATs associated
+//! with the code, symbols and the string table; a big object (`/bigobj`) past 65279 sections. No debug info
 //! (`-g` builds for Windows go through LLVM, whose `CodeView` lld-link
 //! turns into a PDB).
 
@@ -57,8 +57,12 @@ const X64_UNWIND: [u8; 8] = [0x01, 0x04, 0x02, 0x05, 0x04, 0x03, 0x01, 0x50];
 /// `set_fp` (`mov x29, sp`), `save_fplr_x` 16 (`stp x29, x30, [sp,
 /// #-16]!`), `end`, a `nop` pad. What `a64::prologue` / `epilogue` emit.
 const A64_CODES: [u8; 4] = [0xe1, 0x81, 0xe4, 0xe3];
-/// The first two instructions of `a64::epilogue`.
-const A64_EPILOG: [u32; 2] = [0x9100_03bf, 0xa8c1_7bfd];
+/// The codes of a fragment without the prolog: `end_c`, then those.
+const A64_CODES_NO_PROLOG: [u8; 4] = [0xe5, 0xe1, 0x81, 0xe4];
+/// Longest fragment an `.xdata` record covers: 2^18 - 1 words.
+const A64_FRAGMENT: u32 = 0x3_ffff * 4;
+/// The first two instructions of `a64::EPILOGUE`.
+const A64_EPILOG: [u32; 2] = [crate::a64::EPILOGUE[0], crate::a64::EPILOGUE[1]];
 
 /// `(offset, type, symbol table index)`.
 type Rel = (u32, u16, u32);
@@ -212,27 +216,34 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             relocs: Vec::new(),
         });
     }
-    // Per function: its piece, its `.xdata` (arm64), its `.pdata`.
+    // Per function: its piece, its `.xdata` (arm64: a record per
+    // fragment), its `.pdata` (arm64: an entry per fragment).
     let mut unwind = Vec::new();
     for f in &obj.fns {
         let k = piece_of[f.sym as usize].expect("a defined function");
         let at = f.start - pieces[k].start;
-        let xdata = (!x86).then(|| {
+        let mut pdata = Vec::new();
+        let xdata = if x86 {
+            put32(&mut pdata, at);
+            put32(&mut pdata, at + f.len);
+            put32(&mut pdata, 0);
+            None
+        } else {
+            let mut data = Vec::new();
+            for (start, rec) in a64_xdata(obj, f) {
+                put32(&mut pdata, at + start);
+                put32(&mut pdata, data.len() as u32);
+                data.extend_from_slice(&rec);
+            }
             outs.push(Out {
                 name: ".xdata",
                 flags: data_flags | SCN_LNK_COMDAT,
-                data: a64_xdata(obj, f),
+                data,
                 align: 2,
                 relocs: Vec::new(),
             });
-            outs.len() - 1
-        });
-        let mut pdata = Vec::new();
-        put32(&mut pdata, at);
-        if x86 {
-            put32(&mut pdata, at + f.len);
-        }
-        put32(&mut pdata, 0);
+            Some(outs.len() - 1)
+        };
         outs.push(Out {
             name: ".pdata",
             flags: data_flags | SCN_LNK_COMDAT,
@@ -355,7 +366,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             let shared = sect_sym[pieces.len()];
             vec![(0, rva, code), (4, rva, code), (8, rva, shared)]
         } else {
-            vec![(0, rva, code), (4, rva, sect_sym[xdata.unwrap_or(0)])]
+            let x = sect_sym[xdata.unwrap_or(0)];
+            (0..outs[pdata].data.len() as u32)
+                .step_by(8)
+                .flat_map(|e| [(e, rva, code), (e + 4, rva, x)])
+                .collect()
         };
     }
 
@@ -430,9 +445,10 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     b
 }
 
-/// arm64 `.xdata` of `f`: its length, one epilog scope per epilog, the
-/// shared codes.
-fn a64_xdata(obj: &Obj, f: &FnRange) -> Vec<u8> {
+/// arm64 `.xdata` of `f`, `(offset, record)` per fragment: the length
+/// field holds at most 2^18 - 1 words, so a longer function is split
+/// (never inside an epilog), as LLVM does.
+fn a64_xdata(obj: &Obj, f: &FnRange) -> Vec<(u32, Vec<u8>)> {
     let text = &obj.sects[&Sect::Text].data;
     let word = |at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap_or([0; 4]));
     let epilogs: Vec<u32> = (0..f.len.saturating_sub(4))
@@ -442,21 +458,53 @@ fn a64_xdata(obj: &Obj, f: &FnRange) -> Vec<u8> {
             [word(at), word(at + 4)] == A64_EPILOG
         })
         .collect();
-    let mut xdata = Vec::new();
-    // Function length in words (18 bits), one code word; more than 31
-    // epilogs need the extended header.
-    let len = (f.len / 4) & 0x3_ffff;
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < f.len {
+        let mut end = (start + A64_FRAGMENT).min(f.len);
+        // An epilog is `mov sp, x29; ldp; ret`.
+        if let Some(&e) = epilogs.iter().find(|&&e| e < end && end < e + 12) {
+            end = e;
+        }
+        let here: Vec<u32> = epilogs
+            .iter()
+            .filter(|&&e| (start..end).contains(&e))
+            .map(|e| e - start)
+            .collect();
+        out.push((start, a64_fragment(end - start, &here, start == 0)));
+        start = end;
+    }
+    out
+}
+
+/// The `.xdata` record of a fragment of `len` bytes: one epilog scope
+/// per epilog (offsets in it), the shared codes. A fragment after the
+/// first has no prolog: its codes start with `end_c`, so the unwinder
+/// takes the prolog as done; without an epilog, the `E` form's single
+/// epilog starts at that `end_c`.
+fn a64_fragment(len: u32, epilogs: &[u32], prolog: bool) -> Vec<u8> {
+    let words = len / 4;
     let n = epilogs.len() as u32;
-    if n <= 31 {
-        put32(&mut xdata, len | (n << 22) | (1 << 27));
+    let mut xdata = Vec::new();
+    // One code word; more than 31 epilogs need the extended header.
+    if !prolog && n == 0 {
+        put32(&mut xdata, words | (1 << 21) | (1 << 27));
+    } else if n <= 31 {
+        put32(&mut xdata, words | (n << 22) | (1 << 27));
     } else {
-        put32(&mut xdata, len);
+        put32(&mut xdata, words);
         put32(&mut xdata, n | (1 << 16));
     }
+    // The epilog's codes follow `end_c`, if any.
+    let index = u32::from(!prolog) << 22;
     for e in epilogs {
-        put32(&mut xdata, e / 4);
+        put32(&mut xdata, (e / 4) | index);
     }
-    xdata.extend_from_slice(&A64_CODES);
+    if prolog {
+        xdata.extend_from_slice(&A64_CODES);
+    } else {
+        xdata.extend_from_slice(&A64_CODES_NO_PROLOG);
+    }
     xdata
 }
 
@@ -523,6 +571,61 @@ mod tests {
         let text = 20;
         let rel = u32::from_le_bytes(b[text + 24..text + 28].try_into().unwrap()) as usize;
         assert_eq!(&b[rel..rel + 10], &[5, 0, 0, 0, 12, 0, 0, 0, 4, 0]);
+    }
+
+    /// An arm64 function past 1 MiB: two fragments, the first ending
+    /// before an epilog that would straddle the limit; the second has no
+    /// prolog (`end_c` first) and its epilogs' codes after it.
+    #[test]
+    fn a64_long_function_fragments() {
+        const NOP: u32 = 0xd503_201f;
+        const RET: u32 = 0xd65f_03c0;
+        let len = 0x18_0000u32;
+        let mut words = vec![NOP; len as usize / 4];
+        words[0] = crate::a64::PROLOGUE[0];
+        words[1] = crate::a64::PROLOGUE[1];
+        let mut epilog = |at: u32| {
+            let i = at as usize / 4;
+            words[i..i + 3].copy_from_slice(&[A64_EPILOG[0], A64_EPILOG[1], RET]);
+        };
+        let straddling = A64_FRAGMENT - 4;
+        epilog(straddling);
+        epilog(len - 12);
+        let mut o = Obj::new(false, false, true);
+        let f = o.sym("f");
+        for w in words {
+            o.sect(Sect::Text).data.extend_from_slice(&w.to_le_bytes());
+        }
+        o.syms[f as usize].def = Some((Sect::Text, 0, len));
+        o.fns.push(FnRange {
+            sym: f,
+            start: 0,
+            len,
+            lines: Vec::new(),
+            debug: None,
+        });
+        let frags = a64_xdata(&o, &o.fns[0]);
+        let word = |b: &[u8], i: usize| u32::from_le_bytes(b[4 * i..4 * i + 4].try_into().unwrap());
+        assert_eq!(frags.len(), 2);
+        let (at, first) = &frags[0];
+        assert_eq!(*at, 0);
+        assert_eq!(word(first, 0), (straddling / 4) | (1 << 27));
+        assert_eq!(&first[4..], &A64_CODES);
+        let (at, second) = &frags[1];
+        assert_eq!(*at, straddling);
+        assert_eq!(
+            word(second, 0),
+            ((len - straddling) / 4) | (2 << 22) | (1 << 27)
+        );
+        assert_eq!(word(second, 1), 1 << 22);
+        assert_eq!(word(second, 2), ((len - 12 - straddling) / 4) | (1 << 22));
+        assert_eq!(&second[12..], &A64_CODES_NO_PROLOG);
+        // A fragment with neither prolog nor epilog: the `E` form.
+        let x = a64_fragment(16, &[], false);
+        assert_eq!(word(&x, 0), 4 | (1 << 21) | (1 << 27));
+        if let Some(p) = std::env::var_os("ROK_DUMP_A64_LONG") {
+            std::fs::write(p, write(&o)).unwrap();
+        }
     }
 
     /// Past 65279 sections: a big object, its symbols 20 bytes.

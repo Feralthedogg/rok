@@ -1,4 +1,4 @@
-// spec: 002.x-union-basic
+// spec: refs-lang §2.5.1 §2.5.2
 // expect-exit: 0
 // expect-stdout:
 // 5

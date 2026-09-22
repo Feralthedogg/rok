@@ -1,0 +1,18 @@
+// spec: std §2.4.5
+// expect-exit: 0
+// expect-stdout:
+// 7 8 6 3
+
+// Stdlib 2.4.5: compound assignment is the lowest level, below every
+// arithmetic operator and `..`: the whole right side is its operand.
+fn main() {
+    let a = 1;
+    a += 2 * 3;
+    let b = 10;
+    b -= 1 + 1;
+    let c = 2;
+    c *= 1 + 2;
+    let r = 0..1;
+    r = 0..3;
+    println(f"{a} {b} {c} {r.end}");
+}

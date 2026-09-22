@@ -313,12 +313,7 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
             h.clone_from(&placeholder);
         }
     }
-    pkgs.extern_statics = module
-        .statics
-        .iter()
-        .filter(|s| s.is_extern)
-        .map(|s| s.name.clone())
-        .collect();
+    pkgs.set_statics(&module.statics, module.target.os == "windows");
     let symbols: HashMap<FunctionId, String> = module
         .functions
         .iter()
@@ -571,12 +566,13 @@ impl Key<'_> {
         {
             let _ = write!(
                 self.b,
-                "static {} {} {:?} {} {} {:?} ",
+                "static {} {} {:?} {} {} {} {:?} ",
                 st.name,
                 s.pkgs.static_sym(&st.name),
                 core.lazy_statics.get(&st.name),
                 st.is_mut,
                 st.is_extern,
+                st.dll_import,
                 unit.glue.then_some(&st.init)
             );
             self.ty(&st.ty);
@@ -632,7 +628,7 @@ impl Key<'_> {
             let name = l
                 .name
                 .as_deref()
-                .filter(|n| self.s.debug && !n.starts_with('#'));
+                .filter(|n| self.s.debug && rokc_mir::debug_visible(n));
             let _ = write!(self.b, "{} {name:?} ", l.id.0);
             self.ty(&l.ty);
             if self.s.debug {
@@ -1087,12 +1083,17 @@ impl Key<'_> {
                 self.debug_ty(e);
             }
             DebugTy::Any => self.b.push_str("dany "),
-            DebugTy::Boxed(e) => {
-                self.b.push_str("boxed ");
+            DebugTy::Boxed(n, e) => {
+                let _ = write!(self.b, "boxed {n} ");
                 self.debug_ty(e);
             }
             DebugTy::Cell(e) => {
                 self.b.push_str("cell ");
+                self.debug_ty(e);
+            }
+            DebugTy::Closure(t, e) => {
+                self.b.push_str("closure ");
+                self.ty(t);
                 self.debug_ty(e);
             }
         }

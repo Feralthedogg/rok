@@ -62,6 +62,17 @@ fn is_lazy_static_init(v: &Expr) -> bool {
     }
 }
 
+/// An `extern` block marked `#[link(.., kind = "static")]` (spec 6.2.3):
+/// its statics are in the image, not imported from a DLL.
+fn links_static(attrs: &[rokc_ast::Attribute]) -> bool {
+    use rokc_ast::{AttrArg, AttrBody, Literal};
+    attrs.iter().filter(|a| a.path == ["link"]).any(|a| {
+        matches!(&a.body, AttrBody::Args(args) if args.iter().any(|x| {
+            matches!(x, AttrArg::KeyValue(k, Literal::Str(v)) if k == "kind" && v == "static")
+        }))
+    })
+}
+
 fn is_lazy_init_fn(name: &str) -> bool {
     leaf_name(name).starts_with("__rok_static_init_")
 }
@@ -211,8 +222,81 @@ pub(super) fn strip_int_suffix(s: &str) -> &str {
     s
 }
 
+/// What collecting the items of a stage leaves for the next stage and
+/// for lowering: `Env`'s tables, and what the passes after them read.
+/// The library is collected first, then the package on top of it, so
+/// what the library's items take (type and function ids among them)
+/// is the same whatever the package holds.
+#[derive(Clone)]
+pub(super) struct Collected<'a> {
+    t: Tables<'a>,
+    /// Ahead of lowering's own diagnostics and not merged with them.
+    early: Vec<rokc_diagnostic::RokDiagnostic>,
+    /// Diagnostics of the passes before bodies.
+    pre_diags: Vec<rokc_diagnostic::RokDiagnostic>,
+    /// Every `pub use` re-export (globs expanded).
+    reexports: Vec<crate::uses::ReExport>,
+    /// The declared (not generic) enums and structs, by id.
+    enum_decls: Vec<(EnumId, &'a AstEnumDef)>,
+    struct_decls: Vec<(StructId, &'a AstStructDef)>,
+    /// Inherent associated consts (`S::N`).
+    inherent_keys: std::collections::HashSet<String>,
+    static_defs: Vec<HirStaticDef>,
+    /// Per static: its type as written, module and initializer.
+    static_asts: Vec<(&'a Ty, String, Option<&'a Expr>)>,
+    /// Per decl: its body is library code (`rok::<tier>` / a dependency),
+    /// lowered only when reached (`lower_bodies`).
+    lib_decl: Vec<bool>,
+    /// Decl index → symbol path of a dependency's method.
+    link_names: HashMap<usize, String>,
+    /// Generic impls with method templates by tag (`generic_trait_impl`).
+    templated: HashMap<String, usize>,
+    system_fns: std::collections::HashSet<FunctionId>,
+    no_safepoint: std::collections::HashSet<FunctionId>,
+    wasm_imports: HashMap<FunctionId, (String, String)>,
+    extern_symbols: HashMap<FunctionId, String>,
+    trait_defs: HashMap<String, &'a rokc_ast::TraitDef>,
+    exports: Vec<(FunctionId, String)>,
+    prebuilt: std::collections::HashSet<FunctionId>,
+    inline_copies: std::collections::HashSet<FunctionId>,
+    c_defs: Vec<FunctionId>,
+    /// Leaf names of the functions that diverge (`may_diverge`).
+    diverging: std::collections::HashSet<String>,
+}
+
+impl Collected<'_> {
+    fn empty() -> Self {
+        Self {
+            t: Tables::empty(),
+            early: Vec::new(),
+            pre_diags: Vec::new(),
+            reexports: Vec::new(),
+            enum_decls: Vec::new(),
+            struct_decls: Vec::new(),
+            inherent_keys: std::collections::HashSet::new(),
+            static_defs: Vec::new(),
+            static_asts: Vec::new(),
+            lib_decl: Vec::new(),
+            link_names: HashMap::new(),
+            templated: HashMap::new(),
+            system_fns: std::collections::HashSet::new(),
+            no_safepoint: std::collections::HashSet::new(),
+            wasm_imports: HashMap::new(),
+            extern_symbols: HashMap::new(),
+            trait_defs: HashMap::new(),
+            exports: Vec::new(),
+            prebuilt: std::collections::HashSet::new(),
+            inline_copies: std::collections::HashSet::new(),
+            c_defs: Vec::new(),
+            diverging: std::collections::HashSet::new(),
+        }
+    }
+}
+
+/// `program` (its items in `input.item_modules`' modules) lowered: the
+/// library's items are collected first, then the package's on top of
+/// them (`collect`), then the bodies are lowered (`finish`).
 #[must_use]
-#[allow(clippy::cognitive_complexity)] // linear sequence of lowering passes; splitting adds plumbing, not clarity
 pub fn lower_full(
     program: Program,
     prec: &PrecTable,
@@ -228,39 +312,263 @@ pub fn lower_full(
     super::const_eval::set_pointer_width(input.pointer_width);
     super::const_eval::set_stdcall_system(input.stdcall_system);
     crate::clear_type_names();
-    // A prebuilt-library build: every body of that package is a root.
-    let lib_pkg: Option<String> = input.lib.clone();
-    let check_library = input.check_library;
-    let mut owned = program;
-    for (item, module) in owned.items.iter_mut().zip(&input.item_modules) {
+    let (mut lib, mut user) = (Program::default(), Program::default());
+    let (mut lib_modules, mut user_modules) = (Vec::new(), Vec::new());
+    for (item, module) in program.items.into_iter().zip(&input.item_modules) {
+        if package_of(module).is_empty() {
+            user.items.push(item);
+            user_modules.push(module.clone());
+        } else {
+            lib.items.push(item);
+            lib_modules.push(module.clone());
+        }
+    }
+    let lib_uses: Vec<_> = raw_uses
+        .iter()
+        .filter(|(m, _, _)| !package_of(m).is_empty())
+        .cloned()
+        .collect();
+    let user_uses: Vec<_> = raw_uses
+        .iter()
+        .filter(|(m, _, _)| package_of(m).is_empty())
+        .cloned()
+        .collect();
+    let lib_reexports: Vec<_> = reexports
+        .iter()
+        .filter(|r| !package_of(&r.module_path).is_empty())
+        .cloned()
+        .collect();
+    let user_reexports: Vec<_> = reexports
+        .iter()
+        .filter(|r| package_of(&r.module_path).is_empty())
+        .cloned()
+        .collect();
+    let at = Stage {
+        prec,
+        uses,
+        input,
+        sources,
+    };
+    // The library's stage: kept for the next compile with the same
+    // library (`HirInput::library`), its items leaked to live as long.
+    let key = input.library;
+    let kept = key.and_then(|k| {
+        let kept = LIBRARY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let found = kept
+            .as_ref()
+            .filter(|(at, _)| *at == k)
+            .map(|(_, l)| (l.c.clone(), l.lib, l.type_names.clone()));
+        drop(kept);
+        found
+    });
+    let mut lib_items: Program;
+    let (base, lib): (Collected<'_>, &Program) = if let Some((c, lib, type_names)) = kept {
+        crate::set_type_names(type_names);
+        (c, lib)
+    } else if let Some(k) = key {
+        let lib: &'static mut Program = Box::leak(Box::new(lib));
+        let (c, lib) = match collect(
+            lib,
+            &lib_modules,
+            &[],
+            Collected::empty(),
+            &lib_uses,
+            &lib_reexports,
+            &at,
+        ) {
+            Ok(c) => c,
+            Err(m) => return *m,
+        };
+        let kept = LibraryStage {
+            c: c.clone(),
+            lib,
+            type_names: crate::type_names(),
+        };
+        *LIBRARY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, kept));
+        (c, lib)
+    } else {
+        lib_items = lib;
+        match collect(
+            &mut lib_items,
+            &lib_modules,
+            &[],
+            Collected::empty(),
+            &lib_uses,
+            &lib_reexports,
+            &at,
+        ) {
+            Ok(c) => c,
+            Err(m) => return *m,
+        }
+    };
+    let (c, user) = match collect(
+        &mut user,
+        &user_modules,
+        &lib.items,
+        base,
+        &user_uses,
+        &user_reexports,
+        &at,
+    ) {
+        Ok(c) => c,
+        Err(m) => return *m,
+    };
+    if let Some(t) = collect_started {
+        eprintln!(
+            "time: {:>9.1}ms  hir collect",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    finish(c, [lib, user], raw_uses, &at)
+}
+
+/// The library's stage of an earlier compile (`HirInput::library`).
+struct LibraryStage {
+    c: Collected<'static>,
+    lib: &'static Program,
+    type_names: [Vec<String>; 2],
+}
+
+static LIBRARY: std::sync::Mutex<Option<(u64, LibraryStage)>> = std::sync::Mutex::new(None);
+
+/// Whether the library's stage of key `library` is kept
+/// (`HirInput::library`): a compile with it needs none of the library's
+/// items.
+#[must_use]
+pub fn library_kept(library: u64) -> bool {
+    LIBRARY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|(k, _)| *k == library)
+}
+
+/// What every stage of a compile shares.
+struct Stage<'s> {
+    prec: &'s PrecTable,
+    uses: &'s crate::uses::UseTable,
+    input: &'s crate::HirInput,
+    sources: &'s rokc_diagnostic::SourceMap,
+}
+
+/// Collect the items of `owned` (in `item_modules`) on top of `base`:
+/// the library's with an empty `base`, then the package's on the
+/// library's (`lib`: its items). Its `use`s and re-exports are the
+/// stage's own.
+#[allow(clippy::cognitive_complexity, clippy::too_many_lines)] // linear sequence of collecting passes
+fn collect<'a>(
+    owned: &'a mut Program,
+    item_modules: &[String],
+    lib: &'a [Item],
+    base: Collected<'a>,
+    raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
+    reexports: &[crate::uses::ReExport],
+    at: &Stage<'_>,
+) -> Result<(Collected<'a>, &'a Program), Box<HirModule>> {
+    let Stage {
+        prec,
+        uses,
+        input,
+        sources,
+    } = *at;
+    let Collected {
+        t: base_t,
+        mut early,
+        mut pre_diags,
+        reexports: base_reexports,
+        mut enum_decls,
+        mut struct_decls,
+        mut inherent_keys,
+        mut static_defs,
+        static_asts: base_static_asts,
+        mut lib_decl,
+        mut link_names,
+        mut templated,
+        mut system_fns,
+        mut no_safepoint,
+        mut wasm_imports,
+        mut extern_symbols,
+        trait_defs: base_trait_defs,
+        mut exports,
+        mut prebuilt,
+        mut inline_copies,
+        mut c_defs,
+        mut diverging,
+    } = base;
+    let Tables {
+        fn_table,
+        fn_leaves: _,
+        extern_fns,
+        method_table,
+        key_of: base_key_of,
+        infer_ret: base_infer_ret,
+        implicit_main: _,
+        harness_main: _,
+        may_diverge: base_may_diverge,
+        method_info,
+        defs,
+        consts,
+        const_leaves: _,
+        generic_fns,
+        generic_methods,
+        intrinsics,
+        generic_intrinsics,
+        extern_fn_ids,
+        rok_externs,
+        c_variadic,
+        c_defs: base_c_defs,
+        stdcall_fns: base_stdcall,
+        sink,
+        item_visibility,
+        field_vis,
+        impls,
+        unsafe_fns,
+        neg_auto,
+        auto_memo: _,
+        trait_info: base_trait_info,
+        statics: static_tys,
+        static_leaves: _,
+        mut_statics,
+        literal_shapes,
+        names: base_names,
+        decls,
+        non_exhaustive,
+        bound_methods: _,
+        bound_traits: _,
+    } = base_t;
+    for (item, module) in owned.items.iter_mut().zip(item_modules) {
         qualify(item, module);
     }
     // Spec 6.4: `#[lang(...)]` slots over library + user items; a slot
     // bound twice (6.4.6) stops lowering.
-    let (_, lang_diags) = rokc_parser::collect_lang_table(&owned);
+    let (lang, lang_diags) = rokc_parser::collect_lang_table_onto(base_names.lang.clone(), owned);
     if lang_diags
         .iter()
         .any(rokc_diagnostic::RokDiagnostic::is_error)
     {
-        return HirModule {
+        return Err(Box::new(HirModule {
             diagnostics: lang_diags,
             ..HirModule::default()
-        };
+        }));
     }
-    // Ahead of lowering's own diagnostics and not merged with them.
-    let mut early = lang_diags;
-    let (mut reexports, glob_diags) =
-        crate::uses::glob_reexports(raw_uses, &owned.items, uses, reexports);
+    early.extend(lang_diags);
+    let all_items: Vec<&Item> = lib.iter().chain(&owned.items).collect();
+    let (mut stage_reexports, glob_diags) =
+        crate::uses::glob_reexports(raw_uses, &all_items, uses, reexports);
     // Spec 5.9: a `pub` function of an `extern` block in module `m` is
     // also `m::f` (its symbol stays `f`).
-    for (item, module) in owned.items.iter().zip(&input.item_modules) {
+    for (item, module) in owned.items.iter().zip(item_modules) {
         let Item::Extern(b) = item else { continue };
         for ei in &b.items {
             match ei {
                 rokc_ast::ExternItem::Fn(f)
                     if !module.is_empty() && f.vis != Visibility::Private =>
                 {
-                    reexports.push(crate::uses::ReExport {
+                    stage_reexports.push(crate::uses::ReExport {
                         module_path: module.clone(),
                         short_name: f.name.clone(),
                         full_path: f.name.clone(),
@@ -271,21 +579,17 @@ pub fn lower_full(
             }
         }
     }
-    let reexports = reexports.as_slice();
     early.extend(glob_diags);
+    let mut reexports = base_reexports;
+    reexports.extend(stage_reexports);
+    let reexports = reexports;
     early.extend(crate::uses::check_use_targets(
-        raw_uses,
-        &owned.items,
-        uses,
-        reexports,
+        raw_uses, &all_items, uses, &reexports,
     ));
-    early.extend(check_tiers(raw_uses, &owned.items, &input.item_modules));
-    // Diagnostics emitted during pre-body passes (impl-target validation
-    // etc.) — folded into module.diagnostics once the module exists.
-    let mut pre_diags: Vec<rokc_diagnostic::RokDiagnostic> = Vec::new();
-    add_lazy_static_inits(&mut owned);
-    implicit_generics(&mut owned);
-    let program = &owned;
+    early.extend(check_tiers(raw_uses, &owned.items, item_modules));
+    drop(all_items);
+    add_lazy_static_inits(owned);
+    implicit_generics(owned);
     let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, at: Span, msg: String| {
         pre.push(rokc_diagnostic::RokDiagnostic::error(
             rokc_diagnostic::ErrorKind::Type,
@@ -293,6 +597,7 @@ pub fn lower_full(
             msg,
         ));
     };
+    let program: &Program = &*owned;
     // Spec 6.2: the parser expands `#[derive(..)]` on structs / enums
     // into impls (`rokc_parser::derive`); a union has no field-wise
     // meaning.
@@ -352,9 +657,12 @@ pub fn lower_full(
     // module-qualified by `qualify`) goes into one index; a second
     // definition of the same name is an error (and is skipped below so
     // ids stay consistent).
-    let mut type_set: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut traits: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut type_vis: HashMap<String, Visibility> = HashMap::new();
+    let mut names = base_names;
+    // An answer for a package module may change with its items.
+    names
+        .canon_memo
+        .get_mut()
+        .retain(|(_, module), _| !package_of(module).is_empty());
     for item in &program.items {
         let (name, vis) = match item {
             Item::Struct(s) => (&s.name, s.vis),
@@ -362,13 +670,13 @@ pub fn lower_full(
             Item::Union(u) => (&u.name, u.vis),
             Item::TypeAlias(a) => (&a.name, a.vis),
             Item::Trait(t) => {
-                traits.insert(t.name.clone());
+                names.traits.insert(t.name.clone());
                 (&t.name, t.vis)
             }
             _ => continue,
         };
-        if type_set.insert(name.clone()) {
-            type_vis.insert(name.clone(), vis);
+        if names.names.insert(name.clone()) {
+            names.visibility.insert(name.clone(), vis);
         } else {
             err(
                 &mut pre_diags,
@@ -378,83 +686,58 @@ pub fn lower_full(
         }
     }
     // `pub use` aliases → what they name, chains followed to the item.
-    let aliases = reexport_aliases(reexports);
-    let type_reexports: HashMap<String, String> = aliases
+    let aliases = reexport_aliases(&reexports);
+    names.reexports = aliases
         .iter()
-        .filter(|(_, end)| type_set.contains(*end))
+        .filter(|(_, end)| names.names.contains(*end))
         .map(|(a, end)| (a.clone(), end.clone()))
         .collect();
     // `Enum::Variant` keys, so `use E::{A}` / `use E::*` (and the
     // implicit `rok::core::**`) can bring variants in bare.
-    let variants: std::collections::HashSet<String> = program
-        .items
-        .iter()
-        .filter_map(|it| match it {
-            Item::Enum(e) => Some(e),
-            _ => None,
-        })
-        .flat_map(|e| e.variants.iter().map(|v| format!("{}::{}", e.name, v.name)))
-        .collect();
-    // Spec 6.4: the lang slots (their errors are reported above).
-    let (lang, _) = rokc_parser::collect_lang_table(program);
+    names.variants.extend(
+        program
+            .items
+            .iter()
+            .filter_map(|it| match it {
+                Item::Enum(e) => Some(e),
+                _ => None,
+            })
+            .flat_map(|e| e.variants.iter().map(|v| format!("{}::{}", e.name, v.name))),
+    );
     // Structural auto traits: a type has them unless a component lacks them.
-    let auto_traits = ["send_trait", "sync_trait"]
+    names.auto_traits = ["send_trait", "sync_trait"]
         .into_iter()
         .filter_map(|s| lang.lookup(s))
         .map(|e| e.item_name.clone())
         .collect();
-    let names = TypeNames {
-        names: type_set,
-        variants,
-        traits,
-        auto_traits,
-        lang,
-        reexports: type_reexports,
-        visibility: type_vis,
-        mod_vis: super::resolve::module_visibility(&program.items),
-        uses: uses.clone(),
-        diags: std::cell::RefCell::new(Vec::new()),
-        generic_aliases: program
-            .items
-            .iter()
-            .filter_map(|it| match it {
-                Item::TypeAlias(a)
-                    if !a.generics.params.is_empty() || !a.where_clause.is_empty() =>
-                {
-                    Some((a.name.clone(), a.clone()))
-                }
-                _ => None,
-            })
-            .collect(),
-        plain_aliases: program
-            .items
-            .iter()
-            .filter_map(|it| match it {
-                Item::TypeAlias(a) if a.generics.params.is_empty() => {
-                    Some((a.name.clone(), a.ty.clone()))
-                }
-                _ => None,
-            })
-            .collect(),
-        alias_depth: std::cell::Cell::new(0),
-        broken_aliases: std::cell::RefCell::default(),
-        alias_uses: std::cell::RefCell::new(Vec::new()),
-        unknown_spans: std::cell::RefCell::default(),
-        canon_memo: std::cell::RefCell::default(),
-        leaves: std::cell::OnceCell::new(),
-        variant_leaves: std::cell::OnceCell::new(),
-        consts: program
-            .items
-            .iter()
-            .filter_map(|it| match it {
-                Item::Const(c) => Some((c.name.clone(), (c.ty.clone(), c.value.clone()))),
-                _ => None,
-            })
-            .collect(),
-        const_leaves: std::cell::OnceCell::new(),
-        value_reexports: HashMap::new(),
-    };
-    let mut names = names;
+    names.lang = lang;
+    names
+        .mod_vis
+        .extend(super::resolve::module_visibility(&program.items));
+    names.uses.clone_from(uses);
+    for it in &program.items {
+        match it {
+            Item::TypeAlias(a) if !a.generics.params.is_empty() || !a.where_clause.is_empty() => {
+                names.generic_aliases.insert(a.name.clone(), a.clone());
+            }
+            _ => {}
+        }
+        match it {
+            Item::TypeAlias(a) if a.generics.params.is_empty() => {
+                names.plain_aliases.insert(a.name.clone(), a.ty.clone());
+            }
+            Item::Const(c) => {
+                names
+                    .consts
+                    .insert(c.name.clone(), (c.ty.clone(), c.value.clone()));
+            }
+            _ => {}
+        }
+    }
+    // The leaf indexes are built on the first lookup, over every stage.
+    names.leaves = std::cell::OnceCell::new();
+    names.variant_leaves = std::cell::OnceCell::new();
+    names.const_leaves = std::cell::OnceCell::new();
     let statics: std::collections::HashSet<&str> = program
         .items
         .iter()
@@ -462,12 +745,14 @@ pub fn lower_full(
             Item::Static(s) => Some(s.name.as_str()),
             _ => None,
         })
+        .chain(static_tys.keys().map(String::as_str))
         .collect();
     names.value_reexports = aliases
         .iter()
         .filter(|(_, end)| names.consts.contains_key(*end) || statics.contains(end.as_str()))
         .map(|(a, end)| (a.clone(), end.clone()))
         .collect();
+    drop(statics);
     let aliased: Vec<(String, (Ty, Expr))> = names
         .value_reexports
         .iter()
@@ -477,15 +762,15 @@ pub fn lower_full(
         names.consts.entry(alias).or_insert(c);
     }
     warn_assoc_shadowing(program, &names, &mut pre_diags);
-    let defaults = assoc_defaults(program, &names);
+    let defaults = assoc_defaults(program, &names, &base_trait_defs);
     for (i, added) in defaults {
         if let Item::Impl(imp) = &mut owned.items[i] {
             imp.items.extend(added);
         }
     }
-    impl_param_types(&mut owned, &names);
-    add_self_assoc_sigs(&mut owned);
-    let program = &owned;
+    impl_param_types(owned, &names, &base_trait_defs);
+    add_self_assoc_sigs(owned);
+    let program: &'a Program = owned;
     check_bound_names(program, &names, &mut pre_diags);
     check_niche_attrs(program, &mut pre_diags);
     check_repr_attrs(program, &mut pre_diags);
@@ -494,9 +779,13 @@ pub fn lower_full(
     // is resolved; a generic one is a template, instantiated in the same
     // id space when a type first names it (`TypeDefs`). Unions share the
     // struct namespace, ids after the structs.
-    let mut defs = TypeDefs::default();
-    let mut enum_decls: Vec<&AstEnumDef> = Vec::new();
-    let mut struct_decls: Vec<&AstStructDef> = Vec::new();
+    let mut defs = defs;
+    let (first_enum, first_struct) = (defs.enums.borrow().len(), defs.structs.borrow().len());
+    let enum_id = |n: usize| EnumId(u32::try_from(first_enum + n).expect("EnumId overflow"));
+    let struct_id =
+        |n: usize| StructId(u32::try_from(first_struct + n).expect("StructId overflow"));
+    let mut new_enums: Vec<&AstEnumDef> = Vec::new();
+    let mut new_structs: Vec<&AstStructDef> = Vec::new();
     let mut union_decls: Vec<&rokc_ast::UnionDef> = Vec::new();
     for item in &program.items {
         match item {
@@ -513,10 +802,10 @@ pub fn lower_full(
                     defs.generic_enums.insert(e.name.clone(), e);
                     continue;
                 }
-                let id = EnumId(u32::try_from(enum_decls.len()).expect("EnumId overflow"));
+                let id = enum_id(new_enums.len());
                 crate::name_type(true, id.0, &e.name, &[]);
                 defs.enum_table.borrow_mut().insert(e.name.clone(), id);
-                enum_decls.push(e);
+                new_enums.push(e);
             }
             Item::Struct(s) => {
                 if defs.struct_table.borrow().contains_key(&s.name)
@@ -531,10 +820,10 @@ pub fn lower_full(
                     defs.generic_structs.insert(s.name.clone(), s);
                     continue;
                 }
-                let id = StructId(u32::try_from(struct_decls.len()).expect("StructId overflow"));
+                let id = struct_id(new_structs.len());
                 crate::name_type(false, id.0, &s.name, &[]);
                 defs.struct_table.borrow_mut().insert(s.name.clone(), id);
-                struct_decls.push(s);
+                new_structs.push(s);
             }
             _ => {}
         }
@@ -546,9 +835,7 @@ pub fn lower_full(
             {
                 continue;
             }
-            let id = StructId(
-                u32::try_from(struct_decls.len() + union_decls.len()).expect("StructId overflow"),
-            );
+            let id = struct_id(new_structs.len() + union_decls.len());
             crate::name_type(false, id.0, &u.name, &[]);
             defs.struct_table.borrow_mut().insert(u.name.clone(), id);
             union_decls.push(u);
@@ -556,9 +843,9 @@ pub fn lower_full(
     }
     // Declared ones first (field types not resolved yet), so an instance
     // made while resolving them takes the next id.
-    for (i, e) in enum_decls.iter().enumerate() {
+    for (i, e) in new_enums.iter().enumerate() {
         defs.enums.borrow_mut().push(HirEnumDef {
-            id: EnumId(u32::try_from(i).expect("EnumId overflow")),
+            id: enum_id(i),
             repr: crate::Repr::default(),
             def_id: None,
             name: e.name.clone(),
@@ -567,13 +854,13 @@ pub fn lower_full(
             generic_args: Vec::new(),
         });
     }
-    let struct_shells = struct_decls
+    let struct_shells = new_structs
         .iter()
         .map(|s| (&s.name, s.span))
         .chain(union_decls.iter().map(|u| (&u.name, u.span)));
     for (i, (name, span)) in struct_shells.enumerate() {
         defs.structs.borrow_mut().push(HirStructDef {
-            id: StructId(u32::try_from(i).expect("StructId overflow")),
+            id: struct_id(i),
             repr: crate::Repr::default(),
             def_id: None,
             name: name.clone(),
@@ -584,8 +871,8 @@ pub fn lower_full(
             niche: Vec::new(),
         });
     }
-    for (i, e) in enum_decls.iter().enumerate() {
-        let id = EnumId(u32::try_from(i).expect("EnumId overflow"));
+    for (i, e) in new_enums.iter().enumerate() {
+        let id = enum_id(i);
         let module = module_of(&e.name);
         let sc = Scope {
             names: &names,
@@ -593,10 +880,10 @@ pub fn lower_full(
             at: e.span,
         };
         let def = lower_enum_def(e, id, &defs, sc);
-        defs.enums.borrow_mut()[i] = def;
+        defs.enums.borrow_mut()[id.0 as usize] = def;
     }
-    for (i, s) in struct_decls.iter().enumerate() {
-        let id = StructId(u32::try_from(i).expect("StructId overflow"));
+    for (i, s) in new_structs.iter().enumerate() {
+        let id = struct_id(i);
         let module = module_of(&s.name);
         let sc = Scope {
             names: &names,
@@ -604,11 +891,10 @@ pub fn lower_full(
             at: s.span,
         };
         let def = lower_struct_def(s, id, &defs, sc);
-        defs.structs.borrow_mut()[i] = def;
+        defs.structs.borrow_mut()[id.0 as usize] = def;
     }
     for (i, u) in union_decls.iter().enumerate() {
-        let i = struct_decls.len() + i;
-        let id = StructId(u32::try_from(i).expect("StructId overflow"));
+        let id = struct_id(new_structs.len() + i);
         let module = module_of(&u.name);
         let sc = Scope {
             names: &names,
@@ -616,15 +902,22 @@ pub fn lower_full(
             at: u.span,
         };
         let def = lower_union_def(u, id, &defs, sc, &mut pre_diags);
-        defs.structs.borrow_mut()[i] = def;
+        defs.structs.borrow_mut()[id.0 as usize] = def;
     }
+    let first_new_enum = enum_decls.len();
+    enum_decls.extend(new_enums.iter().enumerate().map(|(i, e)| (enum_id(i), *e)));
+    struct_decls.extend(
+        new_structs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (struct_id(i), *s)),
+    );
 
     // Pass 1c: module-level `const`s, kept as AST and inlined at each
     // use; `static`s get global storage (`HirStaticDef`).
-    let mut consts: HashMap<String, (Ty, Expr)> = HashMap::new();
+    let mut consts = consts;
     // Per impl item: its associated consts, for its `Impl`.
     let mut impl_const_lists: HashMap<usize, Vec<AssocConst>> = HashMap::new();
-    let mut inherent_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (idx, item) in program.items.iter().enumerate() {
         // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
         // inside the impl); a trait impl also gets the trait's defaults
@@ -632,7 +925,8 @@ pub fn lower_full(
         let item_consts: Vec<(String, Ty, Expr)> = match item {
             Item::Const(c) => vec![(c.name.clone(), c.ty.clone(), c.value.clone())],
             Item::Impl(i) => {
-                let (keyed, all) = impl_consts(i, program, &names, &mut pre_diags);
+                let (keyed, all) =
+                    impl_consts(i, program, &base_trait_defs, &names, &mut pre_diags);
                 impl_const_lists.insert(idx, all);
                 keyed
             }
@@ -663,9 +957,9 @@ pub fn lower_full(
             consts.entry(alias.clone()).or_insert(c);
         }
     }
-    let mut static_defs: Vec<HirStaticDef> = Vec::new();
-    let mut static_asts: Vec<(&Ty, String, Option<&Expr>)> = Vec::new();
-    let mut static_tys: HashMap<String, HirTy> = HashMap::new();
+    let first_static = static_defs.len();
+    let mut static_asts = base_static_asts;
+    let mut static_tys = static_tys;
     for item in &program.items {
         let here = item.span();
         if let Item::Static(s) = item {
@@ -687,6 +981,7 @@ pub fn lower_full(
                 init: ConstVal::Unit,
                 is_mut: s.is_mut,
                 is_extern: false,
+                dll_import: false,
                 init_fn: None,
                 span: s.span,
             });
@@ -694,6 +989,7 @@ pub fn lower_full(
         // Spec 5.9.3: `extern "C" { static errno: i32; }` — a C global,
         // read (and with `mut` written) like a `static`.
         if let Item::Extern(blk) = item {
+            let dll_import = !links_static(&blk.attrs);
             for ei in &blk.items {
                 let rokc_ast::ExternItem::Static(s) = ei else {
                     continue;
@@ -714,6 +1010,7 @@ pub fn lower_full(
                     init: ConstVal::Unit,
                     is_mut: s.is_mut,
                     is_extern: true,
+                    dll_import,
                     init_fn: None,
                     span: s.span,
                 });
@@ -805,40 +1102,27 @@ pub fn lower_full(
     // `impl` methods (a free function `Type::method` taking `self`
     // first). Generic functions stay AST templates, monomorphized per
     // call, outside `decls` / `fn_table`.
-    let mut fn_table: HashMap<String, FnSig> = HashMap::new();
-    let mut extern_fns = HashMap::new();
+    let mut fn_table = fn_table;
+    let mut extern_fns = extern_fns;
     // Later extern declarations of a name already declared: whether
     // `extern "rok"`, the first one's id.
     let mut extern_redecls: Vec<(&FnDef, bool, FunctionId)> = Vec::new();
-    let method_table: HashMap<(MethodTarget, String), Vec<FunctionId>> = HashMap::new();
-    let method_info: HashMap<FunctionId, MethodInfo> = HashMap::new();
-    let mut impls = Impls::default();
-    let mut decls: Vec<MethodOrFn<'_>> = Vec::new();
-    // Per decl: its body is library code (`rok::<tier>` / a dependency),
-    // lowered only when reached (`lower_bodies`).
-    let mut lib_decl: Vec<bool> = Vec::new();
-    // Decl index → symbol path of a dependency's method (see below).
-    let mut link_names: HashMap<usize, String> = HashMap::new();
+    let mut impls = impls;
+    let mut decls = decls;
+    let first_decl = decls.len();
     let std_prebuilt = input.prebuilt.iter().any(|p| p == "rok");
     let std_linked = std_prebuilt || input.lib.as_deref() == Some("rok");
-    let mut generic_fns: HashMap<String, &FnDef> = HashMap::new();
-    let generic_methods: HashMap<(String, String), Vec<GenericMethod>> = HashMap::new();
+    let mut generic_fns = generic_fns;
     // Generic impls with method templates (names `__impl{tag}_m`): the
     // tag hashes the impl's module, trait and target, so it stays when
     // another impl comes or goes; a repeat gets a count.
-    let mut templated: HashMap<String, usize> = HashMap::new();
-    let mut intrinsics: HashMap<FunctionId, Intrinsic> = HashMap::new();
-    let mut generic_intrinsics: HashMap<String, Intrinsic> = HashMap::new();
-    let mut unsafe_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut extern_fn_ids: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut c_variadic: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    // `extern "system"` declarations and definitions.
-    let mut system_fns: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut no_safepoint: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut wasm_imports: HashMap<FunctionId, (String, String)> = HashMap::new();
-    let mut extern_symbols: HashMap<FunctionId, String> = HashMap::new();
+    let mut intrinsics = intrinsics;
+    let mut generic_intrinsics = generic_intrinsics;
+    let mut unsafe_fns = unsafe_fns;
+    let mut extern_fn_ids = extern_fn_ids;
+    let mut c_variadic = c_variadic;
     // `extern "rok"` declarations: the runtime's own ABI.
-    let mut rok_externs: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
+    let mut rok_externs = rok_externs;
     // A declaration's signature: its types are resolved once every item
     // is registered (`mono::decl_sig`), the rest is read off it here.
     let sig_of = |fn_def: &FnDef, id: FunctionId, sc: Scope<'_>| FnSig {
@@ -911,7 +1195,7 @@ pub fn lower_full(
                     );
                 }
                 let import_module = wasm_import_module(&blk.attrs);
-                let module = input.item_modules.get(idx).cloned().unwrap_or_default();
+                let module = item_modules.get(idx).cloned().unwrap_or_default();
                 for ei in &blk.items {
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
@@ -992,7 +1276,7 @@ pub fn lower_full(
     }
     // Pre-collect every trait declaration so `impl Trait for T` blocks
     // can pick up default method bodies.
-    let mut trait_defs: HashMap<String, &rokc_ast::TraitDef> = HashMap::new();
+    let mut trait_defs = base_trait_defs;
     for item in &program.items {
         if let Item::Trait(t) = item {
             trait_defs.entry(t.name.clone()).or_insert(t);
@@ -1000,8 +1284,9 @@ pub fn lower_full(
     }
     // `any Tr`: each trait's method names and supertrait keys, and
     // (filled per impl below) its implementing types in source order.
-    let trait_info: HashMap<String, TraitInfo> = trait_defs
+    let new_info: Vec<(String, TraitInfo)> = trait_defs
         .iter()
+        .filter(|(name, _)| !base_trait_info.contains_key(*name))
         .map(|(name, t)| {
             let module = module_of(name);
             let supers = t
@@ -1090,8 +1375,9 @@ pub fn lower_full(
             )
         })
         .collect();
-    let mut neg_auto: std::collections::HashSet<(String, String)> =
-        std::collections::HashSet::new();
+    let mut trait_info = base_trait_info;
+    trait_info.extend(new_info);
+    let mut neg_auto = neg_auto;
     // Impls registered by their written target, resolved once every item
     // is (`impl_heads`).
     let mut pending: Vec<PendingImpl<'_>> = Vec::new();
@@ -1129,7 +1415,7 @@ pub fn lower_full(
             *seen += 1;
             let mut gi = generic_trait_impl(impl_def, trait_key, td, &module, &tag, &mut pre_diags);
             gi.consts = consts;
-            impls.all.push(gi);
+            impls.all.push(std::sync::Arc::new(gi));
             continue;
         }
         // Inherent methods of a generic impl (and generic methods of a
@@ -1167,7 +1453,7 @@ pub fn lower_full(
             generic_base,
             at: impls.all.len(),
         });
-        impls.all.push(Impl {
+        impls.all.push(std::sync::Arc::new(Impl {
             trait_key: trait_name.unwrap_or_default(),
             trait_args: impl_def
                 .trait_path
@@ -1183,7 +1469,7 @@ pub fn lower_full(
             methods: HashMap::new(),
             consts,
             concrete: None,
-        });
+        }));
     }
 
     // Install `pub use` re-exports as fn / static table aliases (types go
@@ -1202,7 +1488,7 @@ pub fn lower_full(
 
     // Name → Visibility for every value-namespace item (fns, consts,
     // statics) plus type items; consulted by path resolution.
-    let mut item_visibility: HashMap<String, Visibility> = HashMap::new();
+    let mut item_visibility = item_visibility;
     for item in &program.items {
         match item {
             Item::Fn(f) => {
@@ -1217,58 +1503,40 @@ pub fn lower_full(
             _ => {}
         }
     }
-    let field_vis = collect_field_visibility(program);
+    let mut field_vis = field_vis;
+    field_vis.extend(collect_field_visibility(program));
 
     // Pass 3: function bodies.
-    let sink = ClosureSink {
-        extras: std::cell::RefCell::new(Vec::new()),
-        next_id: std::cell::Cell::new(0),
-        mono_cache: std::cell::RefCell::new(HashMap::new()),
-        mono_sigs: std::cell::RefCell::new(HashMap::new()),
-        mono_depth: std::cell::Cell::new(0),
-        uninferred: std::cell::Cell::new(0),
-        any_tags: std::cell::RefCell::new(Vec::new()),
-        ref_out: std::cell::RefCell::new(HashMap::new()),
-        any_dispatch: std::cell::RefCell::new(Vec::new()),
-        projecting: std::cell::RefCell::new(Vec::new()),
-        thunks: std::cell::RefCell::new(HashMap::new()),
-        instances: std::cell::RefCell::new(Vec::new()),
-        instance_warns: std::cell::RefCell::new(super::InstanceWarns::default()),
-        diagnostics: std::cell::RefCell::new(Vec::new()),
-        infer_vars: std::cell::RefCell::new(Vec::new()),
-        infer_depth: std::cell::Cell::new(0),
-        infer_floor: std::cell::Cell::new(0),
-        fn_origin: std::cell::RefCell::new(HashMap::new()),
-        track_caller: std::cell::RefCell::new(std::collections::HashSet::new()),
-        const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
-        const_stack: std::cell::RefCell::new(Vec::new()),
-        inferred_ret: std::cell::RefCell::default(),
-        inferred_fns: std::cell::RefCell::default(),
-        bodies_done: std::cell::Cell::new(false),
-        sig_pass: std::cell::Cell::new(None),
-        recursive_ret: std::cell::RefCell::default(),
-        call_sites: std::cell::RefCell::default(),
-        tentative_ret: std::cell::RefCell::default(),
-        params: std::cell::RefCell::default(),
-        failed: std::cell::RefCell::default(),
-        bodies: std::cell::RefCell::default(),
-        assumed: std::cell::RefCell::default(),
-        const_names: std::cell::RefCell::default(),
-    };
     let (bound_methods, bound_traits) = super::bounds::templates(&trait_info);
-    let mut env = Env {
+    let mut_statics: std::collections::HashSet<String> = mut_statics
+        .into_iter()
+        .chain(
+            static_defs
+                .iter()
+                .filter(|s| s.is_mut)
+                .map(|s| s.name.clone()),
+        )
+        .collect();
+    // The package's handlers ahead of the library's.
+    let mut stage_shapes = literal_handlers(program, &mut pre_diags);
+    stage_shapes.extend(literal_shapes);
+    let literal_shapes = stage_shapes;
+    let mut env = EnvIn {
         sources,
         prec,
         t: Tables {
-            infer_ret: std::collections::HashSet::new(),
+            infer_ret: base_infer_ret,
             implicit_main: input.root_main == crate::RootMain::Implicit,
             harness_main: input.root_main == crate::RootMain::Harness,
-            may_diverge: may_diverge(program),
+            may_diverge: base_may_diverge
+                .into_iter()
+                .chain(may_diverge(program, &mut diverging))
+                .collect(),
             fn_table,
             fn_leaves: std::cell::OnceCell::new(),
             extern_fns,
             method_table,
-            key_of: HashMap::new(),
+            key_of: base_key_of,
             method_info,
             defs,
             consts,
@@ -1280,8 +1548,8 @@ pub fn lower_full(
             extern_fn_ids: extern_fn_ids.clone(),
             rok_externs: rok_externs.clone(),
             c_variadic: c_variadic.clone(),
-            c_defs: std::collections::HashSet::new(),
-            stdcall_fns: std::collections::HashSet::new(),
+            c_defs: base_c_defs,
+            stdcall_fns: base_stdcall,
             sink,
             item_visibility,
             field_vis,
@@ -1292,18 +1560,13 @@ pub fn lower_full(
             trait_info,
             statics: static_tys,
             static_leaves: std::cell::RefCell::default(),
-            mut_statics: static_defs
-                .iter()
-                .filter(|s| s.is_mut)
-                .map(|s| s.name.clone())
-                .collect(),
-            literal_shapes: literal_handlers(program, &mut pre_diags),
+            mut_statics,
+            literal_shapes,
             names,
             decls,
-            non_exhaustive: program
-                .items
-                .iter()
-                .filter_map(|i| match i {
+            non_exhaustive: non_exhaustive
+                .into_iter()
+                .chain(program.items.iter().filter_map(|i| match i {
                     Item::Struct(s) if s.attrs.iter().any(|a| a.path == ["non_exhaustive"]) => {
                         Some(s.name.clone())
                     }
@@ -1311,7 +1574,7 @@ pub fn lower_full(
                         Some(e.name.clone())
                     }
                     _ => None,
-                })
+                }))
                 .collect(),
             bound_methods,
             bound_traits,
@@ -1698,11 +1961,7 @@ pub fn lower_full(
             }
         }
     }
-    let mut exports: Vec<(FunctionId, String)> = Vec::new();
-    let mut prebuilt: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut inline_copies: std::collections::HashSet<FunctionId> = std::collections::HashSet::new();
-    let mut c_defs: Vec<FunctionId> = Vec::new();
-    for (i, d) in decls.iter().enumerate() {
+    for (i, d) in decls.iter().enumerate().skip(first_decl) {
         let f = d.def();
         let here = f.span;
         let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
@@ -1774,7 +2033,11 @@ pub fn lower_full(
             }
         }
     }
-    for f in env.generic_fns.values() {
+    let stage_generics = program.items.iter().filter_map(|i| match i {
+        Item::Fn(f) if !f.generics.params.is_empty() => Some(f),
+        _ => None,
+    });
+    for f in stage_generics {
         if let Some(abi) = rokc_ast::extern_fn_abi(&f.attrs) {
             check_extern_fn(f, abi, &mut pre_diags);
         }
@@ -1798,16 +2061,15 @@ pub fn lower_full(
             e.clone_from(k);
         }
     }
-    let main = fn_table
-        .get("main")
-        .map(|s| s.id)
-        .filter(|id| !extern_fn_ids.contains(id) && !rok_externs.contains(id));
-    let infer_ret: std::collections::HashSet<FunctionId> = decls
-        .iter()
-        .enumerate()
-        .filter(|(_, d)| mono::infers_ret(d.def(), |s| env.may_diverge.contains(&s)))
-        .map(|(i, _)| FunctionId(u32::try_from(i).expect("FunctionId overflow")))
-        .collect();
+    let mut infer_ret = std::mem::take(&mut env.infer_ret);
+    infer_ret.extend(
+        decls
+            .iter()
+            .enumerate()
+            .skip(first_decl)
+            .filter(|(_, d)| mono::infers_ret(d.def(), |s| env.may_diverge.contains(&s)))
+            .map(|(i, _)| FunctionId(u32::try_from(i).expect("FunctionId overflow"))),
+    );
     env.fn_table = fn_table;
     env.decls = decls;
     env.method_table = method_table;
@@ -1827,13 +2089,13 @@ pub fn lower_full(
     // Struct fields and enum payloads that name projections (`peeked:
     // I::Item | none`, `v: <S as Tr>::Out`) waited for the impls: resolve
     // them now, an instance's under its arguments.
-    resolve_projection_aliases(&env);
+    resolve_projection_aliases(&env, program);
     // Every declaration's signature types, now that every item and impl
     // is registered (a projection in a signature resolves too). Array
     // lengths that call `const fn`s need their signatures: those wait
     // for a second round.
     let mut waiting: Vec<FunctionId> = Vec::new();
-    let mut sigs: HashMap<FunctionId, FnSig> = (0..env.decls.len())
+    let mut sigs: HashMap<FunctionId, FnSig> = (first_decl..env.decls.len())
         .map(|i| {
             let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
             let base = &env.fn_table[&env.key_of[&id]];
@@ -1846,13 +2108,13 @@ pub fn lower_full(
         })
         .collect();
     env.sink.sig_pass.set(None);
-    install_sigs(&mut env, &sigs);
+    install_sigs(&mut env.fn_table, &sigs);
     for id in waiting {
         let base = &env.fn_table[&env.key_of[&id]];
         let sig = mono::decl_sig(&env, id.0 as usize, base);
         sigs.insert(id, sig);
     }
-    install_sigs(&mut env, &sigs);
+    install_sigs(&mut env.fn_table, &sigs);
     resolve_open_members(&env, &struct_decls, &enum_decls);
     // Spec 5.9.4: extern functions share one namespace; declaring one
     // twice with different signatures is an error. The toolchain's
@@ -1861,7 +2123,10 @@ pub fn lower_full(
     let no_subst = HashMap::new();
     for (f, rok_abi, first) in &extern_redecls {
         let (params, ret) = mono::sig_tys(&env, f, None, fn_module(&env, f), &no_subst);
-        let s = &sigs[first];
+        // The first declaration may be an earlier stage's.
+        let s = sigs
+            .get(first)
+            .unwrap_or_else(|| &env.fn_table[&env.key_of[first]]);
         let c_var = |f: &FnDef| {
             f.attrs
                 .iter()
@@ -1912,27 +2177,22 @@ pub fn lower_full(
         .collect();
     ref_out.sort_by_key(|(id, _)| *id);
     env.sink.ref_out.borrow_mut().extend(ref_out);
-    // Coherence and impl rules for the package's impls (a dependency's
-    // when it is built), every library's with `--check-library`.
-    let own = |module: &str| {
-        let pkg = package_of(module);
-        pkg.is_empty() || check_library || lib_pkg.as_ref().is_some_and(|p| within(pkg, p))
-    };
-    check_impl_overlap(&env, &own);
-    check_impl_rules(&env, program, &own);
-    let failed_derives = check_derives(&env, program);
     // Every static's type, now that every item is registered.
     let no_subst = HashMap::new();
-    let static_types: Vec<HirTy> = static_defs
+    let static_types: Vec<HirTy> = static_defs[first_static..]
         .iter()
-        .zip(&static_asts)
+        .zip(&static_asts[first_static..])
         .map(|(d, (ast, module, _))| {
             let mut rcx = LowerCtx::new(&env, &no_subst, None, d.span);
             rcx.current_module.clone_from(module);
             rcx.resolve_ast_ty(ast)
         })
         .collect();
-    for ((d, ty), (_, _, value)) in static_defs.iter_mut().zip(static_types).zip(&static_asts) {
+    let new_statics = static_defs[first_static..].iter_mut();
+    for ((d, ty), (_, _, value)) in new_statics
+        .zip(static_types)
+        .zip(&static_asts[first_static..])
+    {
         env.statics.insert(d.name.clone(), ty.clone());
         // A non-lazy initializer must const-fold to a literal.
         if let Some(v) = value.filter(|v| !is_lazy_static_init(v)) {
@@ -1951,6 +2211,93 @@ pub fn lower_full(
         }
         d.ty = ty;
     }
+    assign_discriminants(&env, &enum_decls[first_new_enum..]);
+    let collected = Collected {
+        t: env.t,
+        early,
+        pre_diags,
+        reexports,
+        enum_decls,
+        struct_decls,
+        inherent_keys,
+        static_defs,
+        static_asts,
+        lib_decl,
+        link_names,
+        templated,
+        system_fns,
+        no_safepoint,
+        wasm_imports,
+        extern_symbols,
+        trait_defs,
+        exports,
+        prebuilt,
+        inline_copies,
+        c_defs,
+        diverging,
+    };
+    Ok((collected, program))
+}
+
+/// After both stages: the checks over every impl, the roots, the
+/// bodies, and the module.
+#[allow(clippy::too_many_lines)] // linear sequence of lowering passes
+fn finish<'a>(
+    c: Collected<'a>,
+    programs: [&'a Program; 2],
+    raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
+    at: &Stage<'a>,
+) -> HirModule {
+    let Stage {
+        prec,
+        input,
+        sources,
+        ..
+    } = *at;
+    let lib_pkg: Option<String> = input.lib.clone();
+    let check_library = input.check_library;
+    let Collected {
+        t,
+        early,
+        pre_diags,
+        mut static_defs,
+        lib_decl,
+        link_names,
+        system_fns,
+        no_safepoint,
+        wasm_imports,
+        extern_symbols,
+        mut exports,
+        prebuilt,
+        inline_copies,
+        c_defs,
+        ..
+    } = c;
+    let env = Env { sources, prec, t };
+    // Coherence and impl rules for the package's impls (a dependency's
+    // when it is built), every library's with `--check-library`.
+    let own = |module: &str| {
+        let pkg = package_of(module);
+        pkg.is_empty() || check_library || lib_pkg.as_ref().is_some_and(|p| within(pkg, p))
+    };
+    let checked: &[&Program] = if check_library || lib_pkg.is_some() {
+        &programs
+    } else {
+        &programs[1..]
+    };
+    check_impl_overlap(&env, &own);
+    check_impl_rules(&env, checked, &programs, &own);
+    let failed_derives: Vec<Span> = checked
+        .iter()
+        .flat_map(|p| check_derives(&env, p))
+        .collect();
+    let main = env
+        .fn_table
+        .get("main")
+        .map(|s| s.id)
+        .filter(|id| !env.extern_fn_ids.contains(id) && !env.rok_externs.contains(id));
+    let exported: std::collections::HashSet<FunctionId> =
+        exports.iter().map(|(id, _)| *id).collect();
     let decl_roots: Vec<bool> = env
         .decls
         .iter()
@@ -1958,29 +2305,25 @@ pub fn lower_full(
         .enumerate()
         .map(|(i, (d, &lib))| {
             let f = d.def();
-            let module = match d {
+            let module = || match d {
                 MethodOrFn::Fn(f) => fn_module(&env, f),
                 MethodOrFn::Method { module, .. } => module.clone(),
             };
             !lib || check_library
-                || exports.iter().any(|(id, _)| id.0 as usize == i)
+                || exported.contains(&FunctionId(u32::try_from(i).expect("FunctionId overflow")))
                 || is_lazy_init_fn(&f.name)
                 || lib_pkg
                     .as_ref()
-                    .is_some_and(|p| within(package_of(&module), p))
+                    .is_some_and(|p| within(package_of(&module()), p))
         })
         .collect();
-    assign_discriminants(&env, &enum_decls);
-    if let Some(t) = collect_started {
-        eprintln!(
-            "time: {:>9.1}ms  hir collect",
-            t.elapsed().as_secs_f64() * 1e3
-        );
-    }
+    let extern_fn_ids = env.extern_fn_ids.clone();
+    let rok_externs = env.rok_externs.clone();
+    let c_variadic = env.c_variadic.clone();
     rokc_diagnostic::time("hir consts", || super::const_eval::check_user_consts(&env));
     let incr = input.bodies.as_ref().map(|b| {
         rokc_diagnostic::time("hir interface", || {
-            super::incr::Incr::new(&env, &*b.0, program, raw_uses, input)
+            super::incr::Incr::new(&env, &*b.0, &programs, raw_uses, input)
         })
     });
     // Spec 2.10.9: the package's own generic bodies (a dependency's when
@@ -2150,6 +2493,9 @@ pub fn lower_full(
                 .collect()
         })
     };
+    // The package's functions ahead of the library's (their ids are the
+    // other way round): its first one names the debug info's unit.
+    functions.sort_by_key(|f| lib_decl.get(f.id.0 as usize).copied().unwrap_or(false));
     let mut module = HirModule {
         functions,
         structs,
@@ -2189,7 +2535,9 @@ pub fn lower_full(
                 .as_ref()
                 .is_some_and(|l| failed_derives.contains(&l.span))
     });
-    show_nested_fn_names(program, &mut module.diagnostics);
+    for p in programs {
+        show_nested_fn_names(p, &mut module.diagnostics);
+    }
     module.diagnostics.splice(0..0, early);
     module
 }
@@ -2235,10 +2583,6 @@ fn show_nested_fn_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiag
     }
 }
 
-/// Re-resolve, with the impls known, the struct fields and enum payloads
-/// left open (a projection) when their type was first defined: a declared
-/// one (`structs[i]` / `enums[i]`) or a generic instance under its
-/// arguments. A union's storage is fixed at registration.
 /// Stdlib 0.1.2: `rok::bare` names neither `rok::core` nor `rok::std`, and
 /// `rok::core` does not name `rok::std` (in its `use`s and every path it
 /// writes).
@@ -2307,15 +2651,27 @@ fn check_tiers(
 }
 
 /// Put each declaration's signature in `fn_table` (aliases included).
-fn install_sigs(env: &mut Env<'_>, sigs: &HashMap<FunctionId, FnSig>) {
-    for sig in env.fn_table.values_mut() {
+fn install_sigs(fn_table: &mut HashMap<String, FnSig>, sigs: &HashMap<FunctionId, FnSig>) {
+    for sig in fn_table.values_mut() {
         if let Some(s) = sigs.get(&sig.id) {
             sig.clone_from(s);
         }
     }
 }
 
-fn resolve_open_members(env: &Env<'_>, structs: &[&AstStructDef], enums: &[&AstEnumDef]) {
+/// Re-resolve, with the impls known, the struct fields and enum payloads
+/// left open (a projection) when their type was first defined: a declared
+/// one (`structs[i]` / `enums[i]`) or a generic instance under its
+/// arguments. A union's storage is fixed at registration.
+fn resolve_open_members(
+    env: &Env<'_>,
+    structs: &[(StructId, &AstStructDef)],
+    enums: &[(EnumId, &AstEnumDef)],
+) {
+    let structs: HashMap<usize, &AstStructDef> =
+        structs.iter().map(|(id, d)| (id.0 as usize, *d)).collect();
+    let enums: HashMap<usize, &AstEnumDef> =
+        enums.iter().map(|(id, d)| (id.0 as usize, *d)).collect();
     let open = |t: &HirTy| {
         let mut o = Vec::new();
         collect_unknown_paths(t, &mut o);
@@ -2329,7 +2685,7 @@ fn resolve_open_members(env: &Env<'_>, structs: &[&AstStructDef], enums: &[&AstE
         .enumerate()
         .filter(|(_, d)| d.union_kind.is_none() && d.fields.iter().any(|f| open(&f.ty)))
         .filter_map(|(i, d)| {
-            let def = match structs.get(i) {
+            let def = match structs.get(&i) {
                 Some(s) if d.generic_args.is_empty() => *s,
                 _ => *env.defs.generic_structs.get(enum_base_name(&d.name))?,
             };
@@ -2355,7 +2711,7 @@ fn resolve_open_members(env: &Env<'_>, structs: &[&AstStructDef], enums: &[&AstE
                 .any(|v| v.payload_ty.as_ref().is_some_and(open))
         })
         .filter_map(|(i, d)| {
-            let def = match enums.get(i) {
+            let def = match enums.get(&i) {
                 Some(e) if d.generic_args.is_empty() => *e,
                 _ => *env.defs.generic_enums.get(enum_base_name(&d.name))?,
             };
@@ -2418,13 +2774,22 @@ fn qualify(item: &mut Item, module: &str) {
 /// Each plain alias naming a projection (`type B = <A as P>::Out;`),
 /// resolved once impls are registered and reported at its body; a broken
 /// one is `{unknown}` where used.
-fn resolve_projection_aliases(env: &Env<'_>) {
+fn resolve_projection_aliases(env: &Env<'_>, program: &Program) {
     let names = &env.names;
+    let stage: std::collections::HashSet<&str> = program
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            Item::TypeAlias(a) => Some(a.name.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut aliases: Vec<(&String, &Ty)> = names
         .plain_aliases
         .iter()
         .filter(|(full, body)| {
-            !names.broken_aliases.borrow().contains(*full)
+            stage.contains(full.as_str())
+                && !names.broken_aliases.borrow().contains(*full)
                 && names.names_projection(body, &module_of(full), body.span)
         })
         .collect();
@@ -3281,9 +3646,10 @@ fn check_repr_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic
 /// Value variants (spec 2.4.2): an enum with any is all value variants;
 /// each value is a const integer (the const evaluator: `const fn`
 /// calls, `use`d consts) that fits the tag type and is unique.
-fn assign_discriminants(env: &Env<'_>, decls: &[&AstEnumDef]) {
+fn assign_discriminants(env: &Env<'_>, decls: &[(EnumId, &AstEnumDef)]) {
     let no_subst = HashMap::new();
-    for (i, decl) in decls.iter().enumerate() {
+    for &(id, decl) in decls {
+        let i = id.0 as usize;
         let values = decl
             .variants
             .iter()
@@ -3305,7 +3671,6 @@ fn assign_discriminants(env: &Env<'_>, decls: &[&AstEnumDef]) {
             ));
             continue;
         }
-        let id = EnumId(u32::try_from(i).expect("EnumId overflow"));
         let tag_ty = ctx.enum_def(id).repr.int.unwrap_or(PrimTy::I32);
         let mut seen: HashMap<i128, &str> = HashMap::new();
         let mut tags = Vec::new();
@@ -3736,7 +4101,7 @@ struct PendingImpl<'p> {
 /// resolves; the last round reports what is left. `None`: an impl of a
 /// trait (with the same arguments) its target already has.
 fn impl_heads(
-    env: &mut Env<'_>,
+    env: &mut EnvIn<'_, '_>,
     pending: &[PendingImpl<'_>],
     trait_defs: &HashMap<String, &rokc_ast::TraitDef>,
     diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
@@ -3893,6 +4258,7 @@ fn impl_assoc_list(impl_def: &rokc_ast::ImplDef) -> Vec<(String, Ty)> {
 fn impl_consts(
     i: &rokc_ast::ImplDef,
     program: &Program,
+    base: &HashMap<String, &rokc_ast::TraitDef>,
     names: &TypeNames,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) -> (Vec<AssocConst>, Vec<AssocConst>) {
@@ -3910,14 +4276,23 @@ fn impl_consts(
     let trait_def = i.trait_path.as_ref().and_then(|tp| {
         let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
         let key = names.trait_key(&segs, &module, i.span);
-        program.items.iter().find_map(|it| match it {
-            Item::Trait(t)
-                if t.name == key || (!key.contains("::") && leaf_name(&t.name) == key) =>
-            {
-                Some(t)
-            }
-            _ => None,
-        })
+        let fits = |t: &rokc_ast::TraitDef| {
+            t.name == key || (!key.contains("::") && leaf_name(&t.name) == key)
+        };
+        program
+            .items
+            .iter()
+            .find_map(|it| match it {
+                Item::Trait(t) if fits(t) => Some(t),
+                _ => None,
+            })
+            .or_else(|| base.get(key.as_str()).copied())
+            .or_else(|| {
+                let mut leaf: Vec<&rokc_ast::TraitDef> =
+                    base.values().copied().filter(|t| fits(t)).collect();
+                leaf.sort_by(|a, b| a.name.cmp(&b.name));
+                leaf.first().copied()
+            })
     });
     if let Some(t) = trait_def.filter(|_| !i.negative) {
         for ti in &t.items {
@@ -4540,17 +4915,22 @@ fn check_type_bounds(env: &Env<'_>) {
 /// type is the impl's package's own), and supertraits (spec 2.8.4: a
 /// type implementing a trait implements its supertraits too; a generic
 /// impl's target must meet them for every instance its bounds allow).
-fn check_impl_rules(env: &Env<'_>, program: &Program, own: &dyn Fn(&str) -> bool) {
+fn check_impl_rules(
+    env: &Env<'_>,
+    checked: &[&Program],
+    all: &[&Program],
+    own: &dyn Fn(&str) -> bool,
+) {
     let no_subst = HashMap::new();
-    let traits: HashMap<&str, &rokc_ast::TraitDef> = program
-        .items
+    let traits: HashMap<&str, &rokc_ast::TraitDef> = all
         .iter()
+        .flat_map(|p| &p.items)
         .filter_map(|it| match it {
             Item::Trait(t) => Some((t.name.as_str(), t)),
             _ => None,
         })
         .collect();
-    for item in &program.items {
+    for item in checked.iter().flat_map(|p| &p.items) {
         let Item::Impl(i) = item else {
             continue;
         };
@@ -6051,7 +6431,11 @@ fn add_self_assoc_sigs(program: &mut Program) {
 /// default, its names resolved in the trait's module and the trait's
 /// parameters replaced by the impl's arguments. Everything after sees
 /// an ordinary `type X = ..;` in the impl. The additions, by item index.
-fn assoc_defaults(program: &Program, names: &TypeNames) -> Vec<(usize, Vec<AstImplItem>)> {
+fn assoc_defaults(
+    program: &Program,
+    names: &TypeNames,
+    base: &HashMap<String, &rokc_ast::TraitDef>,
+) -> Vec<(usize, Vec<AstImplItem>)> {
     let traits: HashMap<&str, &rokc_ast::TraitDef> = program
         .items
         .iter()
@@ -6059,6 +6443,7 @@ fn assoc_defaults(program: &Program, names: &TypeNames) -> Vec<(usize, Vec<AstIm
             Item::Trait(t) => Some((t.name.as_str(), t)),
             _ => None,
         })
+        .chain(base.iter().map(|(k, t)| (k.as_str(), *t)))
         .filter(|(_, t)| {
             t.items.iter().any(|i| {
                 matches!(
@@ -6120,7 +6505,13 @@ fn assoc_defaults(program: &Program, names: &TypeNames) -> Vec<(usize, Vec<AstIm
 /// whose every branch does. Names are matched by leaf (an
 /// over-approximation the lowering settles); a fixed point over the
 /// program keeps inference from nesting through every unit call chain.
-fn may_diverge(program: &Program) -> std::collections::HashSet<rokc_diagnostic::Span> {
+/// The bodies of `program` that may diverge on every path, by span;
+/// `names` are the leaf names of the diverging functions so far, and
+/// get this stage's.
+fn may_diverge(
+    program: &Program,
+    names: &mut std::collections::HashSet<String>,
+) -> std::collections::HashSet<rokc_diagnostic::Span> {
     use std::collections::HashSet;
     fn tail_block(b: &Block, d: &HashSet<String>) -> bool {
         if let Some(t) = &b.trailing {
@@ -6196,15 +6587,15 @@ fn may_diverge(program: &Program) -> std::collections::HashSet<rokc_diagnostic::
             _ => {}
         }
     }
-    let mut names: HashSet<String> = fns
-        .iter()
-        .filter(|f| {
-            f.ret_ty
-                .as_ref()
-                .is_some_and(|t| matches!(t.kind, AstTyKind::Never))
-        })
-        .map(|f| leaf_name(&f.name).to_owned())
-        .collect();
+    names.extend(
+        fns.iter()
+            .filter(|f| {
+                f.ret_ty
+                    .as_ref()
+                    .is_some_and(|t| matches!(t.kind, AstTyKind::Never))
+            })
+            .map(|f| leaf_name(&f.name).to_owned()),
+    );
     let open: Vec<&FnDef> = fns
         .into_iter()
         .filter(|f| f.ret_ty.is_none() && f.body.is_some())
@@ -6213,7 +6604,7 @@ fn may_diverge(program: &Program) -> std::collections::HashSet<rokc_diagnostic::
     loop {
         let before = out.len();
         for f in &open {
-            if !out.contains(&f.span) && f.body.as_ref().is_some_and(|b| tail_block(b, &names)) {
+            if !out.contains(&f.span) && f.body.as_ref().is_some_and(|b| tail_block(b, names)) {
                 out.insert(f.span);
                 names.insert(leaf_name(&f.name).to_owned());
             }
@@ -6228,7 +6619,11 @@ fn may_diverge(program: &Program) -> std::collections::HashSet<rokc_diagnostic::
 /// declares at its position (trait parameters replaced by the impl's
 /// arguments), not an implicit type parameter: the method implements
 /// that signature.
-fn impl_param_types(program: &mut Program, names: &TypeNames) {
+fn impl_param_types(
+    program: &mut Program,
+    names: &TypeNames,
+    base: &HashMap<String, &rokc_ast::TraitDef>,
+) {
     let traits: HashMap<&str, &rokc_ast::TraitDef> = program
         .items
         .iter()
@@ -6236,6 +6631,7 @@ fn impl_param_types(program: &mut Program, names: &TypeNames) {
             Item::Trait(t) => Some((t.name.as_str(), t)),
             _ => None,
         })
+        .chain(base.iter().map(|(k, t)| (k.as_str(), *t)))
         .collect();
     let untyped = |p: &Param| p.ty.is_none() && p.name != "self" && !p.variadic;
     let mut fills: Vec<(usize, usize, usize, Ty)> = Vec::new();

@@ -109,42 +109,12 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
 }
 
 /// What `-g` shows of a `ty` value beyond its `MirTy`, or `None` when
-/// that says it all: a tagged sum's variants, a `GcBuf`'s elements.
+/// that says it all: a tagged sum's variants, a `GcBuf`'s elements, an
+/// `any`, a closure's environment.
 #[must_use]
 pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<DebugTy> {
-    describe(ty, module, target, true)
-}
-
-/// The variants of [`DebugTy::Any`]: each type stored into an `any` by
-/// its stored tag. The `any`s inside them are plain words (a variant
-/// part over itself would never end).
-#[must_use]
-pub fn any_variants(module: &HirModule, target: &Target) -> Vec<(u32, String, DebugTy)> {
-    module
-        .any_tags
-        .iter()
-        .filter(|(t, _)| !matches!(t, HirTy::AnyTrait(_)))
-        .map(|(t, tag)| {
-            let mir = lower_ty(t, module, target);
-            let d = describe(t, module, target, false).unwrap_or_else(|| DebugTy::Mir(mir.clone()));
-            if target.any_inline(&mir) {
-                (*tag, debug_name(t, module), d)
-            } else {
-                (
-                    tag | crate::gc_abi::ANY_BOXED,
-                    debug_name(t, module),
-                    DebugTy::Boxed(Box::new(d)),
-                )
-            }
-        })
-        .collect()
-}
-
-/// [`debug_ty`]; `any`: an `any` is [`DebugTy::Any`].
-fn describe(ty: &HirTy, module: &HirModule, target: &Target, any: bool) -> Option<DebugTy> {
     let of = |t: &HirTy| {
-        describe(t, module, target, any)
-            .unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target)))
+        debug_ty(t, module, target).unwrap_or_else(|| DebugTy::Mir(lower_ty(t, module, target)))
     };
     // Every variant, those without data too (their payload `()`), so a
     // debugger names each value's case.
@@ -152,7 +122,14 @@ fn describe(ty: &HirTy, module: &HirModule, target: &Target, any: bool) -> Optio
         HirTy::GcBuf(t) => {
             return Some(DebugTy::Buf(debug_name(ty, module), Box::new(of(t))));
         }
-        HirTy::AnyTrait(_) if any => return Some(DebugTy::Any),
+        HirTy::AnyTrait(_) => return Some(DebugTy::Any),
+        HirTy::Closure { env, .. } => {
+            let name = format!("env<{}>", debug_name(env, module));
+            return Some(DebugTy::Closure(
+                lower_ty(ty, module, target),
+                Box::new(DebugTy::Boxed(name, Box::new(of(env)))),
+            ));
+        }
         HirTy::Sum(parts) => (0u32..)
             .zip(parts)
             .map(|(i, v)| (sum_tag(ty, i), debug_name(v, module), Some(v)))
@@ -173,6 +150,32 @@ fn describe(ty: &HirTy, module: &HirModule, target: &Target, any: bool) -> Optio
         .map(|(tag, name, t)| (tag, name, t.map_or(DebugTy::Mir(MirTy::Unit), of)))
         .collect();
     Some(DebugTy::Sum(debug_name(ty, module), mir, variants))
+}
+
+/// The variants of [`DebugTy::Any`]: each type stored into an `any` by
+/// its stored tag.
+#[must_use]
+pub fn any_variants(module: &HirModule, target: &Target) -> Vec<(u32, String, DebugTy)> {
+    module
+        .any_tags
+        .iter()
+        .filter(|(t, _)| !matches!(t, HirTy::AnyTrait(_)))
+        .map(|(t, tag)| {
+            let mir = lower_ty(t, module, target);
+            let d = debug_ty(t, module, target).unwrap_or_else(|| DebugTy::Mir(mir.clone()));
+            let name = debug_name(t, module);
+            if target.any_inline(&mir) {
+                (*tag, name, d)
+            } else {
+                let obj = format!("box<{name}>");
+                (
+                    tag | crate::gc_abi::ANY_BOXED,
+                    name,
+                    DebugTy::Boxed(obj, Box::new(d)),
+                )
+            }
+        })
+        .collect()
 }
 
 /// A short name of `ty` for `-g` (`List`, `i64 | f64`, `GcBuf<u8>`).

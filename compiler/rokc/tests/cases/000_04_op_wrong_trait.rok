@@ -1,3 +1,4 @@
+// spec: refs-lang §0.4.3
 // spec: 000.04-operator-dispatch
 // `+` dispatches only through the add_trait (Add) impl, not another trait's `add`.
 // expect-error: it needs `impl Add for V`

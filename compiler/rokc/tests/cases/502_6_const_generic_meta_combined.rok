@@ -1,0 +1,20 @@
+// spec: refs-lang §5.2.6
+// expect-exit: 0
+// expect-stdout:
+// Grid { cells: [0, 0, 0, 0, 0, 0], area: 6 } 6 2
+
+// 5.2.6: generics, meta blocks (here `derive`) and `const fn` are
+// orthogonal: a `const fn` result is the field default of a derived
+// struct that a generic function takes.
+const fn area(w: i32, h: i32) -> i32 { w * h }
+const AREA: i32 = area(2, 3);
+
+#[derive(Debug, Clone)]
+struct Grid { cells: [i32; 6]; area: i32 = AREA; }
+
+fn count<T: Clone>(xs: List<T>) -> usize { xs.len() }
+
+fn main() {
+    let g = Grid { cells: [0; 6] };
+    println(f"{g:?} {AREA} {count([g.clone(), g])}");
+}

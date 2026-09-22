@@ -7,10 +7,12 @@
 //! `llvm.intr.dbg.declare` of their stack slot, typed by `di_type`
 //! (primitives; structs with their field names, tuples, `str`, `any`
 //! and arrays as composites; a tagged sum as a variant part, and an
-//! `any` as one over the types stored into one, by their tags; a `GcBuf`
-//! reference as a pointer to its object, header then elements; a
-//! `[ref]`-captured variable as its value, through its cell; other GC
-//! references and `fn` values as pointers). The unit's language is Rust:
+//! `any` as one over the types stored into one, by their tags (an `any`
+//! inside them is the same, recursive type); a `GcBuf` reference as a
+//! pointer to its object, header then elements; a `[ref]`-captured
+//! variable as its value, through its cell; a closure value as `{code,
+//! env}`, the env pointing at its object; other GC references and `fn`
+//! values as pointers). Scalar returns are typed. The unit's language is Rust:
 //! debuggers read variant parts in it (lldb only there).
 //!
 //! The attribute aliases are module-level text placed before `module`;
@@ -41,6 +43,10 @@ pub struct DebugInfo {
     /// a reference back to one (a `GcBuf` field) is a declaration,
     /// which the debugger completes by name.
     building: BTreeMap<String, String>,
+    /// The `any` being described: its self reference (`isRecSelf`), and
+    /// the types defined since that hold it, by key. They leave `types`
+    /// once it is done: outside it the reference is undefined.
+    any_self: Option<(String, Vec<String>)>,
     next: u32,
     target: Target,
     /// An optimized build (the unit's `isOptimized`).
@@ -65,6 +71,13 @@ pub struct FnDebug {
 /// Marker line the body emitter writes for a `Statement::Loc`.
 pub const MARK: &str = "    //loc ";
 
+/// Whether attribute text `def` refers to alias `a`.
+fn mentions(def: &str, a: &str) -> bool {
+    def.match_indices(a).any(|(i, _)| {
+        !def[i + a.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
 fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -81,6 +94,7 @@ impl DebugInfo {
             cu: None,
             types: BTreeMap::new(),
             building: BTreeMap::new(),
+            any_self: None,
             next: 0,
             target,
             optimized,
@@ -125,7 +139,7 @@ impl DebugInfo {
         if f.span.line == 0 {
             return None;
         }
-        let mut d = self.synthesized(name, f.span)?;
+        let mut d = self.function(name, f.span, f.debug_ret())?;
         let file = self.file_alias(f.span.file)?;
         // A lexical block per nested scope, at its first position;
         // parents have smaller ids, so they come first.
@@ -157,6 +171,17 @@ impl DebugInfo {
     /// `main`, a lazy static's guard, ..): a function without a position
     /// is at line 0 of the unit's file; `None` before any unit.
     pub fn synthesized(&mut self, name: &str, span: rokc_diagnostic::Span) -> Option<FnDebug> {
+        self.function(name, span, None)
+    }
+
+    /// The subprogram `name` at `span` returning `ret`
+    /// (`MirFunction::debug_ret`).
+    fn function(
+        &mut self,
+        name: &str,
+        span: rokc_diagnostic::Span,
+        ret: Option<PrimTy>,
+    ) -> Option<FnDebug> {
         let (id, line, col) = match self.cu {
             _ if span.line != 0 => (span.file, span.line, span.col.max(1)),
             Some(cu) => (cu, 0, 0),
@@ -174,13 +199,20 @@ impl DebugInfo {
             );
             self.cu = Some(id);
         }
+        let ty = match ret.and_then(|p| self.basic_type(p)) {
+            Some(r) => self.define(
+                format!("fn -> {r}"),
+                &format!("#llvm.di_subroutine_type<callingConvention = DW_CC_normal, types = {r}>"),
+            ),
+            None => "#di_fn_ty".to_owned(),
+        };
         let n = self.fresh();
         let sp = format!("#di_sp{n}");
         let _ = writeln!(
             self.defs,
             "{sp} = #llvm.di_subprogram<id = distinct[{n}]<>, compileUnit = #di_cu, scope = {file}, \
              name = \"{}\", file = {file}, line = {line}, scopeLine = {line}, \
-             subprogramFlags = Definition, type = #di_fn_ty>",
+             subprogramFlags = Definition, type = {ty}>",
             escape(name),
         );
         Some(FnDebug {
@@ -253,7 +285,7 @@ impl DebugInfo {
                 return Some(self.define(key, &def));
             }
             // The object: its header, then the value.
-            DebugTy::Boxed(value) => {
+            DebugTy::Boxed(name, value) => {
                 let key = format!("{ty:?}");
                 if let Some(a) = self.types.get(&key) {
                     return Some(a.clone());
@@ -264,17 +296,53 @@ impl DebugInfo {
                     members.push(("value", v, HEADER_SIZE));
                     size += self.target.size_align(&value.mir()).0;
                 }
-                let obj = Self::composite("box", size, 8, &members);
+                let obj = Self::composite(name, size, 8, &members);
                 let def = format!(
                     "#llvm.di_derived_type<tag = DW_TAG_pointer_type, baseType = {obj}, sizeInBits = {pw}>"
                 );
                 return Some(self.define(key, &def));
             }
+            // Recursive: an `any` inside a type stored in one is this
+            // same variant part.
             DebugTy::Any => {
+                if let Some((me, _)) = &self.any_self {
+                    return Some(me.clone());
+                }
+                let n = self.fresh();
+                let me = format!("#di_any_self{n}");
+                let _ = writeln!(
+                    self.defs,
+                    "{me} = #llvm.di_composite_type<recId = distinct[{n}]<>, isRecSelf = true>"
+                );
+                self.any_self = Some((me, Vec::new()));
                 let variants = self.debug.any.clone();
-                self.variant_part("any", &rokc_mir::any_ty(), &variants)?
+                let def = self.variant_part("any", &rokc_mir::any_ty(), &variants);
+                for key in self.any_self.take().map(|(_, h)| h).unwrap_or_default() {
+                    self.types.remove(&key);
+                }
+                def?.replacen(
+                    "#llvm.di_composite_type<",
+                    &format!("#llvm.di_composite_type<recId = distinct[{n}]<>, "),
+                    1,
+                )
             }
             DebugTy::Sum(name, mir, variants) => self.variant_part(name, mir, variants)?,
+            // `{code, env}`, the env a pointer to its object.
+            DebugTy::Closure(mir, env) => {
+                let MirTy::Tuple(ps) = mir else {
+                    return self.di_type(mir);
+                };
+                let code = self.di_type(&ps[0])?;
+                let env = self.di_debug(env)?;
+                let (size, align) = self.target.size_align(mir);
+                let at = self.target.field_offsets(mir);
+                Self::composite(
+                    "closure",
+                    size,
+                    align,
+                    &[("code", code, at[0]), ("env", env, at[1])],
+                )
+            }
         };
         Some(self.define(format!("{ty:?}"), &def))
     }
@@ -348,6 +416,12 @@ impl DebugInfo {
         }
         let alias = format!("#di_ty{}", self.fresh());
         let _ = writeln!(self.defs, "{alias} = {def}");
+        if let Some((me, held)) = &mut self.any_self {
+            let types = &self.types;
+            if mentions(def, me) || held.iter().any(|k| mentions(def, &types[k])) {
+                held.push(key.clone());
+            }
+        }
         self.types.insert(key, alias.clone());
         alias
     }

@@ -3,7 +3,9 @@
 //! in lowering order; an edit anywhere would rename (and so re-symbol)
 //! functions it did not touch. Here a closure becomes
 //! `<creator>::{closure#k}` (the `k`th closure its creator takes the
-//! address of) and `Struct<id>__m` becomes `<type path>__m`.
+//! address of), a coroutine body (its resume function, `__coro_<id>`)
+//! `<creator>::{coroutine#k}`, and `Struct<id>__m` becomes
+//! `<type path>__m`.
 
 use std::collections::HashMap;
 
@@ -12,7 +14,14 @@ use rokc_ir_common::FunctionId;
 
 use crate::{MirFunction, RValue, Statement};
 
-const CLOSURE: &str = "__closure_";
+/// Lowering-name prefixes of the functions named after their creator,
+/// and the kind their stable name says.
+const KINDS: [(&str, &str); 2] = [("__closure_", "closure"), ("__coro_", "coroutine")];
+
+/// Whether `s` holds a lowering name `KINDS` renames.
+fn has_token(s: &str) -> bool {
+    KINDS.iter().any(|(p, _)| s.contains(p))
+}
 
 /// Renames `functions` as above; `type_name(enum_, id)` is a type's
 /// build-independent name.
@@ -77,10 +86,10 @@ pub fn stable_names(
     }
     let mut lookup = |t: &str| map.get(t).cloned();
     for f in functions.iter_mut() {
-        if f.name.contains(CLOSURE) {
+        if has_token(&f.name) {
             f.name = replace_closures(&f.name, &mut lookup);
         }
-        if let Some(a) = f.facts.mono_args.as_mut().filter(|a| a.contains(CLOSURE)) {
+        if let Some(a) = f.facts.mono_args.as_mut().filter(|a| has_token(a)) {
             *a = replace_closures(a, &mut lookup);
         }
     }
@@ -99,17 +108,28 @@ fn type_prefixed(name: &str, type_name: &dyn Fn(bool, u32) -> Option<String>) ->
     Some(format!("{}__{tail}", type_name(enum_, id)?))
 }
 
-/// `__closure_<id>`: the closure's lowering name.
+/// `__closure_<id>` / `__coro_<id>`: the lowering name of a closure or
+/// coroutine body.
 fn closure_id(name: &str) -> Option<&str> {
     closure_token(name).filter(|t| t.len() == name.len())
 }
 
-/// The `__closure_<id>` `name` starts with (a closure's, or a function
-/// made from one).
+/// The `__closure_<id>` / `__coro_<id>` `name` starts with (a closure's,
+/// a coroutine body's, or a function made from one).
 fn closure_token(name: &str) -> Option<&str> {
-    let digits = name.strip_prefix(CLOSURE)?;
-    let n = digits.bytes().take_while(u8::is_ascii_digit).count();
-    (n > 0).then(|| &name[..CLOSURE.len() + n])
+    KINDS.iter().find_map(|(p, _)| {
+        let digits = name.strip_prefix(p)?;
+        let n = digits.bytes().take_while(u8::is_ascii_digit).count();
+        (n > 0).then(|| &name[..p.len() + n])
+    })
+}
+
+/// What a lowering-name token names (`closure`, `coroutine`).
+fn kind(token: &str) -> &'static str {
+    KINDS
+        .iter()
+        .find(|(p, _)| token.starts_with(p))
+        .map_or("closure", |(_, k)| k)
 }
 
 /// The stable name of closure `i`: under its creator with the least
@@ -158,7 +178,7 @@ fn closure_name(
             }
             None => String::new(),
         };
-        let n = format!("{base}::{{closure#{k}{args}}}");
+        let n = format!("{base}::{{{}#{k}{args}}}", kind(&functions[i].name));
         if best.as_ref().is_none_or(|b| n < *b) {
             best = Some(n);
         }
@@ -167,16 +187,20 @@ fn closure_name(
     best
 }
 
-/// `s` with every whole `__closure_<id>` replaced by what `name` says
+/// `s` with every whole `__closure_<id>` / `__coro_<id>` replaced by what `name` says
 /// (kept where it says `None`).
 fn replace_closures(s: &str, name: &mut dyn FnMut(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
-    while let Some(at) = rest.find(CLOSURE) {
+    while let Some((at, p)) = KINDS
+        .iter()
+        .filter_map(|(p, _)| Some((rest.find(p)?, p)))
+        .min()
+    {
         out.push_str(&rest[..at]);
-        let tail = &rest[at + CLOSURE.len()..];
+        let tail = &rest[at + p.len()..];
         let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-        let token = &rest[at..at + CLOSURE.len() + digits];
+        let token = &rest[at..at + p.len() + digits];
         out.push_str(&name(token).unwrap_or_else(|| token.to_owned()));
         rest = &rest[at + token.len()..];
     }

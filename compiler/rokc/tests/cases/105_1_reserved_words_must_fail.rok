@@ -1,0 +1,16 @@
+// spec: refs-lang §1.5.1 §1.9.3
+// expect-error: expected binding name, found keyword `yield`
+// expect-error: expected binding name, found keyword `using`
+// expect-error: expected binding name, found keyword `Self`
+// expect-error: expected binding name, found keyword `true`
+// expect-error: expected binding name, found keyword `none`
+
+// 1.5.1: a reserved keyword is a keyword wherever it appears, never an
+// identifier. 1.9.3: `true` / `false` / `none` are literals, never
+// identifiers.
+fn a() { let yield = 1; }
+fn b() { let using = 1; }
+fn c() { let Self = 1; }
+fn d() { let true = 1; }
+fn e() { let none = 1; }
+fn main() {}

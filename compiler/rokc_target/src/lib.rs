@@ -365,6 +365,55 @@ impl TargetSpec {
         HOST_SPEC.get_or_init(|| Self::resolve(None).unwrap_or_else(|e| panic!("{e}")))
     }
 
+    /// The host's platform, whatever CPU it builds for (`-C target-cpu`,
+    /// `-C target-feature`): its runtime, C toolchain and cached
+    /// standard library builds serve it.
+    #[must_use]
+    pub fn is_host(&self) -> bool {
+        let h = Self::host();
+        *h == Self {
+            cpu: h.cpu.clone(),
+            features: h.features.clone(),
+            ..self.clone()
+        }
+    }
+
+    /// `-C target-cpu` (`native`: the build machine's, with its
+    /// features, when this is its platform; `host` gives them) and
+    /// `-C target-feature` (`+f` / `-f`, appended to the baseline's).
+    pub fn set_cpu(
+        &mut self,
+        cpu: Option<&str>,
+        features: &[String],
+        host: impl FnOnce() -> Result<(String, String), String>,
+    ) -> Result<(), String> {
+        match cpu {
+            Some("native") => {
+                if self.arch != Self::host().arch || self.os != Self::host().os {
+                    return Err(format!(
+                        "-C target-cpu=native: target {} is not the build machine's platform",
+                        self.name
+                    ));
+                }
+                (self.cpu, self.features) = host()?;
+            }
+            Some(c) => c.clone_into(&mut self.cpu),
+            None => {}
+        }
+        for f in features {
+            if !(f.starts_with('+') || f.starts_with('-')) || f.len() < 2 {
+                return Err(format!(
+                    "-C target-feature: `{f}` is not `+feature` or `-feature`"
+                ));
+            }
+            if !self.features.is_empty() {
+                self.features.push(',');
+            }
+            self.features.push_str(f);
+        }
+        Ok(())
+    }
+
     /// A custom target file; its name is the file's stem.
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)

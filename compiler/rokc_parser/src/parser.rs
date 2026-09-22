@@ -1843,10 +1843,14 @@ impl<'a> Parser<'a> {
                 }
                 _ => {
                     let s = self.peek_span();
-                    self.error(
-                        s,
-                        format!("expected impl item, found {}", self.peek().describe()),
-                    );
+                    let msg = if self.at_kw("static") && self.at_ctx_item() {
+                        "a `static` is declared only at module level, not in an `impl`; \
+                         an associated `const` goes there (spec 5.3.8)"
+                            .to_owned()
+                    } else {
+                        format!("expected impl item, found {}", self.peek().describe())
+                    };
+                    self.error(s, msg);
                     let from = self.pos;
                     self.recover(from, Recover::NestedItem);
                 }
@@ -3849,6 +3853,22 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         if self.at_nested_fn() {
             return Some((self.parse_nested_fn()?, false));
+        }
+        // Spec 5.3.3 / 5.4.10 / 5.9.8: module-level only.
+        let module_only = match self.peek() {
+            TokenKind::Mod => Some("a `mod` (spec 5.4.10)"),
+            _ if self.at_kw("static") && self.at_ctx_item() => Some("a `static` (spec 5.3.3)"),
+            _ if self.at_kw("extern") && self.at_ctx_item() => {
+                Some("an `extern` block (spec 5.9.8)")
+            }
+            _ => None,
+        };
+        if let Some(what) = module_only {
+            self.error(
+                start,
+                format!("{what} is declared only at module level, not in a function body"),
+            );
+            return None;
         }
         // Spec 5.2.2: `const NAME: T = e;` in a body.
         if self.at_kw("const") && matches!(self.peek_next(), Some(TokenKind::Ident(_))) {

@@ -105,6 +105,13 @@ struct Pend {
 const POOL: [u32; 5] = [X9, X10, X11, X12, X13];
 const FP_POOL: [u32; 3] = [V16, V17, V18];
 
+/// Every function's prologue (then the frame's `sub sp`, which the
+/// frame pointer undoes): `stp x29, x30, [sp, #-16]!; mov x29, sp`. The
+/// unwind encodings (`coff::A64_CODES`, Mach-O's frame mode) say this.
+pub const PROLOGUE: [u32; 2] = [0xa9bf_7bfd, 0x9100_03fd];
+/// Every epilogue: `mov sp, x29; ldp x29, x30, [sp], #16; ret`.
+pub const EPILOGUE: [u32; 3] = [0x9100_03bf, 0xa8c1_7bfd, 0xd65f_03c0];
+
 struct Em<'a> {
     obj: &'a mut Obj,
     start: u32,
@@ -693,8 +700,9 @@ impl Em<'_> {
     }
 
     fn prologue(&mut self) {
-        self.ins(0xa9bf_7bfd); // stp x29, x30, [sp, #-16]!
-        self.ins(0x9100_03fd); // mov x29, sp
+        for w in PROLOGUE {
+            self.ins(w);
+        }
         let n = self.frame;
         if n == 0 {
             return;
@@ -725,9 +733,9 @@ impl Em<'_> {
     }
 
     fn epilogue(&mut self) {
-        self.ins(0x9100_03bf); // mov sp, x29
-        self.ins(0xa8c1_7bfd); // ldp x29, x30, [sp], #16
-        self.ins(0xd65f_03c0); // ret
+        for w in EPILOGUE {
+            self.ins(w);
+        }
     }
 
     fn copy(&mut self, dst: Mem, src: Mem, size: u32, zero: bool) {
@@ -1488,6 +1496,23 @@ mod tests {
             next_rel: None,
             flags: None,
         }
+    }
+
+    /// The unwind encodings describe `PROLOGUE` only: no callee-saved
+    /// register (`x19`..`x28`, `v8`..`v15`) may hold a value.
+    #[test]
+    fn values_stay_in_caller_saved_registers() {
+        for r in POOL.iter().chain(&[X14, X15, X16, X17]) {
+            assert!(!(19..=28).contains(r), "x{r}");
+        }
+        for v in FP_POOL {
+            assert!(!(8..=15).contains(&v), "v{v}");
+        }
+        let mut obj = Obj::new(false, false, false);
+        let mut e = em(&mut obj);
+        e.frame = 3 * PAGE + 32;
+        e.prologue();
+        assert_eq!(e.code[..2], PROLOGUE);
     }
 
     /// Run the move-wide and 64-bit add / sub (immediate, extended

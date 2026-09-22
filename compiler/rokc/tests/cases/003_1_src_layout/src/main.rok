@@ -1,3 +1,4 @@
+// spec: refs-lang §0.3.2
 // spec: §0.3.1 §5.4.4
 // expect-exit: 0
 // expect-stdout:

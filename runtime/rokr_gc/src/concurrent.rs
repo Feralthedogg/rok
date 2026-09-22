@@ -37,9 +37,9 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use super::{
     FLAG_LARGE, FLAG_SATB, FLAG_SCANNED, FLAG_UNLOGGED, LOG_FULL, LogChunk, MARKER_CPU_NS,
-    MIN_HEAP, Pause, build_index, drain, for_each_logged, for_each_ref, free_logs, header, heap,
-    load_word, log_word, mark, mark_roots, prefix, push, push_chunks, release_free_blocks,
-    retire_log, retire_to, select_candidates, sweep_blocks, sweep_los, world,
+    MIN_HEAP, Pause, WEAK_REF, build_index, clear_dead_weak, drain, for_each_logged, for_each_ref,
+    free_logs, header, heap, load_word, log_word, mark, mark_roots, prefix, push, push_chunks,
+    release_free_blocks, retire_log, retire_to, select_candidates, sweep_blocks, sweep_los, world,
 };
 use rokr_common::object_header::{FLAG_CARDED, FLAG_MARK};
 use rokr_common::sys;
@@ -122,7 +122,7 @@ pub fn start() {
     }
     build_index();
     let m = mark();
-    (m.full, m.concurrent, m.evacuating, m.len) = (true, true, false, 0);
+    (m.full, m.concurrent, m.evacuating, m.len, m.marked) = (true, true, false, 0, 0);
     mark_roots(false);
     MARKING.store(true, Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Relaxed);
@@ -189,6 +189,7 @@ pub fn finish(forced: bool) {
             break;
         }
     }
+    clear_dead_weak(true);
     // The objects stored into during the mark stay remembered (they may
     // reference new, young objects): the survivors among them.
     world::for_each_wb_log(retire_log);
@@ -231,7 +232,7 @@ pub fn finish(forced: bool) {
     h.collections += 1;
     h.forced += u64::from(forced);
     release_free_blocks();
-    p.end(true);
+    p.end(true, "full, concurrent");
 }
 
 /// Drop the unmarked (dead) objects from the chunk list `log`, in place;
@@ -258,6 +259,13 @@ fn keep_marked(mut log: *mut LogChunk) -> *mut LogChunk {
     last
 }
 
+/// A weak reference read during a concurrent mark: its referent `obj`
+/// may be unmarked and about to be stored where the mark has looked
+/// already, so it is marked like an overwritten value.
+pub fn shade(obj: usize) {
+    log_word(rokr_common::tls::satb_log(), &SATB_FULL, obj);
+}
+
 /// The barrier slow path while a concurrent mark runs: the first store
 /// into the old object `obj` logs every reference it holds (unless the
 /// marker scanned it already) and remembers `obj`; a racing store waits
@@ -280,7 +288,11 @@ pub unsafe fn snapshot(obj: *mut u8) {
     }
     if f & FLAG_SCANNED == 0 {
         let slots = rokr_common::tls::satb_log();
-        for_each_ref(obj, 0, usize::MAX, |off, _| {
+        // A weak word keeps nothing alive: its old value need not.
+        for_each_ref(obj, 0, usize::MAX, |off, kind| {
+            if kind == WEAK_REF {
+                return;
+            }
             // SAFETY: a reference word inside `obj`.
             let w = load_word(unsafe { obj.add(off) });
             if w != 0 {

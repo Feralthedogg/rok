@@ -1,3 +1,4 @@
+// spec: refs-lang §5.9.4
 // expect-exit: 101
 // expect-stderr: rok runtime: allocation too large
 // expect-stdout:

@@ -39,3 +39,4 @@ impl<T: Display> Shape for V<T> {
 }
 
 fn main() -> i32 { return 0; }
+// spec: refs-lang §2.8.3

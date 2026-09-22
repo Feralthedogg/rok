@@ -1,3 +1,4 @@
+// spec: refs-lang §2.4.5
 // only-pointer-width: 64
 // expect-exit: 0
 // gc-stress: 50

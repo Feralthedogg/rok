@@ -28,14 +28,19 @@ pub const PLAIN_TYPE_ID: u32 = 1;
 /// Type id of a buffer whose every pointer-aligned word is an ambiguous
 /// reference (runtime word buffers).
 pub const SCAN_WORDS_TYPE_ID: u32 = 2;
+/// Type id of a weak reference cell (`rok_gc_weak_new`): one
+/// `WEAK_REF` word after the header (801 §8.1.2 runtime range).
+pub const WEAK_TYPE_ID: u32 = 3;
 
 /// `ScanTable` field kinds (802 §8.2.3), the low byte of `field_kind`.
 ///
 /// A reference to an object header, a pointer into an object (`str`), an
 /// `any` (`u32` tag, then the payload word), a sum (below), and a word
 /// that holds a reference or other bits (its referent is kept alive and
-/// never moved).
+/// never moved). A `WEAK_REF` word is a reference the mark does not
+/// follow; the collection that frees its referent clears it (802 §8.2.8).
 pub const STRONG_REF: u32 = 0;
+pub const WEAK_REF: u32 = 1;
 pub const INTERIOR_REF: u32 = 2;
 pub const ANY_SLOT: u32 = 3;
 pub const SUM_PAYLOAD: u32 = 4;

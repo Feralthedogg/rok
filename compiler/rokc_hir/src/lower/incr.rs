@@ -648,7 +648,7 @@ impl<'a> Incr<'a> {
     pub(super) fn new(
         env: &Env<'_>,
         cache: &'a dyn BodyCache,
-        program: &Program,
+        programs: &[&Program],
         raw_uses: &[(String, rokc_core::Visibility, rokc_ast::UseTree)],
         input: &crate::HirInput,
     ) -> Self {
@@ -660,7 +660,7 @@ impl<'a> Incr<'a> {
             .filter(|(_, p)| **p)
             .map(|(d, _)| (d.def().name.as_str(), d.def().span))
             .collect();
-        let interface = interface_key(env, &bodies, program, raw_uses, input);
+        let interface = interface_key(env, &bodies, programs, raw_uses, input);
         Self {
             cache,
             interface,
@@ -1585,7 +1585,7 @@ impl Incr<'_> {
                 f.debug(&env.names.uses.get(m));
             }
             Read::GenericImpls => {
-                for i in env.impls.all.iter().filter(|i| i.is_generic()) {
+                for i in env.impls.iter().filter(|i| i.is_generic()) {
                     fp_impl(&mut f, i);
                 }
             }
@@ -1601,13 +1601,13 @@ impl Incr<'_> {
             }
             Read::GenericImplsWith(m) => {
                 let with = |i: &&super::Impl| i.is_generic() && i.methods.contains_key(m);
-                for i in env.impls.all.iter().filter(with) {
+                for i in env.impls.iter().filter(with) {
                     fp_impl(&mut f, i);
                 }
             }
             Read::ImplConsts(n) => {
                 let with = |i: &&super::Impl| i.consts.iter().any(|(c, ..)| c == n);
-                for i in env.impls.all.iter().filter(with) {
+                for i in env.impls.iter().filter(with) {
                     fp_impl(&mut f, i);
                 }
             }
@@ -1983,7 +1983,7 @@ fn is_plain(env: &Env<'_>, i: usize) -> bool {
 fn interface_key(
     env: &Env<'_>,
     bodies: &HashSet<(&str, Span)>,
-    program: &Program,
+    programs: &[&Program],
     raw_uses: &[(String, rokc_core::Visibility, rokc_ast::UseTree)],
     input: &crate::HirInput,
 ) -> u64 {
@@ -2045,8 +2045,9 @@ fn interface_key(
             f.enc(e);
         }
     };
-    e.u(program.items.len() as u64);
-    for item in &program.items {
+    let items = programs.iter().flat_map(|p| &p.items);
+    e.u(items.clone().count() as u64);
+    for item in items {
         match item {
             Item::Fn(f) => {
                 e.buf.push(0);

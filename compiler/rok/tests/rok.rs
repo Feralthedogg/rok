@@ -168,6 +168,7 @@ const LIB_V2: &str = "pub fn greet() -> i32 { return 2; }\n";
 /// A manifest with comments, which `add` / `remove` keep.
 const APP0: &str = "// my app\nPackage {\n    name: \"app\", // keep\n    deps: {\n        // deps go here\n    },\n}\n";
 
+// spec: §9.10.1 §9.10.3 §9.10.4
 #[test]
 fn add_lock_update_offline_remove() {
     let root = scratch("lock");
@@ -297,6 +298,7 @@ fn add_lock_update_offline_remove() {
     );
 }
 
+// spec: §9.10.3 §9.10.4
 #[test]
 fn transitive_dependencies_and_conflicts() {
     let root = scratch("transitive");
@@ -370,6 +372,7 @@ fn transitive_dependencies_and_conflicts() {
     assert_eq!(ok(&rok(&home, &app, &["deps", "--dev"])).lines().count(), 3);
 }
 
+// spec: §0.3.4 §9.10.3
 #[test]
 fn manifest_errors_and_reserved_forms() {
     let root = scratch("manifest");
@@ -419,6 +422,7 @@ fn manifest_errors_and_reserved_forms() {
     );
 }
 
+// spec: §9.10.2
 #[test]
 fn new_and_init_write_a_manifest() {
     let root = scratch("new");
@@ -490,6 +494,7 @@ fn new_and_init_write_a_manifest() {
     );
 }
 
+// spec: §9.10.4 / std §3.9.4
 #[test]
 fn rok_add_writes_canonical_rokon() {
     let root = scratch("canon");
@@ -553,6 +558,7 @@ fn rok_add_writes_canonical_rokon() {
     }
 }
 
+// spec: §9.10.1
 #[test]
 fn lint_and_doc_with_dependencies() {
     let root = scratch("lintdoc");
@@ -593,6 +599,7 @@ fn lint_and_doc_with_dependencies() {
     assert!(read(&app.join("target/doc/index.html")).contains("app/index.html"));
 }
 
+// spec: §6.2.9 §9.10.1 §9.10.3
 #[test]
 fn lints_from_and_files_in_a_package() {
     let root = scratch("lintsfrom");
@@ -673,6 +680,7 @@ fn lints_from_and_files_in_a_package() {
     fails(&rok(&home, &app, &["lint"]), "no rok.rokon in");
 }
 
+// spec: §9.8.3 §9.10.5
 #[test]
 fn named_environments() {
     let root = scratch("envs");
@@ -805,6 +813,7 @@ fn fake_toolchain(dir: &Path, version: &str) {
     write(&dir.join("lib/rok/core/src/lib.rok"), "");
 }
 
+// spec: §9.2.19 §9.10.6
 #[cfg(unix)]
 #[test]
 fn pinned_toolchains() {
@@ -934,6 +943,7 @@ fn pinned_toolchains() {
     ok(&rok(&home, &app, &["-q", "check"]));
 }
 
+// spec: §9.10.7
 #[test]
 fn script_dependencies() {
     let root = scratch("script");
@@ -971,6 +981,7 @@ fn script_dependencies() {
     }
 }
 
+// spec: §9.10.1
 #[test]
 fn build_run_and_repl_with_dependencies() {
     if !llvm() {
@@ -1046,6 +1057,7 @@ fn build_run_and_repl_with_dependencies() {
 /// (`lib<name>.a` + `<name>.rokhir`), reuses it while nothing it depends
 /// on changes, and rebuilds it (and the ones after it) when its source
 /// does. A dependency of a dependency is built first.
+// spec: §9.2.15
 #[test]
 fn prebuilt_dependencies_are_reused_and_rebuilt() {
     if !llvm() {
@@ -1116,6 +1128,7 @@ fn prebuilt_dependencies_are_reused_and_rebuilt() {
     assert!(app.join("target/release/deps/mid.rokhir").is_file());
 }
 
+// spec: §9.9.13 §9.10.1
 #[test]
 fn rokls_is_rok_lsp() {
     let root = scratch("lsp");
@@ -1285,6 +1298,7 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
 
 /// A dependency on the package itself (here a test-only one) is an
 /// error: `pkg::` is how a package names its own items.
+// spec: §5.7.14
 #[test]
 fn self_dependency_is_rejected() {
     let root = scratch("self_dep");
@@ -1677,6 +1691,7 @@ fn sh(dir: &Path, cmd: &str, args: &[&str]) {
 
 /// `install.sh --archive` checks the archive against the `.sha256`
 /// beside it before unpacking.
+// spec: §9.10.6
 #[cfg(unix)]
 #[test]
 fn install_sh_checks_sums() {

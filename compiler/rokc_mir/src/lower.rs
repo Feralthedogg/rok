@@ -58,6 +58,7 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             init: s.init.clone(),
             is_mut: s.is_mut,
             is_extern: s.is_extern,
+            dll_import: s.dll_import,
             init_fn: s.init_fn,
         })
         .collect();

@@ -56,12 +56,7 @@ pub fn compile(
         || module.functions.iter().collect(),
         |a| a.core.view(module, a.u),
     );
-    pkgs.extern_statics = module
-        .statics
-        .iter()
-        .filter(|s| s.is_extern)
-        .map(|s| s.name.clone())
-        .collect();
+    pkgs.set_statics(&module.statics, t.os == "windows");
     if pkgs.link.packages.is_empty() {
         pkgs.link.packages = vec![(
             String::new(),
@@ -347,7 +342,9 @@ fn glue_code(
     // Statics.
     for s in &module.statics {
         // A prebuilt package's statics are its `.a`'s.
-        if pkgs.link.in_prebuilt(&s.name) {
+        // Defined outside: no symbol unless used (a DLL's is used at
+        // its import address only).
+        if pkgs.link.in_prebuilt(&s.name) || (s.is_extern && !defines(&s.name)) {
             continue;
         }
         let name = pkgs.static_sym(&s.name);
@@ -372,9 +369,6 @@ fn glue_code(
                 });
                 funcs.push((func, false, false));
             }
-            continue;
-        }
-        if s.is_extern {
             continue;
         }
         let global = opts.repl.is_some()

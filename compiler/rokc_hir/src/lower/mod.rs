@@ -45,7 +45,7 @@ mod send_check;
 mod throws;
 
 use collect::collect_unknown_paths;
-pub use collect::lower_full;
+pub use collect::{library_kept, lower_full};
 pub use coro::FN_BLOCK_LABEL;
 use desugar::{
     desugar_nullish_coalesce, desugar_question_dot, desugar_try_q, lower_closure_expr, lower_for,
@@ -96,6 +96,7 @@ struct NameSet<'b> {
 /// name (driver-qualified, e.g. `a::P`; generic bases unmangled) plus
 /// `pub use` re-export aliases. All type paths — in signatures, fields,
 /// struct literals, patterns, enum paths — resolve through `canon`.
+#[derive(Clone)]
 struct TypeNames {
     names: std::collections::HashSet<String>,
     traits: std::collections::HashSet<String>,
@@ -791,6 +792,7 @@ pub fn lower_with_uses(
 /// Per-method facts consulted at call sites: the module whose privacy
 /// rules apply, the method's visibility, and the trait it implements
 /// (operator dispatch requires a trait impl, spec 0.4 / 6.4).
+#[derive(Clone)]
 struct MethodInfo {
     module: String,
     vis: Visibility,
@@ -803,6 +805,7 @@ struct MethodInfo {
 /// A method template monomorphized per call like a generic fn: `def`
 /// carries the impl's generics followed by the method's own, and is
 /// named `Base__method` in the impl's module.
+#[derive(Clone)]
 struct GenericMethod {
     def: FnDef,
     /// The impl target (`Box<T>`): the type of `self` and of `Self`.
@@ -816,6 +819,7 @@ type AssocConst = (String, Ty, Expr);
 /// One `impl` block (spec 2.9), inherent or of a trait, concrete or
 /// generic (`impl<..> Tr for Box<T>`, or a bare `T` for a blanket impl:
 /// applies to a type that matches `self_ty` and meets the bounds).
+#[derive(Clone)]
 struct Impl {
     /// Empty for an inherent impl.
     trait_key: String,
@@ -844,9 +848,9 @@ impl Impl {
 }
 
 /// Every impl, in source order, with indexes for the concrete ones.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Impls {
-    all: Vec<Impl>,
+    all: Vec<std::sync::Arc<Impl>>,
     /// Concrete trait impls by target.
     by_target: HashMap<MethodTarget, Vec<usize>>,
     /// Concrete trait impls by trait key, in resolution order.
@@ -854,6 +858,11 @@ struct Impls {
 }
 
 impl Impls {
+    /// Every impl, in source order.
+    fn iter(&self) -> impl Iterator<Item = &Impl> {
+        self.all.iter().map(|i| &**i)
+    }
+
     /// Concrete impl `i`'s target and trait ref, once resolved.
     fn resolve(&mut self, i: usize, ty: HirTy, provides: Option<TraitRef>) {
         if let Some(r) = &provides {
@@ -862,12 +871,12 @@ impl Impls {
             }
             self.by_trait.entry(r.path.clone()).or_default().push(i);
         }
-        self.all[i].concrete = Some((ty, provides));
+        std::sync::Arc::make_mut(&mut self.all[i]).concrete = Some((ty, provides));
     }
 
     fn generic(&self) -> impl Iterator<Item = &Impl> {
         incr::read(|| incr::Read::GenericImpls);
-        self.all.iter().filter(|i| i.is_generic())
+        self.iter().filter(|i| i.is_generic())
     }
 
     /// The generic impls `pick` names.
@@ -876,16 +885,14 @@ impl Impls {
             Pick::Trait(key) => {
                 incr::read(|| incr::Read::GenericImplsOf(key.to_owned()));
                 Box::new(
-                    self.all
-                        .iter()
+                    self.iter()
                         .filter(move |i| i.is_generic() && i.trait_key == key),
                 )
             }
             Pick::Method(m) => {
                 incr::read(|| incr::Read::GenericImplsWith(m.to_owned()));
                 Box::new(
-                    self.all
-                        .iter()
+                    self.iter()
                         .filter(move |i| i.is_generic() && i.methods.contains_key(m)),
                 )
             }
@@ -896,8 +903,7 @@ impl Impls {
     /// The impls with associated const `name`.
     fn with_const<'i: 'n, 'n>(&'i self, name: &'n str) -> impl Iterator<Item = &'i Impl> + 'n {
         incr::read(|| incr::Read::ImplConsts(name.to_owned()));
-        self.all
-            .iter()
+        self.iter()
             .filter(move |i| i.consts.iter().any(|(n, ..)| n == name))
     }
 
@@ -945,7 +951,7 @@ enum Pick<'p> {
 /// Every struct / union and enum definition by id: the declared ones,
 /// and a generic one's instances, made when a type first names them
 /// (`instantiate_struct` / `instantiate_enum`), whatever resolves it.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TypeDefs<'a> {
     structs: std::cell::RefCell<Vec<HirStructDef>>,
     struct_table: std::cell::RefCell<HashMap<String, StructId>>,
@@ -1103,27 +1109,31 @@ impl<'a> TypeDefs<'a> {
 /// Module-wide, read-only lowering environment shared by every function
 /// body (plus the interior-mutable `sink`): the compile's own inputs and
 /// the tables collected from the items.
-struct Env<'a> {
+/// The inputs live for `'s`, the items the tables point into for `'a`.
+struct EnvIn<'a, 's> {
     /// The compile's source files (`#[track_caller]` / `throw` sites).
-    sources: &'a rokc_diagnostic::SourceMap,
-    prec: &'a PrecTable,
+    sources: &'s rokc_diagnostic::SourceMap,
+    prec: &'s PrecTable,
     t: Tables<'a>,
 }
 
-impl<'a> std::ops::Deref for Env<'a> {
+type Env<'a> = EnvIn<'a, 'a>;
+
+impl<'a> std::ops::Deref for EnvIn<'a, '_> {
     type Target = Tables<'a>;
     fn deref(&self) -> &Tables<'a> {
         &self.t
     }
 }
 
-impl std::ops::DerefMut for Env<'_> {
+impl std::ops::DerefMut for EnvIn<'_, '_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.t
     }
 }
 
 /// What collecting the items makes (`Env`'s tables).
+#[derive(Clone)]
 struct Tables<'a> {
     fn_table: HashMap<String, FnSig>,
     /// `fn_table` and `generic_fns` keys by last segment (both are
@@ -1409,7 +1419,125 @@ impl<'a> Env<'a> {
     }
 }
 
+impl ClosureSink {
+    fn new() -> Self {
+        Self {
+            extras: std::cell::RefCell::new(Vec::new()),
+            next_id: std::cell::Cell::new(0),
+            mono_cache: std::cell::RefCell::new(HashMap::new()),
+            mono_sigs: std::cell::RefCell::new(HashMap::new()),
+            mono_depth: std::cell::Cell::new(0),
+            uninferred: std::cell::Cell::new(0),
+            any_tags: std::cell::RefCell::new(Vec::new()),
+            ref_out: std::cell::RefCell::new(HashMap::new()),
+            any_dispatch: std::cell::RefCell::new(Vec::new()),
+            projecting: std::cell::RefCell::new(Vec::new()),
+            thunks: std::cell::RefCell::new(HashMap::new()),
+            instances: std::cell::RefCell::new(Vec::new()),
+            instance_warns: std::cell::RefCell::new(InstanceWarns::default()),
+            diagnostics: std::cell::RefCell::new(Vec::new()),
+            infer_vars: std::cell::RefCell::new(Vec::new()),
+            infer_depth: std::cell::Cell::new(0),
+            infer_floor: std::cell::Cell::new(0),
+            fn_origin: std::cell::RefCell::new(HashMap::new()),
+            track_caller: std::cell::RefCell::new(std::collections::HashSet::new()),
+            const_lowering: std::cell::RefCell::new(std::collections::HashSet::new()),
+            const_stack: std::cell::RefCell::new(Vec::new()),
+            inferred_ret: std::cell::RefCell::default(),
+            inferred_fns: std::cell::RefCell::default(),
+            bodies_done: std::cell::Cell::new(false),
+            sig_pass: std::cell::Cell::new(None),
+            recursive_ret: std::cell::RefCell::default(),
+            call_sites: std::cell::RefCell::default(),
+            tentative_ret: std::cell::RefCell::default(),
+            params: std::cell::RefCell::default(),
+            failed: std::cell::RefCell::default(),
+            bodies: std::cell::RefCell::default(),
+            assumed: std::cell::RefCell::default(),
+            const_names: std::cell::RefCell::default(),
+        }
+    }
+}
+
+impl Tables<'_> {
+    /// No item collected yet.
+    fn empty() -> Self {
+        Self {
+            fn_table: HashMap::new(),
+            fn_leaves: std::cell::OnceCell::new(),
+            extern_fns: HashMap::new(),
+            method_table: HashMap::new(),
+            key_of: HashMap::new(),
+            infer_ret: std::collections::HashSet::new(),
+            implicit_main: false,
+            harness_main: false,
+            may_diverge: std::collections::HashSet::new(),
+            method_info: HashMap::new(),
+            defs: TypeDefs::default(),
+            consts: HashMap::new(),
+            const_leaves: std::cell::RefCell::default(),
+            generic_fns: HashMap::new(),
+            generic_methods: HashMap::new(),
+            intrinsics: HashMap::new(),
+            generic_intrinsics: HashMap::new(),
+            extern_fn_ids: std::collections::HashSet::new(),
+            rok_externs: std::collections::HashSet::new(),
+            c_variadic: std::collections::HashSet::new(),
+            c_defs: std::collections::HashSet::new(),
+            stdcall_fns: std::collections::HashSet::new(),
+            sink: ClosureSink::new(),
+            item_visibility: HashMap::new(),
+            field_vis: HashMap::new(),
+            impls: Impls::default(),
+            unsafe_fns: std::collections::HashSet::new(),
+            neg_auto: std::collections::HashSet::new(),
+            auto_memo: std::cell::RefCell::default(),
+            trait_info: HashMap::new(),
+            statics: HashMap::new(),
+            static_leaves: std::cell::RefCell::default(),
+            mut_statics: std::collections::HashSet::new(),
+            literal_shapes: Vec::new(),
+            names: TypeNames::empty(),
+            decls: Vec::new(),
+            non_exhaustive: std::collections::HashSet::new(),
+            bound_methods: HashMap::new(),
+            bound_traits: HashMap::new(),
+        }
+    }
+}
+
+impl TypeNames {
+    /// No name declared yet.
+    fn empty() -> Self {
+        Self {
+            names: std::collections::HashSet::new(),
+            traits: std::collections::HashSet::new(),
+            auto_traits: std::collections::HashSet::new(),
+            lang: rokc_parser::LangTable::default(),
+            variants: std::collections::HashSet::new(),
+            reexports: HashMap::new(),
+            visibility: HashMap::new(),
+            mod_vis: HashMap::new(),
+            uses: HashMap::new(),
+            diags: std::cell::RefCell::new(Vec::new()),
+            generic_aliases: HashMap::new(),
+            plain_aliases: HashMap::new(),
+            alias_depth: std::cell::Cell::new(0),
+            broken_aliases: std::cell::RefCell::default(),
+            alias_uses: std::cell::RefCell::new(Vec::new()),
+            unknown_spans: std::cell::RefCell::default(),
+            canon_memo: std::cell::RefCell::default(),
+            leaves: std::cell::OnceCell::new(),
+            variant_leaves: std::cell::OnceCell::new(),
+            consts: HashMap::new(),
+            const_leaves: std::cell::OnceCell::new(),
+            value_reexports: HashMap::new(),
+        }
+    }
+}
+
 /// A handler registered with a built-in shape's pattern (`[..]` etc.).
+#[derive(Clone)]
 struct ShapeHandler {
     shape: rokc_parser::Shape,
     /// The handler's full name.
@@ -1420,6 +1548,7 @@ struct ShapeHandler {
 }
 
 /// What `any Tr` needs from a trait declaration.
+#[derive(Clone)]
 struct TraitInfo {
     methods: Vec<String>,
     supers: Vec<String>,
@@ -1454,6 +1583,7 @@ enum MethodTarget {
     Mangled(String),
 }
 
+#[derive(Clone)]
 enum MethodOrFn<'a> {
     Fn(&'a FnDef),
     /// `module` is where the body's names resolve: the impl's module
@@ -2170,7 +2300,7 @@ enum ArgSrc<'e> {
 /// generic structs. Lowering pushes here as it walks expressions.
 type TySubst = HashMap<String, HirTy>;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct InstanceWarns {
     instances: HashMap<rokc_diagnostic::Span, std::collections::HashSet<FunctionId>>,
     warns: Vec<(
@@ -2216,6 +2346,7 @@ impl InstanceWarns {
     }
 }
 
+#[derive(Clone)]
 struct ClosureSink {
     extras: std::cell::RefCell<Vec<HirFunction>>,
     /// Functions with `ref` parameters (spec 4.7, `ref self` included).

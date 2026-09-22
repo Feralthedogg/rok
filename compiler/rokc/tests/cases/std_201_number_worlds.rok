@@ -1,0 +1,23 @@
+// spec: std §2.1.1 §2.1.9
+// expect-exit: 0
+// expect-stdout:
+// i32 f64 i64 2147483648
+// i8 i16 u8 u16 u32 u64 isize usize f32 bool c_char char str int float
+
+// Stdlib 2.1.1: an unsuffixed literal is `i32` / `f64` without an
+// expected type and follows one when there is; `int` promotes past the
+// `i32` range instead of overflowing. 2.1.9: the primitive names and the
+// `int` / `float` keywords.
+fn main() {
+    let n = 0;
+    let f = 3.14;
+    let w: i64 = 0;
+    let big: int = 2147483647;
+    big = big + 1;
+    println(f"{n.type_name_of()} {f.type_name_of()} {w.type_name_of()} {big}");
+    let a: i8 = 1; let b: i16 = 1; let c: u8 = 1; let d: u16 = 1;
+    let e: u32 = 1; let g: u64 = 1; let h: isize = 1; let i: usize = 1;
+    let j: f32 = 1.0; let k: bool = true; let l: c_char = c'a'; let m: char = 'a';
+    let s: str = "s"; let fl: float = 1.5;
+    println(f"{a.type_name_of()} {b.type_name_of()} {c.type_name_of()} {d.type_name_of()} {e.type_name_of()} {g.type_name_of()} {h.type_name_of()} {i.type_name_of()} {j.type_name_of()} {k.type_name_of()} {l.type_name_of()} {m.type_name_of()} {s.type_name_of()} {big.type_name_of()} {fl.type_name_of()}");
+}

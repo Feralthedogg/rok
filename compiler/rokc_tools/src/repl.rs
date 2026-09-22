@@ -896,6 +896,7 @@ impl Repl {
                     init: ConstVal::Unit,
                     is_mut: true,
                     is_extern: true,
+                    dll_import: false,
                     init_fn: None,
                     span: rokc_diagnostic::Span::DUMMY,
                 })

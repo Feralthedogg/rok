@@ -1,0 +1,51 @@
+// spec: refs-lang §8.2.3 §8.2.10 §8.2.13
+// gc-stress: 40
+// expect-exit: 0
+// expect-stdout:
+// kept 41 41
+
+// 8.2.3 / 8.2.10: a ScanTable is little-endian bytes: `total_size` (u32),
+// `version` (u16) = 1, `num_entries` (u16), then (`field_offset`,
+// `field_kind`) u32 pairs. One written by hand and registered for a
+// type id of its own (8.2.13) makes the collector trace (and, under
+// gc-stress, move) the object its STRONG_REF slot names.
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::addr_of;
+
+extern "C" {
+    fn rok_gc_collect();
+    fn rok_gc_register_type(type_id: u32, table: usize);
+    fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;
+}
+
+const HOLDER: u32 = 0x10000u32 + 40000u32;
+// 24-byte objects; version 1, one entry (`1 | 1 << 16`); payload word 0
+// (offset 16) is a STRONG_REF (kind 0).
+static TABLE: [u32; 4] = [24u32, 65537u32, 16u32, 0u32];
+
+fn addr<T>(b: GcBuf<T>) -> usize { unsafe { transmute_unchecked(b) } }
+
+/// A fresh object referenced only by `holder`'s payload word.
+fn stash(holder: GcBuf<usize>) {
+    let t: GcBuf<i64> = unsafe { buf_new(1) };
+    unsafe { t[0] = 41; holder[0] = addr(t); }
+}
+
+fn churn() {
+    for i in 0..3000 { let _junk = f"junk{i}"; }
+    unsafe { rok_gc_collect(); }
+}
+
+fn main() {
+    unsafe {
+        rok_gc_register_type(HOLDER, transmute_unchecked(addr_of(TABLE)));
+        let holder: GcBuf<usize> = transmute_unchecked(rok_gc_alloc_slow(24, 8, HOLDER));
+        stash(holder);
+        churn();
+        let first: GcBuf<i64> = transmute_unchecked(holder[0]);
+        let a = first[0];
+        churn();
+        let again: GcBuf<i64> = transmute_unchecked(holder[0]);
+        println(f"kept {a} {again[0]}");
+    }
+}

@@ -179,6 +179,8 @@ extern "rok" {
 #[no_safepoint]
 extern "rok" {
     fn rok_cpu_count() -> usize;
+    fn rok_sched_workers() -> usize;
+    fn rok_sched_mode() -> u32;
     fn rok_thread_new_id() -> u64;
     fn rok_thread_id() -> u64;
     fn rok_task_worker_present() -> i32;

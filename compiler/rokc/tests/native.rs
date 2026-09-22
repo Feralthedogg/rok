@@ -216,6 +216,7 @@ fn main() {
 /// Runaway recursion on the main thread, a spawned thread and through
 /// nested `await`s: the runtime reports it (after flushing stdout) and
 /// aborts, instead of a bare SIGSEGV.
+// spec: §3.14.8
 #[test]
 fn stack_overflow_is_reported() {
     let Some(env) = setup() else { return };
@@ -378,6 +379,7 @@ struct P { x: i32; y: f64; }
 /// `-g` (spec 9.9.6), both back ends: a subprogram named by the rok
 /// path with its parameters and locals, and a line table pointing into
 /// the `.rok`; `llvm-dwarfdump --verify` finds no error.
+// spec: §0.2.4 §9.2.11 §9.5.10
 #[test]
 fn debug_info_names_functions_lines_and_locals() {
     let Some(env) = setup() else { return };
@@ -632,35 +634,19 @@ fn debug_info_shows_sums_and_gc_objects() {
                 >= 2,
             "{backend}: no subprogram for the C `main`:\n{info}"
         );
-        // A debugger that can run the program shows the values (within a
-        // minute: a wedged debug service makes `run` hang).
-        let Ok(mut lldb) = Command::new("lldb")
-            .args(["--batch", "-o", "b main.rok:10", "-o", "run"])
-            .args(["-o", "frame variable s v xs.h->items[0].buf->items[2]"])
-            .args(["-o", "b main.rok:23", "-o", "c"])
-            .args(["-o", "frame variable a total"])
-            .args(["-o", "kill"])
-            .arg(&exe)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        else {
+        let Some(out) = lldb(
+            &exe,
+            &[
+                "b main.rok:10",
+                "run",
+                "frame variable s v xs.h->items[0].buf->items[2]",
+                "b main.rok:23",
+                "c",
+                "frame variable a total",
+            ],
+        ) else {
             continue;
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        while lldb.try_wait().unwrap().is_none() {
-            if std::time::Instant::now() > deadline {
-                let _ = lldb.kill();
-                let _ = lldb.wait();
-                eprintln!("skipped: lldb did not finish");
-                continue;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        let out = text(&lldb.wait_with_output().unwrap().stdout);
-        if !out.contains("stop reason") {
-            continue;
-        }
         let vars = out.split("frame variable").nth(1).unwrap_or_default();
         assert!(vars.contains("value = (0 = 3, 1 = 4)"), "{backend}: {out}");
         assert!(vars.contains("value = (0 = 1.5)"), "{backend}: {out}");
@@ -671,6 +657,191 @@ fn debug_info_shows_sums_and_gc_objects() {
         assert!(held.contains("total = 8"), "{backend}: {out}");
     }
     // The same entries, tag and name, in the program's unit.
+    assert!(units[0].len() > 20, "{:?}", units[0]);
+    assert_eq!(units[0], units[1], "llvm vs native DIEs");
+}
+
+/// The output of `lldb --batch` running `cmds` on `exe`, then `kill`;
+/// `None` without an lldb that can run it (none, a wedged debug service
+/// that makes `run` hang a minute, no stop), or off arm64 (no debugger
+/// on Rosetta processes).
+fn lldb(exe: &Path, cmds: &[&str]) -> Option<String> {
+    if std::env::consts::ARCH != "aarch64" {
+        return None;
+    }
+    let mut c = Command::new("lldb");
+    c.arg("--batch");
+    for cmd in cmds.iter().chain(&["kill"]) {
+        c.args(["-o", cmd]);
+    }
+    let mut child = c
+        .arg(exe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipped: lldb did not finish");
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = text(&child.wait_with_output().unwrap().stdout);
+    out.contains("stop reason").then_some(out)
+}
+
+const DEBUGGEE_OPT: &str = "struct Wrap { inner: any; n: i32; }
+
+fn fib(n: i64) -> i64 {
+    if n < 2 { return n; }
+    let a = fib(n - 1);
+    let b = fib(n - 2);
+    return a + b;
+}
+
+yield fn evens(limit: i32) -> i32 {
+    let k = 0;
+    while k < limit {
+        let twice = k * 2;
+        yield twice;
+        k += 1;
+    }
+}
+
+fn main() {
+    let base = 10;
+    let f = |k: i32| { return k + base; };
+    let w: any = Wrap { inner: 5i64, n: 2 };
+    let sum = 0;
+    for v in evens(3) {
+        sum += v;
+    }
+    println(f\"{fib(10)} {f(sum)} {held(w)}\");
+}
+
+fn held(w: any) -> i32 {
+    return 1;
+}
+";
+
+/// `-g` at `-O0` (both back ends) and `-O2`: the unit says whether it
+/// is optimized; a coroutine's locals (reloaded from its frame) show in
+/// its resume function, named by its creator (`evens::{coroutine#0}`);
+/// compiler temporaries (`__env`) are no variables; at `-O2` a line breakpoint stops, live locals
+/// show and `finish` returns with the value. A closure local shows its
+/// environment object, an `any` inside a type stored in an `any` is
+/// that variant part again; both back ends write the same entries.
+#[test]
+fn debug_info_optimized_coroutines_closures() {
+    let Some(env) = setup() else { return };
+    let Some(dump) = ["llvm-dwarfdump", "dwarfdump"]
+        .into_iter()
+        .find(|t| Command::new(t).arg("--version").output().is_ok())
+    else {
+        return;
+    };
+    let mut units = Vec::new();
+    for (name, args) in [
+        ("llvm", &["-C", "backend=llvm"][..]),
+        ("native", &["-C", "backend=native"][..]),
+        ("o2", &["-O2"][..]),
+    ] {
+        let dir = scratch(&format!("debug_opt_{name}"));
+        fs::write(dir.join("main.rok"), DEBUGGEE_OPT).unwrap();
+        let exe = dir.join("out");
+        let mut extra = vec!["-g", "-o", exe.to_str().unwrap()];
+        extra.extend_from_slice(args);
+        ok(&build(&env, &dir.join("main.rok"), &extra));
+        let run = Command::new(&exe).output().unwrap();
+        ok(&run);
+        assert_eq!(text(&run.stdout), "55 16 1\n");
+        let dsym = dir.join("out.dSYM");
+        let target = if dsym.exists() { &dsym } else { &exe };
+        verify_dwarf(dump, target, name);
+        let info = Command::new(dump)
+            .arg("--debug-info")
+            .arg(target)
+            .output()
+            .unwrap();
+        let info = text(&info.stdout);
+        // `isOptimized` (Mach-O: `DW_AT_APPLE_optimized`).
+        if dsym.exists() {
+            let unit = info
+                .split("DW_TAG_compile_unit")
+                .find(|u| u.contains("DW_AT_name\t(\"main.rok\")"))
+                .and_then(|u| u.split("DW_TAG_").next())
+                .unwrap_or_else(|| panic!("{name}: no main.rok unit:\n{info}"));
+            let opt = unit.contains("DW_AT_APPLE_optimized\t(true)");
+            assert_eq!(opt, name == "o2", "{name}: {unit}");
+        }
+        if name == "o2" {
+            let Some(out) = lldb(
+                &exe,
+                &[
+                    "b main.rok:14",
+                    "b main.rok:7",
+                    "run",
+                    "frame variable k twice",
+                    "breakpoint delete 1",
+                    "c",
+                    "frame variable a n",
+                    "finish",
+                ],
+            ) else {
+                continue;
+            };
+            let co = out.split("frame variable").nth(1).unwrap_or_default();
+            assert!(co.contains("k = 0") && co.contains("twice = 0"), "{out}");
+            let fib = out.split("frame variable").nth(2).unwrap_or_default();
+            assert!(fib.contains("a = 1") && fib.contains("n = 2"), "{out}");
+            assert!(fib.contains("step out"), "{out}");
+            // fib(10) to `main`: the optimizer made the recursion a loop.
+            assert!(fib.contains("Return value: (long) $0 = 55"), "{out}");
+            continue;
+        }
+        units.push(unit_dies(&info, "main.rok"));
+        let Some(out) = lldb(
+            &exe,
+            &[
+                "b main.rok:14",
+                "b main.rok:27",
+                "b main.rok:31",
+                "run",
+                "frame variable",
+                "breakpoint delete 1",
+                "c",
+                "frame variable -P 3 f",
+                "c",
+                "frame variable -P 6 -D 12 w",
+                "finish",
+            ],
+        ) else {
+            continue;
+        };
+        // The resume function by its creator; no compiler temporaries.
+        let co = out.split("frame variable").nth(1).unwrap_or_default();
+        assert!(
+            co.contains("k = 0") && co.contains("twice = 0"),
+            "{name}: {out}"
+        );
+        assert!(!co.contains("__"), "{name}: {out}");
+        assert!(out.contains("out`evens::{coroutine#0}"), "{name}: {out}");
+        let f = out.split("frame variable").nth(2).unwrap_or_default();
+        assert!(
+            f.contains("env = 0x") && f.contains("0 = 10"),
+            "{name}: {out}"
+        );
+        let w = out.split("frame variable").nth(3).unwrap_or_default();
+        assert!(
+            w.contains("inner = {") && w.contains("0 = 5"),
+            "{name}: {out}"
+        );
+        assert!(w.contains("Return value: (int) $0 = 1"), "{name}: {out}");
+    }
     assert!(units[0].len() > 20, "{:?}", units[0]);
     assert_eq!(units[0], units[1], "llvm vs native DIEs");
 }
@@ -786,6 +957,7 @@ fn elf_debug_info_of_several_objects() {
 /// dependency's code nothing calls: each function's string constant is
 /// in the executable only while the function is. Link only for the
 /// targets other than the host's.
+// spec: §9.2.14
 #[test]
 fn unused_dependency_code_is_dropped() {
     if setup().is_none() {
@@ -1198,6 +1370,7 @@ fn repr_layouts_match_clang() {
     }
 }
 
+// spec: §9.3.7
 #[test]
 fn c_abi_matches_clang() {
     let Some(env) = setup() else { return };
@@ -1314,6 +1487,7 @@ fn c_abi_matches_clang() {
 
 /// `#[link(..)]` on an `extern` block puts the library on the link
 /// line (spec 6.2.3); `LIBRARY_PATH` is the C driver's search path.
+// spec: §9.2.14
 #[test]
 fn link_attribute_links_the_library() {
     let Some(env) = setup() else { return };
@@ -1462,6 +1636,7 @@ fn main() -> i32 {
 /// `-l` links a library the source does not name; `--native-runtime`
 /// copies a shared library beside the executable, which then loads it
 /// from its own directory (rpath `@loader_path` / `$ORIGIN`).
+// spec: §9.1.2 §9.2.14
 #[cfg(unix)]
 #[test]
 fn link_flags_and_runtime_files() {
@@ -1553,6 +1728,7 @@ int rok_str_eq(RokStr a, RokStr b) { return !rok_str_cmp(a, b); }
 int rok_stdio_write(int fd, RokStr s, int nl) {
     _write(fd, s.p, (unsigned)s.n); if (nl) _write(fd, "\n", 1); return 0;
 }
+int side_count = 42;
 void show(long v) {
     char b[32]; int n = 31; int neg = v < 0;
     unsigned long u = neg ? -(unsigned long)v : v;
@@ -1639,12 +1815,26 @@ fn main() {
         show(mixed(1, "ab", 0.5, Big { a: 3, b: 0, c: 4 }, 5, 0.25, "xyz", 6));
         let k = "xyz";
         show(if k == "xyz" { 1 } else { 0 });
+        // Data of a DLL, and of an object (lld-link makes its import
+        // address).
+        show(if NlsAnsiCodePage > 0u16 { 1 } else { 0 });
+        side_count += 1;
+        show(side_count as i64);
     }
+}
+
+#[link("ntdll")]
+extern "system" {
+    static NlsAnsiCodePage: u16;
+}
+
+extern "C" {
+    static mut side_count: i32;
 }
 "#;
 
 const WIN_EXPECTED: &str =
-    "hello from rok\n246\n30615\n-1699\n4225\n45\n7654321\n75\n321\n-4005\n630793071\n1\n";
+    "hello from rok\n246\n30615\n-1699\n4225\n45\n7654321\n75\n321\n-4005\n630793071\n1\n1\n43\n";
 
 /// `(machine, subsystem, unwind table present)` of a PE image.
 fn pe_header(exe: &[u8]) -> (u16, u16, bool) {
@@ -1673,6 +1863,7 @@ fn pe_header(exe: &[u8]) -> (u16, u16, bool) {
 /// runtime are compiled by clang; a package builds `<name>.exe`. With
 /// `ROK_TEST_WINE=<wine>` the `x86_64` and x86 ones run and print what
 /// the C ABI (spec 8.6.3) and the rok one (8.6.6) agree on.
+// spec: §9.2.14 §9.5.9
 #[test]
 fn windows_executables() {
     let Some(env) = setup() else { return };

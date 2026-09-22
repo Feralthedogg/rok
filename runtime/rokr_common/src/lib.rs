@@ -31,7 +31,20 @@ pub unsafe fn write_stderr(msg: *const u8, len: usize) {
 /// Out of memory (stdlib 2.14.5 `oom_fn`; Fatal, exit 101): the one
 /// path every allocation failure and `rok::core::panic::oom()` take.
 pub fn oom() -> ! {
+    let hook = OOM_HOOK.swap(core::ptr::null_mut(), core::sync::atomic::Ordering::Relaxed);
+    if !hook.is_null() {
+        // SAFETY: set from a `fn()` by `set_oom_hook`.
+        unsafe { core::mem::transmute::<*mut (), fn()>(hook)() };
+    }
     fatal(b"fatal error: out of memory")
+}
+
+/// Called once by the first [`oom`] (`ROK_HEAP_DUMP=on_oom`).
+static OOM_HOOK: core::sync::atomic::AtomicPtr<()> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+pub fn set_oom_hook(hook: fn()) {
+    OOM_HOOK.store(hook as *mut (), core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Fatal runtime error: `msg` + `\n` to stderr, then `exit(101)`;

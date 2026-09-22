@@ -1,3 +1,4 @@
+// spec: std §2.3.5
 // expect-exit: 0
 // expect-stdout:
 // 2 -2 0.5 1 1 0 0 -1 9 -0.5 2

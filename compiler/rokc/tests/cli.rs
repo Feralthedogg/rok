@@ -37,6 +37,7 @@ fn new_package(dir: &Path, name: &str, lib: bool) -> PathBuf {
     pkg
 }
 
+// spec: §9.1.1 §9.1.2 §9.1.4 §9.1.5 §9.2.2 §9.2.15
 #[test]
 fn new_bin_package_runs_from_its_directory() {
     let Some(env) = setup() else { return };
@@ -62,6 +63,7 @@ fn new_bin_package_runs_from_its_directory() {
 /// 0.3.1: the package is `src/`; `.rok` files beside it are not part of
 /// it (not compiled, not build inputs, not formatted), and one of them
 /// runs as a script of its own.
+// spec: §9.1.1 §9.2.2 §9.1.11
 #[test]
 fn files_outside_src_are_not_the_package() {
     let Some(env) = setup() else { return };
@@ -100,6 +102,7 @@ fn files_outside_src_are_not_the_package() {
 
 /// `--emit=ast` (9.9.10): the package after meta expansion, as rok
 /// source (derived impls, `if let` as `match`; no comments).
+// spec: §9.9.1
 #[test]
 fn emit_ast_shows_derives_and_desugaring() {
     let dir = scratch("ast");
@@ -124,6 +127,7 @@ fn emit_ast_shows_derives_and_desugaring() {
 /// 9.2.8 in a library build: every function of the package is a root
 /// (even a private one nothing calls), library code it does not reach
 /// is dropped.
+// spec: §9.3.2
 #[test]
 fn library_build_drops_code_its_package_does_not_reach() {
     let dir = scratch("libprune");
@@ -145,6 +149,7 @@ fn library_build_drops_code_its_package_does_not_reach() {
 
 /// 902.16: an unchanged package is not rebuilt; a changed source, a
 /// different option or a replaced output rebuilds it.
+// spec: §9.1.2
 #[test]
 fn unchanged_package_is_fresh() {
     let Some(env) = setup() else { return };
@@ -373,6 +378,7 @@ fn edited_module_recompiles_its_unit_alone() {
 /// them), and its warnings and program are a clean build's; under
 /// `ROKC_INCR_VERIFY` a replay that differs from a clean lowering fails
 /// the build.
+// spec: §9.1.7
 #[test]
 fn front_end_reuses_parses_and_bodies() {
     let Some(env) = setup() else { return };
@@ -542,6 +548,7 @@ fn incremental_checks_generic_bodies() {
 /// dependency, it recompiles nothing, and its archive built against the
 /// old one still links (lld fails on what a member it pulls leaves
 /// undefined). Cross targets (`targets/build.sh`) link only.
+// spec: §9.2.13 §9.3.1 §9.3.3
 #[test]
 fn library_builds_by_units() {
     let Some(env) = setup() else { return };
@@ -648,6 +655,7 @@ fn library_units(env: &Env, target: Option<&str>, opt: &str) {
 /// An anonymous file builds by units too, kept per file in the target
 /// directory without a package (`ROKC_TARGET_DIR`, else the system's
 /// temporary one), not in a `target/` beside the script.
+// spec: §9.1.2 §9.1.7
 #[test]
 fn anonymous_file_reuses_its_units() {
     let Some(env) = setup() else { return };
@@ -726,6 +734,7 @@ fn new_file_under_debug_info_recompiles_its_importers() {
 }
 
 /// `-vv` (909.5): the files read and the generic instances made.
+// spec: §9.1.5 §9.9.5
 #[test]
 fn very_verbose_lists_files_and_instances() {
     let dir = scratch("very_verbose");
@@ -750,6 +759,7 @@ fn very_verbose_lists_files_and_instances() {
 
 /// A nested fn's item (and symbol) name: the enclosing fn's (`Type.m`
 /// for a method), `/`, its own; `/2` .. for a repeated name.
+// spec: §9.5.2
 #[test]
 fn nested_fn_item_names() {
     let dir = scratch("nested_fn_names");
@@ -768,6 +778,7 @@ fn nested_fn_item_names() {
     }
 }
 
+// spec: §9.1.2 §9.2.13 §9.2.15 §6.2.5 §9.9.12
 #[test]
 fn lib_package_builds_archive_and_runs_tests() {
     let Some(env) = setup() else { return };
@@ -807,6 +818,7 @@ fn lib_package_builds_archive_and_runs_tests() {
     assert_exit(&rokc(Some(&env), &lib, &["build"]), 0);
 }
 
+// spec: §6.2.5
 #[test]
 fn tests_in_private_modules_run() {
     let Some(env) = setup() else { return };
@@ -846,6 +858,7 @@ fn tests_in_private_modules_run() {
     assert!(text(&out.stderr).contains("`util::checks::h` is private"));
 }
 
+// spec: §9.1.1 §9.1.2 §9.2.2 §9.2.15
 #[test]
 fn lone_file_is_an_anonymous_package() {
     let Some(env) = setup() else { return };
@@ -874,6 +887,7 @@ fn lone_file_is_an_anonymous_package() {
     assert_exit(&rokc(Some(&env), &dir, &["build"]), 1);
 }
 
+// spec: §9.1.5 §9.1.8 §9.9.4 §9.9.12
 #[test]
 fn json_and_colored_diagnostics() {
     let Some(env) = setup() else { return };
@@ -900,6 +914,7 @@ fn json_and_colored_diagnostics() {
     assert!(!text(&out.stderr).contains('\x1b'));
 }
 
+// spec: §9.1.2 §9.1.11 / std §3.9.4
 #[test]
 fn fmt_check_and_rewrite() {
     let dir = scratch("fmt");
@@ -942,6 +957,7 @@ fn fmt_check_and_rewrite() {
 
 /// A file saved with CRLF (spec 1.1.3) is formatted to LF line ends;
 /// a line break inside a string literal is its value and stays.
+// spec: §9.1.11
 #[test]
 fn fmt_writes_lf_and_keeps_literal_crlf() {
     let dir = scratch("fmt-crlf");
@@ -961,6 +977,7 @@ fn fmt_writes_lf_and_keeps_literal_crlf() {
 /// package hash tells the two apart (9.5.7); `#[export_name]` is as
 /// written (9.5.8); the implicit `main` is mangled beside the platform
 /// `main` (9.5.9).
+// spec: §9.5.1 §9.5.2 §9.5.5 §9.5.7 §9.5.9
 #[test]
 fn symbols_follow_the_mangling_scheme() {
     let Some(env) = setup() else { return };
@@ -1027,8 +1044,18 @@ fn symbols_follow_the_mangling_scheme() {
     for want in ["rok_marker_fn", "main", &format!("_Y{}__main_", a[0].0)] {
         assert!(a_all.iter().any(|s| s == want), "no {want}: {a_all:?}");
     }
+    // 9.5.5: `_Y` is followed by the lowercase hex package hash, never
+    // by the reserved `_YK` / `_YL` / `_YI` / `_YM`.
+    for s in a_all.iter().filter_map(|s| s.strip_prefix("_Y")) {
+        assert!(
+            s.get(..8)
+                .is_some_and(|h| h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))),
+            "_Y{s}"
+        );
+    }
 }
 
+// spec: §9.1.1 §9.1.3 §9.1.4 §9.1.6 §9.5.4 §9.9.3 §9.9.12
 #[test]
 fn demangle_and_usage_errors() {
     let dir = scratch("misc");
@@ -1070,6 +1097,7 @@ fn demangle_and_usage_errors() {
 
 /// rokc's library and runtime are under its own sysroot (`bin/..`),
 /// whatever `ROK_HOME` says; a missing one is named.
+// spec: §9.1.6 §9.2.17 §9.2.19
 #[test]
 fn sysroot_is_beside_rokc() {
     let dir = scratch("sysroot");
@@ -1116,6 +1144,7 @@ fn sysroot_is_beside_rokc() {
 /// WASI preview 2 component, preview 1 command modules), run by `node`
 /// with the shipped `rok.mjs` host and by `ROK_TEST_WASM_RUNNER`
 /// (wasmtime) when there. A target it does not ship is named.
+// spec: §0.2.4 §9.1.2 §9.2.14 §9.2.15 §9.2.18 §9.5.9
 #[test]
 fn cross_targets_link_from_the_sysroot() {
     let dir = scratch("cross");
@@ -1272,6 +1301,7 @@ fn wasm_target_runs(dir: &Path, targets: &Path, spec: &TargetSpec) {
 /// `load` initializes it, `main` runs the program, and its
 /// `#[export_name]` functions stay callable from JS afterwards,
 /// allocating and collecting, their output flushed after each call.
+// spec: §9.5.9
 #[test]
 fn browser_module_exports_to_js() {
     let dir = scratch("browser-exports");
@@ -1458,6 +1488,7 @@ fn check_x86_pe(t: &str, b: &[u8]) {
     );
 }
 
+// spec: §5.7.14 §9.1.2
 #[test]
 fn extern_dependencies_are_top_level_names() {
     let Some(env) = setup() else { return };
@@ -1517,6 +1548,7 @@ fn extern_dependencies_are_top_level_names() {
     assert_exit(&rokc(Some(&env), &dir, &["check", "app"]), 1);
 }
 
+// spec: §5.7.14
 #[test]
 fn extern_dependency_is_a_package_boundary() {
     let Some(env) = setup() else { return };
@@ -1674,6 +1706,7 @@ fn prebuilt_dependency_sums_keep_their_tags() {
 /// Aggregates over 64 bytes cross a prebuilt dependency by address
 /// (spec 8.6.6), both ways and through function values, whichever
 /// backend built each side (`-O0`: native, `-O2`: LLVM).
+// spec: §9.2.10
 #[test]
 fn prebuilt_dependency_passes_large_aggregates_by_address() {
     let Some(env) = setup() else { return };
@@ -1718,6 +1751,7 @@ fn prebuilt_dependency_passes_large_aggregates_by_address() {
     }
 }
 
+// spec: §9.1.3 §9.4.7 §9.4.8 §9.4.9 §9.4.10 §9.9.2 §9.9.14
 #[test]
 fn prebuilt_dependency_is_linked_and_instantiated() {
     let Some(env) = setup() else { return };
@@ -1830,6 +1864,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
 
 /// A ROKHIR from another format version or compiler, or built under
 /// another name, is refused with a "rebuild" message.
+// spec: §0.3.3 §9.3.4 §9.3.5 §9.4.3 §9.4.4 §9.4.5 §9.4.6 §9.4.7 §9.4.9
 #[test]
 fn stale_rokhir_is_rejected() {
     let Some(env) = setup() else { return };
@@ -1863,6 +1898,54 @@ fn stale_rokhir_is_rejected() {
     );
 
     let good = fs::read(&rokhir).unwrap();
+    // The layout (9.4.3 - 9.4.7): a 16-byte little-endian header (`ROKH`,
+    // version 3, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
+    // the producer, then the meta (mount name, package hash — 0.3.3: the
+    // SHA-256 of `path \0 text \0` per file, 8 hex digits — and source
+    // directory, GC type range, features); at the body offset, the files
+    // with concrete function bodies cut to `;`.
+    let word = |i: usize| u32::from_le_bytes(good[i..i + 4].try_into().unwrap());
+    assert_eq!(&good[..4], b"ROKH");
+    assert_eq!((word(4), word(8)), (3, 0));
+    let varint = |at: &mut usize| -> usize {
+        let extra = good[*at].leading_ones() as usize;
+        let mut v = usize::from(good[*at] & 0xffu8.checked_shr(extra as u32 + 1).unwrap_or(0));
+        for b in &good[*at + 1..=*at + extra] {
+            v = (v << 8) | usize::from(*b);
+        }
+        *at += 1 + extra;
+        v
+    };
+    let string = |at: &mut usize| -> String {
+        let n = varint(at);
+        *at += n;
+        String::from_utf8(good[*at - n..*at].to_vec()).unwrap()
+    };
+    let mut at = 16;
+    assert!(string(&mut at).starts_with("rokc "));
+    assert_eq!(string(&mut at), "dep");
+    let src = "pub fn one() -> i32 { return 1; }\n";
+    let digest = rokc_core::hash::sha256(format!("lib.rok\0{src}\0").as_bytes());
+    assert_eq!(string(&mut at), rokc_core::hash::hex(&digest)[..8]);
+    let mut at = word(12) as usize;
+    assert_eq!(varint(&mut at), 1);
+    assert_eq!(string(&mut at), "lib.rok");
+    assert_eq!(string(&mut at), "pub fn one() -> i32 ;\n");
+    // 9.3.5: the archive's functions are global `_Y` symbols.
+    if !cfg!(windows) && Command::new("nm").arg("--version").output().is_ok() {
+        let nm = Command::new("nm")
+            .arg(dir.join("dep/target/debug/libdep.a"))
+            .output()
+            .unwrap();
+        let want = format!("_Y{}_dep_one_", &rokc_core::hash::hex(&digest)[..8]);
+        assert!(
+            text(&nm.stdout)
+                .lines()
+                .any(|l| l.contains(" T ") && l.ends_with(&want)),
+            "no {want}: {}",
+            text(&nm.stdout)
+        );
+    }
     let mut bad = good.clone();
     bad[4] = 99; // format version
     put(&rokhir, &bad).unwrap();
@@ -1890,6 +1973,7 @@ fn stale_rokhir_is_rejected() {
 
 /// Library bodies nothing reaches are skipped by default;
 /// `--check-library` lowers (so type-checks) every one of them.
+// spec: §9.1.2
 #[test]
 fn check_library_checks_every_body() {
     let dir = scratch("check-lib");
@@ -1900,9 +1984,83 @@ fn check_library_checks_every_body() {
     );
 }
 
+/// Spec 9.1 / 0.6.4: `-C target-feature` / `-C target-cpu` reach LLVM
+/// (`+avx2` widens a vectorized loop to `ymm` registers; the baseline
+/// stays SSE2), `native` is the build machine's CPU, and the native
+/// backend says it builds for the baseline.
+// spec: §9.1.2 §0.6.4
+#[test]
+fn target_cpu_and_features() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("target-cpu");
+    let src = "fn add(a: List<f32>, b: List<f32>, c: List<f32>) {\n    \
+               for i in 0..a.len() {\n        c[i] = a[i] + b[i];\n    }\n}\n\n\
+               let a: List<f32> = [];\nlet b: List<f32> = [];\nlet c: List<f32> = [];\n\
+               for i in 0..64 {\n    a.push(1.0f32);\n    b.push(2.0f32);\n    \
+               c.push(0.0f32);\n}\nadd(a, b, c);\nprintln(f\"{c[3]}\");\n";
+    put(dir.join("v.rok"), src).unwrap();
+    let asm = dir.join("target/x86_64-apple-darwin/release/build/v.s");
+    let ymm = |extra: &[&str]| {
+        let mut args = vec![
+            "build",
+            "v.rok",
+            "-O2",
+            "--target=x86_64-apple-darwin",
+            "--emit=asm",
+        ];
+        args.extend_from_slice(extra);
+        assert_exit(&rokc(None, &dir, &args), 0);
+        fs::read_to_string(&asm).unwrap().contains("ymm")
+    };
+    assert!(!ymm(&[]), "the baseline has no AVX");
+    assert!(ymm(&["-C", "target-feature=+avx2"]));
+    assert!(ymm(&["-C", "target-cpu=haswell"]));
+
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &["run", "v.rok", "-O2", "-C", "target-cpu=native"],
+    );
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "3\n");
+    let out = rokc(
+        Some(&env),
+        &dir,
+        &["run", "v.rok", "-C", "target-cpu=native"],
+    );
+    assert_exit(&out, 0);
+    assert!(
+        text(&out.stderr).contains("the native backend (-O0) builds for the target's baseline CPU")
+    );
+
+    let out = rokc(None, &dir, &["build", "v.rok", "-C", "target-feature=avx2"]);
+    assert_exit(&out, 2);
+    assert!(text(&out.stderr).contains("`avx2` is not `+feature` or `-feature`"));
+    let foreign = if cfg!(target_arch = "x86_64") {
+        "aarch64-unknown-linux-gnu"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+    let out = rokc(
+        None,
+        &dir,
+        &[
+            "build",
+            "v.rok",
+            "-O2",
+            &format!("--target={foreign}"),
+            "-C",
+            "target-cpu=native",
+        ],
+    );
+    assert_exit(&out, 2);
+    assert!(text(&out.stderr).contains("is not the build machine's platform"));
+}
+
 /// Stdlib 0.1.2: `rok::bare` names neither `rok::core` nor `rok::std`, and
 /// `rok::core` does not name `rok::std` (copies of the tiers, with one
 /// module each that does).
+// spec: std §0.1.2
 #[test]
 fn library_tiers_depend_only_downward() {
     fn copy(from: &Path, to: &Path) {
@@ -1962,6 +2120,7 @@ fn library_tiers_depend_only_downward() {
     }
 }
 
+// spec: §9.9.1 §9.9.10
 #[test]
 fn emit_expanded_prints_meta_expansions() {
     // Spec 6.9.9: `--emit=expanded` writes what user derives /
@@ -1994,6 +2153,7 @@ fn emit_expanded_prints_meta_expansions() {
     assert_eq!(got, want);
 }
 
+// spec: §9.1.2
 #[test]
 fn overflow_checks_option_overrides_the_opt_level() {
     let Some(env) = setup() else { return };
@@ -2113,6 +2273,7 @@ fn dependency_blanket_impl_overlaps_user_impl() {
     );
 }
 
+// spec: std §1.10.3 §1.10.7
 #[test]
 fn missing_mlir_plugins_are_errors() {
     // Stdlib bare 1.10.3: a missing plugin is a clean error up front.
@@ -2157,6 +2318,7 @@ fn missing_mlir_plugins_are_errors() {
 /// A dialect + pass plugin (`tests/plugin/answer.cpp`) built from the
 /// linked prefix's headers with its MLIR symbols unresolved runs on
 /// rokc's own MLIR.
+// spec: std §1.10.2 §1.10.3 §1.10.4
 #[test]
 fn mlir_plugin_binds_to_rokcs_mlir() {
     let Some(env) = setup() else { return };
@@ -2214,6 +2376,7 @@ fn mlir_plugin_binds_to_rokcs_mlir() {
 }
 
 /// `rokc --print cfg` (spec 6.3.11): the target's keys and `--cfg`.
+// spec: §6.3.11 §9.1.4
 #[test]
 fn print_cfg_lists_the_active_cfg() {
     let dir = scratch("print_cfg");
@@ -2243,6 +2406,7 @@ fn print_cfg_lists_the_active_cfg() {
 
 /// `--print target-list` names every built-in target; `--print
 /// target-spec` prints one as ROKON, which reads back as the same spec.
+// spec: §0.6.2 §0.6.5 §9.1.4
 #[test]
 fn print_target_list_and_spec() {
     let dir = scratch("print_target");
@@ -2270,6 +2434,7 @@ fn print_target_list_and_spec() {
 /// A custom target (`--target <name>.rokon`): a copy of the host's spec
 /// builds the same code under its own name; its runtime is looked up in
 /// `lib/rok/targets/<name>/`; a bad field is an error at its line.
+// spec: §0.6.5 §9.1.2
 #[test]
 fn custom_target_file() {
     let Some(env) = setup() else { return };
@@ -2424,6 +2589,7 @@ fn cfg_on_impl_members_follows_the_target() {
 /// `#[non_exhaustive]` (spec 6.2.10): a match on the type from another
 /// package needs a `_` arm even when it names every variant; inside its
 /// own package it does not.
+// spec: §6.2.10
 #[test]
 fn non_exhaustive_needs_a_catch_all_across_packages() {
     let dir = scratch("non-exhaustive");
@@ -2459,6 +2625,7 @@ fn non_exhaustive_needs_a_catch_all_across_packages() {
 
 /// A native build links the prebuilt standard library, except at `-O3`,
 /// where it is compiled with the program (9.2.16).
+// spec: §9.3.6 / std §0.1.3
 #[test]
 fn o3_compiles_std_from_source() {
     let Some(env) = setup() else { return };
@@ -2482,6 +2649,7 @@ fn o3_compiles_std_from_source() {
 /// it, and `-C profile-use` optimizes with it; a profile older than the
 /// code is a warning (again when the build is Fresh). The REPL,
 /// `-C backend=native` and wasm32-unknown-unknown refuse it.
+// spec: §9.1.2 §9.1.7 §9.2.10 §9.9.7
 #[test]
 fn profile_guided_optimization_round_trip() {
     let dir = scratch("pgo");
@@ -2618,6 +2786,7 @@ const PGO_MAIN: &str = "fn classify(n: i64) -> i64 {\n    if n % 7 == 0 { 3 } el
 /// `--topn`); a merge that overflows a counter warns and still writes
 /// the profile; context-sensitive PGO: `-C cs-profile-generate` on top of
 /// `-C profile-use`, its runs merged with the first profile, used again.
+// spec: §9.1.2 §9.9.7
 #[test]
 fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
     let dir = scratch("pgo-cs");
@@ -2722,6 +2891,7 @@ fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
 /// PGO for wasm32-wasi: the profile runtime (with wasi-libc's emulated
 /// mmap) writes through WASI; the component run by
 /// `ROK_TEST_WASM_RUNNER` (wasmtime) with the directory preopened.
+// spec: §9.9.7
 #[test]
 fn profile_guided_optimization_on_wasm32_wasi() {
     let dir = scratch("pgo-wasm");
@@ -2763,6 +2933,7 @@ fn profile_guided_optimization_on_wasm32_wasi() {
 /// the driver gets the component type and the exports through `-Wl,`,
 /// clang's name of the target and, for a component without `main`, the
 /// reactor exec model. A stand-in driver records its arguments.
+// spec: §9.1.7 §9.2.14
 #[cfg(unix)]
 #[test]
 fn rok_cc_links_wit_components() {
@@ -2821,6 +2992,240 @@ fn rok_cc_links_wit_components() {
     assert!(
         args.lines().any(|l| l.starts_with("-Wl,--component-type,")),
         "{args}"
+    );
+}
+
+/// `rokc run` passes arguments after `--` and exits with the program's
+/// code, `128 + n` for a signal (9.1.2); a lone file must be `.rok`
+/// (1.1.1); an internal compiler error exits 101 (9.1.6); progress verbs
+/// (9.1.8), `ROKC_VERBOSE` and `ROK_TIME_PASSES` (9.1.7, 9.9.5),
+/// `rokc emit` (MLIR by default; several kinds take no `-o`), `help
+/// <command>` (9.1.4), and the runtime's `ROK_GC_STATS` (9.9.8).
+// spec: §1.1.1 §9.1.2 §9.1.4 §9.1.6 §9.1.7 §9.1.8 §9.9.1 §9.9.5 §9.9.8
+#[test]
+fn run_passes_arguments_codes_and_progress() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("run-codes");
+    let app = dir.join("app");
+    let src = "use rok::std::env;\n\
+               extern \"C\" { fn raise(sig: i32) -> i32; }\n\
+               fn main() -> i32 {\n\
+               \x20   let a = env::args();\n\
+               \x20   let last = a[a.len() - 1];\n\
+               \x20   println(f\"{a.len()} {last}\");\n\
+               \x20   if last == \"kill\" { unsafe { raise(9) }; }\n\
+               \x20   let keep: List<List<i32>> = [];\n\
+               \x20   for i in 0..200000 { keep.push([i]); if keep.len() > 64 { keep = []; } }\n\
+               \x20   3\n\
+               }\n";
+    put(app.join("src/main.rok"), src).unwrap();
+    let rokr = env.rokr.display().to_string();
+    let out = rokc(None, &app, &["run", "--rokr", &rokr, "--", "one", "two"]);
+    assert_exit(&out, 3);
+    assert_eq!(text(&out.stdout), "3 two\n");
+    let err = text(&out.stderr);
+    for verb in ["   Compiling app", "    Finished in ", "     Running `"] {
+        assert!(err.contains(verb), "{verb:?}: {err}");
+    }
+    if cfg!(unix) {
+        let out = rokc(None, &app, &["run", "-q", "--rokr", &rokr, "--", "kill"]);
+        assert_exit(&out, 137);
+    }
+    let exe = app.join("target/debug").join(exe_name("app"));
+    let out = Command::new(&exe)
+        .env("ROK_GC_STATS", "1")
+        .output()
+        .unwrap();
+    let err = text(&out.stderr);
+    assert!(
+        err.starts_with("rok gc: ") && err.contains(" collections ("),
+        "{err}"
+    );
+
+    let out = rokc(None, &app, &["clean"]);
+    assert!(text(&out.stderr).contains("     Removed "));
+    let out = Command::new(ROKC)
+        .current_dir(&app)
+        .env("ROK_HOME", workspace())
+        .env("ROKC_VERBOSE", "1")
+        .env("ROK_TIME_PASSES", "1")
+        .args(["build", "--rokr"])
+        .arg(&env.rokr)
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    let err = text(&out.stderr);
+    for want in [
+        "    Building ",
+        "   Stage: front end (",
+        "time: ",
+        " parse\n",
+    ] {
+        assert!(err.contains(want), "{want:?}: {err}");
+    }
+
+    let out = rokc(None, &app, &["emit"]);
+    assert_exit(&out, 0);
+    assert!(text(&out.stderr).contains("       Wrote "));
+    assert!(app.join("target/debug/build/app.mlir").is_file());
+    assert_exit(
+        &rokc(None, &app, &["emit", "--emit=mlir,llvmir", "-o", "x"]),
+        2,
+    );
+    let out = rokc(None, &app, &["help", "build"]);
+    assert_exit(&out, 0);
+    assert!(text(&out.stdout).contains("build [path]"));
+
+    put(dir.join("x.no"), "println(\"no\");\n").unwrap();
+    let out = rokc(None, &dir, &["run", "x.no"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("is not a rok source file"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    put(dir.join("ice.rok"), "let x = 1; // ice-here\n").unwrap();
+    let out = Command::new(ROKC)
+        .current_dir(&dir)
+        .env("ROK_HOME", workspace())
+        .env("ROKC_TEST_ICE", "ice-here")
+        .args(["check", "ice.rok"])
+        .output()
+        .unwrap();
+    assert_exit(&out, 101);
+}
+
+/// The runtime ABI in emitted code. MLIR uses upstream dialects only
+/// (0.2.3). The TLS block `rok_tls` is an external thread-local the code
+/// reaches at fixed offsets: the safepoint poll loads the yield flag at
+/// 10p+8 and calls `rok_runtime_yield` (8.3.1, 8.3.8, 8.4.12, 8.7.7,
+/// 8.9.11); the TLAB fast path takes the cursor at p and the limit at 2p
+/// and falls back to `rok_gc_alloc_slow` (8.5.11); a 32-bit target has
+/// p = 4 (8.3.4, 8.3.5); each target reaches the block its own way
+/// (8.3.2). Runtime functions are plain C declarations (8.5.10), errors
+/// pass by value with no unwinding (8.5.6), GC references are plain
+/// pointers (8.6.4), volatile access is `load` / `store volatile`
+/// (stdlib 1.5.5). At -O2 `#[inline(never)]` keeps its call (8.6.8) and
+/// a self tail call runs in constant stack (8.6.7).
+// spec: §0.2.3 §8.3.1 §8.3.2 §8.3.4 §8.3.5 §8.3.8 §8.4.12 §8.5.6 §8.5.10 §8.5.11 §8.6.4 §8.6.7
+// spec: §8.6.8 §8.7.7 §8.9.11 §9.2.12 / std §1.5.5
+#[test]
+fn emitted_code_follows_the_runtime_abi() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("abi");
+    let pkg = dir.join("abi");
+    let src = "use rok::bare::volatile;\nuse rok::bare::ptr::Ptr;\nuse rok::std::env;\n\
+               struct P { a: i64; b: str; }\n\
+               #[inline(never)]\nfn keep(x: i64) -> i64 { x * 3 + 1 }\n\
+               fn mk(n: i64) -> P { P { a: n, b: \"s\" } }\n\
+               fn len_of(xs: List<i64>) -> usize { xs.len() }\n\
+               fn fails(n: i64) throws -> i64 {\n\
+               \x20   if n > 5 { throw ValueError { msg: \"big\" }; }\n\
+               \x20   n\n\
+               }\n\
+               fn down(n: i64, acc: i64) -> i64 { if n == 0 { acc } else { down(n - 1, acc + 1) } }\n\
+               fn main() {\n\
+               \x20   let t = 0i64;\n\
+               \x20   for i in 0..10i64 { t += keep(i) + mk(i).a; }\n\
+               \x20   let p: Ptr<i64> = Ptr::dangling();\n\
+               \x20   let r = try? fails(t);\n\
+               \x20   let deep = down(env::args().len() as i64 * 20000000, 0);\n\
+               \x20   println(f\"{t} {len_of([1, 2])} {r ?? -1} {deep}\");\n\
+               \x20   if t < 0 {\n\
+               \x20       unsafe { volatile::write(p, 1i64); println(f\"{volatile::read(p.as_const())}\"); }\n\
+               \x20   }\n\
+               }\n";
+    put(pkg.join("src/main.rok"), src).unwrap();
+    let emit = |args: &[&str]| {
+        let mut all = vec!["-q", "emit"];
+        all.extend_from_slice(args);
+        assert_exit(&rokc(None, &pkg, &all), 0);
+    };
+    let read = |p: &str| fs::read_to_string(pkg.join("target").join(p)).unwrap();
+
+    emit(&["--emit=mlir,llvmir"]);
+    let mlir = read("debug/build/abi.mlir");
+    let dialects: std::collections::BTreeSet<&str> = mlir
+        .lines()
+        .filter_map(|l| {
+            let op = l.trim_start();
+            let op = op
+                .split_once(" = ")
+                .map_or(op, |(_, r)| r)
+                .trim_start_matches('"');
+            let (d, rest) = op.split_once('.')?;
+            (!d.is_empty()
+                && d.bytes().all(|b| b.is_ascii_lowercase())
+                && rest.starts_with(|c: char| c.is_ascii_lowercase()))
+            .then_some(d)
+        })
+        .collect();
+    let upstream = ["arith", "cf", "func", "index", "llvm", "math", "scf"];
+    assert!(
+        dialects.iter().all(|d| upstream.contains(d)),
+        "{dialects:?}"
+    );
+    for want in [
+        "llvm.mlir.global external thread_local @rok_tls()",
+        "[88] : (!llvm.ptr) -> !llvm.ptr, i8",
+        "llvm.call @rok_runtime_yield() ",
+    ] {
+        assert!(mlir.contains(want), "no {want:?} in the MLIR");
+    }
+    let ll = read("debug/build/abi.ll");
+    for want in [
+        "@rok_tls = external thread_local",
+        "@llvm.threadlocal.address.p0(ptr @rok_tls)",
+        "i32 8\n",
+        "i32 16\n",
+        "call ptr @rok_gc_alloc_slow(",
+        "declare ptr @rok_gc_alloc_slow(i64, i64, i32)",
+        "declare void @rok_runtime_yield()",
+        "load volatile",
+        "store volatile",
+    ] {
+        assert!(ll.contains(want), "no {want:?} in the LLVM IR");
+    }
+    for unwanted in ["invoke ", "landingpad", "personality", "addrspace("] {
+        assert!(!ll.contains(unwanted), "{unwanted:?} in the LLVM IR");
+    }
+    assert!(
+        ll.lines()
+            .any(|l| l.starts_with("define ") && l.contains("_len_0of_(") && l.contains("ptr")),
+        "a List argument is a pointer"
+    );
+
+    emit(&["--emit=llvmir", "--target=i686-unknown-linux-gnu"]);
+    let ll = read("i686-unknown-linux-gnu/debug/build/abi.ll");
+    for want in [", i32 4\n", ", i32 8\n", ", i32 48\n"] {
+        assert!(ll.contains(want), "no {want:?} in the i686 LLVM IR");
+    }
+    for (target, mechanism) in [
+        ("x86_64-unknown-linux-gnu", "%fs:"),
+        ("aarch64-unknown-linux-gnu", "TPIDR_EL0"),
+        ("aarch64-apple-darwin", "_rok_tls@TLVPPAGE"),
+        ("x86_64-pc-windows-msvc", "_tls_index"),
+        ("wasm32-wasi-threads", "__tls_base"),
+    ] {
+        emit(&["--emit=asm", "--target", target]);
+        let asm = read(&format!("{target}/debug/build/abi.s"));
+        assert!(asm.contains(mechanism), "{target}: no {mechanism:?}");
+    }
+
+    emit(&["--emit=asm", "-O2"]);
+    let asm = read("release/build/abi.s");
+    assert!(
+        asm.lines()
+            .any(|l| l.contains("_keep_") && (l.contains("bl\t") || l.contains("call"))),
+        "`#[inline(never)]` was inlined"
+    );
+    let out = rokc(Some(&env), &pkg, &["run", "-q", "-O2"]);
+    assert_exit(&out, 0);
+    assert!(
+        text(&out.stdout).ends_with(" 20000000\n"),
+        "{}",
+        text(&out.stdout)
     );
 }
 

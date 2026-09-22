@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write;
 
 use rokc_diagnostic::{SourceMap, Span};
-use rokc_ir_common::{Abi, ConstVal, FnRole, FunctionId, Linkage, LocalId, PrimOp, PrimTy};
+use rokc_ir_common::{Abi, ConstVal, FnRole, FunctionId, Inline, Linkage, LocalId, PrimOp, PrimTy};
 use rokc_mir::gc_abi::{
     CARD_SHIFT, FLAG_CARDED, FLAG_UNLOGGED, GC_FLAGS_OFFSET, GC_WORD_OFFSET, HEADER_SIZE,
     LOS_THRESHOLD, MIN_OBJECT_SIZE, PLAIN_TYPE_ID, SUM_DESC_SHIFT, SUM_PAYLOAD, TABLE_ARRAY,
@@ -437,12 +437,8 @@ impl Emitter {
             di.struct_names.clone_from(&module.struct_names);
             di.debug.clone_from(&module.debug);
         }
-        self.pkgs.extern_statics = module
-            .statics
-            .iter()
-            .filter(|s| s.is_extern)
-            .map(|s| s.name.clone())
-            .collect();
+        let windows = self.target.os == "windows";
+        self.pkgs.set_statics(&module.statics, windows);
         // Content-based package hashes (spec 0.3.3) come from the driver;
         // a bare MIR module (tests) hashes its printed MIR.
         if self.pkgs.link.packages.is_empty() {
@@ -492,7 +488,14 @@ impl Emitter {
                     abi
                 }
                 Abi::Rok if f.facts.linkage == Linkage::Extern => {
-                    crate::abi::classify_rok(&self.target, &f.param_tys, &f.ret_ty)
+                    crate::abi::classify_rok(&self.target, &f.param_tys, &f.ret_ty).or_else(|| {
+                        // Declared and called as codegen's own calls of it are.
+                        REF_ONLY_CALLS.contains(&f.name.as_str()).then(|| {
+                            let abi =
+                                crate::abi::classify(&self.target, &f.param_tys, &f.ret_ty, false);
+                            abi.map(|a| FnAbi { rok: true, ..a })
+                        })?
+                    })
                 }
                 Abi::Rok => None,
             };
@@ -835,6 +838,15 @@ impl Emitter {
                 );
                 continue;
             }
+            if self.pkgs.dll_statics.contains(&s.name) {
+                // A DLL's: its import address.
+                let imp = self.pkgs.import_sym(&s.name, self.target.arch == "x86");
+                let _ = writeln!(
+                    self.out,
+                    "  llvm.mlir.global external constant @{imp}() {{addr_space = 0 : i32}} : !llvm.ptr"
+                );
+                continue;
+            }
             if self.prebuilt_static(&s.name) {
                 // In the dependency's `.a`; a lazy one's state byte and
                 // `.init` too (a REPL cell's earlier cell keeps `.init`
@@ -1103,15 +1115,20 @@ impl Emitter {
         // rok code never unwinds: a panic ends the process.
         // A loop-free function that never returns is a panic path: kept
         // out of line, so the checks that call it stay small to inline.
-        let cold = if f
-            .blocks
-            .iter()
-            .all(|b| !matches!(b.terminator, Terminator::Return(_)))
+        let cold = if f.facts.inline != Inline::Always
+            && f.blocks
+                .iter()
+                .all(|b| !matches!(b.terminator, Terminator::Return(_)))
             && back_edge_blocks(f).is_empty()
         {
             r#", "noreturn", "noinline", "cold""#
         } else {
-            ""
+            match f.facts.inline {
+                Inline::Auto => "",
+                Inline::Hint => r#", "inlinehint""#,
+                Inline::Always => r#", "alwaysinline""#,
+                Inline::Never => r#", "noinline""#,
+            }
         };
         // Windows probes through `__chkstk` instead (LLVM would take
         // "inline-asm" there for the probe function's name).
@@ -1143,7 +1160,8 @@ impl Emitter {
             if let Some(d) = &emit.dbg {
                 let lines = crate::debug::decl_lines(f);
                 for l in &f.locals {
-                    let Some(name) = l.name.as_deref().filter(|n| !n.starts_with('#')) else {
+                    let Some(name) = l.name.as_deref().filter(|n| rokc_mir::debug_visible(n))
+                    else {
                         continue;
                     };
                     // A zero-sized value has nothing to show, and its
@@ -2415,7 +2433,11 @@ impl<'a> FnEmit<'a> {
                 && !matches!(local.ty, MirTy::Array(..))
                 && !self.in_memory(&local.ty)
                 && (self.target.root_offsets(&local.ty).is_empty() || !self.is_rooted(local.id))
-                && (self.dbg.is_none() || local.name.as_deref().is_none_or(|n| n.starts_with('#')))
+                && (self.dbg.is_none()
+                    || local
+                        .name
+                        .as_deref()
+                        .is_none_or(|n| !rokc_mir::debug_visible(n)))
             {
                 continue;
             }
@@ -2956,18 +2978,37 @@ impl<'a> FnEmit<'a> {
 
     /// The address `r`, a read of a `ty` from memory, reads at (its
     /// checks emitted); `None` for any other rvalue.
+    /// The address of static `name`: its symbol's, or (`dll_statics`) the
+    /// one at its import address.
+    fn static_ptr(&mut self, name: &str) -> String {
+        let addr = self.fresh_value();
+        if self.pkgs.dll_statics.contains(name) {
+            let (imp, p) = (self.import_sym(name), self.fresh_value());
+            let _ = writeln!(
+                self.body,
+                "    {p} = llvm.mlir.addressof @{imp} : !llvm.ptr\n    \
+                 {addr} = llvm.load {p} invariant : !llvm.ptr -> !llvm.ptr"
+            );
+        } else {
+            let sym = self.pkgs.static_sym(name);
+            let _ = writeln!(
+                self.body,
+                "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
+            );
+        }
+        addr
+    }
+
+    fn import_sym(&self, name: &str) -> String {
+        self.pkgs.import_sym(name, self.target.arch == "x86")
+    }
+
     fn rvalue_addr(&mut self, r: &RValue, ty: &MirTy) -> Option<String> {
         match r {
             RValue::Use(Operand::Copy(id)) if self.local_ty(*id) == *ty => self.slot_of(*id),
             RValue::StaticLoad { name, .. } => {
                 self.ensure_static_init(name);
-                let addr = self.fresh_value();
-                let sym = self.pkgs.static_sym(name);
-                let _ = writeln!(
-                    self.body,
-                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
-                );
-                Some(addr)
+                Some(self.static_ptr(name))
             }
             RValue::FieldRead { target, index, .. } => {
                 let target_ty = match target {
@@ -3241,12 +3282,7 @@ impl<'a> FnEmit<'a> {
             }
             Statement::StaticStore { name, value, ty } => {
                 self.ensure_static_init(name);
-                let addr = self.fresh_value();
-                let sym = self.pkgs.static_sym(name);
-                let _ = writeln!(
-                    self.body,
-                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
-                );
+                let addr = self.static_ptr(name);
                 if self.memcpy_operand(&addr, value, ty) {
                     return;
                 }
@@ -3477,12 +3513,11 @@ impl<'a> FnEmit<'a> {
             }
             RValue::StaticAddr(name) => {
                 self.ensure_static_init(name);
-                let sym = self.pkgs.static_sym(name);
-                let (addr, pw, v) = (self.fresh_value(), self.pw, self.fresh_value());
+                let addr = self.static_ptr(name);
+                let (pw, v) = (self.pw, self.fresh_value());
                 let _ = writeln!(
                     self.body,
-                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr\n    \
-                     {v} = llvm.ptrtoint {addr} : !llvm.ptr to i{pw}"
+                    "    {v} = llvm.ptrtoint {addr} : !llvm.ptr to i{pw}"
                 );
                 v
             }
@@ -3554,12 +3589,7 @@ impl<'a> FnEmit<'a> {
             RValue::StaticLoad { name, ty } => {
                 self.ensure_static_init(name);
                 let ty_str = mlir_type(ty, self.target);
-                let addr = self.fresh_value();
-                let sym = self.pkgs.static_sym(name);
-                let _ = writeln!(
-                    self.body,
-                    "    {addr} = llvm.mlir.addressof @{sym} : !llvm.ptr"
-                );
+                let addr = self.static_ptr(name);
                 let dst = self.fresh_value();
                 let _ = writeln!(
                     self.body,

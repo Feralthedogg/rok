@@ -2,7 +2,7 @@
 // 2.18, refs-lang 7.6), `block_on` (2.20.6); time is `task::time`.
 //
 // One executor per process, started on first use: N workers (N = online
-// CPUs) on OS threads that live as long as the process, the blocking
+// CPUs, or `ROK_WORKERS`) on OS threads that live as long as the process, the blocking
 // lane (`spawn_blocking`) and the I/O driver. `block_on` and the sync
 // `par::*` entry points attach the calling thread as a guest worker
 // until their future and the `spawn_local` tasks pinned to it are done;
@@ -55,6 +55,15 @@
 // Timers are one binary heap behind a `Mutex` (707 §7.7.5 allows a heap;
 // a timing wheel would make insertion O(1)).
 //
+// Options, read when the executor starts (`rok_sched_*`):
+// `ROK_WORKERS=<n>` sets N. `ROK_THREAD_PER_CORE=1` (706 §7.6.8) pins
+// every task to one worker: the spawning pool worker, else the next in
+// turn; it is queued only on that worker's local queue, so no worker
+// steals. `ROK_DYNAMIC_WORKERS=1` (707 §7.7.8) keeps only the active
+// workers as wake targets: the last active one going idle parks, and a
+// push that finds every active worker busy activates one more. A worker
+// blocked in a call is replaced (above) in every mode.
+//
 // A REPL session host saves the session between cells at a quiet moment
 // (`rok_session_hold`): every executor thread (worker, guest, blocking
 // lane, monitor, driver) counts as busy from `rok_session_enter` to
@@ -85,9 +94,10 @@ const DONE: i32 = 4;
 
 /// A task as the executor sees it (what a `Waker` holds).
 pub struct TaskRef {
-    /// `[state, cancelled, timed, proxy, unwinding]` (`timed`: it has
-    /// added a timer; `proxy`: a `select` stand-in, see `up`;
-    /// `unwinding`: a cancellation point saw the cancel).
+    /// `[state, cancelled, timed, proxy, unwinding, local]` (`timed`: it
+    /// has added a timer; `proxy`: a `select` stand-in, see `up`;
+    /// `unwinding`: a cancellation point saw the cancel; `local`: a
+    /// `spawn_local` task, counted in its home's `locals`).
     state: GcBuf<i32>;
     /// One poll of the task's future; `true` once it is done.
     poll: GcBuf<fn(Context) -> bool>;
@@ -96,8 +106,9 @@ pub struct TaskRef {
     /// Parking keys it may still be parked on (under the parking lock):
     /// dropped from the table when it finishes (a cancelled task's).
     parked: List<usize>;
-    /// `spawn_local`: the only worker that runs it. Boxed: a `TaskRef`
-    /// travels by value in every `Context`, through every poll level.
+    /// `spawn_local`, or any task under thread-per-core: the only worker
+    /// that runs it. Boxed: a `TaskRef` travels by value in every
+    /// `Context`, through every poll level.
     home: GcBuf<Worker | none>;
     /// Its `TaskId`.
     id: u64;
@@ -190,7 +201,9 @@ fn finish(t: TaskRef) {
         let pool = executor();
         pool.wake_helpers();
         if let h: Worker = t.home[0] {
-            atomic_add(h.locals, 0, -1, SeqCst);
+            if t.state[5] != 0 {
+                atomic_add(h.locals, 0, -1, SeqCst);
+            }
             wake_worker(h);
         }
     }
@@ -241,6 +254,10 @@ const EPOCH: usize = 0;
 const HELPERS: usize = 1;
 /// Idle workers still looking for work: a push need not wake one.
 const SEARCHING: usize = 2;
+/// Dynamic worker count: the workers a push may wake (`workers[..n]`).
+const ACTIVE: usize = 3;
+/// Thread-per-core: the next home for a task spawned off the pool.
+const HOMES: usize = 4;
 
 /// The process's work-stealing executor.
 pub struct Pool {
@@ -265,6 +282,10 @@ pub struct Pool {
     driver_id: GcBuf<u64>;
     /// No threads: the guest is the whole executor.
     solo: bool;
+    /// Thread-per-core (706 §7.6.8): every task has a home worker.
+    pinned: bool;
+    /// Dynamic worker count (707 §7.7.8).
+    dynamic: bool;
 }
 
 unsafe impl Send for Pool {}
@@ -373,7 +394,7 @@ impl Pool {
                 injector: queue_new(),
                 timers: Mutex::new(BinaryHeap::by(|a: Timer, b: Timer| a.at < b.at)),
                 dead: buf_new(1),
-                signal: buf_new(3),
+                signal: buf_new(5),
                 no_up: buf_new(0),
                 no_home: buf_new(1),
                 driver: Once::new(),
@@ -382,8 +403,11 @@ impl Pool {
                 monitor_id: buf_new(1),
                 driver_id: buf_new(1),
                 solo: rok_cpu_count() == 0,
+                pinned: (rok_sched_mode() & 1u32) != 0u32,
+                dynamic: (rok_sched_mode() & 2u32) != 0u32,
             };
-            let n = rok_cpu_count();
+            let n = rok_sched_workers();
+            pool.signal[ACTIVE] = n as i32;
             for i in 0..n {
                 pool.workers.push(new_worker(pool, i, false, false));
             }
@@ -404,17 +428,50 @@ impl Pool {
         self.workers.len()
     }
 
-    /// Bump the epoch and wake one sleeping worker (if any).
+    /// Bump the epoch and wake one sleeping worker (if any); with a
+    /// dynamic worker count, an active one, else one more becomes active.
     fn notify(self) {
         self.wake_helpers();
         if atomic_load(self.signal, SEARCHING, SeqCst) > 0 {
             return;
         }
-        for w in self.workers {
-            if wake_worker(w) {
+        let n = self.workers();
+        let active = if self.dynamic { atomic_load(self.signal, ACTIVE, SeqCst) as usize } else { n };
+        for i in 0..active {
+            if wake_worker(self.workers[i]) {
                 return;
             }
         }
+        if active < n {
+            let a = active as i32;
+            if atomic_cas(self.signal, ACTIVE, a, a + 1, SeqCst, SeqCst) == a {
+                wake_worker(self.workers[active]);
+            }
+        }
+    }
+
+    /// Dynamic worker count: pool worker `w` is going idle; the last
+    /// active one parks (pushes wake the others first).
+    fn idle(self, w: Worker) {
+        if !self.dynamic || w.guest {
+            return;
+        }
+        let a = atomic_load(self.signal, ACTIVE, SeqCst);
+        if a > 1 && w.index + 1 == a as usize {
+            atomic_cas(self.signal, ACTIVE, a, a - 1, SeqCst, SeqCst);
+        }
+    }
+
+    /// Thread-per-core: the home of a task spawned now, the spawning
+    /// pool worker or else the next one in turn.
+    fn home_for(self) -> Worker {
+        if let w: Worker = current() {
+            if !w.guest {
+                return w;
+            }
+        }
+        let k = atomic_add(self.signal, HOMES, 1, SeqCst);
+        self.workers[(k as u32 as usize) % self.workers()]
     }
 
     fn wake_helpers(self) {
@@ -946,6 +1003,7 @@ fn work(w: Worker, main: TaskRef | none) {
             atomic_xchg(w.sleep, 0, 0, SeqCst);
             continue;
         }
+        pool.idle(w);
         unsafe { rok_session_leave() };
         if pool.solo {
             solo_wait(next);
@@ -961,13 +1019,17 @@ fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
     unsafe {
         let pool = executor();
         let home = pool.no_home;
+        let state: GcBuf<i32> = buf_new(6);
+        state[0] = SCHEDULED;
         if let w: Worker = local {
             home = buf_new(1);
             home[0] = w;
+            state[5] = 1;
             atomic_add(w.locals, 0, 1, SeqCst);
+        } else if pool.pinned && !pool.solo {
+            home = buf_new(1);
+            home[0] = pool.home_for();
         }
-        let state: GcBuf<i32> = buf_new(5);
-        state[0] = SCHEDULED;
         let p: GcBuf<fn(Context) -> bool> = buf_new(1);
         p[0] = poll;
         let t = TaskRef {
@@ -1474,8 +1536,9 @@ impl<F: Future> SelectFuture<F> {
 /// go to `parent` until it is done.
 const fn proxy_task(parent: Waker) -> TaskRef {
     unsafe {
-        let state: GcBuf<i32> = buf_new(5);
+        let state: GcBuf<i32> = buf_new(6);
         state[3] = 1;
+        state[5] = parent.task.state[5];
         let p: GcBuf<fn(Context) -> bool> = buf_new(1);
         p[0] = |ctx: Context| -> bool { true };
         let up: GcBuf<Waker> = buf_new(1);

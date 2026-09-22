@@ -1,0 +1,24 @@
+// spec: refs-lang §1.2.1
+// expect-exit: 0
+// expect-stdout:
+// 3 1.5 255 1000
+// hello raw\n x = 3 3
+// A 65 true false true
+// 7 [2, 3]
+
+// 1.2.1: the token kinds — identifiers (`count`, `α`, `Δt`), keywords,
+// numeric literals, the string forms (plain, raw, format, byte), the
+// character forms, `true` / `false` / `none`, operators and punctuation.
+fn main() {
+    let count = 3;
+    let α = 1.5;
+    let Δt = 0xFF;
+    println(f"{count} {α} {Δt} {1_000}");
+    let x = count;
+    let b = b"bytes";
+    println(f"{"hello"} {r"raw\n"} {f"x = {x}"} {b.len() - 2}");
+    let n: i32 | none = none;
+    println(f"{'A'} {c'A' as i32} {true} {false} {n is none}");
+    let xs = [1, 2, 3];
+    println(f"{count + 4} {xs[1..3]:?}");
+}

@@ -46,6 +46,14 @@ pub struct MirModule {
     pub link: Link,
 }
 
+/// Whether `-g` describes the local named `name`: not one lowering made
+/// (`#..`) or a desugaring's temporary (`__..`, as `__env`,
+/// `__rok_slice_target`).
+#[must_use]
+pub fn debug_visible(name: &str) -> bool {
+    !name.starts_with('#') && !name.starts_with("__")
+}
+
 /// What `-g` shows of a value beyond its `MirTy`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum DebugTy {
@@ -59,11 +67,15 @@ pub enum DebugTy {
     /// `any Tr` (`any_ty`): a variant part over [`DebugTypes::any`].
     Any,
     /// A reference to a GC object holding one value after its header (an
-    /// `any`'s boxed copy).
-    Boxed(Box<DebugTy>),
+    /// `any`'s boxed copy, a closure's environment), named for the
+    /// debugger (which takes same-named types of a size for one).
+    Boxed(String, Box<DebugTy>),
     /// A `[ref]`-captured variable's cell (a local only): shown as the
     /// value in it.
     Cell(Box<DebugTy>),
+    /// A closure value (this fat `fn` type) with its environment object
+    /// (a `Boxed`).
+    Closure(MirTy, Box<DebugTy>),
 }
 
 impl DebugTy {
@@ -71,8 +83,8 @@ impl DebugTy {
     #[must_use]
     pub fn mir(&self) -> MirTy {
         match self {
-            Self::Mir(m) | Self::Sum(_, m, _) => m.clone(),
-            Self::Buf(..) | Self::Boxed(_) | Self::Cell(_) => MirTy::GcRef,
+            Self::Mir(m) | Self::Sum(_, m, _) | Self::Closure(m, _) => m.clone(),
+            Self::Buf(..) | Self::Boxed(..) | Self::Cell(_) => MirTy::GcRef,
             Self::Any => crate::any_ty(),
         }
     }
@@ -179,6 +191,8 @@ pub struct MirStaticDef {
     pub is_mut: bool,
     /// `extern "C" { static .. }`: defined outside, keeps its C name.
     pub is_extern: bool,
+    /// `HirStaticDef::dll_import`.
+    pub dll_import: bool,
     /// Lazily initialized by this function on first access.
     pub init_fn: Option<FunctionId>,
 }
@@ -202,6 +216,16 @@ impl MirFunction {
     #[must_use]
     pub fn path(&self) -> &str {
         self.facts.path(&self.name)
+    }
+
+    /// The return type `-g` gives it: a scalar's, which every
+    /// convention returns in a register, so a debugger reads it (`finish`).
+    #[must_use]
+    pub fn debug_ret(&self) -> Option<PrimTy> {
+        match self.ret_ty {
+            MirTy::Prim(p) if p != PrimTy::Str => Some(p),
+            _ => None,
+        }
     }
 }
 

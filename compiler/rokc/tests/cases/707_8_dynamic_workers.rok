@@ -1,0 +1,61 @@
+// refs-lang 7.7.8: `ROK_DYNAMIC_WORKERS=1` parks idle workers and takes
+// them back as work arrives; tasks, timers and blocking calls behave as
+// with a fixed pool.
+// run-env: ROK_WORKERS=4
+// run-env: ROK_DYNAMIC_WORKERS=1
+// expect-exit: 0
+// expect-stdout:
+// workers 4
+// sum 5050
+// slept 8
+// blocked 4
+use rok::std::thread;
+
+async fn run() -> i32 {
+    println(f"workers {task::workers()}");
+    let tasks: List<Task<i64>> = List::new();
+    for i in 1..101 {
+        tasks.push(task::spawn(async {
+            await task::yield_now();
+            i as i64
+        }));
+    }
+    let sum = 0i64;
+    for t in tasks {
+        sum += await t;
+    }
+    println(f"sum {sum}");
+    // Idle between bursts: the pool shrinks, then wakes for timers.
+    let sleepers: List<Task<i32>> = List::new();
+    for i in 0..8 {
+        sleepers.push(task::spawn(async {
+            await task::sleep(Duration::ms(5 + i as i64));
+            1
+        }));
+    }
+    let slept = 0;
+    for t in sleepers {
+        slept += await t;
+    }
+    println(f"slept {slept}");
+    // Blocking calls on workers: the others go on.
+    let blockers: List<Task<i32>> = List::new();
+    for i in 0..4 {
+        blockers.push(task::spawn(async {
+            thread::sleep(Duration::ms(20));
+            1
+        }));
+    }
+    let blocked = 0;
+    for t in blockers {
+        blocked += await t;
+    }
+    println(f"blocked {blocked}");
+    0
+}
+
+fn main() -> i32 {
+    task::block_on(run())
+}
+
+// spec: 007.07-io-and-timer §7.7.8

@@ -372,6 +372,7 @@ pub fn generated(
             line: span.line,
             scopes: Vec::new(),
             vars: Vec::new(),
+            ret: None,
         });
     }
     f

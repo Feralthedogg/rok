@@ -210,6 +210,12 @@ pub fn data_layout(t: &Target) -> Result<String, String> {
     ffi::data_layout(t)
 }
 
+/// The build machine's CPU and features (`+f,-g,..`), as LLVM detects
+/// them: `-C target-cpu=native`.
+pub fn host_cpu() -> Result<(String, String), String> {
+    ffi::host_cpu()
+}
+
 /// Runs lld; `args[0]` names the flavor (`ld64.lld`, `ld.lld`, `lld-link`,
 /// `wasm-ld`). Returns what it printed; an error carries it.
 pub fn lld<S: AsRef<OsStr>>(args: &[S]) -> Result<String, String> {
@@ -568,6 +574,7 @@ mod ffi {
             warn: *mut RokBuf,
         ) -> c_int;
         fn rok_llvm_data_layout(o: *const RokCompile, out: *mut RokBuf, err: *mut RokBuf) -> c_int;
+        fn rok_llvm_host_cpu(cpu: *mut RokBuf, features: *mut RokBuf) -> c_int;
         fn rok_llvm_dsymutil(argv: *const *const c_char, argc: usize) -> c_int;
         fn rok_llvm_lld(argv: *const *const c_char, argc: usize, log: *mut RokBuf) -> c_int;
         fn rok_llvm_write_archive(
@@ -769,6 +776,15 @@ mod ffi {
         }
     }
 
+    pub fn host_cpu() -> Result<(String, String), String> {
+        let (mut cpu, mut features) = (RokBuf::new(), RokBuf::new());
+        // SAFETY: the shim fills both buffers when it returns 0.
+        if unsafe { rok_llvm_host_cpu(&raw mut cpu, &raw mut features) } != 0 {
+            return Err("LLVM cannot tell this machine's CPU".to_owned());
+        }
+        Ok((cpu.text(), features.text()))
+    }
+
     pub fn data_layout(t: &Target) -> Result<String, String> {
         let (triple, cpu, features, none) =
             (c(&t.llvm_triple())?, c(&t.cpu)?, c(&t.features)?, c("")?);
@@ -940,6 +956,10 @@ mod ffi {
     }
 
     pub fn data_layout(_: &Target) -> Result<String, String> {
+        off()
+    }
+
+    pub fn host_cpu() -> Result<(String, String), String> {
         off()
     }
 

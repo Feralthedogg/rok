@@ -1,0 +1,76 @@
+// spec: refs-lang 909-debug-tools §9.9.8
+// needs: process
+// expect-exit: 0
+// expect-stdout:
+// log: 3 lines, full true, minor true, fields true
+// dump: exit 101, out of memory true, totals true, types true, large true
+
+// 9.9.8: `ROK_GC_LOG=1` prints a line per collection (kind, pause,
+// objects marked, live bytes before -> after the sweep) to stderr;
+// `ROK_HEAP_DUMP=on_oom` prints the heap's object count and bytes per
+// type and its largest objects when the program runs out of memory.
+// The program runs itself with each variable set.
+use rok::bare::gc;
+use rok::std::env;
+use rok::std::process::Command;
+
+extern "C" {
+    fn rok_gc_collect_young();
+}
+
+fn text(b: List<u8>) -> str { try! str::from_utf8(b) }
+
+fn child(mode: str) {
+    let big: List<u8> = [];
+    for i in 0..100000 {
+        big.push(i as u8);
+    }
+    let small: List<str> = [];
+    for i in 0..100 {
+        small.push(f"s{i}");
+    }
+    if mode == "log" {
+        gc::collect();
+        unsafe { rok_gc_collect_young() };
+        gc::collect();
+        return;
+    }
+    rok::core::panic::oom();
+}
+
+fn main() {
+    let mode = try? env::var("GC_DIAG_CHILD");
+    if let m: str = mode {
+        child(m);
+        return;
+    }
+    let exe = try! env::current_exe();
+    let o = try! Command::new(exe).env("GC_DIAG_CHILD", "log").env("ROK_GC_LOG", "1").output();
+    let lines: List<str> = text(o.stderr).trim().lines().collect();
+    let (full, minor, fields) = (0, 0, 0usize);
+    for l in lines {
+        if l.contains(" full: ") {
+            full += 1;
+        }
+        if l.contains(" minor: ") {
+            minor += 1;
+        }
+        if l.starts_with("rok gc: #") && l.contains(" ms pause, ") && l.contains(" objects marked, ")
+            && l.contains(" -> ") && l.ends_with(" KiB") {
+                fields += 1;
+            }
+    }
+    println(f"log: {lines.len()} lines, full {full == 2}, minor {minor == 1}, fields {fields == lines.len()}");
+
+    let d = try! Command::new(exe).env("GC_DIAG_CHILD", "oom").env("ROK_HEAP_DUMP", "on_oom").output();
+    let err = text(d.stderr);
+    let large = false;
+    for l in err.lines() {
+        let rest = l.strip_prefix("rok heap dump: large object of type ") ?? "";
+        if let (_, n): (str, str) = rest.split_once(": ") {
+            let bytes = (try? (n.strip_suffix(" bytes") ?? "").parse::<i64>()) ?? 0;
+            large = large || bytes >= 100000;
+        }
+    }
+    println(f"dump: exit {d.status.code() ?? -1}, out of memory {err.trim().ends_with("fatal error: out of memory")}, totals {err.contains(" blocks (")}, types {err.contains("rok heap dump: type 0x")}, large {large}");
+}

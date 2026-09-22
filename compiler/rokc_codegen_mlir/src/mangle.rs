@@ -19,6 +19,10 @@ pub struct Pkgs {
     pub link: Link,
     /// `extern` statics: they keep their C name.
     pub extern_statics: std::collections::HashSet<String>,
+    /// Windows: the `extern` statics of DLLs (`MirStaticDef::dll_import`),
+    /// reached through their import address `__imp_<name>`, as an
+    /// import library defines only that for data.
+    pub dll_statics: std::collections::HashSet<String>,
     /// Lazily initialized statics: name → symbol of their initializer.
     pub lazy_statics: std::collections::HashMap<String, String>,
     /// A codegen unit build (`units`): a library's statics of other
@@ -29,6 +33,28 @@ pub struct Pkgs {
 }
 
 impl Pkgs {
+    /// `extern_statics` and `dll_statics` (`windows`) of `statics`.
+    pub fn set_statics(&mut self, statics: &[rokc_mir::MirStaticDef], windows: bool) {
+        let ext = statics.iter().filter(|s| s.is_extern);
+        self.extern_statics = ext.clone().map(|s| s.name.clone()).collect();
+        self.dll_statics = ext
+            .filter(|s| windows && s.dll_import)
+            .map(|s| s.name.clone())
+            .collect();
+    }
+
+    /// MLIR symbol of DLL static `name`'s import address, `__imp_<sym>`
+    /// (`x86`: `__imp__<sym>`, escaped from LLVM's `_` prefix).
+    #[must_use]
+    pub fn import_sym(&self, name: &str, x86: bool) -> String {
+        let sym = self.static_sym(name);
+        if x86 {
+            format!("\"\\01__imp__{sym}\"")
+        } else {
+            format!("__imp_{sym}")
+        }
+    }
+
     /// Linker symbol of static `name`.
     pub fn static_sym(&self, name: &str) -> String {
         if self.extern_statics.contains(name) {

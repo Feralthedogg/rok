@@ -315,9 +315,11 @@ pub(super) const fn module_display(m: &str) -> &str {
 
 /// Module path → visibility of its `mod`, from the flattened
 /// module stubs (`Item::Mod` named by its full path).
-pub fn module_visibility(items: &[Item]) -> HashMap<String, Visibility> {
+pub fn module_visibility<'i>(
+    items: impl IntoIterator<Item = &'i Item>,
+) -> HashMap<String, Visibility> {
     items
-        .iter()
+        .into_iter()
         .filter_map(|i| match i {
             Item::Mod(m) => Some((m.name.clone(), m.vis)),
             _ => None,

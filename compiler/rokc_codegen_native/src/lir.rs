@@ -332,6 +332,8 @@ pub struct FnDebug {
     /// Lexical scopes other than the body (0): `(id, parent)`.
     pub scopes: Vec<(u32, u32)>,
     pub vars: Vec<DebugVar>,
+    /// `MirFunction::debug_ret`.
+    pub ret: Option<rokc_ir_common::PrimTy>,
 }
 
 /// A named local in its stack slot.

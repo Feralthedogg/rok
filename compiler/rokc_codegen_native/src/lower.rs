@@ -1488,7 +1488,9 @@ impl<'c, 'a> FnLower<'c, 'a> {
     /// The address of static `name` in a word temp.
     fn static_addr(&mut self, name: &str) -> Slot {
         let sym = self.c.pkgs.static_sym(name);
-        let s = self.c.sym(&sym);
+        // A DLL's (Windows): the address at its import address.
+        let dll = self.c.pkgs.dll_statics.contains(name);
+        let s = self.c.sym(&if dll { format!("__imp_{sym}") } else { sym });
         let local = self.c.local_statics.contains(name);
         let p = self.word_tmp();
         self.push(Inst::Sym {
@@ -1497,7 +1499,17 @@ impl<'c, 'a> FnLower<'c, 'a> {
             got: !local,
         });
         let Mem::Frame(ps, _) = p else { unreachable!() };
-        ps
+        if !dll {
+            return ps;
+        }
+        let q = self.word_tmp();
+        self.push(Inst::Mov {
+            k: K::I64,
+            dst: q,
+            src: V::M(Mem::Ind(ps, 0)),
+        });
+        let Mem::Frame(qs, _) = q else { unreachable!() };
+        qs
     }
 
     // ---- function body ----
@@ -1724,7 +1736,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             .locals
             .iter()
             .filter_map(|l| {
-                let name = l.name.as_deref().filter(|n| !n.starts_with('#'))?;
+                let name = l.name.as_deref().filter(|n| rokc_mir::debug_visible(n))?;
                 if params.contains(&l.id.0) {
                     return None;
                 }
@@ -1756,6 +1768,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             line: f.span.line,
             scopes,
             vars,
+            ret: f.debug_ret(),
         }
     }
 

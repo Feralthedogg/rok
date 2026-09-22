@@ -91,6 +91,12 @@ pub fn discover(path: &Path) -> Result<Package, String> {
             path.display()
         ));
     }
+    if abs.extension().is_none_or(|x| x != "rok") {
+        return Err(format!(
+            "`{}` is not a rok source file: rok sources end in `.rok` (spec 1.1.1)",
+            path.display()
+        ));
+    }
     Ok(Package {
         root: shown(&abs),
         dir: shown(start),

@@ -15,7 +15,7 @@ pub mod walk;
 pub use lower::FN_BLOCK_LABEL;
 pub use lower::type_visible;
 pub use lower::{Bodies, BodyCache, BodyReuse, Unit};
-pub use lower::{lower, lower_full, lower_with_uses};
+pub use lower::{library_kept, lower, lower_full, lower_with_uses};
 pub use print::{instance, print_hir};
 
 /// Origin of the root `main`.
@@ -76,6 +76,10 @@ pub struct HirInput {
     /// Run the lints that need lowering's type facts (`rokc check` /
     /// `lint`): `HirModule::lint_hits`.
     pub lints: bool,
+    /// The library's items are the same as in an earlier compile of
+    /// this process that gave this key (a REPL session's cells): what
+    /// collecting them made is taken from it.
+    pub library: Option<u64>,
 }
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
@@ -149,6 +153,9 @@ pub struct HirStaticDef {
     pub is_mut: bool,
     /// `extern "C" { static .. }` (spec 5.9.3): no initializer here.
     pub is_extern: bool,
+    /// An extern static of a block not linked `kind = "static"`: on
+    /// Windows a DLL's data, reached through its import address.
+    pub dll_import: bool,
     /// Non-literal initializer: this function computes the value on
     /// first access (lazy, thread-safe); `init` is unused.
     pub init_fn: Option<FunctionId>,
@@ -711,6 +718,16 @@ thread_local! {
 /// Forget the type names of an earlier compile.
 pub(crate) fn clear_type_names() {
     TYPE_NAMES.with(|n| *n.borrow_mut() = [Vec::new(), Vec::new()]);
+}
+
+/// The type names given so far.
+pub(crate) fn type_names() -> [Vec<String>; 2] {
+    TYPE_NAMES.with(|n| n.borrow().clone())
+}
+
+/// Take up the type names of `type_names`.
+pub(crate) fn set_type_names(names: [Vec<String>; 2]) {
+    TYPE_NAMES.with(|n| *n.borrow_mut() = names);
 }
 
 /// Forget the names of the structs and enums from `structs` / `enums`

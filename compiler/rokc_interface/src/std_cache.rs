@@ -82,7 +82,7 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         .iter()
         .filter(|c| crate::feature_of(c).is_none())
         .collect();
-    if !plain || key.bootstrap.is_empty() || !cfg.is_empty() || key.target != TargetSpec::host() {
+    if !plain || key.bootstrap.is_empty() || !cfg.is_empty() || !key.target.is_host() {
         return None;
     }
     let root = rokc_driver::cache_dir()?;

@@ -1,0 +1,24 @@
+// spec: refs-lang §0.5.1 §0.5.2 §0.5.4
+// expect-exit: 0
+// expect-stdout:
+// 1 7 8 9
+// [1, 2] 3 8 true
+
+// 0.5.1 / 0.5.4: the tiers live under `rok::`, which names no user item:
+// a local `rok` and user modules `std` / `bare` / `core` do not collide
+// with them. 0.5.2: `rok::core` items need no `use`; `rok::std` and
+// `rok::bare` items are reached by their `rok::` paths.
+mod std { pub fn f() -> i32 { 7 } }
+mod bare { pub fn g() -> i32 { 8 } }
+mod core { pub fn h() -> i32 { 9 } }
+
+fn main() {
+    let rok = 1;
+    println(f"{rok} {std::f()} {bare::g()} {core::h()}");
+    let xs: List<i32> = [1, 2];
+    let d: rok::core::collections::dict::Dict<str, i32> = Dict::new();
+    d["k"] = 3;
+    let n = rok::bare::ptr::size_of::<i64>();
+    let p = rok::std::path::Path::new();
+    println(f"{xs:?} {d["k"]} {n} {p.is_relative()}");
+}

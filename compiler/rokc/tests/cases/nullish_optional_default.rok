@@ -1,3 +1,4 @@
+// spec: refs-lang §3.8.4
 // expect-exit: 0
 // expect-stdout:
 // 1 2 -1

@@ -1,3 +1,4 @@
+// spec: std §2.13.6
 // expect-exit: 0
 // expect-stdout:
 // Rec { pos: (1, 2), grid: [3, 4, 5], tag: 7, name: none }

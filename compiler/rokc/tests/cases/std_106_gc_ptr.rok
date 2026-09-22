@@ -1,0 +1,60 @@
+// spec: std 106-gc-pin §1.6.3 §1.6.6
+// gc-stress: 40
+// expect-exit: 0
+// expect-stdout:
+// get 7 shared 8 same true false
+// boxed 3 [1, 2, 9]
+// pinned true 41 42
+// many 499500
+
+// stdlib 1.6.3: `GcPtr<T>` is a managed reference to one `T` on the GC
+// heap. Copies share the object; the collector keeps it alive through
+// every holder and moves it (the gc-stress runs evacuate everything
+// movable) without the program noticing. A raw pointer to the value
+// exists only under a pin, which keeps it in place.
+use rok::bare::gc;
+use rok::bare::gc::GcPtr;
+
+struct Node { id: i64; xs: List<i64>; }
+
+fn churn() {
+    for i in 0..2000 {
+        let _junk = f"junk{i}";
+    }
+    gc::collect();
+}
+
+fn main() {
+    let p = GcPtr::new(7i64);
+    let q = p;
+    churn();
+    let before = p.get();
+    q.set(8);
+    println(f"get {before} shared {p.get()} same {p.same(q)} {p.same(GcPtr::new(8i64))}");
+
+    let n = GcPtr::new(Node { id: 3, xs: [1, 2] });
+    churn();
+    n.get().xs.push(9);
+    println(f"boxed {n.get().id} {n.get().xs:?}");
+
+    let v = GcPtr::new(41i64);
+    using pin = gc::pin(v) {
+        let at = pin.as_value_ptr();
+        churn();
+        let first = unsafe { at.read() };
+        unsafe { at.write(42) };
+        println(f"pinned {pin.as_value_ptr().addr() == at.addr()} {first} {v.get()}");
+    }
+
+    let ps: List<GcPtr<i64>> = [];
+    for i in 0..1000 {
+        ps.push(GcPtr::new(i as i64));
+        let _junk = f"junk{i}";
+    }
+    churn();
+    let sum = 0i64;
+    for p in ps {
+        sum += p.get();
+    }
+    println(f"many {sum}");
+}

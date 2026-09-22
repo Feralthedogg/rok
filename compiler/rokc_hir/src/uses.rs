@@ -107,7 +107,7 @@ pub fn build_use_table(
 #[must_use]
 pub fn glob_reexports(
     raw: &[(String, Visibility, UseTree)],
-    items: &[rokc_ast::Item],
+    items: &[&rokc_ast::Item],
     table: &UseTable,
     reexports: &[ReExport],
 ) -> (Vec<ReExport>, Vec<RokDiagnostic>) {
@@ -147,7 +147,7 @@ pub fn glob_reexports(
     let mut diags = Vec::new();
     let mods: HashMap<&str, Visibility> = items
         .iter()
-        .filter_map(|i| match i {
+        .filter_map(|i| match *i {
             Item::Mod(m) => Some((m.name.as_str(), m.vis)),
             _ => None,
         })
@@ -157,7 +157,7 @@ pub fn glob_reexports(
     }
     let own: HashMap<&str, Visibility> = items
         .iter()
-        .filter_map(|i| match i {
+        .filter_map(|i| match *i {
             Item::Fn(f) => Some((f.name.as_str(), f.vis)),
             Item::Struct(s) => Some((s.name.as_str(), s.vis)),
             Item::Union(u) => Some((u.name.as_str(), u.vis)),
@@ -315,14 +315,14 @@ pub fn glob_reexports(
 #[must_use]
 pub fn check_use_targets(
     raw: &[(String, Visibility, UseTree)],
-    items: &[rokc_ast::Item],
+    items: &[&rokc_ast::Item],
     table: &UseTable,
     reexports: &[ReExport],
 ) -> Vec<RokDiagnostic> {
     use rokc_ast::{ExternItem, ImplItem, Item};
     let mut known: HashSet<String> = HashSet::new();
     for item in items {
-        match item {
+        match *item {
             Item::Fn(f) => drop(known.insert(f.name.clone())),
             Item::Struct(s) => drop(known.insert(s.name.clone())),
             Item::Union(u) => drop(known.insert(u.name.clone())),
@@ -358,10 +358,10 @@ pub fn check_use_targets(
         .flat_map(|k| k.match_indices("::").map(|(i, _)| k[..i].to_owned()))
         .collect();
     known.extend(modules);
-    let mod_vis = crate::lower::module_visibility(items);
+    let mod_vis = crate::lower::module_visibility(items.iter().copied());
     let item_vis: HashMap<&str, Visibility> = items
         .iter()
-        .filter_map(|i| match i {
+        .filter_map(|i| match *i {
             Item::Fn(f) => Some((f.name.as_str(), f.vis)),
             Item::Struct(s) => Some((s.name.as_str(), s.vis)),
             Item::Union(u) => Some((u.name.as_str(), u.vis)),

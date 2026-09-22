@@ -2,6 +2,10 @@
 // compiler-driven semantics. Slots follow stdlib spec 0.4 (6.4.8).
 // The comparison / hashing traits live in `cmp.rok`.
 
+/// The type of the `none` literal (stdlib 2.13.8): the compiler's
+/// built-in `none`, here under its library name.
+pub type NoneSentinel = none;
+
 #[lang("clone_trait")]
 pub trait Clone {
     fn clone(self) -> Self;

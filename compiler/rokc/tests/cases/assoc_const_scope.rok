@@ -1,3 +1,4 @@
+// spec: refs-lang 002.08-trait §2.8.3
 // expect-exit: 0
 // expect-stdout:
 // 32

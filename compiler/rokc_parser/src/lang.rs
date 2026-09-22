@@ -200,7 +200,15 @@ impl LangTable {
 /// to a top-level item. Spec 6.4.6: same slot name on two items is a
 /// compile error.
 pub fn collect_lang_table(program: &Program) -> (LangTable, Vec<RokDiagnostic>) {
-    let mut table = LangTable::default();
+    collect_lang_table_onto(LangTable::default(), program)
+}
+
+/// `collect_lang_table` with `table`'s slots already bound (an earlier
+/// package's).
+pub fn collect_lang_table_onto(
+    mut table: LangTable,
+    program: &Program,
+) -> (LangTable, Vec<RokDiagnostic>) {
     let mut diags = Vec::new();
     for item in &program.items {
         let (attrs, name, kind, span) = match item {

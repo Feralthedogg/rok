@@ -75,7 +75,8 @@
 //! may), `ROK_GC_CONCURRENT=always|off` (every automatic full collection
 //! marks concurrently / none does), `ROK_GC_STATS=1` (counts, pause
 //! times, blocks and bytes moved, full-collection pauses and marker CPU
-//! to stderr at exit).
+//! to stderr at exit), `ROK_GC_LOG=1` (a line per collection, [`Pause`])
+//! and `ROK_HEAP_DUMP=on_oom` ([`heap_dump`]).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
 //! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` on
@@ -87,12 +88,13 @@
 //! words (a reference, a `str` pointer into an object, or a non-heap
 //! address), `ANY_SLOT` (the payload is a reference iff the tag has
 //! [`ANY_BOXED`]; else it is the value), `SUM_PAYLOAD` (an enum / sum:
-//! its tag selects the variant whose entries apply, [`visit_sum`]) and
-//! `AMBIGUOUS` (a word that may hold anything). A table with the
-//! `TABLE_ARRAY` version bit describes one element of a buffer, repeated
-//! over its payload. Type id 2 (runtime word buffers) is all ambiguous
-//! words. An object whose type was never registered
-//! has no traced children. Any reference word (root, interior, or an
+//! its tag selects the variant whose entries apply, [`visit_sum`]),
+//! `AMBIGUOUS` (a word that may hold anything) and `WEAK_REF` (a
+//! reference the mark does not follow, [`clear_dead_weak`]). A table
+//! with the `TABLE_ARRAY` version bit describes one element of a buffer,
+//! repeated over its payload. Type id 2 (runtime word buffers) is all
+//! ambiguous words; type id 3 is a weak cell ([`weak_new`]). An object
+//! whose type was never registered has no traced children. Any reference word (root, interior, or an
 //! integer that happens to equal an address) is looked up among the
 //! objects; a word outside every object is ignored and an ambiguous one
 //! only retains (and pins) the object it hits.
@@ -116,9 +118,13 @@ pub mod world;
 
 use rokr_common::gc_abi::{
     AMBIGUOUS, ANY_SLOT, INTERIOR_REF, KIND_MASK, STRONG_REF, SUM_DESC_SHIFT, SUM_PAYLOAD,
-    USER_TYPE_BASE,
+    USER_TYPE_BASE, WEAK_REF, WEAK_TYPE_ID,
 };
 pub use rokr_common::gc_abi::{ANY_BOXED, SCAN_WORDS_TYPE_ID};
+
+/// The `ScanTable` of a weak cell ([`WEAK_TYPE_ID`]): one `WEAK_REF`
+/// word after the header.
+static WEAK_TABLE: [u32; 4] = [24, 1 | (1 << 16), 16, WEAK_REF];
 
 /// Heap size below which no collection runs.
 const MIN_HEAP: usize = 4 << 20;
@@ -245,6 +251,8 @@ struct Heap {
     full_cpu_max_ns: u64,
     /// `ROK_GC_*` read (first slow-path allocation or collection).
     configured: bool,
+    /// `ROK_GC_LOG`: a line per collection to stderr.
+    log: bool,
     /// `ROK_GC_STRESS`: collect every `stress` runtime allocations (0 =
     /// off); `allocs` counts them.
     stress: u64,
@@ -335,6 +343,7 @@ static HEAP: Global<Heap> = Global(UnsafeCell::new(Heap {
     full_cpu_ns: 0,
     full_cpu_max_ns: 0,
     configured: false,
+    log: false,
     stress: 0,
     allocs: 0,
     base: 0,
@@ -401,6 +410,12 @@ struct Mark {
     pinned: *mut usize,
     pinned_len: usize,
     pinned_cap: usize,
+    /// Addresses of the `WEAK_REF` words of the scanned objects.
+    weak: *mut usize,
+    weak_len: usize,
+    weak_cap: usize,
+    /// Objects marked by this collection (`ROK_GC_LOG`).
+    marked: usize,
 }
 
 /// Marker thread CPU time (`ROK_GC_STATS`).
@@ -423,6 +438,10 @@ static MARK: Global<Mark> = Global(UnsafeCell::new(Mark {
     pinned: ptr::null_mut(),
     pinned_len: 0,
     pinned_cap: 0,
+    weak: ptr::null_mut(),
+    weak_len: 0,
+    weak_cap: 0,
+    marked: 0,
 }));
 
 fn mark() -> &'static mut Mark {
@@ -580,6 +599,21 @@ fn configure(h: &mut Heap) {
     if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
         sys::atexit(print_stats);
     }
+    h.log = env_num(c"ROK_GC_LOG").is_some_and(|v| v != 0);
+    if env_str(c"ROK_HEAP_DUMP") == b"on_oom" {
+        rokr_common::set_oom_hook(heap_dump);
+    }
+}
+
+/// `core::fmt` to stderr.
+struct Stderr;
+
+impl core::fmt::Write for Stderr {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        // SAFETY: `s` is valid for its own length.
+        unsafe { rokr_common::write_stderr(s.as_ptr(), s.len()) };
+        Ok(())
+    }
 }
 
 /// The bytes of env var `name` (empty if unset).
@@ -596,7 +630,7 @@ fn env_str(name: &core::ffi::CStr) -> &'static [u8] {
 }
 
 /// Decimal value of env var `name` (`Some(0)` if set but not a number).
-fn env_num(name: &core::ffi::CStr) -> Option<u64> {
+pub fn env_num(name: &core::ffi::CStr) -> Option<u64> {
     // SAFETY: `name` is NUL-terminated; getenv's result is NUL-terminated.
     unsafe {
         let mut p = libc::getenv(name.as_ptr()).cast::<u8>().cast_const();
@@ -613,14 +647,6 @@ fn env_num(name: &core::ffi::CStr) -> Option<u64> {
 }
 
 extern "C" fn print_stats() {
-    struct Stderr;
-    impl core::fmt::Write for Stderr {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            // SAFETY: `s` is valid for its own length.
-            unsafe { rokr_common::write_stderr(s.as_ptr(), s.len()) };
-            Ok(())
-        }
-    }
     world::lock_at_exit();
     let h = heap();
     let _ = writeln!(
@@ -657,6 +683,131 @@ extern "C" fn print_stats() {
         h.full_pauses, h.cycles, h.forced
     );
     world::unlock();
+}
+
+/// Types [`heap_dump`] tells apart; the rest count as one.
+const DUMP_TYPES: usize = 512;
+/// Types and large objects [`heap_dump`] lists.
+const DUMP_LINES: usize = 32;
+
+/// [`heap_dump`]'s tables (it must not allocate).
+struct Dump {
+    /// `(type_id, objects, bytes)` per type; the last entry (type id 0)
+    /// counts the types that did not fit.
+    types: [(u32, u64, u64); DUMP_TYPES + 1],
+    /// The largest LOS objects, `(bytes, type_id)`.
+    large: [(usize, u32); DUMP_LINES],
+}
+
+static DUMP: Global<Dump> = Global(UnsafeCell::new(Dump {
+    types: [(0, 0, 0); DUMP_TYPES + 1],
+    large: [(0, 0); DUMP_LINES],
+}));
+
+/// `ROK_HEAP_DUMP=on_oom`: the object count and bytes of each type (most
+/// bytes first; type ids, 801 §8.1.2) and the largest LOS objects, to
+/// stderr. Runs on the failing thread without taking the world lock (it
+/// may hold it): other threads' newest objects may be missed.
+fn heap_dump() {
+    // SAFETY: called once (`oom` takes the hook); best effort over the
+    // heap as it stands.
+    let Dump { types, large } = unsafe { &mut *DUMP.0.get() };
+    let mut count = |type_id: u32, size: usize| {
+        let mut i = type_id as usize % DUMP_TYPES;
+        for _ in 0..DUMP_TYPES {
+            if types[i].0 == type_id || types[i].1 == 0 {
+                break;
+            }
+            i = (i + 1) % DUMP_TYPES;
+        }
+        if types[i].1 != 0 && types[i].0 != type_id {
+            i = DUMP_TYPES; // type id 0: the rest
+        } else {
+            types[i].0 = type_id;
+        }
+        types[i].1 += 1;
+        types[i].2 += size as u64;
+    };
+    let h = heap();
+    let (mut objects, mut used) = (0usize, 0usize);
+    for b in 0..h.nblocks {
+        // SAFETY: `b < nblocks`.
+        let m = unsafe { &*h.meta.add(b) };
+        if !m.used {
+            continue;
+        }
+        used += 1;
+        let block = h.base + b * BLOCK_SIZE;
+        // Survivors by their start bits; what was handed out since, by
+        // parsing (a header being written may read as 0: skipped).
+        for_each_start(&m.lines, &m.starts, true, |off| {
+            if line(m, off / LINE_SIZE) == LIVE {
+                let o = (block + off) as *mut u8;
+                // SAFETY: a survivor's header.
+                count(unsafe { (*header(o)).type_id }, obj_size(o));
+                objects += 1;
+            }
+        });
+        let mut off = 0;
+        while off + HEADER_SIZE <= BLOCK_SIZE {
+            let state = line(m, off / LINE_SIZE);
+            if state != TAKEN && state != BLACK {
+                off = (off / LINE_SIZE + 1) * LINE_SIZE;
+                continue;
+            }
+            let o = (block + off) as *mut u8;
+            // SAFETY: inside a handed-out line: zeroes or headers.
+            let (type_id, size) = unsafe { ((*header(o)).type_id, obj_size(o)) };
+            if type_id == 0 || size < HEADER_SIZE || size % 8 != 0 || off + size > BLOCK_SIZE {
+                off += 8;
+                continue;
+            }
+            count(type_id, size);
+            objects += 1;
+            off += size;
+        }
+    }
+    let (mut los, mut los_bytes) = (0usize, 0usize);
+    let mut o = h.los;
+    while !o.is_null() {
+        // SAFETY: walks the LOS list.
+        let (size, type_id, next) =
+            unsafe { ((*prefix(o)).size, (*header(o)).type_id, (*prefix(o)).next) };
+        count(type_id, size);
+        los += 1;
+        los_bytes += size;
+        if let Some(i) = large.iter().position(|&(s, _)| s < size) {
+            large.copy_within(i..DUMP_LINES - 1, i + 1);
+            large[i] = (size, type_id);
+        }
+        o = next;
+    }
+    types.sort_unstable_by(|a, b| b.2.cmp(&a.2));
+    let _ = writeln!(
+        Stderr,
+        "rok heap dump: {used} blocks ({} KiB), {objects} objects in them; {los} large objects ({} KiB)",
+        (used * BLOCK_SIZE) >> 10,
+        los_bytes >> 10
+    );
+    for &(type_id, n, bytes) in types.iter().take(DUMP_LINES).filter(|t| t.1 != 0) {
+        if type_id == 0 {
+            let _ = writeln!(
+                Stderr,
+                "rok heap dump: other types: {n} objects, {bytes} bytes"
+            );
+        } else {
+            let _ = writeln!(
+                Stderr,
+                "rok heap dump: type {type_id:#x}: {n} objects, {bytes} bytes"
+            );
+        }
+    }
+    for &(size, type_id) in large.iter().filter(|l| l.0 != 0) {
+        let _ = writeln!(
+            Stderr,
+            "rok heap dump: large object of type {type_id:#x}: {size} bytes"
+        );
+    }
 }
 
 fn now_ns() -> u64 {
@@ -977,6 +1128,7 @@ fn scan_table(type_id: u32) -> *const u8 {
             core::sync::atomic::AtomicUsize::from_ptr(t.add(1 + i as usize)).load(Ordering::Acquire)
                 as *const u8
         },
+        _ if type_id == WEAK_TYPE_ID => WEAK_TABLE.as_ptr().cast(),
         _ => ptr::null(),
     }
 }
@@ -1155,6 +1307,33 @@ pub unsafe fn unpin(obj: *mut u8) {
     });
 }
 
+/// A new weak cell referring to `obj` (802 §8.2.8).
+///
+/// The collection that frees `obj` sets the cell's word to 0, one that
+/// moves it updates it. The cell is never written again, so (young when
+/// written) it needs no barrier. May collect: the caller roots `obj`.
+#[allow(clippy::cast_ptr_alignment)] // GC objects are 8-aligned
+pub fn weak_new(obj: *mut u8) -> *mut u8 {
+    let cell = alloc(24, 8, WEAK_TYPE_ID);
+    // SAFETY: a fresh 24-byte object.
+    unsafe { cell.add(HEADER_SIZE).cast::<usize>().write(obj as usize) };
+    cell
+}
+
+/// The referent of the weak cell `cell`, null once it was freed.
+///
+/// # Safety
+/// `cell` must be a live cell from [`weak_new`].
+pub unsafe fn weak_get(cell: *mut u8) -> *mut u8 {
+    // SAFETY: caller contract.
+    let w = load_word(unsafe { cell.add(HEADER_SIZE) });
+    // No safepoint between the load and the log: a running mark sees it.
+    if w != 0 && concurrent::MARKING.load(Ordering::Relaxed) {
+        concurrent::shade(w);
+    }
+    w as *mut u8
+}
+
 /// Never move `obj` again (its address became a number: a parking key).
 /// It still dies when unreachable.
 ///
@@ -1282,22 +1461,73 @@ fn push(word: usize, pin: bool) {
     };
     let m = mark();
     if pin && m.evacuating && (obj as usize) < m.base + m.nblocks * BLOCK_SIZE {
-        if m.pinned_len == m.pinned_cap {
-            let cap = (m.pinned_cap * 2).max(1024);
-            // SAFETY: realloc of our own buffer (or null).
-            let p = unsafe { libc::realloc(m.pinned.cast(), cap * size_of::<usize>()) };
-            if p.is_null() {
-                rokr_common::oom();
-            }
-            m.pinned = p.cast();
-            m.pinned_cap = cap;
-        }
-        // SAFETY: `pinned_len < pinned_cap`.
-        unsafe { *m.pinned.add(m.pinned_len) = obj as usize };
-        m.pinned_len += 1;
+        append(
+            &mut m.pinned,
+            &mut m.pinned_len,
+            &mut m.pinned_cap,
+            obj as usize,
+        );
     }
     // Marked or not is decided by `drain`, once the header is in cache.
     push_obj(obj);
+}
+
+/// Append `v` to the `realloc`-grown list `list[..len]`.
+fn append(list: &mut *mut usize, len: &mut usize, cap: &mut usize, v: usize) {
+    if *len == *cap {
+        *cap = (*cap * 2).max(1024);
+        // SAFETY: realloc of our own buffer (or null).
+        let p = unsafe { libc::realloc(list.cast(), *cap * size_of::<usize>()) };
+        if p.is_null() {
+            rokr_common::oom();
+        }
+        *list = p.cast();
+    }
+    // SAFETY: `len < cap`.
+    unsafe { *list.add(*len) = v };
+    *len += 1;
+}
+
+/// The word at offset `off` of the scanned object `o`, of kind `kind`
+/// ([`for_each_ref`]): queue its referent, or record a weak word.
+fn visit_word(o: *mut u8, off: usize, kind: u32) {
+    // SAFETY: `off` is a word inside the live object `o`.
+    let at = unsafe { o.add(off) };
+    if kind == WEAK_REF {
+        let m = mark();
+        append(&mut m.weak, &mut m.weak_len, &mut m.weak_cap, at as usize);
+    } else {
+        push(load_word(at), kind == AMBIGUOUS);
+    }
+}
+
+/// After marking, before the sweep: clear every recorded weak word whose
+/// referent this collection frees (unmarked; a minor collection frees
+/// young objects only). One it does not look at (allocated during a
+/// concurrent mark) stays.
+fn clear_dead_weak(full: bool) {
+    let m = mark();
+    if m.weak_len == 0 {
+        return;
+    }
+    // SAFETY: `weak_len` recorded words inside marked (live) objects.
+    let words = unsafe { core::slice::from_raw_parts(m.weak, m.weak_len) };
+    for &at in words {
+        let w = load_word(at as *const u8);
+        if w == 0 {
+            continue;
+        }
+        let Some(obj) = object_in::<false>(w, false, true) else {
+            continue;
+        };
+        // SAFETY: an object header.
+        let f = unsafe { (*header(obj)).gc_flags.load(Ordering::Relaxed) };
+        if f & FLAG_MARK == 0 && (full || f & FLAG_STICKY == 0) {
+            // SAFETY: as above; the world is stopped.
+            unsafe { (at as *mut usize).write(0) };
+        }
+    }
+    mark().weak_len = 0;
 }
 
 /// Start loading the cache line at `p` (a hint: never faults).
@@ -1384,6 +1614,7 @@ fn drain(mut batch: usize) {
         {
             continue;
         }
+        m.marked += 1;
         scan_children(o);
         if concurrent {
             // The first store into `o` from now on need not log what it
@@ -1453,12 +1684,14 @@ fn scan_children(o: *mut u8) {
                     true
                 }
                 SUM_PAYLOAD => {
-                    visit_sum(o, t, kind, off, &mut |off, precise| {
-                        push(load_word(o.add(off)), !precise);
-                    });
+                    visit_sum(o, t, kind, off, &mut |off, k| visit_word(o, off, k));
                     continue;
                 }
                 AMBIGUOUS => false,
+                WEAK_REF => {
+                    visit_word(o, off, WEAK_REF);
+                    continue;
+                }
                 _ => continue,
             };
             push(load_word(o.add(off)), !precise);
@@ -1469,20 +1702,18 @@ fn scan_children(o: *mut u8) {
 /// Queue the referents of `o`'s reference words at byte offsets
 /// `lo..hi` (from the header).
 fn scan_range(o: *mut u8, lo: usize, hi: usize) {
-    for_each_ref(o, lo, hi, |off, precise| {
-        // SAFETY: `off` is a word inside the live object `o`.
-        push(load_word(unsafe { o.add(off) }), !precise);
-    });
+    for_each_ref(o, lo, hi, |off, kind| visit_word(o, off, kind));
 }
 
-/// `f(offset, precise)` for every word of the live object `o` at byte
+/// `f(offset, kind)` for every word of the live object `o` at byte
 /// offsets `lo..hi` (from the header) that may hold a reference, per
-/// its `ScanTable` (802). A `precise` word holds a reference or an
-/// address outside the heap; an ambiguous one may hold anything. An
-/// `ANY_SLOT` yields its payload word only when the tag says it is a
-/// box. An object whose type was never registered has none.
+/// its `ScanTable` (802). `kind`: `STRONG_REF` (a reference or an
+/// address outside the heap), `AMBIGUOUS` (anything) or `WEAK_REF` (a
+/// reference or 0, not to be followed). An `ANY_SLOT` yields its payload
+/// word only when the tag says it is a box. An object whose type was
+/// never registered has none.
 #[allow(clippy::cast_ptr_alignment)] // tables are 4-aligned, payloads 8
-fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)) {
+fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, u32)) {
     // SAFETY: `o` is a live GC object; its ScanTable (802) describes it.
     unsafe {
         let hd = &*header(o);
@@ -1492,7 +1723,7 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, bool)
             let hi = hi.min(obj_size(o)) & !(W - 1);
             let mut off = lo.max(HEADER_SIZE).next_multiple_of(W);
             while off < hi {
-                f(off, false);
+                f(off, AMBIGUOUS);
                 off += W;
             }
             return;
@@ -1550,18 +1781,18 @@ fn visit_entries(
     t: *const u8,
     entries: &[[u32; 2]],
     at: usize,
-    f: &mut impl FnMut(usize, bool),
+    f: &mut impl FnMut(usize, u32),
 ) {
     for &[eo, kind] in entries {
         let off = at + eo as usize;
         match kind & KIND_MASK {
-            STRONG_REF | INTERIOR_REF => f(off, true),
+            STRONG_REF | INTERIOR_REF => f(off, STRONG_REF),
             // SAFETY: the tag word of an `any` inside the live `o`.
             ANY_SLOT if load_u32(unsafe { o.add(off) }) & ANY_BOXED != 0 => {
-                f(off + size_of::<usize>(), true);
+                f(off + size_of::<usize>(), STRONG_REF);
             }
             SUM_PAYLOAD => visit_sum(o, t, kind, off, f),
-            AMBIGUOUS => f(off, false),
+            k @ (AMBIGUOUS | WEAK_REF) => f(off, k),
             _ => {}
         }
     }
@@ -1570,7 +1801,7 @@ fn visit_entries(
 /// The `SUM_PAYLOAD` entry `kind` of table `t` whose tag is at byte
 /// offset `at` of `o`: visit the entries of the variant the tag selects.
 #[allow(clippy::cast_ptr_alignment)] // tables and tags are 4-aligned
-fn visit_sum(o: *mut u8, t: *const u8, kind: u32, at: usize, f: &mut impl FnMut(usize, bool)) {
+fn visit_sum(o: *mut u8, t: *const u8, kind: u32, at: usize, f: &mut impl FnMut(usize, u32)) {
     // SAFETY: the tag of a sum inside the live `o`; the descriptor and
     // its variants' entries lie inside the table (802, `gc_abi`).
     unsafe {
@@ -1632,7 +1863,14 @@ fn collect_locked(full: bool, may_concur: bool) {
     } else {
         mark_sweep(full);
     }
-    p.end(full);
+    p.end(
+        full,
+        match (concur, full) {
+            (true, _) => "minor, concurrent full mark started",
+            (false, true) => "full",
+            (false, false) => "minor",
+        },
+    );
 }
 
 /// A full collection due now should mark concurrently.
@@ -1650,6 +1888,8 @@ fn wants_concurrent() -> bool {
 struct Pause {
     t0: u64,
     c0: u64,
+    /// `live_bytes` before.
+    live: usize,
 }
 
 impl Pause {
@@ -1658,6 +1898,7 @@ impl Pause {
         let p = Self {
             t0: now_ns(),
             c0: sys::thread_cpu_ns() as u64,
+            live: heap().live_bytes,
         };
         world::stop();
         world::reset_tlabs();
@@ -1665,11 +1906,24 @@ impl Pause {
         p
     }
 
-    /// `full`: the pause belongs to a full collection.
-    fn end(self, full: bool) {
+    /// `full`: the pause belongs to a full collection; `kind` names the
+    /// collection in the `ROK_GC_LOG` line.
+    fn end(self, full: bool, kind: &str) {
+        let marked = mark().marked;
         concurrent::unlock_mark();
         let h = heap();
         let dt = now_ns() - self.t0;
+        if h.log {
+            let _ = writeln!(
+                Stderr,
+                "rok gc: #{} {kind}: {}.{:03} ms pause, {marked} objects marked, {} -> {} KiB",
+                h.collections,
+                dt / 1_000_000,
+                dt / 1000 % 1000,
+                self.live >> 10,
+                h.live_bytes >> 10
+            );
+        }
         let cpu = sys::thread_cpu_ns() as u64 - self.c0;
         h.gc_cpu_ns += cpu;
         h.gc_ns += dt;
@@ -1707,7 +1961,7 @@ fn mark_roots(pin: bool) {
 fn mark_sweep(full: bool) {
     build_index();
     let m = mark();
-    (m.full, m.concurrent, m.evacuating, m.len) = (full, false, full, 0);
+    (m.full, m.concurrent, m.evacuating, m.len, m.marked) = (full, false, full, 0, 0);
     mark_roots(true);
     // Nobody logs while the world is stopped (the barrier has no
     // safepoint): every thread's chunk joins the retired ones.
@@ -1718,6 +1972,7 @@ fn mark_sweep(full: bool) {
         scan_dirty_cards();
     }
     drain(usize::MAX);
+    clear_dead_weak(full);
     if !full {
         // The logged (old) objects all survive: unlogged again.
         for_each_logged(log, |o| {
@@ -2034,9 +2289,10 @@ fn evacuate() {
     heap().moved_bytes += moved as u64;
 }
 
-/// After the copies: rewrite every precise reference word of every
-/// survivor (copies included, old copies not) that points into a moved
-/// object. Roots and ambiguous words only reach objects that stayed.
+/// After the copies: rewrite every precise (or weak) reference word of
+/// every survivor (copies included, old copies not) that points into a
+/// moved object. Roots and ambiguous words only reach objects that
+/// stayed; a weak word's referent is live (or the word was cleared).
 // A second pass over the live heap: recording the slots that
 // point into candidates during the mark needs the candidates before
 // the mark, from stale line states (young objects refill the holes and
@@ -2044,8 +2300,8 @@ fn evacuate() {
 #[allow(clippy::cast_ptr_alignment)] // reference words are 8-aligned
 fn fix_references() {
     let fix = |o: *mut u8| {
-        for_each_ref(o, 0, usize::MAX, |off, precise| {
-            if !precise {
+        for_each_ref(o, 0, usize::MAX, |off, kind| {
+            if kind == AMBIGUOUS {
                 return;
             }
             // SAFETY: `off` is a reference word inside the live `o`.
@@ -2444,6 +2700,82 @@ mod tests {
         sum_payloads_scan_the_active_variant();
         concurrent_mark_keeps_the_snapshot();
         evacuation_defragments_sparse_blocks();
+        weak_cells_clear_and_follow_moves();
+    }
+
+    /// Weak cells: a minor collection clears the one whose young referent
+    /// died and keeps an old referent; an evacuation updates a moved
+    /// referent's; a full collection clears it once nothing else holds the
+    /// referent. A referent read during a concurrent mark survives it.
+    #[allow(clippy::many_single_char_names)]
+    fn weak_cells_clear_and_follow_moves() {
+        let leaf = USER_TYPE_BASE + 1;
+        heap().evac_always = true;
+        let base = live_bytes();
+        let a = alloc(32, 8, USER_TYPE_BASE); // one STRONG_REF @16
+        let (x, y) = (alloc(24, 8, leaf), alloc(24, 8, leaf));
+        set(y, 16, 0xA);
+        set(a, 16, y as usize);
+        let (cx, cy) = (weak_new(x), weak_new(y));
+        let cell = |c: *mut u8| word(c, 16);
+        // SAFETY: frame layout matches `Frame` + three slots, unlinked
+        // before it dies.
+        unsafe {
+            let (mut ra, mut rx, mut ry) = (a as usize, cx as usize, cy as usize);
+            let mut frame: (Frame, *mut usize, *mut usize, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 3,
+                },
+                &mut ra,
+                &mut rx,
+                &mut ry,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect_young();
+            assert_eq!(cell(cx), 0);
+            assert_eq!(cell(cy), y as usize);
+            collect();
+            let y2 = word(a, 16);
+            assert_ne!(y2, y as usize);
+            assert_eq!(cell(cy), y2);
+            assert_eq!(word(weak_get(cy), 16), 0xA);
+            collect_young();
+            assert_eq!(cell(cy), y2);
+            // A concurrent mark (held off): `y` is weakly reachable only
+            // when it starts; read through the cell and stored into an
+            // object younger than the mark (never scanned), it survives.
+            set(a, 16, 0);
+            heap().concurrent = Concurrent::Always;
+            world::lock();
+            collect_locked(true, true);
+            world::unlock();
+            concurrent::lock_mark();
+            let c = alloc(32, 8, USER_TYPE_BASE);
+            set(c, 16, weak_get(cy) as usize);
+            *frame.2 = c as usize;
+            concurrent::unlock_mark();
+            world::lock();
+            if heap().marking {
+                concurrent::finish(false);
+            }
+            world::unlock();
+            heap().concurrent = Concurrent::Auto;
+            assert_eq!(cell(cy), word(c, 16));
+            assert_eq!(word(weak_get(cy), 16), 0xA);
+            *frame.2 = 0;
+            collect();
+            assert_eq!(cell(cy), 0);
+            assert!(weak_get(cy).is_null());
+            *frame.1 = 0;
+            *frame.2 = 0;
+            *frame.3 = 0;
+            collect();
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
+        heap().evac_always = false;
     }
 
     fn word(o: *mut u8, off: usize) -> usize {

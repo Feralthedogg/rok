@@ -824,33 +824,62 @@ fn compile_unit_in(
         config.cfg_flags, config.test, config.bench
     );
     let parse_libs = rokc_diagnostic::time_passes().then(std::time::Instant::now);
-    let (mut items, mut uses, mut d) = cached(&LIB_CACHE, cache, key, files, |files| {
-        let (mut items, mut uses, mut diags) = (Vec::new(), Vec::new(), Vec::new());
-        for (i, (prefix, root)) in roots.iter().enumerate() {
-            let first = sources.len();
-            let stray = collect_module_tree(
-                root,
-                None,
-                root.parent(),
-                prefix,
-                &ext,
-                &metas[i + 1],
-                &mut diags,
-                &mut items,
-                &mut uses,
-                config.keep_ast.then_some(&mut sources),
-                files,
-            );
-            if !stray.is_empty() {
-                diags.push(entry::stmts_outside_entry(root));
-            }
-            let pkg = prefix.join("::");
-            for f in &mut sources[first..] {
-                f.package.clone_from(&pkg);
-            }
-        }
-        (items, uses, diags)
+    // A cached library parse keeps what HIR collected of it too: with
+    // that kept, the library's items are not needed again.
+    let mut library = cache.then(|| {
+        let flags = format!(
+            "{:?} {lib:?} {:?} {} {} {} {} {}",
+            config.externs,
+            prebuilt.iter().map(|p| &p.rokhir.name).collect::<Vec<_>>(),
+            config.check_library,
+            config.inline_prebuilt,
+            config.target.pointer_width,
+            config.target.stdcall_system(),
+            incr::target_key(&cfg_env, &config.target),
+        );
+        incr::key(&[key.as_bytes(), &files.len().to_le_bytes(), flags.as_bytes()])
     });
+    let reused = library
+        .filter(|&k| rokc_hir::library_kept(k))
+        .and_then(|k| cached_parts(&key, files, k));
+    let kept = reused.is_some();
+    let (mut items, mut uses, mut d) = match reused {
+        Some((uses, diags)) => (Vec::new(), uses, diags),
+        None => cached(&LIB_CACHE, cache, key, files, |files| {
+            let (mut items, mut uses, mut diags) = (Vec::new(), Vec::new(), Vec::new());
+            for (i, (prefix, root)) in roots.iter().enumerate() {
+                let first = sources.len();
+                let stray = collect_module_tree(
+                    root,
+                    None,
+                    root.parent(),
+                    prefix,
+                    &ext,
+                    &metas[i + 1],
+                    &mut diags,
+                    &mut items,
+                    &mut uses,
+                    config.keep_ast.then_some(&mut sources),
+                    files,
+                );
+                if !stray.is_empty() {
+                    diags.push(entry::stmts_outside_entry(root));
+                }
+                let pkg = prefix.join("::");
+                for f in &mut sources[first..] {
+                    f.package.clone_from(&pkg);
+                }
+            }
+            (items, uses, diags)
+        }),
+    };
+    if let (false, Some(k)) = (kept, library) {
+        let mut libs = Vec::new();
+        native_libs(items.iter().map(|(_, i)| i), &mut libs);
+        *LIB_NATIVE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, libs));
+    }
     if let Some(t) = parse_libs {
         eprintln!(
             "time: {:>9.1}ms  parse library",
@@ -889,6 +918,9 @@ fn compile_unit_in(
     {
         w.reactor = true;
     }
+    if wit_link.is_some() && !kept {
+        library = None;
+    }
     coro::rewrite_items(&mut all_items, &mut diags);
     let (item_modules, items): (Vec<String>, Vec<rokc_ast::Item>) = all_items.into_iter().unzip();
     let input = rokc_hir::HirInput {
@@ -905,6 +937,7 @@ fn compile_unit_in(
         fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
         bodies: incr::current().map(|i| incr::bodies(i, files)),
         lints: config.keep_ast,
+        library,
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -931,6 +964,15 @@ fn compile_unit_in(
     diags.append(&mut use_diags);
     let mut libs = Vec::new();
     native_libs(&program.items, &mut libs);
+    if kept {
+        libs.extend(
+            LIB_NATIVE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .flat_map(|(_, l)| l.clone()),
+        );
+    }
     let mut hir = rokc_diagnostic::time("hir", || {
         let lower = |program, input: &rokc_hir::HirInput| {
             rokc_hir::lower_full(
@@ -1876,14 +1918,45 @@ type UseEntry = (String, rokc_core::Visibility, rokc_ast::UseTree);
 /// One cached parse (`cached`): its key, the files it added, its
 /// result.
 type Cached<T> = std::sync::Mutex<Option<(String, Vec<(String, String)>, T)>>;
-type LibParse = (
-    Vec<ModItem>,
-    Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
-    Vec<RokDiagnostic>,
-);
+/// `use` trees by module.
+type RawUses = Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>;
+type LibParse = (Vec<ModItem>, RawUses, Vec<RokDiagnostic>);
 static PREPASS_CACHE: Cached<(PrecTable, Vec<RokDiagnostic>, PrePass)> =
     std::sync::Mutex::new(None);
 static LIB_CACHE: Cached<LibParse> = std::sync::Mutex::new(None);
+/// `#[link]` libraries: name, static.
+type NativeLibs = Vec<(String, bool)>;
+/// The native libraries of the cached library's items, by HIR key.
+static LIB_NATIVE: std::sync::Mutex<Option<(u64, NativeLibs)>> = std::sync::Mutex::new(None);
+
+/// The cached library parse's `use`s and diagnostics without its items
+/// (HIR keeps what it collected of them, `library`): its files are added
+/// again. `None` when another parse is cached.
+fn cached_parts(
+    key: &str,
+    files: &mut SourceMap,
+    library: u64,
+) -> Option<(RawUses, Vec<RokDiagnostic>)> {
+    let native = LIB_NATIVE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|(k, _)| *k == library);
+    if !native {
+        return None;
+    }
+    let key = format!("{}|{key}", files.len());
+    let (added, uses, diags) = LIB_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .filter(|(k, _, _)| *k == key)
+        .map(|(_, added, (_, uses, diags))| (added.clone(), uses.clone(), diags.clone()))?;
+    for (path, text) in added {
+        files.add(path, text);
+    }
+    Some((uses, diags))
+}
 
 /// `parse(files)`, or (`on`) a copy of its last result when `key` and
 /// the number of files before it are the same: its files are added
@@ -2305,7 +2378,10 @@ fn flatten_module_items(
 
 /// `#[link("z")]` / `#[link(name = "z", kind = "static")]` on the
 /// `extern` blocks of `items` (spec 6.2.3).
-fn native_libs(items: &[rokc_ast::Item], out: &mut Vec<(String, bool)>) {
+fn native_libs<'i>(
+    items: impl IntoIterator<Item = &'i rokc_ast::Item>,
+    out: &mut Vec<(String, bool)>,
+) {
     use rokc_ast::{AttrArg, AttrBody, Item, Literal};
     for item in items {
         match item {

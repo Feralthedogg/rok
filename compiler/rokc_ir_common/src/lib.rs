@@ -193,6 +193,16 @@ pub enum Linkage {
     Prebuilt,
 }
 
+/// `#[inline]` / `#[inline(always)]` / `#[inline(never)]` (spec 6.2.4).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Inline {
+    #[default]
+    Auto,
+    Hint,
+    Always,
+    Never,
+}
+
 /// A function the back end treats specially.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FnRole {
@@ -230,6 +240,7 @@ pub struct FnFacts {
     /// Declared in a `#[no_safepoint] extern "rok"` block: neither
     /// allocates nor blocks, so a call to it is no safepoint.
     pub no_safepoint: bool,
+    pub inline: Inline,
 }
 
 /// Separator between a generic function's path and its instance's type
@@ -355,6 +366,12 @@ rokc_core::codec_enum!(FnRole {
     Main,
     AnyDispatcher
 });
+rokc_core::codec_enum!(Inline {
+    Auto,
+    Hint,
+    Always,
+    Never
+});
 rokc_core::codec_struct!(FnFacts {
     abi,
     linkage,
@@ -365,4 +382,5 @@ rokc_core::codec_struct!(FnFacts {
     mono_args,
     track_caller,
     no_safepoint,
+    inline,
 });

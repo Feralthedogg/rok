@@ -1,0 +1,114 @@
+// spec: refs-lang 802-scan-table §8.2.8
+// gc-stress: 30
+// expect-exit: 0
+// expect-stdout:
+// alive 5 true
+// young cleared true
+// old cleared true
+// moved 0xA true
+// cache 50 kept, hits 50 dropped 50
+// churn ok 1000
+
+// 8.2.8 `WEAK_REF`: a `Weak<T>` does not keep its `GcPtr<T>`'s object
+// alive. The collection that frees the object — minor (it was young),
+// full, or concurrent — clears every weak reference to it; one that
+// moves it (evacuation) updates them. The gc-stress runs collect, move
+// and mark concurrently all along.
+use rok::bare::gc;
+use rok::bare::gc::{GcPtr, Weak};
+
+extern "C" {
+    fn rok_gc_collect_young();
+}
+
+fn weak_of(v: i64) -> Weak<i64> { Weak::new(GcPtr::new(v)) }
+
+fn main() {
+    let strong = GcPtr::new(5i64);
+    let w = Weak::new(strong);
+    gc::collect();
+    if let p: GcPtr<i64> = w.get() {
+        println(f"alive {p.get()} {p.same(strong)}");
+    }
+
+    let young = weak_of(1);
+    unsafe { rok_gc_collect_young() };
+    println(f"young cleared {young.get() is none}");
+
+    let o = GcPtr::new(2i64);
+    let wo = Weak::new(o);
+    gc::collect();
+    o = GcPtr::new(3i64);
+    gc::collect();
+    println(f"old cleared {wo.get() is none}");
+
+    // Held only through a list: precise, so evacuation may move it.
+    let held: List<GcPtr<i64>> = [GcPtr::new(0xAi64)];
+    let wh = Weak::new(held[0]);
+    for i in 0..5 {
+        for k in 0..2000 {
+            let _junk = f"junk{k}";
+        }
+        gc::collect();
+    }
+    let h = wh.get() ?? GcPtr::new(0i64);
+    println(f"moved {h.get():#X} {h.same(held[0])}");
+
+    // A cache of weak entries: the kept half answers, the rest is gone.
+    let keep: List<GcPtr<i64>> = [];
+    let cache: List<Weak<i64>> = [];
+    for i in 0..100 {
+        let v = GcPtr::new(i as i64);
+        if i % 2 == 0 {
+            keep.push(v);
+        }
+        cache.push(Weak::new(v));
+    }
+    gc::collect();
+    let hits = 0;
+    let dropped = 0;
+    for i in 0..100 {
+        match cache[i].get() {
+            p: GcPtr<i64> => {
+                if p.get() == i as i64 {
+                    hits += 1;
+                }
+            }
+            none => {
+                dropped += 1;
+            }
+        }
+    }
+    println(f"cache {keep.len()} kept, hits {hits} dropped {dropped}");
+
+    // Weak references made and read all along, while every kind of
+    // collection runs; a live one always reads its own value.
+    let live: List<GcPtr<i64>> = [];
+    let refs: List<Weak<i64>> = [];
+    let ok = true;
+    for i in 0..3000 {
+        let v = GcPtr::new(i as i64);
+        if i % 3 == 0 {
+            live.push(v);
+        }
+        refs.push(Weak::new(v));
+        if i % 7 == 0 {
+            let j = i / 2;
+            if let p: GcPtr<i64> = refs[j].get() {
+                ok = ok && p.get() == j as i64;
+            }
+        }
+    }
+    gc::collect();
+    for i in 0..3000 {
+        match refs[i].get() {
+            p: GcPtr<i64> => {
+                ok = ok && p.get() == i as i64;
+            }
+            none => {
+                ok = ok && i % 3 != 0;
+            }
+        }
+    }
+    println(f"churn {if ok { "ok" } else { "bad" }} {live.len()}");
+}

@@ -931,6 +931,15 @@ std::unique_ptr<llvm::TargetMachine> prepare(llvm::Module &m,
   }
   m.setTargetTriple(tm->getTargetTriple());
   m.setDataLayout(tm->createDataLayout());
+  // As clang: every function carries the CPU and features it is built
+  // for (`-C target-cpu` / `-C target-feature`), so the inliner and the
+  // vectorizers see them per function.
+  for (llvm::Function &f : m)
+    if (!f.isDeclaration()) {
+      f.addFnAttr("target-cpu", tm->getTargetCPU());
+      if (!tm->getTargetFeatureString().empty())
+        f.addFnAttr("target-features", tm->getTargetFeatureString());
+    }
   if (tm->getTargetTriple().isOSWindows()) {
     // Windows debuggers read CodeView (lld-link writes it into a PDB).
     if (m.getModuleFlag("Debug Info Version") && !m.getModuleFlag("CodeView"))
@@ -1226,6 +1235,24 @@ int rok_llvm_compile_ir(const char *src, size_t len, const RokCompile *o,
     return fail(err, msg);
   }
   return finish(*m, *o, out, err, warn);
+}
+
+// The build machine's CPU and its features (`+f,-g,..`), for
+// `-C target-cpu=native`; 1 if LLVM cannot name the CPU.
+int rok_llvm_host_cpu(RokBuf *cpu, RokBuf *features) {
+  llvm::StringRef name = llvm::sys::getHostCPUName();
+  if (name.empty())
+    return 1;
+  put(cpu, name);
+  std::string f;
+  for (auto &kv : llvm::sys::getHostCPUFeatures()) {
+    if (!f.empty())
+      f += ',';
+    f += kv.second ? '+' : '-';
+    f += kv.first().str();
+  }
+  put(features, f);
+  return 0;
 }
 
 // The data layout LLVM uses for o->triple / o->cpu.

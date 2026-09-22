@@ -227,15 +227,18 @@ fn check_lints(
     Ok(())
 }
 
-/// Run `exe` (with `env`) and check its exit code, stderr and stdout
-/// against the case's directives.
+/// Run `exe` (with the case's `run-env` and `env`) and check its exit
+/// code, stderr and stdout against the case's directives.
 fn check_run(
     source: &str,
     exe: &std::path::Path,
     expected: i32,
     env: &[(&str, &str)],
 ) -> Result<(), String> {
+    // `// run-env: KEY=VALUE`: the case's own environment.
+    let own = directives(source, "run-env:").filter_map(|d| d.split_once('='));
     let run = run_command(exe)
+        .envs(own)
         .envs(env.iter().copied())
         .output()
         .map_err(|e| format!("exec: {e}"))?;

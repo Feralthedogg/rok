@@ -1,3 +1,4 @@
+// spec: std §2.3.9
 // expect-exit: 0
 // expect-stdout:
 // false true

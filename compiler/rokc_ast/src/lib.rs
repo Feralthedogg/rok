@@ -13,7 +13,7 @@ pub use defs::*;
 
 use rokc_diagnostic::Span;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Program {
     pub attrs: Vec<Attribute>,
     pub items: Vec<Item>,

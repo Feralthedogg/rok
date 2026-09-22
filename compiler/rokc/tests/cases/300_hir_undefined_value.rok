@@ -1,4 +1,4 @@
-// spec: 003.00-name-resolution
+// spec: refs-lang §9.2.5
 // An undefined name is a compile error.
 // expect-error: cannot find value `yy`
 

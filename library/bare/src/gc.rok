@@ -1,16 +1,20 @@
 // rok::bare::gc — keeping GC objects in place for raw pointers (stdlib
 // spec 1.6). A `Pinned<T>` from `pin` keeps the object holding `T`'s
 // data where it is (`rok_gc_pin`, counted) until it is dropped, at the
-// end of its `using` block.
+// end of its `using` block. `GcPtr<T>` is a managed reference to one `T`
+// on the GC heap (1.6.3); `Weak<T>` refers to a `GcPtr<T>`'s object
+// without keeping it alive (a `WEAK_REF` word, refs-lang 8.2.8).
 
 use rok::bare::mem::transmute_unchecked;
 use rok::bare::ptr::{ConstPtr, ManyPtr, Ptr, size_of};
-use rok::bare::mem::GcBuf;
+use rok::bare::mem::{GcBuf, buf_get, buf_new, buf_same, buf_set};
 
 extern "rok" {
     fn rok_gc_collect();
     fn rok_gc_pin(obj: GcBuf<u8>) -> GcBuf<u8>;
     fn rok_gc_unpin(obj: GcBuf<u8>);
+    fn rok_gc_weak_new(obj: GcBuf<u8>) -> GcBuf<u8>;
+    fn rok_gc_weak_get(cell: GcBuf<u8>) -> GcBuf<u8>;
 }
 
 /// A full collection now (it may move every unpinned object).
@@ -37,6 +41,74 @@ impl<T> Pinnable for List<T> {
 
 impl Pinnable for str {
     fn gc_object(self) -> GcBuf<u8> | none { none }
+}
+
+impl<T> Pinnable for GcPtr<T> {
+    fn gc_object(self) -> GcBuf<u8> | none {
+        let erased: GcBuf<u8> = unsafe { transmute_unchecked(self.obj) };
+        erased
+    }
+}
+
+/// A reference to a GC object holding one `T` (1.6.3). Copies share the
+/// object. The collector traces it from every frame and object that
+/// holds it and updates it when the object moves; a raw `Ptr<T>` to the
+/// value exists only under a pin (`Pinned<GcPtr<T>>::as_value_ptr`).
+pub struct GcPtr<T> {
+    obj: GcBuf<T>;
+}
+
+// Shares its object like `List` (stdlib 2.13.9).
+impl<T> !Sync for GcPtr<T> {}
+
+impl<T> GcPtr<T> {
+    /// A new object holding `value`.
+    pub fn new(value: T) -> GcPtr<T> {
+        let obj: GcBuf<T> = unsafe { buf_new(1) };
+        unsafe { buf_set(obj, 0, value) };
+        GcPtr { obj }
+    }
+
+    /// The value.
+    pub fn get(self) -> T { unsafe { buf_get(self.obj, 0) } }
+
+    /// Replace the value; every copy sees it.
+    pub fn set(self, value: T) { unsafe { buf_set(self.obj, 0, value) }; }
+
+    /// Whether `self` and `other` are one object (identity, not value).
+    pub fn same(self, other: GcPtr<T>) -> bool { buf_same(self.obj, other.obj) }
+}
+
+/// A reference to a `GcPtr<T>`'s object that does not keep it alive
+/// (refs-lang 8.2.8): once a collection finds the object unreachable
+/// except through weak references, it frees it and every `Weak` to it
+/// reads `none` from then on. For caches and observers.
+pub struct Weak<T> {
+    /// A runtime weak cell: its one word is a `WEAK_REF`.
+    cell: GcBuf<GcPtr<T>>;
+}
+
+impl<T> !Sync for Weak<T> {}
+
+impl<T> Weak<T> {
+    /// A weak reference to `target`'s object.
+    pub fn new(target: GcPtr<T>) -> Weak<T> {
+        let obj: GcBuf<u8> = unsafe { transmute_unchecked(target.obj) };
+        let cell: GcBuf<GcPtr<T>> = unsafe { transmute_unchecked(rok_gc_weak_new(obj)) };
+        Weak { cell }
+    }
+
+    /// The object, `none` once it was collected.
+    pub fn get(self) -> GcPtr<T> | none {
+        let erased: GcBuf<u8> = unsafe { transmute_unchecked(self.cell) };
+        let obj = unsafe { rok_gc_weak_get(erased) };
+        let at: usize = unsafe { transmute_unchecked(obj) };
+        if at == 0 {
+            return none;
+        }
+        let typed: GcBuf<T> = unsafe { transmute_unchecked(obj) };
+        GcPtr { obj: typed }
+    }
 }
 
 /// `obj`'s data held in place (1.6.2).
@@ -74,6 +146,15 @@ impl<T> Pinned<List<T>> {
     }
 
     pub fn as_data_many_ptr(self) -> ManyPtr<T> { self.as_data_ptr().as_many() }
+}
+
+impl<T> Pinned<GcPtr<T>> {
+    /// The value in the pinned object.
+    pub fn as_value_ptr(self) -> Ptr<T> {
+        let at: usize = unsafe { transmute_unchecked(self.obj.obj) };
+        // The payload follows the 16-byte object header (8.1).
+        Ptr::<T>::dangling().with_addr(at + 16)
+    }
 }
 
 impl Pinned<str> {

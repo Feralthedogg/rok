@@ -1,3 +1,4 @@
+// spec: refs-lang §0.4.3
 // spec: 000.04-operator-dispatch
 // A user trait named `Add` is not the lang-slot trait, so `+` does not use it.
 // expect-error: it needs `impl Add for V`

@@ -1,0 +1,26 @@
+// Spec 9.9.6: `-g` describes an `any` inside a type stored in an `any`
+// (a struct field) as the same variant part, and a closure local with
+// its environment object.
+// rokc-arg: -g
+// expect-exit: 0
+// expect-stdout:
+// 16
+// 5 2
+struct Wrap { inner: any; n: i32; }
+
+fn main() {
+    let base = 10;
+    let name = "rok";
+    let f = |k: i32| { return k + base + name.len() as i32; };
+    println(f"{f(3)}");
+    let w: any = Wrap { inner: 5i64, n: 2 };
+    match w {
+        v: Wrap => match v.inner {
+            x: i64 => println(f"{x} {v.n}"),
+            _ => println("inner?"),
+        },
+        _ => println("outer?"),
+    }
+}
+
+// spec: §9.9.6

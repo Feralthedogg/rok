@@ -253,6 +253,100 @@ fn cases() -> Vec<(String, String)> {
     out
 }
 
+/// Rust test files whose `// spec:` lines tag the next `fn` (tool and
+/// CLI behavior no case can show), relative to the workspace.
+const TEST_FILES: &[&str] = &[
+    "compiler/rokc/tests/cli.rs",
+    "compiler/rokc/tests/devtools.rs",
+    "compiler/rokc/tests/native.rs",
+    "compiler/rokc/tests/tools.rs",
+    "compiler/rok/tests/rok.rs",
+];
+
+/// `(file::fn, tags)` of the `// spec:` lines in `src`.
+fn fn_tags(file: &str, src: &str) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let mut pending = Vec::new();
+    for line in src.lines() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix("// spec:") {
+            pending.push(rest.trim().to_owned());
+        } else if let Some(rest) = t
+            .strip_prefix("fn ")
+            .or_else(|| t.strip_prefix("async fn "))
+        {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !pending.is_empty() {
+                out.push((format!("{file}::{name}"), std::mem::take(&mut pending)));
+            }
+        }
+    }
+    out
+}
+
+fn test_fns() -> Vec<(String, Vec<String>)> {
+    let ws = common::workspace();
+    let mut out = Vec::new();
+    for f in TEST_FILES {
+        let src = fs::read_to_string(ws.join(f)).unwrap();
+        let file = f.rsplit('/').next().unwrap();
+        out.extend(fn_tags(file, &src));
+    }
+    out
+}
+
+/// Sections with no rule a test can check, by kind (tag syntax). They
+/// are left out of the counts and listed in the report.
+const NON_NORMATIVE: &[(&str, &str)] = &[
+    (
+        "notation: how the spec is written",
+        "refs-lang §0.8.1-0.8.7 std §0.5.2 §0.5.3 §0.5.6 §0.5.7",
+    ),
+    (
+        "rationale: motivation, comparison with other languages, usage advice",
+        "refs-lang §0.5.5 §1.3.2 §1.8.2 §2.12.2 §2.12.4 §3.17.8 §4.13.10 §6.4.1 §6.6.1 §6.6.6 \
+         §6.6.11 §6.6.14 §6.8.10 §7.1.4 §7.7.10 §9.4.1 §9.4.2 §9.5.3 \
+         std §0.2.1 §0.2.7 §0.3.1 §0.3.6 §1.1.7 §1.3.1 §1.3.8 §1.5.3 §1.5.4 §1.6.1 §1.6.5 \
+         §1.6.8 §1.7.5 §1.7.7 §1.7.8 §1.8.3 §1.8.4 §1.8.5 §1.9.1 §1.9.4 §1.9.6 §1.10.1 §1.10.5 \
+         §1.10.8 §2.1.10 §2.2.9 §2.6.1 §2.6.9 §2.9.11 §2.10.13 §2.11.11 §2.12.6 §2.13.7 \
+         §2.14.9 §2.15.9 §2.20.10 §3.3.6 §3.8.8 §3.9.6",
+    ),
+    (
+        "summary: restates rules given elsewhere",
+        "refs-lang §2.4.7 §2.14.5 §4.8.10 §5.8.13 §6.2.13 §6.7.14 §6.8.12 §6.9.10 §8.9.14 \
+         §8.10.11 §9.6.6 §9.9.15 std §2.2.8 §3.3.8",
+    ),
+    (
+        "pointer: defers to another section, no rule of its own",
+        "refs-lang §0.4.1 §0.4.2 §1.5.2 §2.8.8 §2.14.7 §3.1.2 §6.4.10 §6.4.11 §6.5.9 §8.7.1 §9.6.7 \
+         §9.7.11 §9.8.9 std §2.7.12 §2.12.1",
+    ),
+    (
+        "policy: versioning and stability promises, not observable in one build",
+        "refs-lang §1.1.4 §1.4.5 §6.4.9 §8.1.10 §8.2.11 §8.3.9 §8.5.9 §8.6.14 §9.1.10 §9.3.8 \
+         §9.4.11 §9.5.11 std §0.1.5 §1.10.6",
+    ),
+    (
+        "informative: compiler internals, costs, out-of-scope lists, non-normative appendices",
+        "refs-lang §0.2.1 §0.2.2 §1.2.4 §2.2.9 §3.3.4 §7.2.11 §8.4.5 §8.4.9 §8.5.12 §8.7.2 \
+         §6.8.9 §8.3.7 §8.7.8 §8.7.9 §9.2.1 §9.2.7 §9.2.9 §9.5.6 §9.8.8 std §1.10.9",
+    ),
+];
+
+fn non_normative() -> BTreeMap<Id, &'static str> {
+    let mut out = BTreeMap::new();
+    for (kind, ids) in NON_NORMATIVE {
+        for id in tag_ids(ids) {
+            let shown = show(&id);
+            assert!(out.insert(id, *kind).is_none(), "{shown} listed twice");
+        }
+    }
+    out
+}
+
 fn json_str(s: &str) -> String {
     let mut o = String::from("\"");
     for c in s.chars() {
@@ -296,13 +390,19 @@ fn spec_coverage_report() {
     let mut unresolved: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut untagged = 0;
     let cases = cases();
+    let mut sources: Vec<(String, Vec<String>)> = Vec::new();
     for (name, src) in &cases {
         let tags = case_tags(src);
         if tags.is_empty() {
             untagged += 1;
         }
+        sources.push((name.clone(), tags));
+    }
+    let fns = test_fns();
+    sources.extend(fns.iter().cloned());
+    for (name, tags) in &sources {
         for tag in tags {
-            let ids = tag_ids(&tag);
+            let ids = tag_ids(tag);
             if !ids.iter().any(|i| known.contains(i)) {
                 unresolved
                     .entry(tag.clone())
@@ -322,45 +422,62 @@ fn spec_coverage_report() {
             .collect()
     };
 
+    let skip = non_normative();
+    let stale: Vec<String> = skip
+        .keys()
+        .filter(|id| !known.contains(*id))
+        .map(show)
+        .collect();
+
     let mut md = String::new();
     let mut json = String::from("{\n");
-    let (mut all_secs, mut all_cov) = (0, 0);
-    // Part (`lang 3`) -> (sections, covered).
-    let mut parts: BTreeMap<(Domain, u32), (usize, usize)> = BTreeMap::new();
+    let (mut all_secs, mut all_cov, mut all_skip) = (0, 0, 0);
+    // Part (`lang 3`) -> (normative sections, covered, non-normative).
+    let mut parts: BTreeMap<(Domain, u32), (usize, usize, usize)> = BTreeMap::new();
     let mut chapter_rows = String::new();
     let mut section_rows = String::new();
     let mut json_chapters = Vec::new();
     for c in &chapters {
-        let mut cov = 0;
+        let (mut cov, mut skipped) = (0, 0);
         let mut json_secs = Vec::new();
         for (sid, title) in &c.sections {
             let by = covering(sid);
-            if !by.is_empty() {
+            let kind = skip.get(sid).copied();
+            if kind.is_some() {
+                skipped += 1;
+            } else if !by.is_empty() {
                 cov += 1;
             }
+            let mark = match kind {
+                Some(k) => k.split(':').next().unwrap(),
+                None if by.is_empty() => "—",
+                None => "✓",
+            };
             let _ = writeln!(
                 section_rows,
-                "| {} | {} | {} | {} |",
+                "| {} | {} | {mark} | {} |",
                 show(sid),
                 title.replace('|', "\\|"),
-                if by.is_empty() { "—" } else { "✓" },
                 by.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
                     + if by.len() > 4 { ", …" } else { "" }
             );
             json_secs.push(format!(
-                "{{\"id\":{},\"title\":{},\"cases\":[{}]}}",
+                "{{\"id\":{},\"title\":{},\"non_normative\":{},\"cases\":[{}]}}",
                 json_str(&show(sid)),
                 json_str(title),
+                kind.is_some(),
                 by.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(",")
             ));
         }
-        let n = c.sections.len();
+        let n = c.sections.len() - skipped;
         let chapter_only = tagged.get(&c.id).map_or(0, BTreeSet::len);
         let p = parts.entry((c.id.0, c.id.1[0])).or_default();
         p.0 += n;
         p.1 += cov;
+        p.2 += skipped;
         all_secs += n;
         all_cov += cov;
+        all_skip += skipped;
         let _ = writeln!(
             chapter_rows,
             "| {} | {} | {cov}/{n} | {:.0}% | {chapter_only} |",
@@ -379,28 +496,32 @@ fn spec_coverage_report() {
     let _ = writeln!(md, "# Spec coverage\n");
     let _ = writeln!(
         md,
-        "{all_cov} of {all_secs} sections ({:.1}%) have a tagged case. {} cases, {untagged} without a `// spec:` tag.\n",
+        "{all_cov} of {all_secs} normative sections ({:.1}%) have a tagged case or test ({all_skip} non-normative left out). {} cases, {untagged} without a `// spec:` tag; {} tagged test functions.\n",
         pct(all_cov, all_secs),
-        cases.len()
+        cases.len(),
+        fns.len()
     );
-    let _ = writeln!(md, "## Parts\n\n| part | covered | % |\n|---|---|---|");
+    let _ = writeln!(
+        md,
+        "## Parts\n\n| part | covered | % | non-normative |\n|---|---|---|---|"
+    );
     let mut summary = String::new();
     let mut json_parts = Vec::new();
-    for ((d, n), (secs, cov)) in &parts {
+    for ((d, n), (secs, cov, skipped)) in &parts {
         let _ = writeln!(
             md,
-            "| {} {n} | {cov}/{secs} | {:.0}% |",
+            "| {} {n} | {cov}/{secs} | {:.0}% | {skipped} |",
             d.name(),
             pct(*cov, *secs)
         );
         let _ = writeln!(
             summary,
-            "  {} {n}: {cov}/{secs} ({:.0}%)",
+            "  {} {n}: {cov}/{secs} ({:.0}%), {skipped} non-normative",
             d.name(),
             pct(*cov, *secs)
         );
         json_parts.push(format!(
-            "{{\"id\":\"{} {n}\",\"sections\":{secs},\"covered\":{cov}}}",
+            "{{\"id\":\"{} {n}\",\"sections\":{secs},\"covered\":{cov},\"non_normative\":{skipped}}}",
             d.name()
         ));
     }
@@ -408,7 +529,14 @@ fn spec_coverage_report() {
         md,
         "\n## Chapters\n\n`chapter tags`: cases tagged with the chapter only.\n\n| chapter | title | covered | % | chapter tags |\n|---|---|---|---|---|\n{chapter_rows}"
     );
-    let _ = writeln!(md, "## Unresolved tags\n");
+    let _ = writeln!(md, "## Non-normative sections\n");
+    for (kind, ids) in NON_NORMATIVE {
+        let _ = writeln!(md, "- {kind}: {ids}");
+    }
+    for id in &stale {
+        let _ = writeln!(md, "- not in the spec (stale entry): {id}");
+    }
+    let _ = writeln!(md, "\n## Unresolved tags\n");
     for (tag, by) in &unresolved {
         let _ = writeln!(
             md,
@@ -423,8 +551,9 @@ fn spec_coverage_report() {
 
     let _ = writeln!(
         json,
-        "  \"sections\": {all_secs},\n  \"covered\": {all_cov},\n  \"cases\": {},\n  \"untagged_cases\": {untagged},",
-        cases.len()
+        "  \"sections\": {all_secs},\n  \"covered\": {all_cov},\n  \"non_normative\": {all_skip},\n  \"cases\": {},\n  \"untagged_cases\": {untagged},\n  \"tagged_test_fns\": {},",
+        cases.len(),
+        fns.len()
     );
     let _ = writeln!(json, "  \"parts\": [{}],", json_parts.join(","));
     let _ = writeln!(
@@ -454,9 +583,10 @@ fn spec_coverage_report() {
     fs::write(target.join("spec-coverage.md"), md).unwrap();
     fs::write(target.join("spec-coverage.json"), json).unwrap();
     println!(
-        "spec-coverage: {all_cov}/{all_secs} sections ({:.1}%), {} unresolved tags -> {}\n{summary}",
+        "spec-coverage: {all_cov}/{all_secs} normative sections ({:.1}%), {all_skip} non-normative, {} unresolved tags, {} stale non-normative entries -> {}\n{summary}",
         pct(all_cov, all_secs),
         unresolved.len(),
+        stale.len(),
         target.join("spec-coverage.{md,json}").display()
     );
 }
@@ -479,4 +609,10 @@ fn tag_forms() {
     );
     let src = "// expect-stdout:\n// spec: 1 -1 0.5\n\n// spec: 003.03-let\n";
     assert_eq!(case_tags(src), ["003.03-let"]);
+    let rs = "// spec: §9.1.6\n#[test]\nfn exits() {\n    // inner\n}\nfn helper() {}\n";
+    assert_eq!(
+        fn_tags("cli.rs", rs),
+        [("cli.rs::exits".to_owned(), vec!["§9.1.6".to_owned()])]
+    );
+    let _ = non_normative();
 }

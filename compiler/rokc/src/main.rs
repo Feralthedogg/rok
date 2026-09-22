@@ -95,6 +95,10 @@ build options:
   -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
   -C backend=native|llvm       code generator (default: native at -O0, else LLVM)
+  -C target-cpu=<cpu>|native   build for that CPU instead of the target's
+                               baseline (native: this machine's); LLVM only
+  -C target-feature=+f1,-f2,.. turn CPU features on / off (LLVM only); the
+                               binary may not run on CPUs without them
   -C subsystem=console|windows Windows executable subsystem (default: console;
                                windows: a GUI program entered through WinMain)
   -C profile-generate[=<dir>]  instrument for profile-guided optimization: runs
@@ -194,8 +198,13 @@ struct Args {
     /// `--target`: a built-in target or a `<name>.rokon` file; `None`
     /// is the host.
     target: Option<String>,
-    /// The target `--target` names (set once the arguments are read).
+    /// The target `--target` names (set once the arguments are read),
+    /// built for `target_cpu` / `target_features`.
     spec: Option<TargetSpec>,
+    /// `-C target-cpu`.
+    target_cpu: Option<String>,
+    /// `-C target-feature`, each `+f` / `-f`.
+    target_features: Vec<String>,
     opts: BuildOptions,
     run_args: Vec<String>,
     verbose: u8,
@@ -381,40 +390,7 @@ fn parse_args(raw: Vec<String>) -> Args {
                 name[2..].clone_into(&mut a.opts.opt_level);
                 a.opt_set = true;
             }
-            "-C" | "--codegen" => {
-                let v = value(&name, inline, &mut it);
-                match v.as_str() {
-                    "overflow-checks" | "overflow-checks=yes" | "overflow-checks=on" => {
-                        a.opts.overflow_checks = Some(true);
-                    }
-                    "overflow-checks=no" | "overflow-checks=off" => {
-                        a.opts.overflow_checks = Some(false);
-                    }
-                    "backend=native" | "backend=llvm" => a.opts.backend = Some(v[8..].to_owned()),
-                    // clang's file name: `%m` merges the runs of one binary.
-                    "profile-generate" => {
-                        a.opts.profile = Profile::Generate("default_%m.profraw".into());
-                    }
-                    _ if v.starts_with("profile-generate=") => {
-                        a.opts.profile =
-                            Profile::Generate(Path::new(&v[17..]).join("default_%m.profraw"));
-                    }
-                    _ if v.starts_with("profile-use=") => {
-                        a.opts.profile = Profile::Use(v[12..].into());
-                    }
-                    "cs-profile-generate" => a.cs_generate = Some("default_%m.profraw".into()),
-                    _ if v.starts_with("cs-profile-generate=") => {
-                        a.cs_generate = Some(Path::new(&v[20..]).join("default_%m.profraw"));
-                    }
-                    _ => match v
-                        .strip_prefix("subsystem=")
-                        .and_then(rokc_interface::Subsystem::parse)
-                    {
-                        Some(s) => a.opts.subsystem = s,
-                        None => usage_error(&format!("unknown codegen option `{v}`")),
-                    },
-                }
-            }
+            "-C" | "--codegen" => codegen_option(&mut a, &value(&name, inline, &mut it)),
             "--keep" => a.opts.keep_temps = true,
             "-g" | "--debug" => a.opts.debug = true,
             "--check" => a.check = true,
@@ -474,7 +450,14 @@ fn parse_args(raw: Vec<String>) -> Args {
     if a.cmd.is_empty() && a.print.is_none() {
         usage_error("missing command");
     }
-    a.spec = Some(TargetSpec::resolve(a.target.as_deref()).unwrap_or_else(|e| fail(&e)));
+    let mut spec = TargetSpec::resolve(a.target.as_deref()).unwrap_or_else(|e| fail(&e));
+    spec.set_cpu(
+        a.target_cpu.as_deref(),
+        &a.target_features,
+        rokc_llvm::host_cpu,
+    )
+    .unwrap_or_else(|e| usage_error(&e));
+    a.spec = Some(spec);
     if let Some(g) = a.cs_generate.take() {
         let Profile::Use(p) = &a.opts.profile else {
             usage_error("-C cs-profile-generate needs -C profile-use=<first stage's profile>");
@@ -485,6 +468,51 @@ fn parse_args(raw: Vec<String>) -> Args {
         a.verbose = a.verbose.max(1);
     }
     a
+}
+
+/// `-C <v>`.
+fn codegen_option(a: &mut Args, v: &str) {
+    match v {
+        "overflow-checks" | "overflow-checks=yes" | "overflow-checks=on" => {
+            a.opts.overflow_checks = Some(true);
+        }
+        "overflow-checks=no" | "overflow-checks=off" => {
+            a.opts.overflow_checks = Some(false);
+        }
+        "backend=native" | "backend=llvm" => a.opts.backend = Some(v[8..].to_owned()),
+        _ if v.starts_with("target-cpu=") && v.len() > 11 => {
+            a.target_cpu = Some(v[11..].to_owned());
+        }
+        _ if v.starts_with("target-feature=") => {
+            a.target_features.extend(
+                v[15..]
+                    .split(',')
+                    .filter(|f| !f.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        // clang's file name: `%m` merges the runs of one binary.
+        "profile-generate" => {
+            a.opts.profile = Profile::Generate("default_%m.profraw".into());
+        }
+        _ if v.starts_with("profile-generate=") => {
+            a.opts.profile = Profile::Generate(Path::new(&v[17..]).join("default_%m.profraw"));
+        }
+        _ if v.starts_with("profile-use=") => {
+            a.opts.profile = Profile::Use(v[12..].into());
+        }
+        "cs-profile-generate" => a.cs_generate = Some("default_%m.profraw".into()),
+        _ if v.starts_with("cs-profile-generate=") => {
+            a.cs_generate = Some(Path::new(&v[20..]).join("default_%m.profraw"));
+        }
+        _ => match v
+            .strip_prefix("subsystem=")
+            .and_then(rokc_interface::Subsystem::parse)
+        {
+            Some(s) => a.opts.subsystem = s,
+            None => usage_error(&format!("unknown codegen option `{v}`")),
+        },
+    }
 }
 
 /// `-l [static=|dylib=]<name>`: `(name, static)`.
@@ -732,7 +760,7 @@ fn with_defaults(mut a: Args) -> Args {
         )
     };
     if a.opts.rokr == "rokr" {
-        let rokr = if t == *TargetSpec::host() {
+        let rokr = if t.is_host() {
             sys.rokr
         } else {
             Some(dir.join(t.runtime_lib()))
@@ -784,6 +812,16 @@ fn with_defaults(mut a: Args) -> Args {
             a.opts.profile_rt = Some(rt);
         }
         _ => {}
+    }
+    let codegen = links || a.cmd == "build";
+    if codegen
+        && (a.target_cpu.is_some() || !a.target_features.is_empty())
+        && rokc_interface::native_backend(&a.opts)
+    {
+        eprintln!(
+            "rokc: warning: -C target-cpu / -C target-feature apply to the LLVM backend; the \
+             native backend (-O0) builds for the target's baseline CPU"
+        );
     }
     a
 }

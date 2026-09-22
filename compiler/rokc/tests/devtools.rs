@@ -79,6 +79,7 @@ fn main() {
 /// The GC never closes a descriptor (stdlib 2.13): a `File` only read
 /// through its own methods and never closed leaks; `using`, `close()`,
 /// or handing it on (returned, passed, stored) does not.
+// spec: §6.2.9
 #[test]
 fn lint_unclosed_resource() {
     let src = "\
@@ -126,6 +127,7 @@ fn main() {
 /// An item's `#[allow]` covers its variants even after a `#[derive]`
 /// (whose impls carry the attribute's span); an `_` between digits is
 /// still camel case (rustc's rule).
+// spec: §6.2.9
 #[test]
 fn lint_camel_case_allow_and_digit_underscores() {
     let src = "#[derive(Clone, PartialEq)]\n#[allow(non_camel_case_types)]\n\
@@ -144,6 +146,7 @@ fn lint_camel_case_allow_and_digit_underscores() {
     assert_eq!(flagged, ["Bad_c", "X__1"], "{err}");
 }
 
+// spec: §6.2.7 §6.2.9 §6.2.11 §9.1.2 §9.1.5
 #[test]
 fn lint_finds_each_kind_and_honors_levels() {
     let dir = package("lint", &[("main.rok", LINTED)]);
@@ -240,6 +243,7 @@ fn lint_finds_each_kind_and_honors_levels() {
     assert!(!err.contains("[E503]"), "{err}");
 }
 
+// spec: §9.1.2
 #[test]
 fn doc_writes_html_with_links_and_search_index() {
     let dep = package(
@@ -345,6 +349,7 @@ fn doc_writes_html_with_links_and_search_index() {
 
 /// `rokc doc --std` (no package): the standard library tiers alone, into
 /// `./target/doc/`, one directory per tier.
+// spec: §9.1.2
 #[test]
 fn doc_std_documents_the_library() {
     let dir = scratch("doc-std");
@@ -365,6 +370,7 @@ fn doc_std_documents_the_library() {
     assert!(read("search-index.js").contains("rok::core::collections::list::List"));
 }
 
+// spec: §6.2.5 §9.1.2 §9.9.11
 #[test]
 fn bench_times_each_bench() {
     let Some(env) = setup() else { return };

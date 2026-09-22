@@ -45,6 +45,7 @@ fn piped_env(exe: &str, args: &[&str], input: &str, env: &[(&str, &str)]) -> Out
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §0.1.1 §0.1.2 §0.1.3 §4.16.10 §6.10.3 §9.1.2 §9.7.0 §9.7.1 §9.7.3 §9.7.4 §9.7.5 §9.7.7 §9.7.8 §9.9.9 / std §2.12.4
 fn repl_keeps_state_across_cells() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -114,6 +115,7 @@ f64
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.7.8
 fn repl_reports_input_ending_inside_a_cell() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -141,6 +143,7 @@ fn repl_reports_input_ending_inside_a_cell() {
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.1.2 §9.7.10 §9.9.9
 fn repl_loads_and_uses_a_library() {
     // The library is archived by LLVM.
     let Some(env) = setup() else { return };
@@ -178,6 +181,7 @@ fn repl_loads_and_uses_a_library() {
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.6.5 §9.7.0 §9.7.2
 fn repl_runs_each_cell_once() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -230,6 +234,7 @@ p
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.7.0 §9.7.3
 fn repl_refuses_bindings_later_cells_cannot_use() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -273,6 +278,7 @@ match q { x: Q => x.v, _ => 0 }
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.6.1 §9.6.2 §9.7.0
 fn repl_statics_persist() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -316,6 +322,7 @@ bump()
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.6.3 §9.6.4 §9.7.6
 fn repl_compiles_library_code_once() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -372,6 +379,7 @@ g()
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §0.1.4 §9.7.5 §9.7.10
 fn repl_path_keeps_the_programs_bindings() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -474,6 +482,7 @@ let never = 0;
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.6.5 §9.7.0 §9.7.5
 fn repl_survives_failed_cells() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -534,6 +543,7 @@ C.load()
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.7.0
 fn repl_threads_after_a_failed_cell() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -583,6 +593,7 @@ task::block_on(async { let ts = [task::spawn(async { 1 }), task::spawn(async { 2
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.7.0
 fn repl_failed_cell_loses_no_work_and_no_lock() {
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
@@ -631,6 +642,7 @@ fn frame(body: &str) -> String {
     format!("Content-Length: {}\r\n\r\n{body}", body.len())
 }
 
+// spec: §9.1.2 §9.9.13
 #[test]
 fn rokc_lsp_answers_over_stdio() {
     let input = [
@@ -661,6 +673,7 @@ fn rokc_lsp_answers_over_stdio() {
 /// The server builds its dependencies first and answers from their ROKHIR:
 /// hover shows a dependency function's doc comment, definition goes to
 /// its source.
+// spec: §9.9.13
 #[test]
 fn lsp_sees_prebuilt_dependencies() {
     let Some(env) = setup() else { return };
@@ -733,6 +746,7 @@ fn lsp_sees_prebuilt_dependencies() {
 
 /// An internal compiler error (`ROKC_TEST_ICE`, a debug rokc's) in an
 /// analysis is that buffer's diagnostic; the server keeps serving.
+// spec: §9.1.6 §9.7.5
 #[test]
 fn lsp_survives_a_compiler_panic() {
     let dir = scratch("lsp-ice");
@@ -827,6 +841,7 @@ fn lsp_survives_a_compiler_panic() {
     )),
     ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
 )]
+// spec: §9.1.6 §9.7.5
 fn repl_survives_a_compiler_panic() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
@@ -845,6 +860,7 @@ fn repl_survives_a_compiler_panic() {
     assert_eq!(out.status.code(), Some(0), "{stderr}");
 }
 
+// spec: §9.1.9
 #[test]
 fn check_reads_stdin() {
     let out = piped(
@@ -873,6 +889,7 @@ fn check_reads_stdin() {
     )),
     ignore = "the REPL host runs on macOS and Linux, arm64 and x86_64"
 )]
+// spec: §0.1.2 §9.1.2 §9.7.9 §9.8.1 §9.8.2 §9.8.4 §9.8.5 §9.8.6 §9.8.7
 fn jupyter_kernel_speaks_the_wire_protocol() {
     use rokc_interface::Json;
     use rokc_tools::jupyter::{encode, handshake, parse_msg, read_msg, write_msg};

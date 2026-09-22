@@ -1,3 +1,4 @@
+// spec: std §2.4.10
 // expect-exit: 0
 // expect-stdout:
 // [11, 22, 33] [10, 40, 90] [0, 2, 0]

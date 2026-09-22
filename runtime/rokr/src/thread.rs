@@ -328,6 +328,26 @@ pub extern "C" fn rok_cpu_count() -> usize {
     0
 }
 
+/// The executor's pool size (706 §7.6.1): `ROK_WORKERS` when set to a
+/// positive number, else the online CPUs; 0 without threads.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_sched_workers() -> usize {
+    let n = rok_cpu_count();
+    match rokr_gc::env_num(c"ROK_WORKERS") {
+        Some(w) if w > 0 && n > 0 => usize::try_from(w).unwrap_or(usize::MAX),
+        _ => n,
+    }
+}
+
+/// The executor's options: bit 0 thread-per-core (706 §7.6.8,
+/// `ROK_THREAD_PER_CORE=1`), bit 1 dynamic worker count (707 §7.7.8,
+/// `ROK_DYNAMIC_WORKERS=1`).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_sched_mode() -> u32 {
+    let on = |name: &core::ffi::CStr| rokr_gc::env_num(name).is_some_and(|v| v != 0);
+    u32::from(on(c"ROK_THREAD_PER_CORE")) | (u32::from(on(c"ROK_DYNAMIC_WORKERS")) << 1)
+}
+
 /// This thread's worker id (`rok_tls_worker_id`), the `ThreadId`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_thread_id() -> u64 {

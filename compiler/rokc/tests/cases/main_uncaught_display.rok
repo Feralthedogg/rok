@@ -20,3 +20,4 @@ fn main() throws -> i32 {
     let v = try find(3) + try find(40);
     return v;
 }
+// spec: refs-lang §4.16.4

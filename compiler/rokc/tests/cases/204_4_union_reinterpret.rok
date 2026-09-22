@@ -1,4 +1,4 @@
-// spec: 002.x-union-reinterpret
+// spec: refs-lang §2.5.2 §2.5.3 §2.5.6
 // expect-exit: 0
 // expect-stdout:
 // 5

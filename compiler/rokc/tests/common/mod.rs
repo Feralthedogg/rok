@@ -22,6 +22,8 @@
 //!     `ROK_GC_STRESS=N ROK_GC_EVAC=always ROK_GC_CONCURRENT=always`,
 //!     same expectations
 //!   - `// rokc-arg: args`      — extra `rokc` arguments (`--cfg feat`)
+//!   - `// run-env: KEY=VALUE`  — (repeatable) set for every run of the
+//!     case (`ROK_WORKERS=3`)
 //!   - `// only-os: macos linux` — skipped unless the target's `target_os`
 //!     is listed (POSIX commands, paths, signals)
 //!   - `// only-pointer-width: 64` — skipped on targets of another width

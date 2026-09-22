@@ -1130,7 +1130,27 @@ fn lower_fn_with(
         is_async: false,
         is_generator: false,
         span: fn_def.span,
-        facts: rokc_ir_common::FnFacts::default(),
+        facts: rokc_ir_common::FnFacts {
+            inline: inline_hint(&fn_def.attrs),
+            ..rokc_ir_common::FnFacts::default()
+        },
+    }
+}
+
+/// The `#[inline]` hint of a function (spec 6.2.4).
+fn inline_hint(attrs: &[rokc_ast::Attribute]) -> rokc_ir_common::Inline {
+    use rokc_ast::{AttrArg, AttrBody};
+    use rokc_ir_common::Inline;
+    let Some(a) = attrs.iter().find(|a| a.name() == "inline") else {
+        return Inline::Auto;
+    };
+    match &a.body {
+        AttrBody::Args(xs) => match xs.as_slice() {
+            [AttrArg::Word(w)] if w == "always" => Inline::Always,
+            [AttrArg::Word(w)] if w == "never" => Inline::Never,
+            _ => Inline::Hint,
+        },
+        _ => Inline::Hint,
     }
 }
 
