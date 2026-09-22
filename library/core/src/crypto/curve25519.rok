@@ -4,6 +4,8 @@
 // multiply. All field and group operations run in constant time;
 // callers choose where variable time is allowed (public data only).
 
+use sup::{ct_mask, ct_mask_i64};
+
 /// A field element: limb `i` holds bits `ceil(25.5 i)..`.
 pub(pkg) type Fe25519 = [i64; 10];
 
@@ -129,7 +131,7 @@ fn f25519_pow22523(z: Fe25519) -> Fe25519 {
 
 /// Swap `f` and `g` when `b` is 1, without branching on `b`.
 pub(pkg) fn f25519_cswap(ref f: Fe25519, ref g: Fe25519, b: i64) {
-    let m = -b;
+    let m = ct_mask_i64(b);
     for i in 0usize..10 {
         let t = m & (f[i] ^ g[i]);
         f[i] ^= t;
@@ -139,7 +141,7 @@ pub(pkg) fn f25519_cswap(ref f: Fe25519, ref g: Fe25519, b: i64) {
 
 /// `g` when `b` is 1, else `f`, without branching on `b`.
 pub(pkg) fn f25519_select(f: Fe25519, g: Fe25519, b: i64) -> Fe25519 {
-    let m = -b;
+    let m = ct_mask_i64(b);
     let h = f;
     for i in 0usize..10 { h[i] ^= m & (f[i] ^ g[i]); }
     h
@@ -361,7 +363,7 @@ pub(pkg) fn sc25519_reduce(b: Slice<u8>) -> [u8; 32] {
             d[j] = s as u32;
             borrow = (s >> 63u64) & 1u64;
         }
-        let m = (borrow as u32).wrapping_sub(1u32);
+        let m = ct_mask((borrow as u32) ^ 1u32);
         for j in 0usize..8 { r[j] = (d[j] & m) | (r[j] & ~m); }
     }
     let out: [u8; 32] = [0u8; 32];

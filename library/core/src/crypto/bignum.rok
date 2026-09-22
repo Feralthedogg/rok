@@ -6,6 +6,8 @@
 // `Nat::bits` and the conversions are variable-time; they see public
 // sizes only.
 
+use sup::ct_mask;
+
 pub(pkg) struct Nat;
 
 impl Nat {
@@ -168,13 +170,13 @@ impl Modulus {
         let (s, carry) = Nat::add(a, b);
         let (d, borrow) = Nat::sub(s, self.m);
         // Keep the difference when the sum overflowed or reached m.
-        Nat::select(0u32.wrapping_sub(carry | (borrow ^ 1u32)), d, s)
+        Nat::select(ct_mask(carry | (borrow ^ 1u32)), d, s)
     }
 
     /// `(a - b) mod m` for `a, b < m`.
     pub(pkg) fn sub(self, a: List<u32>, b: List<u32>) -> List<u32> {
         let (d, borrow) = Nat::sub(a, b);
-        let mask = 0u32.wrapping_sub(borrow);
+        let mask = ct_mask(borrow);
         let corr = Nat::zero(self.n);
         for i in 0..self.n { corr[i] = self.m[i] & mask; }
         let (r, _) = Nat::add(d, corr);
@@ -184,7 +186,7 @@ impl Modulus {
     /// `a mod m` for `a < 2m` (equal widths).
     pub(pkg) fn reduce_once(self, a: List<u32>) -> List<u32> {
         let (d, borrow) = Nat::sub(a, self.m);
-        Nat::select(0u32.wrapping_sub(borrow ^ 1u32), d, a)
+        Nat::select(ct_mask(borrow ^ 1u32), d, a)
     }
 
     /// Montgomery product `a b R^-1 mod m` (CIOS) for `a, b < m`.
@@ -217,7 +219,7 @@ impl Modulus {
         // t < 2m: subtract m once if t[n] is set or t >= m.
         let lo = Nat::resize(t, n);
         let (d, borrow) = Nat::sub(lo, self.m);
-        Nat::select(0u32.wrapping_sub(t[n] | (borrow ^ 1u32)), d, lo)
+        Nat::select(ct_mask(t[n] | (borrow ^ 1u32)), d, lo)
     }
 
     pub(pkg) fn to_mont(self, a: List<u32>) -> List<u32> { self.mul(a, self.r2) }
@@ -241,7 +243,7 @@ impl Modulus {
                 r = self.mul(r, r);
                 let ra = self.mul(r, a);
                 let bit = ((byte >> (7 - k) as u8) & 1u8) as u32;
-                r = Nat::select(0u32.wrapping_sub(bit), ra, r);
+                r = Nat::select(ct_mask(bit), ra, r);
             }
         }
         r
@@ -290,12 +292,12 @@ impl Modulus {
         let v = Nat::zero(n);
         for _ in 0..64 * n {
             // If a is odd and a < b: swap (a, u) with (b, v).
-            let odd = 0u32.wrapping_sub(a[0] & 1u32);
+            let odd = ct_mask(a[0] & 1u32);
             let borrow = 0u64;
             for i in 0..n {
                 borrow = ((a[i] as u64).wrapping_sub(b[i] as u64).wrapping_sub(borrow)) >> 63u64;
             }
-            let sw = odd & 0u32.wrapping_sub(borrow as u32);
+            let sw = odd & ct_mask(borrow as u32);
             for i in 0..n {
                 let t = (a[i] ^ b[i]) & sw;
                 a[i] = a[i] ^ t;
@@ -315,7 +317,7 @@ impl Modulus {
                 u[i] = s as u32;
                 bu = s >> 63u64;
             }
-            let fix = 0u32.wrapping_sub(bu as u32);
+            let fix = ct_mask(bu as u32);
             let c = 0u64;
             for i in 0..n {
                 let t = (u[i] as u64) + ((m[i] & fix) as u64) + c;
@@ -323,7 +325,7 @@ impl Modulus {
                 c = t >> 32u64;
             }
             // a /= 2; u /= 2 (mod m): add m first when u is odd.
-            let uo = 0u32.wrapping_sub(u[0] & 1u32);
+            let uo = ct_mask(u[0] & 1u32);
             let c2 = 0u64;
             for i in 0..n {
                 let t = (u[i] as u64) + ((m[i] & uo) as u64) + c2;

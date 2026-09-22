@@ -7,7 +7,7 @@
 // key select are masks. Only the rejection sampling of the public
 // matrix branches.
 
-use sup::{view, Bytes};
+use sup::{view, Bytes, ct_mask};
 use sup::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 
 const Q: u32 = 3329u32;
@@ -351,8 +351,7 @@ impl MlKem768 {
         let diff = 0u32;
         for i in 0..1088 { diff = diff | ((cv[i] ^ c2[i]) as u32); }
         // 0xff when the ciphertexts differ, else 0.
-        let bit = (0u32.wrapping_sub(diff) >> 31) as u8;
-        let mask = 0u8.wrapping_sub(bit);
+        let mask = ct_mask(0u32.wrapping_sub(diff) >> 31) as u8;
         let out: List<u8> = List::with_capacity(32);
         for i in 0..32 { out.push(kr[i] ^ (mask & (kr[i] ^ kbar[i]))); }
         out

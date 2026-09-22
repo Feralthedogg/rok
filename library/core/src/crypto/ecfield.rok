@@ -4,6 +4,8 @@
 // prime's limbs folded in. Constant time: carries and the final
 // corrections are masks.
 
+use sup::{ct_mask, ct_mask64};
+
 /// A field element: little-endian 32-bit limbs, the top four zero for
 /// P-256.
 pub(pkg) type Fe = [u32; 12];
@@ -51,7 +53,7 @@ pub(pkg) fn mul_p256(a: Fe, b: Fe) -> Fe {
         d[j] = u as u32;
         br = u >> 63u64;
     }
-    let mask = 0u32.wrapping_sub(t[8] | ((br as u32) ^ 1u32));
+    let mask = ct_mask(t[8] | ((br as u32) ^ 1u32));
     for j in 0usize..8 { d[j] = (d[j] & mask) | (t[j] & ~mask); }
     d
 }
@@ -80,7 +82,7 @@ pub(pkg) fn add_p256(a: Fe, b: Fe) -> Fe {
         br = u >> 63u64;
     }
     // The difference when the sum overflowed or reached p.
-    let mask = 0u32.wrapping_sub((c as u32) | ((br as u32) ^ 1u32));
+    let mask = ct_mask((c as u32) | ((br as u32) ^ 1u32));
     for j in 0usize..8 { d[j] = (d[j] & mask) | (s[j] & ~mask); }
     d
 }
@@ -95,7 +97,7 @@ pub(pkg) fn sub_p256(a: Fe, b: Fe) -> Fe {
         br = u >> 63u64;
     }
     // Add p back on a borrow.
-    let mask = 0u64.wrapping_sub(br);
+    let mask = ct_mask64(br);
     let c = 0u64;
     for j in 0usize..8 {
         let u = (d[j] as u64) + ((P256[j] as u64) & mask) + c;
@@ -146,7 +148,7 @@ pub(pkg) fn mul_p384(a: Fe, b: Fe) -> Fe {
         d[j] = u as u32;
         br = u >> 63u64;
     }
-    let mask = 0u32.wrapping_sub(t[12] | ((br as u32) ^ 1u32));
+    let mask = ct_mask(t[12] | ((br as u32) ^ 1u32));
     for j in 0usize..12 { d[j] = (d[j] & mask) | (t[j] & ~mask); }
     d
 }
@@ -175,7 +177,7 @@ pub(pkg) fn add_p384(a: Fe, b: Fe) -> Fe {
         br = u >> 63u64;
     }
     // The difference when the sum overflowed or reached p.
-    let mask = 0u32.wrapping_sub((c as u32) | ((br as u32) ^ 1u32));
+    let mask = ct_mask((c as u32) | ((br as u32) ^ 1u32));
     for j in 0usize..12 { d[j] = (d[j] & mask) | (s[j] & ~mask); }
     d
 }
@@ -190,7 +192,7 @@ pub(pkg) fn sub_p384(a: Fe, b: Fe) -> Fe {
         br = u >> 63u64;
     }
     // Add p back on a borrow.
-    let mask = 0u64.wrapping_sub(br);
+    let mask = ct_mask64(br);
     let c = 0u64;
     for j in 0usize..12 {
         let u = (d[j] as u64) + ((P384[j] as u64) & mask) + c;

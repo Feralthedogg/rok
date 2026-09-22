@@ -94,7 +94,8 @@ fn mgf1(hash: HashAlgorithm, seed: Slice<u8>, len: usize) -> List<u8> {
 
 impl RsaPublicKey {
     /// From big-endian `n` and `e`: `n` odd, 2048 to 4096 bits; `e` odd,
-    /// at least 3, below `n`.
+    /// `3 <= e < 2^33` (verification costs a square and a multiply per
+    /// exponent bit; a peer's certificate must not choose that).
     pub fn new(n: Bytes, e: Bytes) throws (ValueError) -> RsaPublicKey {
         let nb = strip(view(n));
         let eb = strip(view(e));
@@ -109,8 +110,8 @@ impl RsaPublicKey {
         if m[0] & 1u32 == 0u32 {
             throw ValueError { msg: "RSA modulus must be odd" };
         }
-        if eb.len() == 0 || eb.len() >= nb.len() || eb[eb.len() - 1] & 1u8 == 0u8 || (eb.len() == 1 && eb[0] < 3u8) {
-            throw ValueError { msg: "RSA exponent must be odd, at least 3 and below the modulus" };
+        if eb.len() == 0 || eb.len() > 5 || (eb.len() == 5 && eb[0] > 1u8) || eb[eb.len() - 1] & 1u8 == 0u8 || (eb.len() == 1 && eb[0] < 3u8) {
+            throw ValueError { msg: "RSA exponent must be odd, at least 3 and below 2^33" };
         }
         RsaPublicKey { md: Modulus::new(m), e: eb.to_list(), bits }
     }
@@ -209,6 +210,14 @@ pub struct RsaPrivateKey {
     qinv: List<u32>;
 }
 
+/// `b` with leading zeros to `len` bytes (`b.len() <= len`).
+fn pad_be(b: Slice<u8>, len: usize) -> List<u8> {
+    let out: List<u8> = List::with_capacity(len);
+    for _ in b.len()..len { out.push(0u8); }
+    for x in b { out.push(x); }
+    out
+}
+
 /// A prime factor as a modulus: odd, at most `nlimbs` limbs.
 fn factor(b: Slice<u8>, nlimbs: usize) throws (ValueError) -> Modulus {
     let bad = ValueError { msg: "bad RSA private key" };
@@ -247,8 +256,10 @@ impl RsaPrivateKey {
         RsaPrivateKey {
             public,
             qinv: fp.to_mont(qi),
-            dp: fields[6].to_list(),
-            dq: fields[7].to_list(),
+            // Padded to the primes' width: `pow` takes the same number of
+            // steps whatever the exponents' leading zeros.
+            dp: pad_be(fields[6], 4 * fp.n),
+            dq: pad_be(fields[7], 4 * fq.n),
             fp,
             fq,
         }

@@ -2064,14 +2064,14 @@ fn stale_rokhir_is_rejected() {
 
     let good = fs::read(&rokhir).unwrap();
     // The layout (9.4.3 - 9.4.7): a 16-byte little-endian header (`ROKH`,
-    // version 3, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
+    // version 4, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
     // the producer, then the meta (mount name, package hash — 0.3.3: the
     // SHA-256 of `path \0 text \0` per file, 8 hex digits — and source
     // directory, GC type range, features); at the body offset, the files
     // with concrete function bodies cut to `;`.
     let word = |i: usize| u32::from_le_bytes(good[i..i + 4].try_into().unwrap());
     assert_eq!(&good[..4], b"ROKH");
-    assert_eq!((word(4), word(8)), (3, 0));
+    assert_eq!((word(4), word(8)), (4, 0));
     let varint = |at: &mut usize| -> usize {
         let extra = good[*at].leading_ones() as usize;
         let mut v = usize::from(good[*at] & 0xffu8.checked_shr(extra as u32 + 1).unwrap_or(0));

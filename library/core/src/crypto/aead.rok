@@ -59,6 +59,7 @@ impl Aead {
         let n = try nonce12(nonce);
         let a = view(aad);
         let p = view(plaintext);
+        try self.check_len(p.len());
         if self.alg == AeadAlgorithm::ChaCha20Poly1305 {
             let c = ChaChaState::new(self.key[0:32], n, 1u32);
             let out = c.xor(p);
@@ -81,6 +82,7 @@ impl Aead {
         if ct.len() < 16 { return none; }
         let body = ct[0:ct.len() - 16];
         let tag = ct[ct.len() - 16:ct.len()];
+        try self.check_len(body.len());
         if self.alg == AeadAlgorithm::ChaCha20Poly1305 {
             if !constant_time_eq(self.poly_tag(n, a, body), tag) { return none; }
             let c = ChaChaState::new(self.key[0:32], n, 1u32);
@@ -88,6 +90,16 @@ impl Aead {
         }
         if !constant_time_eq(self.gcm_tag(n, a, body), tag) { return none; }
         self.ctr(n, body)
+    }
+
+    /// The per-nonce limit: the 32-bit block counter must not wrap
+    /// (GCM: 2^32 - 2 blocks of 16 bytes; ChaCha20 from counter 1:
+    /// 2^32 - 1 blocks of 64).
+    fn check_len(self, len: usize) throws (ValueError) {
+        let max = if self.alg == AeadAlgorithm::ChaCha20Poly1305 { 274877906880u64 } else { 68719476704u64 };
+        if (len as u64) > max {
+            throw ValueError { msg: f"{self.alg:?} message longer than {max} bytes" };
+        }
     }
 
     fn poly_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {

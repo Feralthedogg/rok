@@ -27,6 +27,27 @@ pub use ed25519::Ed25519;
 pub use ecdsa::{EcCurve, Ecdsa};
 pub use rsa::{RsaPublicKey, RsaPrivateKey};
 
+use rok::core::sync::{Atomic, AtomicOrdering};
+
+/// Always 0, but loaded at run time: a mask built through `ct_mask*`
+/// is a value the optimizer cannot prove is 0 or all ones, so the
+/// and/or selects it drives are not rewritten into branches (LLVM does
+/// that at -O2 to masks it can see are 0 or -1).
+static CT_ZERO: Atomic<u32> = Atomic::new(0u32);
+
+/// All ones when `bit` is 1, zero when it is 0.
+pub(pkg) fn ct_mask(bit: u32) -> u32 {
+    0u32.wrapping_sub(bit) ^ CT_ZERO.load(AtomicOrdering::Relaxed)
+}
+
+pub(pkg) fn ct_mask64(bit: u64) -> u64 {
+    0u64.wrapping_sub(bit) ^ (CT_ZERO.load(AtomicOrdering::Relaxed) as u64)
+}
+
+pub(pkg) fn ct_mask_i64(bit: i64) -> i64 {
+    -bit ^ (CT_ZERO.load(AtomicOrdering::Relaxed) as i64)
+}
+
 /// Byte input: a list, a view or a string's UTF-8 bytes.
 pub type Bytes = List<u8> | Slice<u8> | str;
 

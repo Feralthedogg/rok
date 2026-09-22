@@ -1,0 +1,378 @@
+// expect-exit: 0
+// expect-stdout:
+// cavp-sha256: 12 cases, 0 failed
+// cavp-sha256-monte: 2 cases, 0 failed
+// cavp-sha384: 12 cases, 0 failed
+// cavp-sha384-monte: 2 cases, 0 failed
+// cavp-sha512: 12 cases, 0 failed
+// cavp-sha512-monte: 2 cases, 0 failed
+// cavp-sha3-256: 12 cases, 0 failed
+// cavp-sha3-256-monte: 2 cases, 0 failed
+// cavp-sha3-512: 12 cases, 0 failed
+// cavp-sha3-512-monte: 2 cases, 0 failed
+// cavp-shake128: 12 cases, 0 failed
+// cavp-shake128-varout: 6 cases, 0 failed
+// cavp-shake256: 12 cases, 0 failed
+// cavp-shake256-varout: 6 cases, 0 failed
+// cavp-hmac-sha256: 12 cases, 0 failed
+// cavp-hmac-sha384: 12 cases, 0 failed
+// cavp-hmac-sha512: 12 cases, 0 failed
+// cavp-gcm-enc-128: 16 cases, 0 failed
+// cavp-gcm-dec-128: 16 cases, 0 failed
+// cavp-gcm-enc-256: 16 cases, 0 failed
+// cavp-gcm-dec-256: 16 cases, 0 failed
+// cavp-ecdsa-sigver-p256-sha256: 3 cases, 0 failed
+// cavp-ecdsa-sigver-p256-sha384: 3 cases, 0 failed
+// cavp-ecdsa-sigver-p256-sha512: 3 cases, 0 failed
+// cavp-ecdsa-sigver-p384-sha256: 3 cases, 0 failed
+// cavp-ecdsa-sigver-p384-sha384: 3 cases, 0 failed
+// cavp-ecdsa-sigver-p384-sha512: 3 cases, 0 failed
+// cavp-ecdsa-siggen-p256-sha256: 3 cases, 0 failed
+// cavp-ecdsa-siggen-p256-sha384: 3 cases, 0 failed
+// cavp-ecdsa-siggen-p256-sha512: 3 cases, 0 failed
+// cavp-ecdsa-siggen-p384-sha256: 3 cases, 0 failed
+// cavp-ecdsa-siggen-p384-sha384: 3 cases, 0 failed
+// cavp-ecdsa-siggen-p384-sha512: 3 cases, 0 failed
+// cavp-ecdsa-keypair-p256: 3 cases, 0 failed
+// cavp-ecdsa-keypair-p384: 3 cases, 0 failed
+// cavp-rsa-sigver-pkcs1: 5 cases, 0 failed
+// cavp-rsa-sigver-pss: 5 cases, 0 failed
+// cavp-rsa-siggen-pkcs1: 5 cases, 0 failed
+// cavp-rsa-siggen-pss: 5 cases, 0 failed
+// wp-aes-gcm: 16 cases, 0 failed
+// wp-aes-gcm-nonce: 16 cases, 0 failed
+// wp-chacha20-poly1305: 16 cases, 0 failed
+// wp-chacha20-poly1305-nonce: 9 cases, 0 failed
+// wp-x25519: 16 cases, 0 failed
+// wp-ed25519: 16 cases, 0 failed
+// wp-ecdsa-secp256r1-sha256: 16 cases, 0 failed
+// wp-ecdsa-secp256r1-sha512: 16 cases, 0 failed
+// wp-ecdsa-secp384r1-sha384: 16 cases, 0 failed
+// wp-ecdsa-secp384r1-sha256: 16 cases, 0 failed
+// wp-ecdsa-secp384r1-sha512: 16 cases, 0 failed
+// wp-hkdf-sha256: 16 cases, 0 failed
+// wp-hkdf-sha384: 16 cases, 0 failed
+// wp-hkdf-sha512: 16 cases, 0 failed
+// wp-hmac-sha256: 16 cases, 0 failed
+// wp-hmac-sha384: 16 cases, 0 failed
+// wp-hmac-sha512: 16 cases, 0 failed
+// wp-rsa-pkcs1-2048: 5 cases, 0 failed
+// wp-rsa-pkcs1-sign-2048: 5 cases, 0 failed
+// wp-rsa-pkcs1-3072: 3 cases, 0 failed
+// wp-rsa-pkcs1-sign-3072: 3 cases, 0 failed
+// wp-rsa-pkcs1-4096: 3 cases, 0 failed
+// wp-rsa-pkcs1-sign-4096: 3 cases, 0 failed
+// wp-rsa-pss-2048-sha256-mgf1-0: 5 cases, 0 failed
+// wp-rsa-pss-2048-sha256-mgf1-32: 5 cases, 0 failed
+// wp-rsa-pss-2048-sha384-mgf1-48: 5 cases, 0 failed
+// wp-rsa-pss-3072-sha256-mgf1-32: 3 cases, 0 failed
+// wp-rsa-pss-4096-sha256-mgf1-32: 3 cases, 0 failed
+// wp-rsa-pss-4096-sha512-mgf1-64: 3 cases, 0 failed
+// wp-rsa-pss-misc: 5 cases, 0 failed
+// wp-mlkem768-keygen: 3 cases, 0 failed
+// wp-mlkem768-encaps: 3 cases, 0 failed
+// wp-mlkem768-decaps: 2 cases, 0 failed
+// wp-mlkem768: 3 cases, 0 failed
+// total: 595 cases, 0 failed
+
+// rok::core::crypto against official vectors: NIST CAVP (SHA-2, SHA-3 /
+// SHAKE, HMAC, AES-GCM, ECDSA, RSA PKCS #1 v1.5 / PSS) and Wycheproof
+// (AEAD, X25519, Ed25519, ECDSA, RSA, HMAC, HKDF, ML-KEM), one case per
+// line of vectors.txt, a subset that ../gen_vectors.py makes from the
+// pinned sources it lists. A line is `<suite> <op> <field>...`: hex
+// fields, `-` for empty, `@name` for a `def name <hex>` line before it.
+use rok::core::crypto::{constant_time_eq, HashAlgorithm, Digest, Sha3_256, Sha3_512, Shake128, Shake256, Hmac, Hkdf, Aead, AeadAlgorithm, X25519, Ed25519, Ecdsa, EcCurve, RsaPublicKey, RsaPrivateKey, MlKem768};
+
+fn nib(c: u8) -> u8 {
+    if c >= 0x30u8 && c <= 0x39u8 { return c - 0x30u8; }
+    if c >= 0x61u8 && c <= 0x66u8 { return c - 0x61u8 + 10u8; }
+    c - 0x41u8 + 10u8
+}
+
+fn unhex(s: str) -> List<u8> {
+    let out: List<u8> = [];
+    if s == "-" { return out; }
+    let b = s.as_bytes();
+    let i = 0usize;
+    while i + 1 < b.len() {
+        out.push((nib(b[i]) << 4) | nib(b[i + 1]));
+        i += 2;
+    }
+    out
+}
+
+fn hex(b: List<u8>) -> str {
+    let s = "";
+    for x in b { s += f"{x:02x}"; }
+    s
+}
+
+fn hash_of(name: str) -> HashAlgorithm {
+    if name == "sha384" { return HashAlgorithm::Sha384; }
+    if name == "sha512" { return HashAlgorithm::Sha512; }
+    HashAlgorithm::Sha256
+}
+
+fn curve_of(name: str) -> EcCurve { if name == "p384" { EcCurve::P384 } else { EcCurve::P256 } }
+
+fn sha256(b: List<u8>) -> str { hex(HashAlgorithm::Sha256.digest(b)) }
+
+fn digest(alg: str, m: List<u8>) -> List<u8> {
+    if alg == "sha3-256" { return Sha3_256::digest(m); }
+    if alg == "sha3-512" { return Sha3_512::digest(m); }
+    let h = hash_of(alg);
+    // Streamed in two pieces as well: both must agree.
+    let d = Digest::new(h);
+    let half = m.len() / 2;
+    d.update(m[0:half]);
+    d.update(m[half:m.len()]);
+    let one = h.digest(m);
+    if !constant_time_eq(d.finish(), one) { return []; }
+    one
+}
+
+/// SHA-2 Monte Carlo (SHAVS 6.4): one checkpoint, 1000 chained hashes.
+fn monte2(alg: str, seed: List<u8>) -> List<u8> {
+    let h = hash_of(alg);
+    let a = seed;
+    let b = seed;
+    let c = seed;
+    for _ in 0..1000 {
+        let m = a.clone();
+        for x in b { m.push(x); }
+        for x in c { m.push(x); }
+        a = b;
+        b = c;
+        c = h.digest(m);
+    }
+    c
+}
+
+/// SHA-3 Monte Carlo (SHA3VS 6.2.3): one checkpoint.
+fn monte3(alg: str, seed: List<u8>) -> List<u8> {
+    let md = seed;
+    for _ in 0..1000 { md = digest(alg, md); }
+    md
+}
+
+/// `got` as the expectation `flag` wants: "1" true, "0" false, "a"
+/// (Wycheproof "acceptable") either.
+fn want(flag: str, got: bool) -> bool { flag == "a" || got == (flag == "1") }
+
+fn aead_alg(name: str) -> AeadAlgorithm {
+    if name == "aes128gcm" { return AeadAlgorithm::Aes128Gcm; }
+    if name == "aes256gcm" { return AeadAlgorithm::Aes256Gcm; }
+    AeadAlgorithm::ChaCha20Poly1305
+}
+
+/// Whether the AEAD case behaves as expected: a valid one seals to
+/// `ct || tag` and opens back; an invalid one is refused (`ValueError`
+/// or `none`).
+fn aead_case(alg: str, key: List<u8>, iv: List<u8>, aad: List<u8>, msg: List<u8>, ct: List<u8>, tag: List<u8>, valid: bool) -> bool {
+    let a: Aead = try Aead::new(aead_alg(alg), key) catch _ { return !valid; };
+    let sealed = ct.clone();
+    for x in tag { sealed.push(x); }
+    if valid {
+        let s = try a.seal(iv, aad, msg) catch _ { return false; };
+        let o = try a.open(iv, aad, sealed) catch _ { return false; };
+        return constant_time_eq(s, sealed) && match o { p: List<u8> => constant_time_eq(p, msg), none => false };
+    }
+    let o = try a.open(iv, aad, sealed) catch _ { return true; };
+    o == none
+}
+
+fn rsa_key(cache: Dict<str, RsaPublicKey>, n: str, e: str) -> RsaPublicKey | none {
+    let k = n + e;
+    if let c: RsaPublicKey = cache.get(k) { return c; }
+    let key: RsaPublicKey = try RsaPublicKey::new(unhex(n), unhex(e)) catch _ { return none; };
+    cache.insert(k, key);
+    key
+}
+
+fn rsa_priv(cache: Dict<str, RsaPrivateKey>, der: str) -> RsaPrivateKey | none {
+    if let c: RsaPrivateKey = cache.get(der) { return c; }
+    let key: RsaPrivateKey = try RsaPrivateKey::from_pkcs1_der(unhex(der)) catch _ { return none; };
+    cache.insert(der, key);
+    key
+}
+
+fn run(op: str, f: List<str>, pubs: Dict<str, RsaPublicKey>, privs: Dict<str, RsaPrivateKey>) -> bool {
+    if op == "hash" {
+        // alg msg md
+        return hex(digest(f[0], unhex(f[1]))) == f[2];
+    }
+    if op == "shake" {
+        // alg msg outlen out
+        let n = try f[2].parse::<usize>() catch _ { 0 };
+        let m = unhex(f[1]);
+        let out: List<u8> = if f[0] == "shake128" {
+            let x = Shake128::new();
+            x.update(m);
+            x.squeeze(n)
+        } else {
+            let x = Shake256::new();
+            x.update(m);
+            x.squeeze(n)
+        };
+        return hex(out) == f[3];
+    }
+    if op == "monte" {
+        // alg seed md
+        let md = if f[0].starts_with("sha3-") { monte3(f[0], unhex(f[1])) } else { monte2(f[0], unhex(f[1])) };
+        return hex(md) == f[2];
+    }
+    if op == "hmac" {
+        // alg key msg tag valid: the tag may be truncated
+        let h = hash_of(f[0]);
+        let tag = unhex(f[3]);
+        let full = Hmac::mac(h, unhex(f[1]), unhex(f[2]));
+        let ok = tag.len() <= full.len() && constant_time_eq(full[0:tag.len()], tag);
+        if tag.len() == full.len() && Hmac::verify(h, unhex(f[1]), unhex(f[2]), tag) != ok { return false; }
+        return want(f[4], ok);
+    }
+    if op == "hkdf" {
+        // alg ikm salt info size okm valid
+        let h = hash_of(f[0]);
+        let size = try f[4].parse::<usize>() catch _ { 0 };
+        let prk = Hkdf::extract(h, unhex(f[2]), unhex(f[1]));
+        let okm: List<u8> = try Hkdf::expand(h, prk, unhex(f[3]), size) catch _ { return f[6] == "0"; };
+        return want(f[6], hex(okm) == f[5]);
+    }
+    if op == "aead" {
+        // alg key iv aad msg ct tag valid
+        return aead_case(f[0], unhex(f[1]), unhex(f[2]), unhex(f[3]), unhex(f[4]), unhex(f[5]), unhex(f[6]), f[7] == "1");
+    }
+    if op == "x25519" {
+        // private public shared valid; an all-zero shared secret is `none`
+        let r = try X25519::shared_secret(unhex(f[0]), unhex(f[1])) catch _ { return f[3] == "0"; };
+        let zero = true;
+        for x in unhex(f[2]) { if x != 0u8 { zero = false; } }
+        return match r {
+            s: List<u8> => f[3] == "1" && hex(s) == f[2],
+            none => zero || f[3] == "0",
+        };
+    }
+    if op == "x25519-pub" {
+        // private public
+        return hex(try X25519::public_key(unhex(f[0])) catch _ { return false; }) == f[1];
+    }
+    if op == "ed25519" {
+        // public msg sig valid
+        return want(f[3], Ed25519::verify(unhex(f[0]), unhex(f[1]), unhex(f[2])));
+    }
+    if op == "ed25519-sign" {
+        // seed public msg sig
+        let pk = try Ed25519::public_key(unhex(f[0])) catch _ { return false; };
+        let sig = try Ed25519::sign(unhex(f[0]), unhex(f[2])) catch _ { return false; };
+        return hex(pk) == f[1] && hex(sig) == f[3] && Ed25519::verify(pk, unhex(f[2]), sig);
+    }
+    if op == "ecdsa" {
+        // curve hash public msg sig valid
+        return want(f[5], Ecdsa::verify(curve_of(f[0]), hash_of(f[1]), unhex(f[2]), unhex(f[3]), unhex(f[4])));
+    }
+    if op == "ecdsa-pub" {
+        // curve private public
+        return hex(try Ecdsa::public_key(curve_of(f[0]), unhex(f[1])) catch _ { return false; }) == f[2];
+    }
+    if op == "ecdsa-sign" {
+        // curve hash private msg sig (RFC 6979 nonces)
+        let c = curve_of(f[0]);
+        let sig = try Ecdsa::sign(c, hash_of(f[1]), unhex(f[2]), unhex(f[3])) catch _ { return false; };
+        let pk = try Ecdsa::public_key(c, unhex(f[2])) catch _ { return false; };
+        return hex(sig) == f[4] && Ecdsa::verify(c, hash_of(f[1]), pk, unhex(f[3]), sig);
+    }
+    if op == "rsa" {
+        // pkcs1|pss hash n e msg sig salt_len valid
+        let key: RsaPublicKey = rsa_key(pubs, f[2], f[3]) else { return f[7] != "1"; };
+        let ok = if f[0] == "pkcs1" {
+            key.verify_pkcs1v15(hash_of(f[1]), unhex(f[4]), unhex(f[5]))
+        } else {
+            key.verify_pss(hash_of(f[1]), unhex(f[4]), unhex(f[5]), try f[6].parse::<usize>() catch _ { 0 })
+        };
+        return want(f[7], ok);
+    }
+    if op == "rsa-sign" {
+        // pkcs1|pss hash der msg salt sig: deterministic given the salt
+        let key: RsaPrivateKey = rsa_priv(privs, f[2]) else { return false; };
+        let h = hash_of(f[1]);
+        let sig = if f[0] == "pkcs1" {
+            try key.sign_pkcs1v15(h, unhex(f[3])) catch _ { return false; }
+        } else {
+            try key.sign_pss(h, unhex(f[3]), unhex(f[4])) catch _ { return false; }
+        };
+        let pk = key.public_key();
+        let back = if f[0] == "pkcs1" { pk.verify_pkcs1v15(h, unhex(f[3]), sig) } else { pk.verify_pss(h, unhex(f[3]), sig) };
+        return hex(sig) == f[5] && back;
+    }
+    if op == "mlkem-keygen" {
+        // d z sha256(ek) sha256(dk)
+        let (ek, dk) = try MlKem768::keygen(unhex(f[0]), unhex(f[1])) catch _ { return false; };
+        return sha256(ek) == f[2] && sha256(dk) == f[3];
+    }
+    if op == "mlkem-encaps" {
+        // ek m key sha256(c) valid
+        let (k, c) = try MlKem768::encapsulate(unhex(f[0]), unhex(f[1])) catch _ { return f[4] == "0"; };
+        return f[4] == "1" && hex(k) == f[2] && sha256(c) == f[3];
+    }
+    if op == "mlkem-decaps" {
+        // dk c key valid
+        let k = try MlKem768::decapsulate(unhex(f[0]), unhex(f[1])) catch _ { return f[3] == "0"; };
+        return f[3] == "1" && hex(k) == f[2];
+    }
+    if op == "mlkem-seed" {
+        // d z sha256(ek) c key valid: keygen, then decapsulate c
+        let (_, dk) = try MlKem768::keygen(unhex(f[0]), unhex(f[1])) catch _ { return f[5] != "1"; };
+        let ek_ok = f[2] == "-" || sha256(dk[1152:2336].to_list()) == f[2];
+        let k = try MlKem768::decapsulate(dk, unhex(f[3])) catch _ { return ek_ok && f[5] == "0"; };
+        return ek_ok && want(f[5], hex(k) == f[4]);
+    }
+    false
+}
+
+fn main() {
+    let text = include_str!("vectors.txt");
+    let defs: Dict<str, str> = Dict::new();
+    let pubs: Dict<str, RsaPublicKey> = Dict::new();
+    let privs: Dict<str, RsaPrivateKey> = Dict::new();
+    let suites: List<str> = [];
+    let counts: Dict<str, (i64, i64)> = Dict::new();
+    for line in text.lines() {
+        if line.len() == 0 || line.starts_with("#") { continue; }
+        let parts: List<str> = [];
+        for w in line.split(" ") { parts.push(w); }
+        if parts[0] == "def" {
+            defs.insert(parts[1], parts[2]);
+            continue;
+        }
+        let f: List<str> = [];
+        for i in 2..parts.len() {
+            let w = parts[i];
+            if w.starts_with("@") {
+                let name = w[1:w.len()];
+                f.push(defs.get(name) ?? "");
+            } else {
+                f.push(w);
+            }
+        }
+        let suite = parts[0];
+        if !counts.contains_key(suite) {
+            suites.push(suite);
+            counts.insert(suite, (0, 0));
+        }
+        let (n, bad) = counts[suite];
+        let ok = run(parts[1], f, pubs, privs);
+        if !ok { println(f"FAIL {suite}: {line}"); }
+        counts.insert(suite, (n + 1, if ok { bad } else { bad + 1 }));
+    }
+    let total = 0i64;
+    let failed = 0i64;
+    for s in suites {
+        let (n, bad) = counts[s];
+        total += n;
+        failed += bad;
+        println(f"{s}: {n} cases, {bad} failed");
+    }
+    println(f"total: {total} cases, {failed} failed");
+}
+
+// spec: std 221-crypto §2.21.1-2.21.4

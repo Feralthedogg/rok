@@ -11,7 +11,7 @@
 // exponent, carries and reductions are masks. Verification sees public
 // data only and indexes its tables by scalar digits.
 
-use sup::{view, Bytes};
+use sup::{view, Bytes, ct_mask};
 use sup::sha2::HashAlgorithm;
 use sup::hmac::Hmac;
 use sup::bignum::Nat;
@@ -135,7 +135,7 @@ impl Field {
             borrow = u >> 63u64;
         }
         // The difference when the sum overflowed or reached m.
-        let mask = 0u32.wrapping_sub((carry as u32) | ((borrow as u32) ^ 1u32));
+        let mask = ct_mask((carry as u32) | ((borrow as u32) ^ 1u32));
         for i in 0..n { d[i] = (d[i] & mask) | (s[i] & ~mask); }
         d
     }
@@ -145,7 +145,7 @@ impl Field {
         if self.kind != 0u8 { return fsub(self.kind, a, b); }
         let n = self.n;
         let (d, borrow) = fe_sub(a, b, n);
-        let mask = 0u32.wrapping_sub(borrow);
+        let mask = ct_mask(borrow);
         let carry = 0u64;
         for i in 0..n {
             let t = (d[i] as u64) + ((self.m[i] & mask) as u64) + carry;
@@ -158,7 +158,7 @@ impl Field {
     /// `a mod m` for `a < 2m`.
     fn reduce_once(self, a: Fe) -> Fe {
         let (d, borrow) = fe_sub(a, self.m, self.n);
-        fe_select(0u32.wrapping_sub(borrow ^ 1u32), d, a)
+        fe_select(ct_mask(borrow ^ 1u32), d, a)
     }
 
     /// Montgomery product `a b R^-1 mod m` (FIOS: multiplication and
@@ -194,7 +194,7 @@ impl Field {
             d[i] = u as u32;
             borrow = u >> 63u64;
         }
-        let mask = 0u32.wrapping_sub(t[n] | ((borrow as u32) ^ 1u32));
+        let mask = ct_mask(t[n] | ((borrow as u32) ^ 1u32));
         for i in 0..n { d[i] = (d[i] & mask) | (t[i] & ~mask); }
         d
     }
@@ -218,7 +218,7 @@ impl Field {
             let d = (e[w / 8] >> (4 * (w % 8)) as u32) & 15u32;
             let t = fe_zero();
             for i in 0..16 {
-                let hit = 0u32.wrapping_sub(((i as u32) ^ d).wrapping_sub(1u32) >> 31u32);
+                let hit = ct_mask(((i as u32) ^ d).wrapping_sub(1u32) >> 31u32);
                 t = fe_select(hit, table[i], t);
             }
             r = self.mul(r, t);
@@ -438,7 +438,7 @@ impl Curve {
             let d = (k[w / 8] >> (4 * (w % 8)) as u32) & 15u32;
             let s = self.identity();
             for i in 0..16 {
-                let hit = 0u32.wrapping_sub(((i as u32) ^ d).wrapping_sub(1u32) >> 31u32);
+                let hit = ct_mask(((i as u32) ^ d).wrapping_sub(1u32) >> 31u32);
                 let e = t[i];
                 s = Point { x: fe_select(hit, e.x, s.x), y: fe_select(hit, e.y, s.y), z: fe_select(hit, e.z, s.z) };
             }

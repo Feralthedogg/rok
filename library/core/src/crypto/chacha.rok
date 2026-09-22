@@ -2,6 +2,8 @@
 // rotates and fixed-pattern multiplies on 32-bit limbs with 64-bit
 // products.
 
+use sup::ct_mask;
+
 /// The ChaCha20 state words: constants, key, block counter, nonce.
 pub(pkg) struct ChaChaState {
     s: [u32; 16];
@@ -250,7 +252,7 @@ impl Poly1305State {
         c = g3 >> 26;
         g3 = g3 & M26;
         let g4 = (h4 + c).wrapping_sub(1u32 << 26);
-        let mask = (g4 >> 31).wrapping_sub(1u32);
+        let mask = ct_mask((g4 >> 31) ^ 1u32);
         let keep = ~mask;
         h0 = (h0 & keep) | (g0 & mask);
         h1 = (h1 & keep) | (g1 & mask);
