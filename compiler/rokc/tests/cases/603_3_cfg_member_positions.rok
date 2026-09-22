@@ -107,7 +107,7 @@ extern "C" {
     #[cfg(feature = "x")]
     fn abs(x: i32) -> i32;
     #[cfg(not(feature = "x"))]
-    #[link_name = "abs"]
+    #[link_name = "llabs"]
     fn abs(x: i64) -> i64;
     #[cfg(feature = "nope")]
     fn no_such_symbol_anywhere();

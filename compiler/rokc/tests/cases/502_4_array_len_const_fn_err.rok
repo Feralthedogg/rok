@@ -12,7 +12,7 @@ const fn neg() -> i64 {
 }
 
 const fn boom(x: usize) -> usize {
-    x * 10000000000000000000
+    x * usize::MAX
 }
 
 struct S {

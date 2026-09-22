@@ -252,6 +252,12 @@ fn check_run(
     let got = String::from_utf8_lossy(&run.stderr)
         .replace('\\', "/")
         .replace(&root, "");
+    // wasmtime's report of a preview 1 exit code of 126 or more (run as
+    // 1, `exit_matches`) is not the program's.
+    let got = match got.split_once("Error: failed to run main module") {
+        Some((program, _)) if exit != expected => program.to_owned(),
+        _ => got,
+    };
     // wasmtime's notice on `-S threads` (wasm32-wasi-threads) and the
     // blank padding around it are not the program's.
     let got = match got.split_once('\n') {

@@ -199,9 +199,16 @@ extern "rok" {
     fn rok_str_parse_float(s: str, out: GcBuf<f64>) -> i32;
     fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
     fn rok_fmt_finish(t: str) -> str;
-    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
+    fn rok_nat_mul_scratch(an: usize, bn: usize) -> usize;
+    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>);
     fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
-    fn rok_nat_divmod(q: GcBuf<u32>, un: GcBuf<u32>, vn: GcBuf<u32>, m: usize, n: usize);
+    fn rok_nat_divmod_scratch(an: usize, bn: usize) -> usize;
+    fn rok_nat_divmod(q: GcBuf<u32>, r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>);
+    fn rok_nat_put_digits(out: GcBuf<u8>, end: usize, a: GcBuf<u32>, n: usize, width: usize, radix: u32) -> usize;
+    fn rok_nat_add(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize) -> u32;
+    fn rok_nat_sub(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
+    fn rok_nat_shl(r: GcBuf<u32>, off: usize, a: GcBuf<u32>, n: usize, s: u32);
+    fn rok_nat_shr(r: GcBuf<u32>, a: GcBuf<u32>, n: usize, s: u64);
     fn rok_os_errno_kind(code: i32) -> i32;
     fn rok_os_getpid() -> u32;
     fn rok_os_getppid() -> u32;

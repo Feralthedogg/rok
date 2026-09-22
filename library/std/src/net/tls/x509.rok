@@ -541,9 +541,9 @@ pub(pkg) fn verify_client(chain: List<CertInfo>, roots: List<CertInfo>, now: i64
 fn verify_chain(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, usage: str, host: str | none, ip: List<u8> | none) throws (TlsError) -> List<CertInfo> {
     if chain.len() == 0 { throw TlsError::certificate("no certificate"); }
     let leaf = chain[0];
-    if now < leaf.not_before || now > leaf.not_after { throw TlsError::certificate("certificate expired or not yet valid"); }
+    if now < leaf.not_before || now > leaf.not_after { throw cert_err("certificate expired or not yet valid", ALERT_CERTIFICATE_EXPIRED); }
     let role = if usage == EKU_SERVER_AUTH { "server" } else { "client" };
-    if !eku_ok(leaf, usage) { throw TlsError::certificate(f"certificate not valid for {role} authentication"); }
+    if !eku_ok(leaf, usage) { throw cert_err(f"certificate not valid for {role} authentication", ALERT_UNSUPPORTED_CERTIFICATE); }
     if leaf.key_usage >= 0 && leaf.key_usage & KU_DIGITAL_SIGNATURE == 0 {
         throw TlsError::certificate("certificate key usage does not allow signing");
     }
@@ -555,8 +555,21 @@ fn verify_chain(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, usage: s
     }
     let path: List<CertInfo> = [leaf];
     let why = build(path, chain, roots, now, usage);
+    if why == UNKNOWN_CA { throw cert_err(why, ALERT_UNKNOWN_CA); }
     if why != "" { throw TlsError::certificate(why); }
     path
+}
+
+// RFC 8446 6.2; other path failures are bad_certificate.
+const ALERT_UNSUPPORTED_CERTIFICATE: u8 = 43u8;
+const ALERT_CERTIFICATE_EXPIRED: u8 = 45u8;
+const ALERT_UNKNOWN_CA: u8 = 48u8;
+const UNKNOWN_CA: str = "certificate signed by an unknown authority";
+
+fn cert_err(msg: str, alert: u8) -> TlsError {
+    let e = TlsError::certificate(msg);
+    e.alert = alert;
+    e
 }
 
 /// Extend `path` (ending in a certificate to find the issuer of) to a
@@ -564,7 +577,7 @@ fn verify_chain(chain: List<CertInfo>, roots: List<CertInfo>, now: i64, usage: s
 /// attempt failed.
 fn build(path: List<CertInfo>, pool: List<CertInfo>, roots: List<CertInfo>, now: i64, usage: str) -> str {
     let cur = path[path.len() - 1];
-    let why = "certificate signed by an unknown authority";
+    let why = UNKNOWN_CA;
     for r in roots {
         if r.subject == cur.issuer {
             let w = check_issuer(path, r, true, now, usage);

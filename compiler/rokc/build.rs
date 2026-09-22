@@ -46,16 +46,27 @@ fn main() {
     if std::env::var("CARGO_PKG_NAME").as_deref() == Ok("rokc") {
         println!("cargo:rerun-if-env-changed=DEP_ROKC_LLVM_EXPORTS");
         println!("cargo:rerun-if-env-changed=DEP_ROKC_LLVM_PLUGIN_DEV");
+        println!("cargo:rerun-if-env-changed=DEP_ROKC_LLVM_PREFIX");
         if let Ok(list) = std::env::var("DEP_ROKC_LLVM_EXPORTS") {
             let link = |flag: String| println!("cargo:rustc-link-arg-bin=rokc={flag}");
             if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
                 let dev = std::env::var("DEP_ROKC_LLVM_PLUGIN_DEV").unwrap();
                 link(format!("/DEF:{list}"));
                 link(format!("/IMPLIB:{dev}/lib/rokc.lib"));
-            } else if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
-                link(format!("-Wl,-exported_symbols_list,{list}"));
             } else {
-                link(format!("-Wl,--dynamic-list={list}"));
+                // The prefix's lld, for identical code folding (link.exe
+                // folds under rustc's /OPT:REF,ICF): MLIR's and LLVM's
+                // template instances fold by the thousand.
+                let bin = format!("{}/bin", std::env::var("DEP_ROKC_LLVM_PREFIX").unwrap());
+                if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+                    link(format!("-fuse-ld={bin}/ld64.lld"));
+                    link(format!("-Wl,-exported_symbols_list,{list}"));
+                } else {
+                    link(format!("-B{bin}"));
+                    link("-fuse-ld=lld".into());
+                    link(format!("-Wl,--dynamic-list={list}"));
+                }
+                link("-Wl,--icf=safe".into());
             }
         }
     }

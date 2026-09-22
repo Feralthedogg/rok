@@ -147,7 +147,6 @@
 LLD_HAS_DRIVER(macho)
 LLD_HAS_DRIVER(elf)
 LLD_HAS_DRIVER(coff)
-LLD_HAS_DRIVER(mingw)
 LLD_HAS_DRIVER(wasm)
 
 int dsymutil_main(int argc, char **argv, const llvm::ToolContext &);
@@ -1279,14 +1278,19 @@ int rok_llvm_dsymutil(const char *const *argv, size_t argc) {
 }
 
 // lld with argv[0] naming the flavor (ld64.lld, ld.lld, lld-link,
-// wasm-ld). Its output goes to `log`. Returns lld's exit code.
+// wasm-ld; not MinGW's ld.lld, which rokc never runs). Its output goes
+// to `log`. Returns lld's exit code.
 int rok_llvm_lld(const char *const *argv, size_t argc, RokBuf *log) {
   static std::mutex lock; // lld keeps per-link globals
   std::lock_guard<std::mutex> guard(lock);
   std::string text;
   llvm::raw_string_ostream os(text);
   lld::Result r = lld::lldMain(llvm::ArrayRef<const char *>(argv, argc), os,
-                               os, LLD_ALL_DRIVERS);
+                               os,
+                               {{lld::WinLink, &lld::coff::link},
+                                {lld::Gnu, &lld::elf::link},
+                                {lld::Darwin, &lld::macho::link},
+                                {lld::Wasm, &lld::wasm::link}});
   put(log, text);
   return r.retCode;
 }

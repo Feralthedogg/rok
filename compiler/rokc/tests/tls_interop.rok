@@ -1,0 +1,102 @@
+// The rok side of the OpenSSL interop test (cli.rs, `tls_interop_openssl`).
+//   client PORT NAME CA [suite=aes128|aes256|chacha] [pq=0] [cert=.. key=..] [conns=N] [early=TEXT]
+//   server CERT KEY [suite=..] [croots=CA] [early=N] [conns=N]
+// A client sends "ping\n" per connection and prints the reply; a server
+// echoes each read as "echo:<line>" until a line contains "bye". The
+// server reports its port on stderr.
+use rok::std::net::{tcp_listen, tcp_connect};
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, CipherSuite, SessionCache, TlsError};
+use rok::std::fs::File;
+use rok::std::env;
+use rok::std::time::Duration;
+
+fn read_file(p: str) -> str { try! (try! File::open(p)).read_to_str() }
+
+fn opt(args: List<str>, k: str) -> str {
+    for a in args {
+        if a.starts_with(f"{k}=") { return a[k.len() + 1:a.len()]; }
+    }
+    ""
+}
+
+fn count(args: List<str>) -> i32 { if opt(args, "conns") == "" { 1 } else { try! opt(args, "conns").parse::<i32>() } }
+
+fn suites(s: str) -> List<CipherSuite> {
+    if s == "aes128" { return [CipherSuite::Aes128GcmSha256]; }
+    if s == "aes256" { return [CipherSuite::Aes256GcmSha384]; }
+    if s == "chacha" { return [CipherSuite::ChaCha20Poly1305Sha256]; }
+    CipherSuite::all()
+}
+
+fn err(e: TlsError) -> str { f"error {e.kind:?} alert {e.alert}" }
+
+fn line(buf: List<u8>, k: usize) -> str { (try str::from_utf8(buf[0:k]) catch _ { "?" }).trim() }
+
+fn client(args: List<str>) {
+    let cfg = ClientConfig::new();
+    cfg.root_certs = try! Certificate::from_pem(read_file(args[4]));
+    cfg.cipher_suites = suites(opt(args, "suite"));
+    cfg.enable_pq = opt(args, "pq") != "0";
+    if opt(args, "cert") != "" {
+        cfg.client_cert_chain = try! Certificate::from_pem(read_file(opt(args, "cert")));
+        cfg.client_key = try! PrivateKey::from_pem(read_file(opt(args, "key")));
+    }
+    cfg.session_cache = SessionCache::new();
+    for i in 0..count(args) {
+        if i > 0 { cfg.early_data = opt(args, "early").as_bytes().to_list(); }
+        let s = try! tcp_connect(f"127.0.0.1:{args[2]}");
+        try! s.set_read_timeout(Duration::sec(20));
+        let c = try Client::with_config(s, args[3], cfg) catch e {
+            println(f"conn {i}: {err(e)}");
+            continue;
+        };
+        let buf: List<u8> = [];
+        for _ in 0..4096 { buf.push(0u8); }
+        try c.write_all("ping\n") catch e {
+            println(f"conn {i}: write {e}");
+            continue;
+        };
+        let k = try c.read(buf) catch e {
+            println(f"conn {i}: read {e}");
+            continue;
+        };
+        println(f"conn {i}: resumed {c.resumed()} early {c.early_data_accepted()} reply {line(buf, k)}");
+        try c.close_notify() catch _ {};
+        c.close();
+    }
+}
+
+fn server(args: List<str>) {
+    let cfg = try! ServerConfig::new(try! Certificate::from_pem(read_file(args[2])), try! PrivateKey::from_pem(read_file(args[3])));
+    cfg.cipher_suites = suites(opt(args, "suite"));
+    if opt(args, "croots") != "" { cfg.client_roots = try! Certificate::from_pem(read_file(opt(args, "croots"))); }
+    if opt(args, "early") != "" { cfg.max_early_data = try! opt(args, "early").parse::<u32>(); }
+    let l = try! tcp_listen("127.0.0.1:0");
+    eprintln(f"listening {(try! l.local_addr()).port()}");
+    for i in 0..count(args) {
+        let (s, _) = try! l.accept();
+        try! s.set_read_timeout(Duration::sec(20));
+        let srv = try Server::new(s, cfg) catch e {
+            println(f"srv {i}: {err(e)}");
+            continue;
+        };
+        let buf: List<u8> = [];
+        for _ in 0..4096 { buf.push(0u8); }
+        loop {
+            let k = try srv.read(buf) catch _ { break; };
+            if k == 0 { break; }
+            let t = line(buf, k);
+            try srv.write_all(f"echo:{t}\n") catch _ { break; };
+            if t.contains("bye") { break; }
+        }
+        let early = (try str::from_utf8(srv.early_data()) catch _ { "?" }).trim();
+        println(f"srv {i}: resumed {srv.resumed()} early {early} peer certs {srv.peer_certificates().len()}");
+        try srv.close_notify() catch _ {};
+        srv.close();
+    }
+}
+
+fn main() {
+    let args = env::args();
+    if args[1] == "client" { client(args); } else { server(args); }
+}

@@ -5,15 +5,15 @@
 // p256: hello, resumed false
 // p256 again: hello, resumed true
 // none: read: tls: peer sent alert 116
-// serverAuth only: read: tls: peer sent alert 42
-// other CA: read: tls: peer sent alert 42
+// serverAuth only: read: tls: peer sent alert 43
+// other CA: read: tls: peer sent alert 48
 // key mismatch: handshake: Certificate client key does not match the client certificate
 // server: peer 1 certs, names 1, resumed false
 // server: peer 1 certs, names 1, resumed false
 // server: peer 1 certs, names 1, resumed true
 // server: error client sent no certificate (alert 116)
-// server: error certificate not valid for client authentication (alert 42)
-// server: error certificate signed by an unknown authority (alert 42)
+// server: error certificate not valid for client authentication (alert 43)
+// server: error certificate signed by an unknown authority (alert 48)
 // server: error connection closed without close_notify (alert 0)
 // optional, none: hello, resumed false
 // optional, ed25519: hello, resumed false

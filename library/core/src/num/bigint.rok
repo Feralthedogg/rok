@@ -12,17 +12,24 @@
 // Values are immutable: a limb buffer is never written once it sits in
 // an `Int`, so copies share it (spec 2.13.3: `int` is `Copy`).
 //
-// Algorithms: schoolbook add / sub, schoolbook multiplication with
-// Karatsuba above `KARATSUBA` limbs, Knuth algorithm D division (the
-// multiply and divide inner loops are runtime kernels),
-// square-and-multiply `pow`, Euclid `gcd`, quadratic radix conversion.
-// Numbers of 10^5+ digits would want FFT / Toom-Cook multiplication,
-// Burnikel-Ziegler division and divide-and-conquer radix conversion.
+// Algorithms: add / sub / shifts / products / Knuth D are runtime
+// kernels (`rokr/src/bignum.rs`: 64-bit limbs on 64-bit targets,
+// schoolbook, Karatsuba, Toom-3, three-prime NTT). Here: Burnikel-Ziegler
+// division above `BZ` limbs; divide-and-conquer radix conversion over
+// the powers chunk^(2^i) both ways, output dividing by Newton / Barrett
+// reciprocals of the powers; square-and-multiply `pow`, Euclid `gcd`.
 
 use rok::core::collections::raw::{GcBuf, buf_new};
 
-/// Limb count from which `IntMag::mul` splits (Karatsuba).
-const KARATSUBA: usize = 40;
+/// Divisor limbs below which (or quotient limbs below which) division
+/// is schoolbook (Knuth D); limb / digit counts below which radix
+/// conversion is quadratic; power limbs from which output divides by a
+/// reciprocal. Measured on aarch64.
+const BZ: usize = 60;
+const STR_SMALL: usize = 40;
+const PARSE_SMALL: usize = 400;
+const BARRETT: usize = 200;
+const RECIP_SMALL: usize = 120;
 
 /// A magnitude: little-endian base-2^32 limbs `d[0..n]`, no leading
 /// zero limb (`n == 0` is zero). `d` may be longer than `n`.
@@ -91,15 +98,7 @@ impl IntMag {
         unsafe {
             if self.n < b.n { return b.plus(self); }
             let r: GcBuf<u32> = buf_new(self.n + 1);
-            let carry = 0u64;
-            let i = 0usize;
-            while i < self.n {
-                let s = (self.d[i] as u64) + b.limb(i) + carry;
-                r[i] = s as u32;
-                carry = s >> 32u64;
-                i += 1;
-            }
-            r[self.n] = carry as u32;
+            r[self.n] = rok_nat_add(r, self.d, self.n, b.d, b.n);
             IntMag::trim(r, self.n + 1)
         }
     }
@@ -108,35 +107,18 @@ impl IntMag {
     const fn minus(self, b: IntMag) -> IntMag {
         unsafe {
             let r: GcBuf<u32> = buf_new(self.n);
-            let borrow = 0u64;
-            let i = 0usize;
-            while i < self.n {
-                let x = self.d[i] as u64;
-                let y = b.limb(i) + borrow;
-                if x >= y {
-                    r[i] = (x - y) as u32;
-                    borrow = 0u64;
-                } else {
-                    r[i] = (x + 0x1_0000_0000u64 - y) as u32;
-                    borrow = 1u64;
-                }
-                i += 1;
-            }
+            rok_nat_sub(r, self.d, self.n, b.d, b.n);
             IntMag::trim(r, self.n)
         }
     }
 
-    /// `r[off..] += self` (`r` has room for the carry).
-    const fn add_to(self, r: GcBuf<u32>, off: usize) {
+    /// `hi B^k + lo` for `lo < B^k`.
+    const fn join(hi: IntMag, lo: IntMag, k: usize) -> IntMag {
         unsafe {
-            let carry = 0u64;
-            let i = 0usize;
-            while i < self.n || carry != 0u64 {
-                let s = (r[off + i] as u64) + self.limb(i) + carry;
-                r[off + i] = s as u32;
-                carry = s >> 32u64;
-                i += 1;
-            }
+            let r: GcBuf<u32> = buf_new(k + hi.n + 1);
+            rok_nat_shl(r, 0, lo.d, lo.n, 0u32);
+            rok_nat_shl(r, k, hi.d, hi.n, 0u32);
+            IntMag::trim(r, k + hi.n + 1)
         }
     }
 
@@ -146,49 +128,38 @@ impl IntMag {
             let h = if hi < self.n { hi } else { self.n };
             if lo >= h { return IntMag::zero(); }
             let r: GcBuf<u32> = buf_new(h - lo);
-            let i = lo;
-            while i < h {
-                r[i - lo] = self.d[i];
-                i += 1;
-            }
+            rok_nat_shr(r, self.d, h, (lo as u64) * 32u64);
             IntMag::trim(r, h - lo)
         }
     }
 
+    /// Limbs `0..k` (shares `d`).
+    const fn low(self, k: usize) -> IntMag {
+        IntMag::trim(self.d, if k < self.n { k } else { self.n })
+    }
+
+    /// B^n - 1.
+    const fn ones(n: usize) -> IntMag {
+        unsafe {
+            let d: GcBuf<u32> = buf_new(n);
+            let i = 0usize;
+            while i < n {
+                d[i] = 0xFFFF_FFFFu32;
+                i += 1;
+            }
+            IntMag { d: d, n: n }
+        }
+    }
+
+    /// `self * b` (squares when `b` is `self`).
     fn times(self, b: IntMag) -> IntMag {
         unsafe {
-            if self.n < b.n { return b.times(self); }
-            if b.n == 0 { return IntMag::zero(); }
-            if b.n < KARATSUBA {
-                let n = self.n + b.n;
-                let r: GcBuf<u32> = buf_new(n);
-                rok_nat_mul(r, self.d, self.n, b.d, b.n);
-                return IntMag::trim(r, n);
-            }
-            let r: GcBuf<u32> = buf_new(self.n + b.n + 1);
-            if b.n * 2 <= self.n {
-                // Unbalanced: `b`-sized pieces of `self`, each balanced.
-                let off = 0usize;
-                while off < self.n {
-                    self.slice(off, off + b.n).times(b).add_to(r, off);
-                    off += b.n;
-                }
-                return IntMag::trim(r, self.n + b.n + 1);
-            }
-            // Karatsuba: a = a1 B^k + a0, b = b1 B^k + b0;
-            // ab = z2 B^2k + ((a0 + a1)(b0 + b1) - z2 - z0) B^k + z0.
-            let k = (self.n + 1) / 2;
-            let a0 = self.slice(0, k);
-            let a1 = self.slice(k, self.n);
-            let b0 = b.slice(0, k);
-            let b1 = b.slice(k, b.n);
-            let z0 = a0.times(b0);
-            let z2 = a1.times(b1);
-            let z1 = a0.plus(a1).times(b0.plus(b1)).minus(z0).minus(z2);
-            z0.add_to(r, 0);
-            z1.add_to(r, k);
-            z2.add_to(r, 2 * k);
-            IntMag::trim(r, self.n + b.n + 1)
+            if self.n == 0 || b.n == 0 { return IntMag::zero(); }
+            let n = self.n + b.n;
+            let r: GcBuf<u32> = buf_new(n);
+            let t: GcBuf<u32> = buf_new(rok_nat_mul_scratch(self.n, b.n));
+            rok_nat_mul(r, self.d, self.n, b.d, b.n, t);
+            IntMag::trim(r, n)
         }
     }
 
@@ -197,17 +168,8 @@ impl IntMag {
         unsafe {
             if self.n == 0 { return self; }
             let limbs = (s / 32u64) as usize;
-            let bits = s % 32u64;
             let r: GcBuf<u32> = buf_new(self.n + limbs + 1);
-            let carry = 0u64;
-            let i = 0usize;
-            while i < self.n {
-                let v = ((self.d[i] as u64) << bits) | carry;
-                r[i + limbs] = v as u32;
-                carry = v >> 32u64;
-                i += 1;
-            }
-            r[self.n + limbs] = carry as u32;
+            rok_nat_shl(r, limbs, self.d, self.n, (s % 32u64) as u32);
             IntMag::trim(r, self.n + limbs + 1)
         }
     }
@@ -215,25 +177,143 @@ impl IntMag {
     /// `self >> s` bits (floor).
     const fn shr(self, s: u64) -> IntMag {
         unsafe {
-            let limbs = s / 32u64;
-            if limbs >= self.n as u64 { return IntMag::zero(); }
-            let skip = limbs as usize;
-            let bits = s % 32u64;
-            let n = self.n - skip;
+            if s / 32u64 >= self.n as u64 { return IntMag::zero(); }
+            let n = self.n - (s / 32u64) as usize;
             let r: GcBuf<u32> = buf_new(n);
-            let i = 0usize;
-            while i < n {
-                let v = ((self.limb(i + skip + 1) << 32u64) | (self.d[i + skip] as u64)) >> bits;
-                r[i] = v as u32;
-                i += 1;
-            }
+            rok_nat_shr(r, self.d, self.n, s);
             IntMag::trim(r, n)
         }
     }
 
-    /// `(self / b, self % b)`, `b != 0`: Knuth TAOCP 4.3.1 algorithm D
-    /// on the operands shifted so the divisor's top bit is set.
+    /// `(self / b, self % b)`, `b != 0`. Short divisors or quotients go
+    /// to Knuth D; otherwise the normalized dividend is divided in base
+    /// B^n digits (`n` the divisor's limbs), each a Burnikel-Ziegler
+    /// 2n/1n step.
     fn divmod(self, b: IntMag) -> (IntMag, IntMag) {
+        unsafe {
+            if self.cmp3(b) < 0 { return (IntMag::zero(), self); }
+            if b.n < BZ || self.n < b.n + BZ { return self.divmod_knuth(b); }
+            let s = b.d[b.n - 1].leading_zeros() as u64;
+            let bs = b.shl(s);
+            let a = self.shl(s);
+            let n = bs.n;
+            let k = (a.n + n - 1) / n;
+            let q: GcBuf<u32> = buf_new(k * n);
+            let r = IntMag::zero();
+            let i = k;
+            while i > 0 {
+                i -= 1;
+                let (qd, rd) = IntMag::join(r, a.slice(i * n, i * n + n), n).div2n1n(bs, n);
+                let j = 0usize;
+                while j < qd.n {
+                    q[i * n + j] = qd.d[j];
+                    j += 1;
+                }
+                r = rd;
+            }
+            (IntMag::trim(q, k * n), r.shr(s))
+        }
+    }
+
+    /// `(self / b, self % b)` for `self < b B^n`, `b` of `n` limbs with
+    /// its top bit set (Burnikel-Ziegler 1998, algorithm 1): two 3n/2n
+    /// steps on half-size digits.
+    fn div2n1n(self, b: IntMag, n: usize) -> (IntMag, IntMag) {
+        if n < BZ || self.n < n + BZ { return self.divmod_knuth(b); }
+        let a = self;
+        let v = b;
+        let w = n;
+        if w % 2 == 1 {
+            // An even digit count: both times B keeps `v`'s top bit set.
+            a = a.shl(32u64);
+            v = v.shl(32u64);
+            w += 1;
+        }
+        let h = w / 2;
+        let v1 = v.slice(h, w);
+        let v2 = v.low(h);
+        let (q1, r1) = IntMag::div3n2n(a.slice(w, a.n), a.slice(h, w), v, v1, v2, h);
+        let (q2, r2) = IntMag::div3n2n(r1, a.low(h), v, v1, v2, h);
+        let q = IntMag::join(q1, q2, h);
+        (q, if w != n { r2.shr(32u64) } else { r2 })
+    }
+
+    /// `(a12 B^n + a3) / b` for `b = b1 B^n + b2` (`b1` of `n` limbs, top
+    /// bit set), `a12 < b B^n`, `a3 < B^n` (algorithm 2).
+    fn div3n2n(a12: IntMag, a3: IntMag, b: IntMag, b1: IntMag, b2: IntMag, n: usize) -> (IntMag, IntMag) {
+        let sh = (n as u64) * 32u64;
+        let (q, r) = if a12.shr(sh).cmp3(b1) == 0 {
+            (IntMag::ones(n), a12.minus(b1.shl(sh)).plus(b1))
+        } else {
+            a12.div2n1n(b1, n)
+        };
+        // The estimate is at most 2 too big.
+        let t = IntMag::join(r, a3, n);
+        let d = q.times(b2);
+        while t.cmp3(d) < 0 {
+            q = q.minus(IntMag::from_u64(1u64));
+            t = t.plus(b);
+        }
+        (q, t.minus(d))
+    }
+
+    /// floor(B^2n / self), `n = self.n`: `recip_approx` made exact.
+    fn recip(self) -> IntMag {
+        let one = IntMag::from_u64(1u64);
+        let b2n = one.shl((self.n as u64) * 64u64);
+        let x = self.recip_approx();
+        let px = x.times(self);
+        while px.cmp3(b2n) > 0 {
+            x = x.minus(one);
+            px = px.minus(self);
+        }
+        while b2n.minus(px).cmp3(self) >= 0 {
+            x = x.plus(one);
+            px = px.plus(self);
+        }
+        x
+    }
+
+    /// floor(B^2n / self) within a few units (`n = self.n`): one Newton
+    /// step from the reciprocal of the top `h = n/2 + 2` limbs. With
+    /// X = R_h B^(n-h), B^2n - self X = B^(n-h) E for E = B^(n+h) -
+    /// self R_h, so X' = X + R_h E / B^2h; the error squares.
+    fn recip_approx(self) -> IntMag {
+        let n = self.n;
+        let one = IntMag::from_u64(1u64);
+        if n < RECIP_SMALL {
+            let (q, _) = one.shl((n as u64) * 64u64).divmod(self);
+            return q;
+        }
+        let h = n / 2 + 2;
+        let rh = self.slice(n - h, n).recip_approx();
+        let x = rh.shl(((n - h) as u64) * 32u64);
+        let px = self.times(rh);
+        let bnh = one.shl(((n + h) as u64) * 32u64);
+        let sh = ((2 * h) as u64) * 32u64;
+        if px.cmp3(bnh) <= 0 {
+            x.plus(rh.times(bnh.minus(px)).shr(sh))
+        } else {
+            x.minus(rh.times(px.minus(bnh)).shr(sh)).minus(one)
+        }
+    }
+
+    /// `(self / p, self % p)` for `self < B^2n` (`n = p.n`) and `inv =
+    /// p.recip()` (Barrett: the estimate is at most 2 short).
+    fn barrett(self, p: IntMag, inv: IntMag) -> (IntMag, IntMag) {
+        let n = p.n;
+        let t = self.slice(n - 1, self.n).times(inv);
+        let q = t.slice(n + 1, t.n);
+        let r = self.minus(q.times(p));
+        while r.cmp3(p) >= 0 {
+            q = q.plus(IntMag::from_u64(1u64));
+            r = r.minus(p);
+        }
+        (q, r)
+    }
+
+    /// Knuth TAOCP 4.3.1 algorithm D (a runtime kernel; `b != 0`).
+    fn divmod_knuth(self, b: IntMag) -> (IntMag, IntMag) {
         unsafe {
             if self.cmp3(b) < 0 { return (IntMag::zero(), self); }
             if b.n == 1 {
@@ -241,23 +321,77 @@ impl IntMag {
                 let rem = rok_nat_divmod_small(q, self.d, self.n, b.d[0]);
                 return (IntMag::trim(q, self.n), IntMag::from_u64(rem as u64));
             }
-            let n = b.n;
-            let m = self.n - n;
-            let s = b.d[n - 1].leading_zeros() as u64;
-            let vn = b.shl(s).d;
-            // `self << s` in `m + n + 1` limbs (the top one may stay zero).
-            let un: GcBuf<u32> = buf_new(self.n + 1);
-            let sh = self.shl(s);
-            let i = 0usize;
-            while i < sh.n {
-                un[i] = sh.d[i];
-                i += 1;
-            }
-            let q: GcBuf<u32> = buf_new(m + 1);
-            rok_nat_divmod(q, un, vn, m, n);
-            (IntMag::trim(q, m + 1), IntMag::trim(un, n).shr(s))
+            let m = self.n - b.n + 1;
+            let q: GcBuf<u32> = buf_new(m);
+            let r: GcBuf<u32> = buf_new(b.n);
+            let t: GcBuf<u32> = buf_new(rok_nat_divmod_scratch(self.n, b.n));
+            rok_nat_divmod(q, r, self.d, self.n, b.d, b.n, t);
+            (IntMag::trim(q, m), IntMag::trim(r, b.n))
         }
     }
+}
+
+/// The digits of `x` in base `radix` ending at `out[end]` (exclusive),
+/// zero-padded to `width`; the start. By halves: `x < pw[k - 1]^2`
+/// splits at `pw[k - 1]` (`per 2^(k-1)` digits) into two `put_digits`
+/// on `k - 1`, down to a runtime kernel at `STR_SMALL` (<= 64) limbs.
+/// `inv[i]` is `pw[i].recip()`, or zero where plain division is used.
+fn put_digits(x: IntMag, pw: List<IntMag>, inv: List<IntMag>, k: usize, per: usize, out: GcBuf<u8>, end: usize, width: usize, radix: u32) -> usize {
+    if k == 0 || x.n <= STR_SMALL { return unsafe { rok_nat_put_digits(out, end, x.d, x.n, width, radix) }; }
+    let p = pw[k - 1];
+    // A leading part may be short: no padding to `w` then.
+    if x.cmp3(p) < 0 { return put_digits(x, pw, inv, k - 1, per, out, end, width, radix); }
+    let (q, r) = if inv[k - 1].n > 0 { x.barrett(p, inv[k - 1]) } else { x.divmod(p) };
+    let w = per << (k - 1);
+    put_digits(r, pw, inv, k - 1, per, out, end, w, radix);
+    put_digits(q, pw, inv, k - 1, per, out, end - w, if width > w { width - w } else { 0 }, radix)
+}
+
+/// The value of the checked digits `bs[lo..hi]`, folded `per` at a
+/// time: acc = acc * radix^k + chunk (quadratic).
+fn fold_digits(bs: Slice<u8>, lo: usize, hi: usize, radix: u32, per: u32) -> IntMag {
+    unsafe {
+        let acc: GcBuf<u32> = buf_new((hi - lo) / (per as usize) + 2);
+        let len = 0usize;
+        let i = lo;
+        while i < hi {
+            let v = 0u64;
+            let mul = 1u64;
+            let k = 0u32;
+            while k < per && i < hi {
+                v = v * (radix as u64) + (digit_of(bs[i]) as u64);
+                mul = mul * (radix as u64);
+                k += 1u32;
+                i += 1;
+            }
+            // mul <= chunk < 2^32.
+            let carry = v;
+            let j = 0usize;
+            while j < len {
+                let t = (acc[j] as u64) * mul + carry;
+                acc[j] = t as u32;
+                carry = t >> 32u64;
+                j += 1;
+            }
+            if carry != 0u64 {
+                acc[len] = carry as u32;
+                len += 1;
+            }
+        }
+        IntMag::trim(acc, len)
+    }
+}
+
+/// `fold_digits` by halves: the low part is the largest `per 2^j`
+/// digits shorter than the run, its weight `pw[j]`.
+fn parse_digits(bs: Slice<u8>, lo: usize, hi: usize, radix: u32, per: u32, pw: List<IntMag>) -> IntMag {
+    let len = hi - lo;
+    if len <= PARSE_SMALL { return fold_digits(bs, lo, hi, radix, per); }
+    let j = 0usize;
+    while ((per as usize) << (j + 1)) < len { j += 1; }
+    let l = (per as usize) << j;
+    let top = parse_digits(bs, lo, hi - l, radix, per, pw);
+    top.times(pw[j]).plus(parse_digits(bs, hi - l, hi, radix, per, pw))
 }
 
 /// An arbitrary-precision integer (spec 2.1.2). Write it `int`.
@@ -325,40 +459,20 @@ impl Int {
             let st = rok_str_parse_int(s, radix, 1, 64u32, out);
             if st == 0 { return Int::from_i64(out[0]); }
             if st != 3 { return none; }
-            // Past `i64`: fold the checked digits into limbs, `per` at a
-            // time: acc = acc * radix^k + chunk.
+            // Past `i64`: the checked digits, by halves over the powers
+            // pw[j] = chunk^(2^j).
             let bs = s.as_bytes();
             let n = s.len();
             let neg = bs[0] == 45u8;
             let i = if bs[0] == 45u8 || bs[0] == 43u8 { 1usize } else { 0usize };
-            let (_, per) = radix_chunk(radix);
-            let acc: GcBuf<u32> = buf_new((n - i) / (per as usize) + 2);
-            let len = 0usize;
-            while i < n {
-                let v = 0u64;
-                let mul = 1u64;
-                let k = 0u32;
-                while k < per && i < n {
-                    v = v * (radix as u64) + (digit_of(bs[i]) as u64);
-                    mul = mul * (radix as u64);
-                    k += 1u32;
-                    i += 1;
-                }
-                // mul <= chunk < 2^32.
-                let carry = v;
-                let j = 0usize;
-                while j < len {
-                    let t = (acc[j] as u64) * mul + carry;
-                    acc[j] = t as u32;
-                    carry = t >> 32u64;
-                    j += 1;
-                }
-                if carry != 0u64 {
-                    acc[len] = carry as u32;
-                    len += 1;
-                }
+            let (chunk, per) = radix_chunk(radix);
+            let pw: List<IntMag> = List::new();
+            pw.push(IntMag::from_u64(chunk as u64));
+            while n - i > PARSE_SMALL && ((per as usize) << pw.len()) < n - i {
+                let p = pw[pw.len() - 1];
+                pw.push(p.times(p));
             }
-            Int::from_parts(neg, IntMag::trim(acc, len))
+            Int::from_parts(neg, parse_digits(bs, i, n, radix, per, pw))
         }
     }
 
@@ -369,42 +483,26 @@ impl Int {
             if radix < 2u32 || radix > 36u32 { panic(f"to_str_radix: radix {radix} out of 2..=36"); }
             let (neg, m) = self.parts();
             if m.n == 0 { return "0"; }
+            // pw[i] = chunk^(2^i) until the top one's square exceeds `m`.
             let (chunk, per) = radix_chunk(radix);
-            let p = per as usize;
-            // Chunks of `per` digits, least significant first, by dividing a
-            // scratch copy in place.
-            let work: GcBuf<u32> = buf_new(m.n);
-            let wn = m.n;
+            let pw: List<IntMag> = List::new();
+            pw.push(IntMag::from_u64(chunk as u64));
+            while m.n > STR_SMALL && pw[pw.len() - 1].bits() * 2u64 <= m.bits() + 1u64 {
+                let p = pw[pw.len() - 1];
+                pw.push(p.times(p));
+            }
+            // Digits <= bits / floor(log2 radix) + 1, plus the sign.
+            let total = (m.bits() / ((31u32 - radix.leading_zeros()) as u64)) as usize + 2;
+            let out: GcBuf<u8> = buf_new(total);
+            // Every level but the top divides by its power more than once:
+            // a reciprocal pays off there.
+            let inv: List<IntMag> = List::new();
             let i = 0usize;
-            while i < wn {
-                work[i] = m.d[i];
+            while i < pw.len() {
+                inv.push(if i + 1 < pw.len() && pw[i].n >= BARRETT { pw[i].recip() } else { IntMag::zero() });
                 i += 1;
             }
-            let chunks: GcBuf<u32> = buf_new(m.n * 2 + 1);
-            let count = 0usize;
-            while wn > 0 {
-                chunks[count] = rok_nat_divmod_small(work, work, wn, chunk);
-                count += 1;
-                while wn > 0 && work[wn - 1] == 0u32 { wn -= 1; }
-            }
-            // Digits right to left into one byte buffer.
-            let total = count * p + 1;
-            let out: GcBuf<u8> = buf_new(total);
-            let digits = "0123456789abcdefghijklmnopqrstuvwxyz".as_bytes();
-            let at = total;
-            let c = 0usize;
-            while c < count {
-                let v = chunks[c];
-                let k = 0usize;
-                // The leading chunk drops its zeros.
-                while k < p && (c + 1 < count || v != 0u32) {
-                    at -= 1;
-                    out[at] = digits[(v % radix) as usize];
-                    v = v / radix;
-                    k += 1;
-                }
-                c += 1;
-            }
+            let at = put_digits(m, pw, inv, pw.len(), per as usize, out, total, 0, radix);
             if neg {
                 at -= 1;
                 out[at] = 45u8;

@@ -20,11 +20,12 @@ pub(pkg) mod ocsp;
 pub(pkg) mod conn;
 
 use rok::core::collections::raw::{GcBuf, buf_new};
-use rok::std::net::TcpStream;
+use rok::std::net::{TcpStream, Shutdown};
+use rok::core::task;
 use rok::std::io::{IoError, IoErrorKind, AsBytes, Reader, Writer, byte_buf};
 use rok::std::fs;
 use rok::std::env;
-use rok::std::time::Instant;
+use rok::std::time::{Instant, Duration};
 use rok::std::net::tls::x509::{CertInfo, PubKey};
 use rok::std::net::tls::conn::{Conn, new_conn, io_tls, OP_HANDSHAKE, OP_READ, OP_WRITE, OP_CLOSE_NOTIFY, OP_KEY_UPDATE};
 use rok::std::net::tls::der::{Der, SEQUENCE, INTEGER, OCTET_STRING, OID};
@@ -743,6 +744,41 @@ impl Shared {
 }
 
 /// A configured client key must belong to the client certificate.
+/// How long a failed handshake waits for the peer's remaining input.
+const LINGER: Duration = Duration::sec(1);
+
+/// Close after a fatal alert: half-close, read what the peer still
+/// sends (for at most `LINGER`), then close. Closing with unread input
+/// would reset the connection and could destroy the alert in flight.
+fn linger_close(s: TcpStream) {
+    try s.shutdown(Shutdown::Write) catch _ {};
+    let start = Instant::now();
+    let buf = byte_buf(16384);
+    loop {
+        let left = LINGER.as_ns() - start.elapsed().as_ns();
+        if left <= 0 { break; }
+        try s.set_read_timeout(Duration::ns(left)) catch _ { break; };
+        let n = try s.read(buf) catch _ { break; };
+        if n == 0 { break; }
+    }
+    s.close();
+}
+
+async fn drain_async(s: TcpStream) -> i32 {
+    let buf = byte_buf(16384);
+    loop {
+        let n = try await s.read_async(buf) catch _ { return 0; };
+        if n == 0 { return 0; }
+    }
+}
+
+/// `linger_close` without blocking the worker.
+async fn linger_close_async(s: TcpStream) {
+    try s.shutdown(Shutdown::Write) catch _ {};
+    let _ = try await task::timeout(LINGER, task::spawn(drain_async(s))) catch _ { 0 };
+    s.close();
+}
+
 fn check_client_key(cfg: ClientConfig) throws (TlsError) {
     if let k: PrivateKey = cfg.client_key {
         if cfg.client_cert_chain.len() == 0 || !k.matches(cfg.client_cert_chain[0]) {
@@ -780,10 +816,12 @@ impl Client {
         let c = new_conn(stream, true);
         try c.client_start(server_name, ip_bytes(server_name), cfg) catch e {
             c.fail(e);
+            linger_close(c.sock);
             throw e;
         };
         try c.handshake() catch e {
             c.fail(e);
+            linger_close(c.sock);
             throw e;
         };
         Client { s: Shared::new(c) }
@@ -804,10 +842,19 @@ impl Client {
         c.nb = true;
         try c.client_start(server_name, ip_bytes(server_name), cfg) catch e {
             c.fail(e);
+            linger_close(c.sock);
             throw e;
         };
         let s = Shared::new(c);
-        try await s.pump(OP_HANDSHAKE, [], nothing());
+        let failed: TlsError | none = none;
+        try await s.pump(OP_HANDSHAKE, [], nothing()) catch e {
+            failed = e;
+            0
+        };
+        if let e: TlsError = failed {
+            await linger_close_async(s.conn().sock);
+            throw e;
+        }
         Client { s }
     }
 
@@ -896,11 +943,15 @@ impl !Sync for Server {}
 impl Server {
     /// Handshake with the client on `stream`.
     pub fn new(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
-        if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
+        if cfg.cert_chain.len() == 0 {
+            stream.close();
+            throw TlsError::certificate("ServerConfig without a certificate");
+        }
         let c = new_conn(stream, false);
         c.server_start(cfg);
         try c.handshake() catch e {
             c.fail(e);
+            linger_close(c.sock);
             throw e;
         };
         Server { s: Shared::new(c) }
@@ -908,11 +959,22 @@ impl Server {
 
     /// `new` without blocking the worker.
     pub async fn new_async(stream: TcpStream, cfg: ServerConfig) throws (TlsError) -> Server {
-        if cfg.cert_chain.len() == 0 { throw TlsError::certificate("ServerConfig without a certificate"); }
+        if cfg.cert_chain.len() == 0 {
+            stream.close();
+            throw TlsError::certificate("ServerConfig without a certificate");
+        }
         let c = new_conn(stream, false);
         c.server_start(cfg);
         let s = Shared::new(c);
-        try await s.pump(OP_HANDSHAKE, [], nothing());
+        let failed: TlsError | none = none;
+        try await s.pump(OP_HANDSHAKE, [], nothing()) catch e {
+            failed = e;
+            0
+        };
+        if let e: TlsError = failed {
+            await linger_close_async(s.conn().sock);
+            throw e;
+        }
         Server { s }
     }
 

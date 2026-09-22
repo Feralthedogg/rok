@@ -2,6 +2,7 @@
 // worker: tasks spawned off the pool take the workers in turn, a task's
 // children stay on its worker, and a task woken from another worker
 // (a channel send) resumes on its own. `ROK_WORKERS` sets the pool size.
+// needs: threads
 // run-env: ROK_WORKERS=3
 // run-env: ROK_THREAD_PER_CORE=1
 // expect-exit: 0

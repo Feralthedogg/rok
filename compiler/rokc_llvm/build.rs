@@ -197,6 +197,26 @@ fn members(archive: &Path, flags: &[&str], msvc: bool) -> Vec<Member> {
     v
 }
 
+/// The non-weak, non-hidden global definitions of Mach-O `archive`.
+fn macho_exportable(archive: &Path) -> std::collections::HashSet<String> {
+    let out = Command::new("nm")
+        .args(["-m", "--defined-only"])
+        .arg(archive)
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run nm: {e}"));
+    assert!(out.status.success(), "nm failed on {}", archive.display());
+    // `<value> (<segment>,<section>) [weak] [private] external [..] <name>`
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (attrs, name) = l.rsplit_once(' ')?;
+            let a: Vec<&str> = attrs.split_whitespace().collect();
+            (a.contains(&"external") && !a.contains(&"weak") && !a.contains(&"private"))
+                .then(|| name.to_owned())
+        })
+        .collect()
+}
+
 /// The symbols rokc exports, for its link (`cargo:exports`): the
 /// non-weak globals of every MLIR archive member the link loads (found
 /// as the linker does: members defining what the shim and the members
@@ -252,14 +272,9 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
         if !exported || !(0..all[a].len()).any(|m| loaded.contains(&(a, m))) {
             continue;
         }
-        // Mach-O's nm types weak definitions as others: it omits them
-        // with --no-weak.
-        let strong: Option<HashSet<String>> = apple.then(|| {
-            members(path, &["--defined-only", "--no-weak"], false)
-                .into_iter()
-                .flat_map(|m| m.defs)
-                .collect()
-        });
+        // Mach-O's nm -P types weak and hidden (private extern)
+        // definitions as others: -m spells them out.
+        let strong: Option<HashSet<String>> = apple.then(|| macho_exportable(path));
         for (m, member) in all[a].iter().enumerate() {
             if loaded.contains(&(a, m)) {
                 syms.extend(

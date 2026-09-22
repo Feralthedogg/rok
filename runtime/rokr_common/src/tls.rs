@@ -34,6 +34,7 @@ pub const MUTATOR_PARKED: u8 = 2;
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(0);
 
 /// The block `rok_tls` and its accessor `rokr_tls_addr`.
+#[cfg(not(target_family = "wasm"))]
 macro_rules! tls_block {
     () => {
         #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
