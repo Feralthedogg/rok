@@ -11,10 +11,16 @@
 // homes 3
 // stayed true
 // woken on home true
-use rok::std::thread;
+
+// The thread a task runs on: the runtime's id (what `ThreadId` holds),
+// read without `thread::current()`'s registry lock, a blocking call that
+// under contention may hand the worker on to another thread (706 §7.6.7).
+extern "C" {
+    fn rok_thread_id() -> u64;
+}
 
 fn here() -> u64 {
-    thread::current().id().as_u64()
+    unsafe { rok_thread_id() }
 }
 
 async fn hop() -> bool {

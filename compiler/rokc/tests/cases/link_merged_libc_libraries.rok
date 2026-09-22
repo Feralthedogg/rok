@@ -1,0 +1,21 @@
+// spec: §6.2.6
+// only-os: linux
+// expect-exit: 0
+// expect-stdout:
+// 3 true
+
+// The libraries C code names with -l that glibc 2.34 and musl keep in
+// libc (libm, libpthread, libdl, librt) link on every Linux target,
+// glibc or musl, as the C library's own empty archives / stubs.
+#[link("m")]
+#[link("pthread")]
+#[link("dl")]
+#[link("rt")]
+extern "C" {
+    fn fabs(x: f64) -> f64;
+    fn pthread_self() -> usize;
+}
+
+let a = unsafe { fabs(-3.0) };
+let t = unsafe { pthread_self() };
+println(f"{a} {t != 0usize}");

@@ -112,22 +112,10 @@ case ":${PATH-}:" in
     ;;
 esac
 
-# rokc links its own LLVM and linker; on macOS the link needs the SDK of
-# Xcode's command line tools.
+# rokc links its own LLVM and linker, and on Linux its own C library
+# files (lib/rok/targets); on macOS the link needs the SDK of Xcode's
+# command line tools.
 if [ "$(uname -s)" = Darwin ] && ! xcrun --show-sdk-path >/dev/null 2>&1; then
   say ""
   say "rok needs the macOS SDK to link programs: xcode-select --install"
-fi
-# On Linux it links against the system C library's and GCC's runtime
-# files (crt1.o, crtbeginS.o, libgcc).
-if [ "$(uname -s)" = Linux ]; then
-  found=""
-  for f in /usr/lib/gcc/*/*/crtbeginS.o /usr/lib64/gcc/*/*/crtbeginS.o; do
-    if [ -f "$f" ]; then found=1; fi
-  done
-  if [ -z "$found" ]; then
-    say ""
-    say "rok needs the C library and GCC runtime files to link programs:"
-    say "  Debian / Ubuntu: apt install gcc   Fedora: dnf install gcc   Alpine: apk add gcc musl-dev"
-  fi
 fi

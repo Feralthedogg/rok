@@ -7,8 +7,11 @@
 #                        ELF / Mach-O: localized
 #                        (runtime/rokr/localize.sh)
 #   Linux, -musl:        crt1.o crti.o crtn.o libc.a: musl, the copy the
-#                        pinned Rust toolchain ships for the target
-#   Linux, -gnu(eabihf): Scrt1.o crti.o crtn.o libc_nonshared.a and stub
+#                        pinned Rust toolchain ships for the target; empty
+#                        libm.a, libpthread.a, .. as musl installs them
+#   Linux, -gnu(eabihf): Scrt1.o crti.o crtn.o libc_nonshared.a, the empty
+#                        libpthread.a / libdl.a / librt.a / libutil.a /
+#                        libanl.a, and stub
 #                        libc.so / libm.so (sonames .so.6), made by
 #                        glibc_stubs.py from glibc 2.36 (Debian 12 amd64 /
 #                        arm64 / i386 / armhf; the packages are checked
@@ -21,7 +24,8 @@
 #                        pinned Rust toolchain ships for the Rust target
 #                        the runtime is built for: wasm32-wasip2 for
 #                        wasm32-wasi (plus wasm-component-ld, which makes
-#                        the component: a pinned release, SHA-256 checked),
+#                        the component: a pinned release, SHA-256 checked;
+#                        on a musl host that version built by cargo),
 #                        wasm32-wasip1-threads for wasm32-wasi-threads,
 #                        wasm32-wasip1 for wasm32-unknown-unknown (plus
 #                        rok.mjs, the JS host that gives a browser or node
@@ -40,8 +44,9 @@
 #
 #   targets/build.sh [<triple>...]
 #
-# Default: every shipped target (an Apple host's runtime is lib/librokr.a:
-# only its profile runtime is built here). Needs rustup (and its
+# Default: every shipped target the host can build (the Apple ones only on
+# macOS; an Apple host's runtime is lib/librokr.a: only its profile
+# runtime is built here). Needs rustup (and its
 # llvm-tools component's llvm-ar), curl, make, python3, bash, clang (as
 # the assembler and C compiler; CC names another: wasm32-wasi's profile
 # runtime needs one with the WebAssembly target, which Apple's lacks) and
@@ -127,6 +132,16 @@ component_ld() {
 	*) o=windows x=zip ;;
 	esac
 	n=wasm-component-ld-$WCL-$a-$o
+	# The release's Linux builds need glibc: a musl host builds that
+	# version from crates.io (cargo checks the packages' checksums).
+	case $host in *-musl)
+		if [ ! -x "$cache/$n-musl/bin/wasm-component-ld" ]; then
+			cargo install --quiet --locked --root "$cache/$n-musl" --version "${WCL#v}" wasm-component-ld
+		fi
+		cp "$cache/$n-musl/bin/wasm-component-ld" "$1/"
+		return
+		;;
+	esac
 	case $n in
 	*-aarch64-linux) s=e2e533389aa894765ff1ec618668239b7b11c5e9fb5cd51a4d9f21583db8aef2 ;;
 	*-aarch64-macos) s=374cb68f28aa52ff53a38f8c1ef41eac611feeb9ac6c40aed4fdfb2960d1b027 ;;
@@ -193,10 +208,6 @@ profile() {
 	extra=
 	case $t in
 	*-apple-*)
-		if [ "$(uname -s)" != Darwin ]; then
-			echo "$t: no profile runtime (needs the macOS SDK)" >&2
-			return
-		fi
 		format=darwin
 		flags="--target=$arch-apple-macosx11.0 -isysroot $(xcrun --show-sdk-path) $unix"
 		;;
@@ -217,7 +228,9 @@ profile() {
 		debian "$t"
 		deb "$root" libc6-dev "$deb"
 		deb "$root" linux-libc-dev "$deb"
-		flags="--target=$t --sysroot=$root $unix"
+		# Named, not --sysroot: a wrapping driver (nix's) adds
+		# -nostdlibinc, which drops a sysroot's include directories.
+		flags="--target=$t -nostdlibinc -isystem $root/usr/include/$multi -isystem $root/usr/include $unix"
 		case $arch in
 		armv7) flags="$flags -mfloat-abi=hard -mfpu=neon" ;;
 		esac
@@ -286,13 +299,21 @@ profile() {
 
 for t in ${*:-$TARGETS}; do
 	dir=$out/$t
-	case $t in *-apple-*) if [ "$t" = "$host" ]; then
-		rm -rf "$dir"
-		mkdir -p "$dir"
-		profile "$t" "$dir"
-		echo "$dir"
-		continue
-	fi ;; esac
+	case $t in *-apple-*)
+		# The Mach-O runtime is localized by ld64 and the profile runtime
+		# built against the macOS SDK: a macOS host's job.
+		if [ "$(uname -s)" != Darwin ]; then
+			[ $# -eq 0 ] || { echo "$t: needs a macOS host" >&2; exit 1; }
+			continue
+		fi
+		if [ "$t" = "$host" ]; then
+			rm -rf "$dir"
+			mkdir -p "$dir"
+			profile "$t" "$dir"
+			echo "$dir"
+			continue
+		fi ;;
+	esac
 	case $t in
 	wasm32-wasi) rust=wasm32-wasip2 ;;
 	wasm32-wasi-threads) rust=wasm32-wasip1-threads ;;
@@ -330,12 +351,18 @@ for t in ${*:-$TARGETS}; do
 		for f in crt1.o crti.o crtn.o libc.a; do
 			cp "$sysroot/lib/rustlib/$t/lib/self-contained/$f" "$dir/"
 		done
+		# libc.a holds them all; musl installs these empty, so
+		# `-lm` / `-lpthread` link.
+		for lib in m rt pthread crypt util xnet resolv dl; do
+			printf '!<arch>\n' >"$dir/lib$lib.a"
+		done
 		;;
 	*-linux-gnu | *-linux-gnueabihf)
 		debian "$t"
 		deb "$root" libc6 "$deb"
 		deb "$root" libc6-dev "$deb"
-		for f in Scrt1.o crti.o crtn.o libc_nonshared.a; do
+		# The empty archives of the libraries glibc 2.34 merged into libc.
+		for f in Scrt1.o crti.o crtn.o libc_nonshared.a libpthread.a libdl.a librt.a libutil.a libanl.a; do
 			cp "$root/usr/lib/$multi/$f" "$dir/"
 		done
 		work=$dir/stub

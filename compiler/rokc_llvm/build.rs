@@ -100,22 +100,29 @@ fn main() {
     // MLIR plugins bind to the MLIR rokc links and the LLVM support
     // library under it (spec bare 1.10.2): rokc exports those, and the
     // rest of the toolchain is dead-stripped. Support and Demangle go in
-    // whole, so plugins find all of it.
-    let exports = out.join(if msvc { "exports.def" } else { "exports" });
-    let shim = out.join(if msvc {
-        "rokc_llvm_shim.lib"
-    } else {
-        "librokc_llvm_shim.a"
-    });
-    write_exports(&shim, &lib, &names, &exports, msvc);
-    println!("cargo:exports={}", exports.display());
-    names.retain(|n| !EXPORTED_LIBS.contains(&n.as_str()));
-    for n in EXPORTED_LIBS {
-        println!("cargo:rustc-link-lib=static:+whole-archive,-bundle={n}");
+    // whole, so plugins find all of it. A static rokc (musl, whose Rust
+    // targets link `crt-static`, a feature build scripts are not told
+    // about) loads no plugins and exports nothing: its startup relocates
+    // only itself, and anything bound by symbol would need the dynamic
+    // loader it does not have.
+    let shared = env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("musl");
+    if shared {
+        let exports = out.join(if msvc { "exports.def" } else { "exports" });
+        let shim = out.join(if msvc {
+            "rokc_llvm_shim.lib"
+        } else {
+            "librokc_llvm_shim.a"
+        });
+        write_exports(&shim, &lib, &names, &exports, msvc);
+        println!("cargo:exports={}", exports.display());
+        names.retain(|n| !EXPORTED_LIBS.contains(&n.as_str()));
+        for n in EXPORTED_LIBS {
+            println!("cargo:rustc-link-lib=static:+whole-archive,-bundle={n}");
+        }
+        let dev = plugin_dev(&prefix, &out);
+        println!("cargo:plugin_dev={}", dev.display());
+        println!("cargo:rustc-env=ROK_LLVM_PLUGIN_DEV={}", dev.display());
     }
-    let dev = plugin_dev(&prefix, &out);
-    println!("cargo:plugin_dev={}", dev.display());
-    println!("cargo:rustc-env=ROK_LLVM_PLUGIN_DEV={}", dev.display());
     if apple || msvc {
         for n in &names {
             println!("cargo:rustc-link-lib=static:-bundle={n}");
@@ -150,8 +157,11 @@ fn main() {
     } else {
         &["stdc++", "m", "dl", "pthread", "rt"]
     };
+    // Static, the C++ runtime too (libstdc++.a; musl's libm.a, .. are
+    // its libc.a's empty companions).
+    let kind = if shared { "dylib" } else { "static:-bundle" };
     for l in system {
-        println!("cargo:rustc-link-lib=dylib={l}");
+        println!("cargo:rustc-link-lib={kind}={l}");
     }
 }
 

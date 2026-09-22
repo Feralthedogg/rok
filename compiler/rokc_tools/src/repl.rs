@@ -1446,7 +1446,10 @@ fn push_new<T: PartialEq>(to: &mut Vec<T>, x: T) {
 /// Build and start the session host.
 fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
     if !rokc_interface::repl_host() {
-        eprintln!("error: the REPL runs on macOS, Linux and Windows (arm64, x86_64) only");
+        eprintln!(
+            "error: the REPL runs on macOS, Linux glibc and Windows (arm64, x86_64) only \
+             (a musl rokc is static: its session host cannot bind cells)"
+        );
         return None;
     }
     let obj = dir.join("host.o");

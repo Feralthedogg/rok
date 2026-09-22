@@ -843,9 +843,10 @@ pub extern "C" fn rok_os_link(dir: i32, target: RokStr, link: RokStr, hard: i32)
     if r < 0 { -e } else { 0 }
 }
 
-/// Open `path` under `dir` for listing: a `DIR*` (positive) or `-errno`.
+/// Open `path` under `dir` for listing: a `DIR*` (its address, zero
+/// extended: a 32-bit one may have the top bit set) or `-errno`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
+pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> i64 {
     // SAFETY: `path` is a C string; `fdopendir` owns `fd` on success.
     let (d, e) = native(|| unsafe {
         let fd = libc::openat(
@@ -863,9 +864,9 @@ pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
         d
     });
     if d.is_null() {
-        -(e as isize)
+        -i64::from(e)
     } else {
-        d as isize
+        d as usize as i64
     }
 }
 
@@ -1023,17 +1024,24 @@ fn environ() -> *mut *const CStrPtr {
 #[cfg(all(unix, not(target_vendor = "apple")))]
 static mut ARGS: (i32, *const CStrPtr) = (0, ptr::null());
 
-/// Captured from the initial stack before `main`: the kernel lays out
-/// `argc, argv[0..argc], NULL, envp..`, and `environ` still points at
-/// `envp` then. glibc would also pass the three to `.init_array`
-/// entries, musl passes nothing; the walk works under both.
+/// Captured before `main` by an `.init_array` entry. glibc passes it
+/// `argc, argv, envp`. musl passes nothing: the initial stack, which the
+/// kernel lays out as `argc, argv[0..argc], NULL, envp..`, is found
+/// through `environ`, still the kernel's `envp` then (glibc's 32-bit Arm
+/// `_start` overwrites that `argc` with a pointer).
 #[cfg(all(unix, not(target_vendor = "apple")))]
 #[used]
 #[unsafe(link_section = ".init_array")]
-static CAPTURE_ARGS: extern "C" fn() = capture_args;
+static CAPTURE_ARGS: extern "C" fn(i32, *const CStrPtr) = capture_args;
 
-#[cfg(all(unix, not(target_vendor = "apple")))]
-extern "C" fn capture_args() {
+#[cfg(all(unix, not(target_vendor = "apple"), not(target_env = "musl")))]
+extern "C" fn capture_args(argc: i32, argv: *const CStrPtr) {
+    // SAFETY: runs once, single-threaded, before `main`.
+    unsafe { ARGS = (argc, argv) };
+}
+
+#[cfg(target_env = "musl")]
+extern "C" fn capture_args(_: i32, _: *const CStrPtr) {
     // SAFETY: runs once, single-threaded, before `main`, while `environ`
     // is still the kernel's `envp`.
     unsafe {
@@ -1050,7 +1058,7 @@ extern "C" fn capture_args() {
 /// # Safety
 /// `envp` is null or the `envp` of the process's initial stack layout.
 #[cfg(unix)]
-#[cfg_attr(target_vendor = "apple", allow(dead_code))]
+#[cfg_attr(not(target_env = "musl"), allow(dead_code))]
 unsafe fn argv_before(envp: *const CStrPtr) -> Option<(i32, *const CStrPtr)> {
     if envp.is_null() {
         return None;

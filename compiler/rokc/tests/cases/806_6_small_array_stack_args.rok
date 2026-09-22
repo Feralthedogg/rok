@@ -1,0 +1,27 @@
+// spec: §8.6.6
+// expect-exit: 0
+// expect-stdout:
+// HTTP 1 2 3 true
+// [72, 84] [9, 8, 7]
+
+// Spec 8.6.6: small arrays of 1- and 2-byte elements passed and returned
+// between rok functions after the argument registers are used up (on
+// 32-bit Arm they go by address: LLVM's own lowering there disagrees
+// between caller and callee).
+#[inline(never)]
+fn show(s: Slice<u8>, a: i64, b: i64, bytes: [u8; 4], half: [u16; 3], flag: [bool; 1]) -> str {
+    let t = try str::from_utf8(bytes[:].to_list()) catch _ { "?" };
+    f"{t} {half[0]} {half[1]} {half[2]} {flag[0] && s.len() == a as usize + b as usize}"
+}
+
+#[inline(never)]
+fn pair(x: Slice<u8>, k: u16) -> ([u8; 2], [u16; 3]) {
+    ([x[0], x[1]], [k, k - 1, k - 2])
+}
+
+fn main() {
+    let hay = b"GET / HTTP/1.1";
+    println(show(hay[:], 7, 7, b"HTTP", [1u16, 2, 3], [true]));
+    let (b, h) = pair(hay[6:], 9u16);
+    println(f"{b[:]:?} {h[:]:?}");
+}

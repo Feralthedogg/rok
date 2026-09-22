@@ -23,7 +23,9 @@ Hosts:
 - macOS (arm64, x86_64): Xcode's command line tools, cmake, ninja.
 - Linux (x86_64, aarch64; glibc or musl): cmake, ninja, curl, xz and a
   C++17 compiler (`apt install cmake ninja-build g++ curl xz-utils`;
-  Alpine: `apk add cmake samurai g++ curl xz linux-headers`). rokc_llvm
+  Alpine: `apk add cmake samurai g++ curl xz linux-headers`; NixOS or
+  any nix host: `nix-shell` at the repository root, whose `shell.nix`
+  has these with clang, which reads the PGO profile). rokc_llvm
   links the C++ runtime the archives were built against: libstdc++, or
   libc++ when they name `std::__1`.
 - Windows (x86_64, arm64; MSVC ABI): `llvm\build.ps1 [prefix]` from a
@@ -68,10 +70,12 @@ makes it on a Windows host (below), and until then Windows builds have
 no PGO.
 
 `llvm/train-pgo.sh` regenerates `rok.profdata.xz` (macOS, Xcode's
-clang): an instrumented LLVM (`ROK_LLVM_INSTRUMENT=1 build.sh`), a
-release rokc against it, linked with the profile runtime, then three
-quarters of `compiler/rokc/tests/cases` built with it at `-O2` (a third
-of them as x86_64 Linux objects, so the X86 back end is profiled too).
+clang; or Linux, clang and its llvm-profdata): an instrumented LLVM
+(`ROK_LLVM_INSTRUMENT=1 build.sh`), a release rokc against it, linked
+with the profile runtime, then three quarters of
+`compiler/rokc/tests/cases` built with it at `-O2` (a third of them as
+Linux objects of the other architecture, so both main back ends are
+profiled).
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other
 Windows architecture) into `rok-msvc.profdata.tar.xz`. `train-pgo.sh`

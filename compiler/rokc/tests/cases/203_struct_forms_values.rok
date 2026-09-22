@@ -3,9 +3,11 @@
 // expect-stdout:
 // 1 2 3 7 true
 // 3 30 false 5
-// 16 24 8
+// 16 true true
 // 1 5 1 9
 // 2 2
+
+use rok::bare::mem::align_of;
 
 struct Point { x: f64; y: f64; }
 
@@ -37,8 +39,11 @@ fn main() {
     let c = Config { verbose: false };
     let d = Config { retry: 5, ..c };
     println(f"{c.retry} {c.timeout} {c.verbose} {d.retry}");
-    // 2.3.6: declaration order with natural alignment (repr(C)).
-    println(f"{Point::size()} {Mixed::size()} {Mixed::align()}");
+    // 2.3.6: declaration order with natural alignment (repr(C)): `b` at
+    // i64's alignment (8; 4 on i686 Linux), `c` after it, the size a
+    // multiple of it.
+    let al = align_of::<i64>();
+    println(f"{Point::size()} {Mixed::size() == (al + 8 + 2 + al - 1) / al * al} {Mixed::align() == al}");
     // 2.3.8: a struct copies; a list element read copies.
     let a = Point { x: 1.0, y: 2.0 };
     let b = a;

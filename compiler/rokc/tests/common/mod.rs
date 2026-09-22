@@ -66,6 +66,10 @@
 //!     46.0.3, the last);
 //!     `wasm32-unknown-unknown` with `node` and the toolchain's `rok.mjs`
 //!     host (all need `targets/build.sh <triple>` for the C library).
+//!   - `ROK_TEST_RUNNER=<program> [args]` — run a native target's case
+//!     executables through it (split on whitespace), e.g.
+//!     `qemu-aarch64 -L <sysroot>` or `wine` where no binfmt handler
+//!     is registered.
 #![allow(dead_code)]
 
 use std::env;
@@ -347,7 +351,8 @@ pub fn exe_name(name: &str) -> String {
 /// A command running the built program `exe`: itself, or a wasm module
 /// under `wasmtime` (`ROK_TEST_WASM_RUNNER`; the host's environment and
 /// file system, the engine stack as deep as a native main thread's) or
-/// `node` with the toolchain's `rok.mjs`.
+/// `node` with the toolchain's `rok.mjs`; a native one under
+/// `ROK_TEST_RUNNER` when set.
 pub fn run_command(exe: &Path) -> Command {
     let t = spec();
     match t.object_format {
@@ -400,7 +405,18 @@ pub fn run_command(exe: &Path) -> Command {
             c.arg("--stack-size=8000").arg(host).arg(exe);
             c
         }
-        _ => Command::new(exe),
+        _ => match env::var("ROK_TEST_RUNNER")
+            .ok()
+            .filter(|r| !r.trim().is_empty())
+        {
+            Some(runner) => {
+                let mut words = runner.split_whitespace();
+                let mut c = Command::new(words.next().unwrap());
+                c.args(words).arg(exe);
+                c
+            }
+            None => Command::new(exe),
+        },
     }
 }
 

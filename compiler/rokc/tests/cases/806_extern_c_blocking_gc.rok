@@ -11,14 +11,16 @@
 
 // Spec 8.4.10: a thread inside a blocking `extern "C"` call counts as
 // PARKED, so collections on other threads go on without it. One thread
-// sleeps in `usleep` for 3 s while main collects; another blocks in
+// sleeps in `usleep` for 3 s while main collects, and is still asleep
+// when the collections are done (they did not wait for it); another blocks in
 // `read` on a pipe that main writes only after collecting (it used to
 // deadlock: the collector waited for the reader, the reader for main).
 // A rok callback C calls meanwhile (`qsort`) runs as a mutator again.
 use rok::bare::alloc::{Layout, alloc};
 use rok::bare::ptr::{CPtr, Ptr};
 use rok::std::thread;
-use rok::std::time::BootTime;
+
+static AWAKE: Atomic<i64> = Atomic::new(0);
 
 extern "C" {
     fn usleep(us: u32) -> i32;
@@ -47,14 +49,12 @@ fn churn(n: i64) -> i64 {
 }
 
 fn main() throws (rok::bare::alloc::LayoutError) -> i32 {
-    let sleeper = thread::spawn(|| { unsafe { usleep(3000000u32) }; 0 });
+    let sleeper = thread::spawn(|| { unsafe { usleep(3000000u32) }; AWAKE.store(1); 0 });
     unsafe { usleep(100000u32) };
-    let start = BootTime::now();
     unsafe { rok_gc_collect() };
     churn(5000);
     unsafe { rok_gc_collect() };
-    let ms = start.elapsed().as_ms();
-    println(if ms < 100 { "fast" } else { f"slow {ms} ms" });
+    println(if AWAKE.load() == 0 { "fast" } else { "the collections waited for the sleeper" });
 
     let raw: CPtr<u8> = unsafe { alloc(try Layout::array::<i32>(4usize)) };
     let mem: Ptr<u8> = raw.as_ptr() ?? panic("alloc failed");

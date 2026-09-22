@@ -680,7 +680,7 @@ impl Dir {
 
     fn list(self, p: str) throws (IoError) -> ReadDir {
         unsafe {
-            let d = try check(rok_os_opendir(self.fd(), p) as i64, self.shown(p));
+            let d = try check(rok_os_opendir(self.fd(), p), self.shown(p));
             let base = if p == "." { "" } else { p };
             let cell: GcBuf<isize> = buf_new(1);
             cell[0] = d as isize;

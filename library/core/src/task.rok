@@ -876,8 +876,11 @@ fn cancel_source(t: TaskRef) -> TaskRef | none {
 }
 
 /// Wake every due timer; the nanoseconds to the next one (-1: none).
+/// The wakes happen under the lock, so two threads firing at once queue
+/// their tasks in deadline order too (707 §7.7.4): one that popped an
+/// earlier deadline cannot be overtaken between its pop and its wake.
 fn fire_timers(pool: Pool) -> i64 {
-    let due: List<Waker> = List::new();
+    let fired = false;
     let next: i64 = -1;
     using g = pool.timers.lock() {
         let heap = g.get();
@@ -887,14 +890,12 @@ fn fire_timers(pool: Pool) -> i64 {
                 next = tm.at - now;
                 break;
             }
-            due.push(tm.who);
             heap.pop();
+            tm.who.wake();
+            fired = true;
         }
     }
-    for w in due {
-        w.wake();
-    }
-    if due.len() > 0 {
+    if fired {
         return 0;
     }
     next

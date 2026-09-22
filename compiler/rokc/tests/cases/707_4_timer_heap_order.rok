@@ -7,7 +7,10 @@
 
 // spec 7.7.4: sleeps wait in a heap ordered by deadline, so tasks wake
 // in deadline order whatever order they started in; a cancelled task's
-// timer is just discarded. 7.7.7: idle workers park and a later spawn
+// timer is just discarded. The deadlines are fixed from one start, past
+// the tasks' first polls: a sleep whose deadline has passed when first
+// polled completes then, in poll order (an emulator under load first
+// polled the 10 ms task 20 to 70 ms in). 7.7.7: idle workers park and a later spawn
 // unparks them.
 async fn nap(ms: i64) -> i64 {
     await task::sleep(Duration::ms(ms));
@@ -17,11 +20,12 @@ async fn nap(ms: i64) -> i64 {
 async fn main() {
     let order: List<i64> = [];
     let ts: List<Task<i64>> = [];
+    let start = Instant::now() + Duration::ms(500);
     for ms in [30i64, 10, 40, 20] {
         ts.push(task::spawn_local(async {
-            let v = await nap(ms);
-            order.push(v);
-            v
+            await task::sleep_until(start + Duration::ms(ms));
+            order.push(ms);
+            ms
         }));
     }
     await task::join(ts);

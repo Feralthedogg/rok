@@ -2488,6 +2488,10 @@ fn missing_mlir_plugins_are_errors() {
 #[test]
 fn mlir_plugin_binds_to_rokcs_mlir() {
     let Some(env) = setup() else { return };
+    // A static rokc (musl) loads no plugins.
+    if cfg!(target_env = "musl") {
+        return;
+    }
     let dev = rokc_llvm::PLUGIN_DEV.expect("rokc links LLVM but has no plugin tree");
     let dir = scratch("mlir-plugin-run");
     let src = workspace().join("compiler/rokc/tests/plugin/answer.cpp");
@@ -2520,7 +2524,14 @@ fn mlir_plugin_binds_to_rokcs_mlir() {
         .arg("/link")
         .arg(format!("{dev}/lib/rokc.lib"));
     } else {
-        cxx = Command::new("/usr/bin/c++");
+        // Xcode's, not a Homebrew one first in PATH; elsewhere the
+        // PATH's (NixOS has no /usr/bin/c++).
+        let host = if cfg!(target_vendor = "apple") {
+            "/usr/bin/c++"
+        } else {
+            "c++"
+        };
+        cxx = Command::new(std::env::var_os("CXX").unwrap_or_else(|| host.into()));
         cxx.args([
             "-std=c++17",
             "-O1",
@@ -3505,7 +3516,18 @@ fn wit_prebuilt_dependency_carries_its_wit() {
 /// `rokc bindgen <args>` in `dir`, or `None` (said on stderr) when this
 /// rokc finds no libclang; `ROK_REQUIRE_LIBCLANG=1` makes that a failure.
 fn bindgen(dir: &Path, args: &[&str]) -> Option<Output> {
-    let out = rokc(None, dir, &[&["bindgen"], args].concat());
+    let mut args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    if !args.iter().any(|a| a == "--target") {
+        let dirs = host_c_includes();
+        if !dirs.is_empty() && !args.iter().any(|a| a == "--") {
+            args.push("--".into());
+        }
+        for d in dirs {
+            args.extend(["-isystem".into(), d.to_string_lossy().into_owned()]);
+        }
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = rokc(None, dir, &[&["bindgen"], &args[..]].concat());
     if text(&out.stderr).contains("needs libclang, which is missing") {
         let msg = "no libclang (llvm/build-libclang.sh)";
         assert!(
@@ -3521,6 +3543,30 @@ fn bindgen(dir: &Path, args: &[&str]) -> Option<Output> {
         return None;
     }
     Some(out)
+}
+
+/// Linux: the host C compiler's include directories but those of its
+/// built-in headers (libclang has its own), for the C library headers
+/// libclang's FHS defaults miss (`NixOS` has no `/usr/include`).
+fn host_c_includes() -> Vec<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return Vec::new();
+    }
+    let Ok(out) = Command::new("cc")
+        .args(["-xc", "-E", "-v", "-"])
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    text(&out.stderr)
+        .lines()
+        .skip_while(|l| !l.starts_with("#include <...>"))
+        .skip(1)
+        .take_while(|l| l.starts_with(' '))
+        .map(|l| PathBuf::from(l.trim()))
+        .filter(|d| !d.join("stddef.h").is_file())
+        .collect()
 }
 
 const BINDGEN_H: &str = r#"#include <stddef.h>
@@ -3768,7 +3814,7 @@ fn bindgen_binds_system_headers() {
             .unwrap();
         dirs.push(PathBuf::from(text(&sdk.stdout).trim()).join("usr/include"));
     } else {
-        dirs.push("/usr/include".into());
+        dirs = host_c_includes();
     }
     let dir = scratch("bindgen_sys");
     let mut bound = 0;

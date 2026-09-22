@@ -8,11 +8,12 @@
 #       lib/rok/{core,std,bare}/src/      the standard library sources
 #       lib/rok/targets/<triple>/   what --target links (targets/build.sh)
 #       lib/libclang.{so,dylib,dll}, lib/clang/<major>/include
-#                                   what `rokc bindgen` loads (llvm/build-libclang.sh)
+#                                   what `rokc bindgen` loads (llvm/build-libclang.sh;
+#                                   not with a static, musl rokc)
 #       install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE
 #       COPYING.mingw-w64 (Windows module definitions embedded in rokc)
 #
-#   dist/rok-mlir-dev-<version>-<triple>.tar.gz (Windows: .zip)
+#   dist/rok-mlir-dev-<version>-<triple>.tar.gz (Windows: .zip; none for musl)
 #     rok-mlir-dev-<version>-<triple>/     MLIR plugin development
 #       include/{llvm,llvm-c,mlir,mlir-c,rok}  the headers plugins build with
 #       lib/rokc.lib                        (Windows) rokc.exe's import library
@@ -52,10 +53,15 @@ case $(uname -s) in
     ;;
 esac
 
+# A musl rokc is static: it loads nothing at run time, so it ships no
+# libclang (`rokc bindgen` says it cannot load one) and exports no
+# symbols for MLIR plugins (no development bundle).
+static=""
+case $(rustc -vV | sed -n 's/^host: //p') in *-musl) static=1 ;; esac
 [ -n "${ROK_LLVM_PREFIX-}" ] || $build_llvm
 if [ -n "${ROK_LIBCLANG_PREFIX-}" ]; then
   lc=$ROK_LIBCLANG_PREFIX
-else
+elif [ -z "$static" ]; then
   $build_libclang
   lc=$cache/libclang-$(sed -n 's/^VERSION=//p' llvm/build-libclang.sh)
 fi
@@ -93,11 +99,15 @@ for t in rok rokc rokls; do
   [ -n "$exe" ] || strip -x "$stage/bin/$t"
   echo "$t: $(mb "$target/$t$exe") -> $(mb "$stage/bin/$t$exe")"
 done
-[ -n "$exe" ] || nm -g "$stage/bin/rokc" | grep -q '[^U] _*_ZN4llvm24DisableABIBreakingChecksE$' || {
-  echo "dist.sh: the stripped rokc does not export its LLVM / MLIR symbols" >&2
-  exit 1
-}
 dev=$target/mlir-plugin-dev
+devname=""
+if [ -z "$static" ]; then
+  devname=rok-mlir-dev-$version-$triple
+  [ -n "$exe" ] || nm -g "$stage/bin/rokc" | grep -q '[^U] _*_ZN4llvm24DisableABIBreakingChecksE$' || {
+    echo "dist.sh: the stripped rokc does not export its LLVM / MLIR symbols" >&2
+    exit 1
+  }
+fi
 [ -z "$exe" ] || [ -f "$dev/lib/rokc.lib" ] || {
   echo "dist.sh: rokc.exe's link left no import library ($dev/lib/rokc.lib)" >&2
   exit 1
@@ -107,9 +117,11 @@ runtime/rokr/localize.sh "$target/$rt" "$stage/lib/$rt"
 tar -C library -cf - core/src std/src bare/src | tar -C "$stage/lib/rok" -xf -
 cp -R "${CARGO_TARGET_DIR:-target}/lib/rok/targets" "$stage/lib/rok/"
 # libclang (the file a Linux .so link names) and its built-in headers.
-cp -L "$lc/lib/$libclang" "$stage/lib/"
-cp -R "$lc/lib/clang" "$stage/lib/"
-echo "libclang: $(mb "$stage/lib/$libclang")"
+if [ -z "$static" ]; then
+  cp -L "$lc/lib/$libclang" "$stage/lib/"
+  cp -R "$lc/lib/clang" "$stage/lib/"
+  echo "libclang: $(mb "$stage/lib/$libclang")"
+fi
 cp install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE \
   compiler/rokc_driver/windows/COPYING.mingw-w64 "$stage/"
 
@@ -125,24 +137,27 @@ for o in -O0 -O2; do
   done
 done
 # bindgen loads the toolchain's libclang, which finds its own headers.
-printf '#include <stddef.h>\nsize_t check_len(const char *s);\n' > "$stage/check.h"
-PATH=/usr/bin:/bin "$stage/bin/rokc$exe" bindgen "$stage/check.h" |
-  grep -q 'pub fn check_len(s: CPtr<c_char>) -> usize;'
+if [ -z "$static" ]; then
+  printf '#include <stddef.h>\nsize_t check_len(const char *s);\n' > "$stage/check.h"
+  PATH=/usr/bin:/bin "$stage/bin/rokc$exe" bindgen "$stage/check.h" |
+    grep -q 'pub fn check_len(s: CPtr<c_char>) -> usize;'
+fi
 rm -rf "$stage/check.h" "$stage/check.rok" "$stage/check$exe" "$stage/.check$exe.fp" "$stage/check.pdb" "$stage/lib/rok-cache"
 
 # The MLIR plugin development bundle (docs/mlir-plugins.md): rokc_llvm's
 # plugin tree for this build.
-devname=rok-mlir-dev-$version-$triple
-devstage=$out/$devname
-rm -rf "$devstage" "$out/$devname.$ext" "$out/$devname.$ext.sha256"
-mkdir -p "$devstage/example"
-cp -R "$dev/include" "$devstage/"
-[ -z "$exe" ] || cp -R "$dev/lib" "$devstage/"
-cp docs/mlir-plugins.md "$devstage/README.md"
-cp compiler/rokc/tests/plugin/answer.cpp "$devstage/example/"
+if [ -n "$devname" ]; then
+  devstage=$out/$devname
+  rm -rf "$devstage" "$out/$devname.$ext" "$out/$devname.$ext.sha256"
+  mkdir -p "$devstage/example"
+  cp -R "$dev/include" "$devstage/"
+  [ -z "$exe" ] || cp -R "$dev/lib" "$devstage/"
+  cp docs/mlir-plugins.md "$devstage/README.md"
+  cp compiler/rokc/tests/plugin/answer.cpp "$devstage/example/"
+fi
 
 sum=$(command -v sha256sum || echo "shasum -a 256")
-for n in "$name" "$devname"; do
+for n in "$name" $devname; do
   case $ext in
     # cmake (needed for LLVM anyway) writes zip; Git Bash's tar does not.
     zip) (cd "$out" && cmake -E tar cf "$n.zip" --format=zip "$n") ;;

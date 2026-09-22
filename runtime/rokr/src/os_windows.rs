@@ -1091,12 +1091,13 @@ struct Listing {
     pending: bool,
 }
 
-/// Open `path` under `dir` for listing: a listing (positive) or `-error`.
+/// Open `path` under `dir` for listing: a listing (its address, zero
+/// extended: i686's may have the top bit set) or `-error`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
+pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> i64 {
     let mut p = match path_w(dir, path) {
         Ok(p) => p,
-        Err(e) => return e as isize,
+        Err(e) => return i64::from(e),
     };
     if !p
         .as_slice()
@@ -1115,11 +1116,11 @@ pub extern "C" fn rok_os_opendir(dir: i32, path: RokStr) -> isize {
         let (find, e) = native(|| win::FindFirstFileW(p.ptr(), &raw mut (*l).data));
         if find == win::INVALID_HANDLE_VALUE {
             libc::free(l.cast());
-            return -(e as isize);
+            return -i64::from(e);
         }
         (*l).find = find;
         (*l).pending = true;
-        l as isize
+        l as usize as i64
     }
 }
 

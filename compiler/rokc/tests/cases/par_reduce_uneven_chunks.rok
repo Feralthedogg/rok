@@ -1,0 +1,22 @@
+// spec: std §2.19.4
+// expect-exit: 0
+// expect-stdout:
+// ok
+// ok
+
+// par::reduce / map over a length that does not split evenly into the
+// pool's chunk count (4 per CPU): 4 * cpus + 1 items give chunks of 2,
+// and no chunk may start past the end.
+fn main() -> i32 {
+    let n = task::cpu_count() * 4 + 1;
+    let xs: List<i64> = [];
+    for i in 0..n {
+        xs.push(i as i64);
+    }
+    let want = (n * (n - 1) / 2) as i64;
+    let got = par::reduce(xs, 0i64, |a: i64, b: i64| a + b);
+    println(if got == want { "ok" } else { f"reduce {got}, want {want}" });
+    let ys: List<i64> = par::map(xs, |x: i64| x + 1);
+    println(if ys.len() == n && ys[n - 1] == n as i64 { "ok" } else { "map" });
+    0
+}

@@ -34,6 +34,12 @@ fn main() {
         _ => String::new(),
     };
     println!("cargo:rustc-env=ROK_COMMIT_INFO={info}");
+    // musl gives a thread 128 KiB of stack unless told otherwise; LLVM's
+    // pass pipeline on its worker threads recurses past that. The
+    // PT_GNU_STACK size is musl's default for every thread.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
+        println!("cargo:rustc-link-arg=-Wl,-z,stack-size=8388608");
+    }
     println!(
         "cargo:rustc-env=ROK_HOST={}",
         std::env::var("TARGET").unwrap_or_default()

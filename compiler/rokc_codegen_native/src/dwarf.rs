@@ -102,6 +102,9 @@ const A_VARIANT_PART: u8 = 17;
 const A_VARIANT: u8 = 18;
 const A_DISCR: u8 = 19;
 const A_SUB_RET: u8 = 20;
+// Subprograms without parameters or locals: no child list (as LLVM).
+const A_SUB_LEAF: u8 = 21;
+const A_SUB_RET_LEAF: u8 = 22;
 
 fn uleb(b: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -180,6 +183,8 @@ fn abbrevs(split: bool) -> Vec<u8> {
     ];
     add(A_SUB, DW_TAG_SUBPROGRAM, true, &sub[..6]);
     add(A_SUB_RET, DW_TAG_SUBPROGRAM, true, &sub);
+    add(A_SUB_LEAF, DW_TAG_SUBPROGRAM, false, &sub[..6]);
+    add(A_SUB_RET_LEAF, DW_TAG_SUBPROGRAM, false, &sub);
     let var = [
         (DW_AT_NAME, DW_FORM_STRING),
         (DW_AT_DECL_FILE, DW_FORM_UDATA),
@@ -882,7 +887,13 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
     for f in &fns {
         let (d, offs) = f.debug.as_ref().expect("debug");
         let ret = d.ret.and_then(|p| info.base(p));
-        info.b.push(if ret.is_some() { A_SUB_RET } else { A_SUB });
+        let kids = d.vars.iter().any(|v| info.debug_ty(&v.ty).is_some());
+        info.b.push(match (ret.is_some(), kids) {
+            (true, true) => A_SUB_RET,
+            (false, true) => A_SUB,
+            (true, false) => A_SUB_RET_LEAF,
+            (false, false) => A_SUB_LEAF,
+        });
         cstr(&mut info.b, &d.name);
         uleb(&mut info.b, u64::from(fid(d.file)));
         uleb(&mut info.b, u64::from(d.line));
@@ -926,8 +937,10 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
             uleb(&mut info.b, loc.len() as u64);
             info.b.extend_from_slice(&loc);
         };
-        scope(&mut info, 0, d, &live, f, ranges_sect, &var_die);
-        info.b.push(0);
+        if kids {
+            scope(&mut info, 0, d, &live, f, ranges_sect, &var_die);
+            info.b.push(0);
+        }
     }
     info.b.push(0);
     let len = info.b.len() as u32 - 4;

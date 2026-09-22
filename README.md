@@ -113,7 +113,11 @@ ROK_TEST_OPT=-O2 ROK_REQUIRE_LLVM=1 cargo test --test integration --test differe
 ```
 
 On a Linux host run `targets/build.sh <host triple>` once first: a Linux build, native too, links the
-toolchain's C library (glibc link stubs), which it puts in `target/lib/rok/targets/`.
+toolchain's C library (glibc link stubs), which it puts in `target/lib/rok/targets/`. With nix (NixOS has
+no `/usr/include` or `/usr/bin/c++`), `nix-shell` at the repository root (`shell.nix`) gives everything
+`llvm/build.sh`, `targets/build.sh` and the checks use, with clang as `cc` (so the LLVM build gets PGO).
+A cross target's corpus runs its executables through `ROK_TEST_RUNNER` when no binfmt handler is
+registered, e.g. `ROK_TEST_RUNNER="qemu-aarch64 -L <sysroot>"`.
 
 The WebAssembly targets have their own corpus run: `targets/test-wasm.sh [<target>..]` builds the
 runtimes of `wasm32-wasi`, `wasm32-wasi-threads` and `wasm32-unknown-unknown`, fetches the pinned wasmtime

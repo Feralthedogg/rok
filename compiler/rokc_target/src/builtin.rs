@@ -107,6 +107,8 @@ fn musl(name: &str, t: TargetSpec) -> TargetSpec {
         dynamic_linking: false,
         dynamic_loader: s(""),
         libc: Libc::Musl,
+        // Static: a session host has no dlsym to bind its cells.
+        repl: false,
         ..t
     }
 }

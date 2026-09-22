@@ -294,8 +294,12 @@ pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<Fn
 /// Aggregates larger than this go between rok functions by address.
 pub const BY_REF_BYTES: u32 = 64;
 
-/// A rok-to-rok argument or result passed by address (spec 8.6.6): an
-/// aggregate over [`BY_REF_BYTES`].
+/// A rok-to-rok argument or result passed by address (spec 8.6.6).
+///
+/// That is an aggregate over [`BY_REF_BYTES`]; on 32-bit Arm also an
+/// array of 1- or 2-byte elements, whose stack leaves LLVM's Arm
+/// lowering puts in 4-byte slots at the call but reads packed in the
+/// callee.
 ///
 /// Such an argument is a pointer to the
 /// caller's value, which the callee copies on entry; such a result is
@@ -303,6 +307,11 @@ pub const BY_REF_BYTES: u32 = 64;
 /// function returns nothing.
 #[must_use]
 pub fn rok_by_ref(ty: &MirTy, target: &Target) -> bool {
+    if let (MirTy::Array(elem, _), CAbi::ArmHf) = (ty, target.c_abi) {
+        if target.size_align(elem).0 < 4 {
+            return true;
+        }
+    }
     is_aggregate(ty) && target.size_align(ty).0 > BY_REF_BYTES
 }
 

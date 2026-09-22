@@ -938,12 +938,15 @@ fn elf_debug_info_of_several_objects() {
             .output()
             .unwrap();
         let lines = text(&lines.stdout);
-        // Directories and names are separate entries (LLVM's DWARF 4
-        // leaves the unit's own directory implicit).
-        for f in ["/greet/src\"", "/app/src\"", "\"lib.rok\"", "\"main.rok\""] {
+        // Directories and names are separate entries; LLVM's DWARF 4
+        // leaves a unit's own directory implicit: its comp_dir.
+        for f in ["\"lib.rok\"", "\"main.rok\""] {
+            assert!(lines.contains(f), "{t} {opt}: no line table names {f}");
+        }
+        for d in ["/greet/src\"", "/app/src\""] {
             assert!(
-                !o0 && f == "/app/src\"" || lines.contains(f),
-                "{t} {opt}: no line table names {f}"
+                lines.contains(d) || !o0 && info.contains(&format!("{d})")),
+                "{t} {opt}: no line table or unit names {d}"
             );
         }
         // Dropped code's DWARF addresses are the tombstone, so no unit

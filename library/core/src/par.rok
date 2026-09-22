@@ -33,7 +33,7 @@ fn run_chunks(chunks: usize, job: fn(usize) + Send) {
     });
 }
 
-/// `(chunk count, chunk length)` for `n` items.
+/// `(chunk count, chunk length)` for `n` items: every chunk non-empty.
 fn chunking(n: usize) -> (usize, usize) {
     let chunks = task::cpu_count() * 4;
     if chunks > n {
@@ -42,7 +42,8 @@ fn chunking(n: usize) -> (usize, usize) {
     if chunks == 0 {
         return (0usize, 0usize);
     }
-    (chunks, (n + chunks - 1) / chunks)
+    let size = (n + chunks - 1) / chunks;
+    ((n + size - 1) / size, size)
 }
 
 const fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {

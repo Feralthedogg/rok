@@ -114,7 +114,7 @@ extern "rok" {
     fn rok_os_unlink(dir: i32, path: str, is_dir: i32) -> i32;
     fn rok_os_rename(dir: i32, from: str, to_dir: i32, to: str) -> i32;
     fn rok_os_link(dir: i32, target: str, link: str, hard: i32) -> i32;
-    fn rok_os_opendir(dir: i32, path: str) -> isize;
+    fn rok_os_opendir(dir: i32, path: str) -> i64;
     fn rok_os_readdir(d: isize, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
     fn rok_os_closedir(d: isize);
     fn rok_os_realpath(path: str, buf: GcBuf<u8>, off: usize, len: usize) -> isize;

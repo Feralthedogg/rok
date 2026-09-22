@@ -106,6 +106,7 @@ impl Tr for U {
 extern "C" {
     #[cfg(feature = "x")]
     fn abs(x: i32) -> i32;
+    // C `long long llabs(long long)`: i64 on every target (`abs` is int).
     #[cfg(not(feature = "x"))]
     #[link_name = "llabs"]
     fn abs(x: i64) -> i64;
