@@ -1,0 +1,15 @@
+// spec: §5.9.3
+// only-os: macos linux
+// (POSIX environ / optind)
+// expect-exit: 0
+// expect-stdout: true 7
+
+// An extern `static` declared in a module has its type resolved there:
+// `sys` imports `CPtr` for `environ`'s type and uses it nowhere else.
+mod sys;
+
+fn main() {
+    let set = !environ.is_null();
+    optind = 6;
+    println(f"{set} {optind + 1}");
+}

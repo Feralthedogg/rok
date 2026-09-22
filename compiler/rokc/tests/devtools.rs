@@ -146,6 +146,23 @@ fn lint_camel_case_allow_and_digit_underscores() {
     assert_eq!(flagged, ["Bad_c", "X__1"], "{err}");
 }
 
+/// The types of an `extern` block's functions and statics are uses of
+/// their imports.
+// spec: §6.2.9
+#[test]
+fn lint_counts_extern_types_as_uses() {
+    let sys = "use rok::bare::ptr::{CPtr, ConstPtr, Ptr};\n\
+               extern \"C\" {\n    pub fn f(p: CPtr<u8>) -> ConstPtr<u8>;\n    \
+               pub static g: CPtr<u8>;\n}\n";
+    let dir = package(
+        "lint_extern",
+        &[("main.rok", "mod sys;\nfn main() {}\n"), ("sys.rok", sys)],
+    );
+    let (_, err) = exit(&rokc(&dir, &["lint"]), 0);
+    assert!(err.contains("unused import `rok::bare::ptr::Ptr`"), "{err}");
+    assert_eq!(err.matches("unused import").count(), 1, "{err}");
+}
+
 // spec: §6.2.7 §6.2.9 §6.2.11 §9.1.2 §9.1.5
 #[test]
 fn lint_finds_each_kind_and_honors_levels() {

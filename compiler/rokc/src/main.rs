@@ -48,6 +48,10 @@ commands:
   doc [path]             HTML API docs of the package (and its --extern
                          dependencies) in target/doc/
   clean [path]           remove the package's target/
+  bindgen <header> [-- <clang args>]
+                         rok declarations of a C header (stdout, or -o) for
+                         the --target, through libclang (in the toolchain's
+                         lib/); clang args such as -I <dir> or -D <name>
   demangle <symbol>...   decode `_Y` symbols
   rokhir-text <file>       dump a prebuilt library's ROKHIR (<name>.rokhir or
                          the lib<name>.a beside it)
@@ -621,7 +625,7 @@ fn real_main() {
     }
     // Commands of one `[path]` (`test` / `bench`: and a filter).
     let most = match a.cmd.as_str() {
-        "build" | "emit" | "run" | "check" | "lint" | "doc" | "clean" | "repl" => 1,
+        "build" | "emit" | "run" | "check" | "lint" | "doc" | "clean" | "repl" | "bindgen" => 1,
         "test" | "bench" => 2,
         _ => usize::MAX,
     };
@@ -694,6 +698,7 @@ fn real_main() {
                 Err(e) => fail(&format!("cannot remove {}: {e}", target.display())),
             }
         }
+        "bindgen" => cmd_bindgen(&a),
         "demangle" => cmd_demangle(&a),
         "profdata" => cmd_profdata(&a),
         "rokhir-text" | "inspect" => {
@@ -1588,6 +1593,35 @@ fn cmd_profdata(a: &Args) {
 }
 
 /// Spec 905.4 output, one block per symbol.
+/// `rokc bindgen <header>` (std 1.7.6).
+fn cmd_bindgen(a: &Args) {
+    let [header] = a.positional.as_slice() else {
+        usage_error("usage: rokc bindgen <header> [--target <t>] [-o <file>] [-- <clang args>]");
+    };
+    let spec = a.spec();
+    let libclang =
+        rokc_tools::bindgen::find_libclang(rokc_llvm::LLVM_VERSION).unwrap_or_else(|e| fail(&e));
+    let sdk = (spec.vendor == "apple")
+        .then(rokc_llvm::apple_sdk)
+        .transpose()
+        .unwrap_or_else(|e| fail(&e));
+    let opts = rokc_tools::bindgen::Options {
+        header: Path::new(header),
+        target: &spec.name,
+        triple: &spec.llvm_triple(),
+        stdcall: spec.stdcall_system(),
+        sdk,
+        clang_args: &a.run_args,
+    };
+    let out = rokc_tools::bindgen::generate(&libclang, &opts).unwrap_or_else(|e| fail(&e));
+    match &a.output {
+        Some(p) => {
+            std::fs::write(p, out).unwrap_or_else(|e| fail(&format!("{}: {e}", p.display())));
+        }
+        None => print!("{out}"),
+    }
+}
+
 fn cmd_demangle(a: &Args) {
     if a.positional.is_empty() {
         usage_error("usage: rokc demangle <symbol>...");

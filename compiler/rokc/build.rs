@@ -40,16 +40,23 @@ fn main() {
     );
     // rokc exports what rokc_llvm lists (MLIR and LLVM's support
     // library), so MLIR plugins built with those symbols undefined bind
-    // to rokc's own; the linker strips the rest. No list: no LLVM.
+    // to rokc's own; the linker strips the rest. A plugin DLL links
+    // rokc.exe's import library instead (rokc_llvm's `plugin_dev`). No
+    // list: no LLVM.
     if std::env::var("CARGO_PKG_NAME").as_deref() == Ok("rokc") {
         println!("cargo:rerun-if-env-changed=DEP_ROKC_LLVM_EXPORTS");
+        println!("cargo:rerun-if-env-changed=DEP_ROKC_LLVM_PLUGIN_DEV");
         if let Ok(list) = std::env::var("DEP_ROKC_LLVM_EXPORTS") {
-            let flag = if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
-                format!("-Wl,-exported_symbols_list,{list}")
+            let link = |flag: String| println!("cargo:rustc-link-arg-bin=rokc={flag}");
+            if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+                let dev = std::env::var("DEP_ROKC_LLVM_PLUGIN_DEV").unwrap();
+                link(format!("/DEF:{list}"));
+                link(format!("/IMPLIB:{dev}/lib/rokc.lib"));
+            } else if std::env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple") {
+                link(format!("-Wl,-exported_symbols_list,{list}"));
             } else {
-                format!("-Wl,--dynamic-list={list}")
-            };
-            println!("cargo:rustc-link-arg-bin=rokc={flag}");
+                link(format!("-Wl,--dynamic-list={list}"));
+            }
         }
     }
 }

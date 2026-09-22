@@ -18,9 +18,9 @@
 use std::collections::{HashMap, HashSet};
 
 use rokc_ast::{
-    AccessTail, AttrArg, AttrBody, Attribute, Block, CallArg, Expr, ExprKind, FnDef, ImplItem,
-    Item, Literal, Pattern, PatternKind, Stmt, StmtKind, TraitItem, TryKind, Ty, TyKind, UseTree,
-    UseTreeKind,
+    AccessTail, AttrArg, AttrBody, Attribute, Block, CallArg, Expr, ExprKind, ExternItem, FnDef,
+    ImplItem, Item, Literal, Pattern, PatternKind, Stmt, StmtKind, TraitItem, TryKind, Ty, TyKind,
+    UseTree, UseTreeKind,
 };
 use rokc_core::Visibility;
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
@@ -813,8 +813,23 @@ impl<'a> Cx<'a> {
                     self.item(i);
                 }
             }
-            // C names are not ours to style.
-            Item::Use(_) | Item::Extern(_) => {}
+            // C names are not ours to style; the types are uses.
+            Item::Extern(b) => {
+                for ei in &b.items {
+                    match ei {
+                        ExternItem::Fn(f) => {
+                            for t in f.params.iter().filter_map(|p| p.ty.as_ref()) {
+                                self.ty_names(t);
+                            }
+                            if let Some(t) = &f.ret_ty {
+                                self.ty_names(t);
+                            }
+                        }
+                        ExternItem::Static(s) => self.ty_names(&s.ty),
+                    }
+                }
+            }
+            Item::Use(_) => {}
         }
     }
 

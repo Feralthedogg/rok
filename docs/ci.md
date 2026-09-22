@@ -9,10 +9,10 @@ same branch and event cancels the older one.
 |---|---|---|
 | push to a branch but `main`, pull request | linux-x64 | `check`, `corpus` at `-O0` |
 | push to `main`, merge queue (`merge_group`) | linux-x64, linux-arm64, windows-x64 | `check`, `corpus` at `-O0` |
-| nightly (`schedule`, 03:17 UTC), manual run | every host | `check`, `corpus` at `-O0` and `-O2`, `cross-link`, `cross`, `wasm` |
+| nightly (`schedule`, 03:17 UTC), manual run | every host | `check`, `corpus` at `-O0` and `-O2`, `cross-link`, `cross`, `wasm`, `bindgen` |
 
 A manual run (`workflow_dispatch`) takes `hosts` (all, or some of `linux-x64 linux-arm64 macos-arm64 macos-x64
-windows-x64 windows-arm64`), `jobs` (all, or some of `gate cross wasm`; `none`: prefixes only) and `filter`
+windows-x64 windows-arm64`), `jobs` (all, or some of `gate cross wasm bindgen`; `none`: prefixes only) and `filter`
 (`ROK_TEST_FILTER`: the integration cases to run; the differential suites always run). Hosts: `ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64, `macos-26`
 arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 (cross only).
 
@@ -39,6 +39,11 @@ arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 
   `aarch64-pc-windows-msvc` on windows-arm64, whose rokc is the x64 build under emulation with the x64
   prefix.
 - `wasm` (linux-x64), per wasm32 target: `targets/test-wasm.sh <target>`, with the image's node and clang.
+- `bindgen` (linux-x64, nightly and manual runs only): `llvm/build-libclang.sh` (libclang and clang's
+  resource headers, ~40 MB) under its own cache key (`libclang-<os>-<arch>-<hash of the script>`), apart from
+  the LLVM prefix, whose key and contents it does not touch; built only when the script changes (on a
+  self-hosted runner kept in `~/.cache/rok`). Then the `rokc bindgen` tests (`cargo test --test cli --
+  bindgen`) with `ROK_REQUIRE_LIBCLANG=1`. Elsewhere those tests skip with a notice when no libclang is built.
 
 ## Self-hosted runners
 

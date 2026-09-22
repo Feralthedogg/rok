@@ -1,5 +1,6 @@
 // A dialect and pass plugin built against rokc's own MLIR: its MLIR
-// symbols stay undefined and bind to rokc's at load time.
+// symbols stay undefined and bind to rokc's at load time (Windows: through
+// rokc.lib, rokc.exe's import library). docs/mlir-plugins.md builds it.
 //
 //   rokt.answer : () -> i32       the dialect's one op
 //   --rokt-lower                  rewrites it to `arith.constant 42`
@@ -54,13 +55,14 @@ struct LowerPass : PassWrapper<LowerPass, OperationPass<ModuleOp>> {
 
 } // namespace rokt
 
-extern "C" LLVM_ATTRIBUTE_WEAK DialectPluginLibraryInfo
+extern "C" LLVM_ATTRIBUTE_WEAK LLVM_ALWAYS_EXPORT DialectPluginLibraryInfo
 mlirGetDialectPluginInfo() {
   return {MLIR_PLUGIN_API_VERSION, "rokt", LLVM_VERSION_STRING,
           [](DialectRegistry *r) { r->insert<rokt::RoktDialect>(); }};
 }
 
-extern "C" LLVM_ATTRIBUTE_WEAK PassPluginLibraryInfo mlirGetPassPluginInfo() {
+extern "C" LLVM_ATTRIBUTE_WEAK LLVM_ALWAYS_EXPORT PassPluginLibraryInfo
+mlirGetPassPluginInfo() {
   return {MLIR_PLUGIN_API_VERSION, "rokt", LLVM_VERSION_STRING,
           [] { PassRegistration<rokt::LowerPass>(); }};
 }

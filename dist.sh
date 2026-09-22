@@ -7,16 +7,25 @@
 #       lib/librokr.a                       (Windows: rokr.lib)
 #       lib/rok/{core,std,bare}/src/      the standard library sources
 #       lib/rok/targets/<triple>/   what --target links (targets/build.sh)
+#       lib/libclang.{so,dylib,dll}, lib/clang/<major>/include
+#                                   what `rokc bindgen` loads (llvm/build-libclang.sh)
 #       install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE
 #       COPYING.mingw-w64 (Windows module definitions embedded in rokc)
 #
-# and its .sha256. Usage: ./dist.sh [--out <dir>] (on Windows from Git
+#   dist/rok-mlir-dev-<version>-<triple>.tar.gz (Windows: .zip)
+#     rok-mlir-dev-<version>-<triple>/     MLIR plugin development
+#       include/{llvm,llvm-c,mlir,mlir-c,rok}  the headers plugins build with
+#       lib/rokc.lib                        (Windows) rokc.exe's import library
+#       example/answer.cpp README.md        docs/mlir-plugins.md
+#
+# and their .sha256. Usage: ./dist.sh [--out <dir>] (on Windows from Git
 # Bash / MSYS2, in a Developer prompt for the MSVC build tools).
 #
 # rokc links the pinned LLVM / MLIR / lld statically: ROK_LLVM_PREFIX,
 # else llvm/build.sh's (llvm/build.ps1's on Windows; built here when
 # missing). The toolchain needs no LLVM install; on macOS only the SDK
-# (Xcode's command line tools).
+# (Xcode's command line tools). libclang is ROK_LIBCLANG_PREFIX's, else
+# llvm/build-libclang.sh's (build-libclang.ps1's; built here when missing).
 set -eu
 
 cd "$(dirname "$0")"
@@ -30,13 +39,26 @@ esac
 # The host's executable suffix, runtime archive and archive format.
 case $(uname -s) in
   MINGW* | MSYS* | CYGWIN*)
-    exe=.exe rt=rokr.lib ext=zip
+    exe=.exe rt=rokr.lib ext=zip libclang=libclang.dll
     build_llvm="powershell -NoProfile -ExecutionPolicy Bypass -File llvm/build.ps1"
+    build_libclang="powershell -NoProfile -ExecutionPolicy Bypass -File llvm/build-libclang.ps1"
+    cache=$(cygpath -u "${ROK_LLVM_CACHE:-$LOCALAPPDATA/rok}")
     ;;
-  *) exe="" rt=librokr.a ext=tar.gz build_llvm=./llvm/build.sh ;;
+  *)
+    exe="" rt=librokr.a ext=tar.gz build_llvm=./llvm/build.sh build_libclang=./llvm/build-libclang.sh
+    cache=${ROK_LLVM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok}
+    libclang=libclang.so
+    [ "$(uname -s)" != Darwin ] || libclang=libclang.dylib
+    ;;
 esac
 
 [ -n "${ROK_LLVM_PREFIX-}" ] || $build_llvm
+if [ -n "${ROK_LIBCLANG_PREFIX-}" ]; then
+  lc=$ROK_LIBCLANG_PREFIX
+else
+  $build_libclang
+  lc=$cache/libclang-$(sed -n 's/^VERSION=//p' llvm/build-libclang.sh)
+fi
 cargo build --release --locked -p rok -p rokc
 # The runtime as one object (fat LTO): only its exports stay global
 # (runtime/rokr/localize.sh).
@@ -75,10 +97,19 @@ done
   echo "dist.sh: the stripped rokc does not export its LLVM / MLIR symbols" >&2
   exit 1
 }
+dev=$target/mlir-plugin-dev
+[ -z "$exe" ] || [ -f "$dev/lib/rokc.lib" ] || {
+  echo "dist.sh: rokc.exe's link left no import library ($dev/lib/rokc.lib)" >&2
+  exit 1
+}
 runtime/rokr/localize.sh "$target/$rt" "$stage/lib/$rt"
 # The library sources.
 tar -C library -cf - core/src std/src bare/src | tar -C "$stage/lib/rok" -xf -
 cp -R "${CARGO_TARGET_DIR:-target}/lib/rok/targets" "$stage/lib/rok/"
+# libclang (the file a Linux .so link names) and its built-in headers.
+cp -L "$lc/lib/$libclang" "$stage/lib/"
+cp -R "$lc/lib/clang" "$stage/lib/"
+echo "libclang: $(mb "$stage/lib/$libclang")"
 cp install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE \
   compiler/rokc_driver/windows/COPYING.mingw-w64 "$stage/"
 
@@ -93,15 +124,32 @@ for o in -O0 -O2; do
     PATH=/usr/bin:/bin "$stage/bin/rokc$exe" -q build "$stage/check.rok" $o --target "$t" -o "$stage/check$exe"
   done
 done
-rm -rf "$stage/check.rok" "$stage/check$exe" "$stage/.check$exe.fp" "$stage/check.pdb" "$stage/lib/rok-cache"
+# bindgen loads the toolchain's libclang, which finds its own headers.
+printf '#include <stddef.h>\nsize_t check_len(const char *s);\n' > "$stage/check.h"
+PATH=/usr/bin:/bin "$stage/bin/rokc$exe" bindgen "$stage/check.h" |
+  grep -q 'pub fn check_len(s: CPtr<c_char>) -> usize;'
+rm -rf "$stage/check.h" "$stage/check.rok" "$stage/check$exe" "$stage/.check$exe.fp" "$stage/check.pdb" "$stage/lib/rok-cache"
 
-case $ext in
-  # cmake (needed for LLVM anyway) writes zip; Git Bash's tar does not.
-  zip) (cd "$out" && cmake -E tar cf "$name.zip" --format=zip "$name") ;;
-  *) tar -C "$out" -czf "$out/$name.$ext" "$name" ;;
-esac
+# The MLIR plugin development bundle (docs/mlir-plugins.md): rokc_llvm's
+# plugin tree for this build.
+devname=rok-mlir-dev-$version-$triple
+devstage=$out/$devname
+rm -rf "$devstage" "$out/$devname.$ext" "$out/$devname.$ext.sha256"
+mkdir -p "$devstage/example"
+cp -R "$dev/include" "$devstage/"
+[ -z "$exe" ] || cp -R "$dev/lib" "$devstage/"
+cp docs/mlir-plugins.md "$devstage/README.md"
+cp compiler/rokc/tests/plugin/answer.cpp "$devstage/example/"
+
 sum=$(command -v sha256sum || echo "shasum -a 256")
-(cd "$out" && $sum "$name.$ext" > "$name.$ext.sha256")
-rm -rf "$stage"
-echo "archive: $(mb "$out/$name.$ext")"
-echo "$out/$name.$ext"
+for n in "$name" "$devname"; do
+  case $ext in
+    # cmake (needed for LLVM anyway) writes zip; Git Bash's tar does not.
+    zip) (cd "$out" && cmake -E tar cf "$n.zip" --format=zip "$n") ;;
+    *) tar -C "$out" -czf "$out/$n.$ext" "$n" ;;
+  esac
+  (cd "$out" && $sum "$n.$ext" > "$n.$ext.sha256")
+  rm -rf "${out:?}/$n"
+  echo "archive: $(mb "$out/$n.$ext")"
+  echo "$out/$n.$ext"
+done

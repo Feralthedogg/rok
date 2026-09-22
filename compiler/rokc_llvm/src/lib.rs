@@ -14,8 +14,9 @@ pub const LLVM_VERSION: &str = "22.1.8";
 /// Whether this build links LLVM.
 pub const AVAILABLE: bool = cfg!(rok_llvm);
 
-/// The prefix this build links (its headers build MLIR plugins).
-pub const PREFIX: Option<&str> = option_env!("ROK_LLVM_LINKED_PREFIX");
+/// The MLIR plugin development tree of this build (`include/`, and
+/// `lib/rokc.lib` on Windows; docs/mlir-plugins.md).
+pub const PLUGIN_DEV: Option<&str> = option_env!("ROK_LLVM_PLUGIN_DEV");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OptLevel {
@@ -447,7 +448,7 @@ pub fn import_library(t: &Target, def: &str, out: &Path) -> Result<(), String> {
 /// The macOS SDK as `xcrun` finds it, without running it: `SDKROOT`,
 /// else the SDK of the developer directory (`DEVELOPER_DIR`, else the
 /// one `xcode-select` chose, else the command line tools).
-fn apple_sdk() -> Result<std::path::PathBuf, String> {
+pub fn apple_sdk() -> Result<std::path::PathBuf, String> {
     if let Some(p) = std::env::var_os("SDKROOT").filter(|p| !p.is_empty()) {
         return Ok(p.into());
     }

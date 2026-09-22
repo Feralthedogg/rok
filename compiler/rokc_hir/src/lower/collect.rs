@@ -960,7 +960,7 @@ fn collect<'a>(
     let first_static = static_defs.len();
     let mut static_asts = base_static_asts;
     let mut static_tys = static_tys;
-    for item in &program.items {
+    for (idx, item) in program.items.iter().enumerate() {
         let here = item.span();
         if let Item::Static(s) = item {
             if static_tys.contains_key(&s.name) {
@@ -1002,7 +1002,9 @@ fn collect<'a>(
                     );
                     continue;
                 }
-                static_asts.push((&s.ty, String::new(), None));
+                // Its type is resolved in the block's module.
+                let module = item_modules.get(idx).cloned().unwrap_or_default();
+                static_asts.push((&s.ty, module, None));
                 static_tys.insert(s.name.clone(), HirTy::Unknown);
                 static_defs.push(HirStaticDef {
                     name: s.name.clone(),

@@ -13,6 +13,10 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "build/exports.rs"]
+mod exports;
+use exports::Member;
+
 /// Must match `VERSION` in `llvm/build.sh` and `llvm/build.ps1`.
 const LLVM_VERSION: &str = "22.1.8";
 
@@ -59,10 +63,6 @@ fn main() {
     }
     println!("cargo:rustc-cfg=rok_llvm");
     println!("cargo:prefix={}", prefix.display());
-    println!(
-        "cargo:rustc-env=ROK_LLVM_LINKED_PREFIX={}",
-        prefix.display()
-    );
 
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let apple = env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
@@ -97,19 +97,25 @@ fn main() {
             n.clone(),
         )
     });
-    if !msvc {
-        // MLIR plugins bind to the MLIR rokc links and the LLVM support
-        // library under it (spec bare 1.10.2): rokc exports those, and
-        // the rest of the toolchain is dead-stripped. Support and
-        // Demangle go in whole, so plugins find all of it.
-        let exports = out.join("exports");
-        write_exports(&out.join("librokc_llvm_shim.a"), &lib, &names, &exports);
-        println!("cargo:exports={}", exports.display());
-        names.retain(|n| !EXPORTED_LIBS.contains(&n.as_str()));
-        for n in EXPORTED_LIBS {
-            println!("cargo:rustc-link-lib=static:+whole-archive,-bundle={n}");
-        }
+    // MLIR plugins bind to the MLIR rokc links and the LLVM support
+    // library under it (spec bare 1.10.2): rokc exports those, and the
+    // rest of the toolchain is dead-stripped. Support and Demangle go in
+    // whole, so plugins find all of it.
+    let exports = out.join(if msvc { "exports.def" } else { "exports" });
+    let shim = out.join(if msvc {
+        "rokc_llvm_shim.lib"
+    } else {
+        "librokc_llvm_shim.a"
+    });
+    write_exports(&shim, &lib, &names, &exports, msvc);
+    println!("cargo:exports={}", exports.display());
+    names.retain(|n| !EXPORTED_LIBS.contains(&n.as_str()));
+    for n in EXPORTED_LIBS {
+        println!("cargo:rustc-link-lib=static:+whole-archive,-bundle={n}");
     }
+    let dev = plugin_dev(&prefix, &out);
+    println!("cargo:plugin_dev={}", dev.display());
+    println!("cargo:rustc-env=ROK_LLVM_PLUGIN_DEV={}", dev.display());
     if apple || msvc {
         for n in &names {
             println!("cargo:rustc-link-lib=static:-bundle={n}");
@@ -152,18 +158,14 @@ fn main() {
 /// The LLVM libraries rokc exports whole besides MLIR.
 const EXPORTED_LIBS: [&str; 2] = ["LLVMSupport", "LLVMDemangle"];
 
-/// The globals of an archive member: defined (weak ones apart where nm
-/// tells them: ELF's `W` / `V`), and undefined (weak undefined ones load
-/// no member and are left out).
-#[derive(Default)]
-struct Member {
-    defs: Vec<String>,
-    weak: Vec<String>,
-    undefs: Vec<String>,
-}
-
-/// The members of `archive` (`nm -P -g`, plus `flags`).
-fn members(archive: &Path, flags: &[&str]) -> Vec<Member> {
+/// The members of `archive`: read as COFF (MSVC), else `nm -P -g` plus
+/// `flags` (ELF's weak definitions are `W` / `V`).
+fn members(archive: &Path, flags: &[&str], msvc: bool) -> Vec<Member> {
+    if msvc {
+        let bytes = std::fs::read(archive)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", archive.display()));
+        return exports::coff_members(&bytes);
+    }
     let out = Command::new("nm")
         .args(["-P", "-g"])
         .args(flags)
@@ -199,19 +201,27 @@ fn members(archive: &Path, flags: &[&str]) -> Vec<Member> {
 /// non-weak globals of every MLIR archive member the link loads (found
 /// as the linker does: members defining what the shim and the members
 /// loaded so far leave undefined) and of the whole [`EXPORTED_LIBS`].
-/// Weak definitions (template instances) stay internal: a plugin has its
-/// own, and dyld would bind each use of an exported one at launch. Mach-O
-/// takes one name per line (`-exported_symbols_list`), ELF a dynamic
-/// list.
-fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path) {
+/// Weak definitions (template instances, COMDATs) stay internal: a
+/// plugin has its own, and dyld would bind each use of an exported one
+/// at launch. Mach-O takes one name per line (`-exported_symbols_list`),
+/// ELF a dynamic list, PE a module definition file.
+fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: bool) {
     use std::collections::{HashMap, HashSet};
-    let archives: Vec<(PathBuf, bool)> = std::iter::once((shim.to_owned(), false))
+    // (archive, exported, loaded whole)
+    let archives: Vec<(PathBuf, bool, bool)> = std::iter::once((shim.to_owned(), false, true))
         .chain(names.iter().map(|n| {
-            let exported = n.starts_with("MLIR") || EXPORTED_LIBS.contains(&n.as_str());
-            (lib.join(format!("lib{n}.a")), exported)
+            let whole = EXPORTED_LIBS.contains(&n.as_str());
+            (
+                archive(lib.parent().unwrap(), n, msvc),
+                whole || n.starts_with("MLIR"),
+                whole,
+            )
         }))
         .collect();
-    let all: Vec<_> = archives.iter().map(|(a, _)| members(a, &[])).collect();
+    let all: Vec<_> = archives
+        .iter()
+        .map(|(a, ..)| members(a, &[], msvc))
+        .collect();
     let mut definer: HashMap<&str, (usize, usize)> = HashMap::new();
     for (a, ms) in all.iter().enumerate() {
         for (m, member) in ms.iter().enumerate() {
@@ -220,20 +230,16 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path) {
             }
         }
     }
-    let whole = |a: usize| {
-        a == 0
-            || EXPORTED_LIBS
-                .iter()
-                .any(|n| archives[a].0.ends_with(format!("lib{n}.a")))
-    };
     let mut work: Vec<(usize, usize)> = (0..all.len())
-        .filter(|&a| whole(a))
+        .filter(|&a| archives[a].2)
         .flat_map(|a| (0..all[a].len()).map(move |m| (a, m)))
         .collect();
     let mut loaded: HashSet<(usize, usize)> = work.iter().copied().collect();
     while let Some((a, m)) = work.pop() {
         for u in &all[a][m].undefs {
-            if let Some(&d) = definer.get(u.as_str()) {
+            // A dllimport reference binds the definition too.
+            let u = u.strip_prefix("__imp_").unwrap_or(u);
+            if let Some(&d) = definer.get(u) {
                 if loaded.insert(d) {
                     work.push(d);
                 }
@@ -241,15 +247,15 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path) {
         }
     }
     let apple = env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
-    let mut syms = Vec::new();
-    for (a, (path, exported)) in archives.iter().enumerate() {
+    let mut syms: Vec<(String, bool)> = Vec::new();
+    for (a, (path, exported, _)) in archives.iter().enumerate() {
         if !exported || !(0..all[a].len()).any(|m| loaded.contains(&(a, m))) {
             continue;
         }
         // Mach-O's nm types weak definitions as others: it omits them
         // with --no-weak.
         let strong: Option<HashSet<String>> = apple.then(|| {
-            members(path, &["--defined-only", "--no-weak"])
+            members(path, &["--defined-only", "--no-weak"], false)
                 .into_iter()
                 .flat_map(|m| m.defs)
                 .collect()
@@ -259,20 +265,78 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path) {
                 syms.extend(
                     (member.defs.iter())
                         .filter(|d| strong.as_ref().is_none_or(|s| s.contains(*d)))
-                        .cloned(),
+                        .map(|d| (d.clone(), member.data.contains(d))),
                 );
             }
         }
     }
     syms.sort();
     syms.dedup();
-    let text = if apple {
-        syms.join("\n") + "\n"
+    let text = if msvc {
+        let x86 = env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86");
+        exports::def_file(&syms, x86).unwrap_or_else(|e| panic!("{e}"))
+    } else if apple {
+        let list: Vec<&str> = syms.iter().map(|(s, _)| s.as_str()).collect();
+        list.join("\n") + "\n"
     } else {
-        let list: Vec<String> = syms.iter().map(|s| format!("  {s};")).collect();
+        let list: Vec<String> = syms.iter().map(|(s, _)| format!("  {s};")).collect();
         format!("{{\n{}\n}};\n", list.join("\n"))
     };
     std::fs::write(to, text).unwrap();
+}
+
+/// The plugin development tree beside the build's executables
+/// (`target/<profile>/mlir-plugin-dev`; dist.sh ships it as the
+/// `rok-mlir-dev` archive, docs/mlir-plugins.md): `include/` holds the
+/// prefix's LLVM and MLIR headers, `mlir/Support/TypeID.h` including
+/// `rok/mlir_typeid.h` (`plugin/`) before its first explicit `TypeID`, and
+/// rokc's link puts its import library in `lib/` (MSVC).
+fn plugin_dev(prefix: &Path, out: &Path) -> PathBuf {
+    let dev = out.ancestors().nth(3).unwrap().join("mlir-plugin-dev");
+    let inc = dev.join("include");
+    // The headers are copied once per prefix.
+    let stamp = dev.join("prefix");
+    let from = prefix.display().to_string();
+    if std::fs::read_to_string(&stamp).ok().as_deref() != Some(from.as_str()) {
+        let _ = std::fs::remove_dir_all(&dev);
+        for d in ["llvm", "llvm-c", "mlir", "mlir-c"] {
+            copy_tree(&prefix.join("include").join(d), &inc.join(d));
+        }
+        std::fs::write(&stamp, &from).unwrap();
+    }
+    std::fs::create_dir_all(dev.join("lib")).unwrap();
+    let typeid = prefix.join("include/mlir/Support/TypeID.h");
+    let text = std::fs::read_to_string(&typeid).unwrap();
+    let first = "\nMLIR_DECLARE_EXPLICIT_SELF_OWNING_TYPE_ID(void)";
+    assert!(
+        text.matches(first).count() == 1,
+        "{} has no single `{}` line to hook",
+        typeid.display(),
+        &first[1..]
+    );
+    let hooked = text.replacen(
+        first,
+        &format!("\n#include \"rok/mlir_typeid.h\"{first}"),
+        1,
+    );
+    std::fs::write(inc.join("mlir/Support/TypeID.h"), hooked).unwrap();
+    std::fs::create_dir_all(inc.join("rok")).unwrap();
+    std::fs::copy("plugin/mlir_typeid.h", inc.join("rok/mlir_typeid.h")).unwrap();
+    println!("cargo:rerun-if-changed=plugin/mlir_typeid.h");
+    dev
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap() {
+        let e = e.unwrap();
+        let dst = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_tree(&e.path(), &dst);
+        } else {
+            std::fs::copy(e.path(), dst).unwrap();
+        }
+    }
 }
 
 fn default_prefix() -> Option<PathBuf> {

@@ -20,6 +20,8 @@ guide are at [rok-lang.org](https://rok-lang.org).
   `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see
   `llvm/README.md`). Without it `rokc` builds `-O0` only (the native backend), linking with the system `cc`.
   `targets/build.sh` builds what `--target` links into `target/lib/rok/targets/` (rustup, curl, python3, clang).
+  `rokc bindgen` loads libclang at run time (nothing else needs it): a toolchain ships it, a build from source
+  uses `llvm/build-libclang.sh`'s (about 5 minutes on 10 cores; `llvm/README.md`).
 
 ## Install
 
@@ -58,7 +60,8 @@ $ROK_HOME/
 ├── bin/{rok,rokc,rokls}              proxies: run the same-named binary of the active toolchain
 ├── toolchains/<version>-<triple>/    self-contained toolchain
 │   ├── bin/{rok,rokc,rokls}
-│   └── lib/librokr.a, lib/rok/{core,std,bare}/src/, lib/rok/targets/<triple>/
+│   └── lib/librokr.a, lib/rok/{core,std,bare}/src/, lib/rok/targets/<triple>/,
+│       lib/libclang.{dylib,so,dll}, lib/clang/<major>/include   (rokc bindgen)
 ├── cache/                            git, registry, script locks
 ├── envs/<name>/, envs/CURRENT        named environments
 └── config.rokon                      Config { registry: "..", toolchain: ".." }
@@ -92,7 +95,8 @@ rok jupyter install  # rok kernel for Jupyter / VS Code
 
 ```sh
 cargo build --release                 # target/release/{rok,rokc,rokls}, librokr.a
-./dist.sh                             # dist/rok-<version>-<triple>.tar.gz (+ .sha256)
+./dist.sh                             # dist/rok-<version>-<triple>.tar.gz (+ .sha256),
+                                      # dist/rok-mlir-dev-<version>-<triple>.tar.gz (MLIR plugins)
 sh install.sh --archive dist/rok-*.tar.gz
 ```
 
@@ -122,7 +126,7 @@ Set `CC` to a clang with a WebAssembly backend to include `wasm32-wasi`'s profil
 
 `.github/workflows/ci.yml` in three tiers: pushes to branches and pull requests check Linux x86_64; pushes to
 `main` and the merge queue add Linux aarch64 and Windows x86_64; a nightly run covers every host at `-O0` and
-`-O2`, the cross targets and wasm. Jobs, runners and the self-hosted setup: [docs/ci.md](docs/ci.md).
+`-O2`, the cross targets, wasm and `rokc bindgen`. Jobs, runners and the self-hosted setup: [docs/ci.md](docs/ci.md).
 
 ## License
 

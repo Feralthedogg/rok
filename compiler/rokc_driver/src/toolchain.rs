@@ -836,8 +836,8 @@ fn rokr_arg(opts: &BuildOptions, t: &TargetSpec) -> String {
 }
 
 /// `--load-mlir-plugin <path | name>` (stdlib bare 1.10.3): a path must
-/// exist; a bare name is `lib<name>.{dylib,so}` / `<name>.dll` in a
-/// directory of `ROK_MLIR_PLUGIN_PATH`.
+/// exist; a bare name is the host's library file of that name
+/// ([`mlir_plugin_files`]) in a directory of `ROK_MLIR_PLUGIN_PATH`.
 ///
 /// # Errors
 /// The plugin is not there.
@@ -851,17 +851,27 @@ pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
         };
     }
     let dirs = std::env::var_os("ROK_MLIR_PLUGIN_PATH").unwrap_or_default();
-    let names = [
-        format!("lib{spec}.dylib"),
-        format!("lib{spec}.so"),
-        format!("{spec}.dll"),
-    ];
+    let names = mlir_plugin_files(spec, std::env::consts::OS);
     std::env::split_paths(&dirs)
         .flat_map(|d| names.iter().map(move |n| d.join(n)))
         .find(|c| c.is_file())
         .ok_or_else(|| {
-            format!("MLIR plugin `{spec}` not found (looked for lib{spec}.dylib / .so in ROK_MLIR_PLUGIN_PATH)")
+            format!(
+                "MLIR plugin `{spec}` not found (looked for {} in ROK_MLIR_PLUGIN_PATH)",
+                names.join(" / ")
+            )
         })
+}
+
+/// The file names plugin `name` has on `os` (`std::env::consts::OS`):
+/// `<name>.dll` on Windows, `lib<name>.so` (and on macOS
+/// `lib<name>.dylib` first: modules cmake builds are `.so` there too).
+fn mlir_plugin_files(name: &str, os: &str) -> Vec<String> {
+    match os {
+        "windows" => vec![format!("{name}.dll")],
+        "macos" => vec![format!("lib{name}.dylib"), format!("lib{name}.so")],
+        _ => vec![format!("lib{name}.so")],
+    }
 }
 
 /// The REPL's session host: `host_object` (`repl_host.c`, compiled with
@@ -976,5 +986,13 @@ mod tests {
     fn mlir_plugins_are_found_by_path_or_name() {
         assert!(super::find_mlir_plugin("/no/such/libx.so").is_err());
         assert!(super::find_mlir_plugin("no_such_plugin_xyz").is_err());
+    }
+
+    #[test]
+    fn mlir_plugin_names_follow_the_host() {
+        use super::mlir_plugin_files as f;
+        assert_eq!(f("d", "windows"), ["d.dll"]);
+        assert_eq!(f("d", "macos"), ["libd.dylib", "libd.so"]);
+        assert_eq!(f("d", "linux"), ["libd.so"]);
     }
 }

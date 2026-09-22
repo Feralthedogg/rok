@@ -1,10 +1,12 @@
 //! Tooling on top of the compiler front end: the language server
 //! (`lsp`), the REPL (`repl`) and its Jupyter kernel (`jupyter`), the
-//! linter (`lint`) and the documentation generator (`doc`). Each takes
+//! linter (`lint`), the documentation generator (`doc`) and the C
+//! binding generator (`bindgen`). Each takes
 //! its configuration as arguments, so any CLI front (`rokc lsp`, which
 //! `rok lsp` / `rokls` run) can host them.
 
 pub mod analysis;
+pub mod bindgen;
 pub mod doc;
 pub mod jupyter;
 mod line_edit;

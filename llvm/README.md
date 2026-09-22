@@ -97,8 +97,38 @@ rokc registers only the MLIR dialects it lowers to and those
 the non-weak symbols of the MLIR it links and all of LLVMSupport /
 LLVMDemangle, for MLIR plugins to bind to (`write_exports` in
 `build.rs`: `-exported_symbols_list` on macOS, `--dynamic-list` on
-Linux, with `nm`); everything else is dead-stripped.
+Linux, with `nm`; on Windows a `/DEF` module definition file from the
+archives' COFF symbol tables, whose import library `rokc.lib` plugins
+link); everything else is dead-stripped. The headers plugins build with
+are in `target/<profile>/mlir-plugin-dev` (docs/mlir-plugins.md).
 
 Homebrew's `llvm` (22.1.8) has static LLVM and MLIR archives but ships lld
 only as shared libraries, so it cannot serve as the prefix; release and
 development builds both use `build.sh`.
+
+## libclang (`rokc bindgen`)
+
+`rokc bindgen` reads C headers through libclang's C API, which it loads at
+run time (`dlopen` / `LoadLibraryW`): rokc does not link it, and no other
+command needs it. It comes from the same source tarball, built apart from
+the prefix above so that prefix (and its CI cache key) stays as it is:
+
+```sh
+llvm/build-libclang.sh            # → ~/.cache/rok/libclang-22.1.8 (ROK_LLVM_CACHE)
+llvm\build-libclang.ps1           # Windows (MSVC) → %LOCALAPPDATA%\rok\libclang-22.1.8
+```
+
+It builds only the `libclang` shared library and `clang-resource-headers`:
+Release, no LLVM back end (`LLVM_TARGETS_TO_BUILD` empty: clang's target
+info for `-target` is its own), no tools, tests or docs. The prefix holds
+`lib/libclang.{dylib,so,dll}` and `lib/clang/22/include` (clang's built-in
+headers, passed as `-resource-dir`); the build tree is deleted at the end.
+On a 10-core Apple Silicon machine: 5.5 minutes, a build tree of ~2 GB at
+its peak, 36 MB installed (libclang.dylib 29 MB, headers 7.7 MB; 12 MB
+compressed).
+
+rokc looks for it in its toolchain's `lib/` (`dist.sh` copies it there,
+from `ROK_LIBCLANG_PREFIX` or this script's prefix), else, for a build in
+the repository, in this script's prefix. Without one, `rokc bindgen` says
+how to get it and the bindgen tests skip (fail under
+`ROK_REQUIRE_LIBCLANG=1`).

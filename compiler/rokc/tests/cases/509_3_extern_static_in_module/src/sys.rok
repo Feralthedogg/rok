@@ -1,0 +1,6 @@
+use rok::bare::ptr::CPtr;
+
+extern "C" {
+    pub static environ: CPtr<CPtr<c_char>>;
+    pub static mut optind: i32;
+}
