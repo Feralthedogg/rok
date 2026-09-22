@@ -923,8 +923,16 @@ fn session(a: &Args, pkg: &Package) -> Session {
 fn reused(a: &Args, result: &CompileResult) {
     if let Some(r) = result.reuse.filter(|_| a.verbose > 0 && !a.quiet) {
         eprintln!(
-            "      Reused: {} of {} files parsed, {} of {} bodies lowered",
-            r.files.0, r.files.1, r.bodies.0, r.bodies.1
+            "      Reused: {} of {} files parsed, {} of {} bodies lowered{}",
+            r.files.0,
+            r.files.1,
+            r.bodies.0,
+            r.bodies.1,
+            if r.library {
+                ", the library's items collected"
+            } else {
+                ""
+            }
         );
     }
 }

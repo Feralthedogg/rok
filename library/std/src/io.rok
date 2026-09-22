@@ -187,29 +187,8 @@ pub type RawFd = i32;
 
 // ---- bytes ----
 
-/// Bytes a write takes (301.0): a `str` (its UTF-8), a `List<u8>` or a
-/// `Slice<u8>`.
-pub trait AsBytes {
-    /// The bytes as a view (no copy).
-    fn byte_slice(self) -> Slice<u8>;
-}
-
-impl AsBytes for str {
-    fn byte_slice(self) -> Slice<u8> { self.as_bytes() }
-}
-
-impl AsBytes for List<u8> {
-    const fn byte_slice(self) -> Slice<u8> { self[0:self.len()] }
-}
-
-impl AsBytes for Slice<u8> {
-    const fn byte_slice(self) -> Slice<u8> { self }
-}
-
-/// `b"..."` and `include_bytes!` data: a view of a copy.
-impl<const N: usize> AsBytes for [u8; N] {
-    const fn byte_slice(self) -> Slice<u8> { self[:] }
-}
+/// Bytes a write takes (301.0); defined in core (`Slice<u8>::find`).
+pub use rok::core::collections::slice::AsBytes;
 
 /// A zeroed list of `n` bytes (a read buffer).
 pub const fn byte_buf(n: usize) -> List<u8> {
@@ -319,6 +298,11 @@ pub trait Reader {
     /// Read up to `buf.len()` bytes into `buf[0..n]`; `0` = end of stream.
     fn read(ref self, buf: List<u8>) throws (IoError) -> usize;
 
+    /// The OS descriptor `copy` may hand to the kernel: one with no
+    /// buffer, timeout or non-blocking mode of the stream's own. `-1`
+    /// (the default): none.
+    fn raw_fd(self) -> RawFd { -1 }
+
     /// Fill all of `buf`, or `UnexpectedEof`.
     fn read_exact(ref self, buf: List<u8>) throws (IoError) {
         let at = try self.read(buf);
@@ -381,6 +365,9 @@ pub trait Writer {
     /// Write some prefix of `buf`; returns its length.
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize;
     fn flush(ref self) throws (IoError);
+
+    /// As `Reader::raw_fd`.
+    fn raw_fd(self) -> RawFd { -1 }
 
     fn write_all(ref self, buf: List<u8>) throws (IoError) {
         let rest = buf;
@@ -623,8 +610,15 @@ impl<W: Writer> Drop for LineWriter<W> {
     }
 }
 
-/// Copy `reader` to its end into `writer`; returns the byte count.
+/// Copy `reader` to its end into `writer`; returns the byte count. Two
+/// OS descriptors (`raw_fd`) go to the runtime, which lets the kernel
+/// move the bytes where their kinds allow (`copy_file_range` /
+/// `sendfile` / `splice`); other streams copy through `read` / `write`.
 pub fn copy<R: Reader, W: Writer>(ref reader: R, ref writer: W) throws (IoError) -> u64 {
+    let (from, to) = (Reader::raw_fd(reader), Writer::raw_fd(writer));
+    if from >= 0 && to >= 0 {
+        return (try check(unsafe { rok_os_copy_fd(from, to) }, "copy")) as u64;
+    }
     let total = 0u64;
     loop {
         let chunk = byte_buf(8192);

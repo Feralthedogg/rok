@@ -126,6 +126,7 @@ impl ChildStdin {
 
 impl Writer for ChildStdin {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.write(buf) }
+    const fn raw_fd(self) -> RawFd { self.file.fd() }
     const fn flush(ref self) throws (IoError) {}
 }
 
@@ -141,6 +142,7 @@ impl ChildStdout {
 
 impl Reader for ChildStdout {
     fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.read(buf) }
+    const fn raw_fd(self) -> RawFd { self.file.fd() }
 }
 
 /// A child's stderr: the read end of its pipe.
@@ -155,6 +157,7 @@ impl ChildStderr {
 
 impl Reader for ChildStderr {
     fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.file.read(buf) }
+    const fn raw_fd(self) -> RawFd { self.file.fd() }
 }
 
 /// A process to run (307.1). Builder methods return the updated command.

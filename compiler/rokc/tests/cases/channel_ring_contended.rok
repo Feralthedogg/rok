@@ -1,0 +1,85 @@
+// needs: threads
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout:
+// ring 40000 99980000 ordered true
+// rendezvous 3000 ordered true
+// strings 8000 true
+
+// The bounded ring under contention (2.17.1): four senders through one
+// slot and through three wrap the ring many times, each sender's values
+// arrive in its order; a rendezvous sender returns only once its value
+// is taken; GC values survive the ring's slots.
+use rok::std::thread;
+
+fn feed(cap: usize, n: i64) -> (i64, i64, bool) {
+    let (tx, rx) = channel_bounded::<i64>(cap);
+    let hs: List<thread::JoinHandle<i32>> = [];
+    for t in 0..4 {
+        let s = tx.clone();
+        hs.push(thread::spawn(|| {
+            for i in 0..n { try! s.send((t as i64) * 1000000 + i); }
+            s.close();
+            0
+        }));
+    }
+    tx.close();
+    let last: List<i64> = [-1, -1, -1, -1];
+    let count: i64 = 0;
+    let sum: i64 = 0;
+    let ordered = true;
+    for v in rx {
+        let t = (v / 1000000) as usize;
+        let i = v % 1000000;
+        if i != last[t] + 1 { ordered = false; }
+        last[t] = i;
+        count += 1;
+        sum += i;
+    }
+    for h in hs { try! h.join(); }
+    (count, sum, ordered)
+}
+
+fn main() -> i32 {
+    let (c1, s1, o1) = feed(1, 5000);
+    let (c3, s3, o3) = feed(3, 5000);
+    println(f"ring {c1 + c3} {s1 + s3} ordered {o1 && o3}");
+
+    // Rendezvous: `send(i)` returns once value `i` was taken, so after
+    // the receiver counted every earlier one.
+    let (tx, rx) = channel_bounded::<i64>(0);
+    let taken: Atomic<i64> = Atomic::new(0);
+    let h = thread::spawn(|| {
+        let ok = true;
+        for i in 0i64..3000i64 {
+            try! tx.send(i);
+            if taken.load() < i { ok = false; }
+        }
+        tx.close();
+        if ok { 1 } else { 0 }
+    });
+    let n: i64 = 0;
+    let ordered = true;
+    for v in rx {
+        if v != n { ordered = false; }
+        taken.fetch_add(1);
+        n += 1;
+    }
+    println(f"rendezvous {n} ordered {ordered && (try! h.join()) == 1}");
+
+    let (ts, rs) = channel_bounded::<str>(2);
+    let hs = thread::spawn(|| {
+        for i in 0..8000 { try! ts.send(f"s{i}"); }
+        ts.close();
+        0
+    });
+    let k = 0;
+    let good = true;
+    for s in rs {
+        if s != f"s{k}" { good = false; }
+        k += 1;
+    }
+    try! hs.join();
+    println(f"strings {k} {good}");
+    0
+}

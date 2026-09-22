@@ -1,0 +1,33 @@
+// Contended channels: 4 producer threads x 500k `i64`s into one
+// receiver, over an unbounded and a bounded (64) channel.
+use rok::std::thread;
+
+fn run(tx: Sender<i64>, rx: Receiver<i64>) -> i64 {
+    let hs: List<thread::JoinHandle<i32>> = [];
+    let t = 0;
+    while t < 4 {
+        let s = tx.clone();
+        hs.push(thread::spawn(|| {
+            let i: i64 = 0;
+            while i < 500000 {
+                try! s.send(i);
+                i += 1;
+            }
+            s.close();
+            0
+        }));
+        t += 1;
+    }
+    tx.close();
+    let total: i64 = 0;
+    for v in rx { total += v; }
+    for h in hs { try! h.join(); }
+    return total;
+}
+
+fn main() -> i32 {
+    let (a, b) = channel::<i64>();
+    let (c, d) = channel_bounded::<i64>(64);
+    println(f"{run(a, b)} {run(c, d)}");
+    return 0;
+}

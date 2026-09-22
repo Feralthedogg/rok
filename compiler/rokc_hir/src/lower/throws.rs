@@ -3,7 +3,8 @@
 //! / `finally`.
 //!
 //! A function declared `throws (E) -> T` returns the carrier
-//! `HirTy::Throws { ok: T, err: E }` (MIR: `(is_err, T, E)`). Nothing
+//! `HirTy::Throws { ok: T, err: E }` (MIR: `is_err` and one payload for
+//! `T` / `E`, spec 8.6.5; HIR names its fields `(is_err, T, E)`). Nothing
 //! unwinds: a call under `try` tests `is_err` and on error `raise`s the
 //! payload, which walks the enclosing `err_frames` innermost-first — a
 //! `finally` frame runs its block inline, the first `catch` frame that
@@ -409,15 +410,8 @@ pub(super) fn raise(
     } else if let Some(decl) = ctx.fn_throws.clone() {
         if let Some(v) = convert_err(ctx, value, &decl) {
             let ok = carrier_ok(ctx);
-            let mut c = carrier(&ok, &decl, Err(v), span);
-            // `ref` parameters: their values ride in the ok slot even on
-            // the error path, for the caller's write-back (spec 4.7).
-            if !ctx.ref_params.is_empty() {
-                if let HirExprKind::Tuple { fields } = &mut c.kind {
-                    let ret = undef(&ctx.fn_ret_ty, span);
-                    fields[1] = super::mono::ref_pack(ctx, ret, span);
-                }
-            }
+            // `ref` parameters go back on the error path too (spec 4.7).
+            let c = super::mono::ref_pack(ctx, carrier(&ok, &decl, Err(v), span), span);
             out.push(HirStmt::Return(Some(c)));
             return out;
         }
@@ -973,8 +967,11 @@ pub(super) fn lower_return(
         Some(err) => {
             let ok = carrier_ok(ctx);
             let v = value.unwrap_or_else(|| unit_value(span));
-            let v = super::mono::ref_pack(ctx, v, span);
-            Some(carrier(&ok, &err, Ok(v), span))
+            Some(super::mono::ref_pack(
+                ctx,
+                carrier(&ok, &err, Ok(v), span),
+                span,
+            ))
         }
         // `ref` parameters (spec 4.7): hand their values back too.
         None if !ctx.ref_params.is_empty() => Some(super::mono::ref_pack(
@@ -1352,15 +1349,13 @@ fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Spa
     }
 }
 
-/// The ok side of the current function's carrier: its value type,
-/// packed with the `ref` parameters (`ref_packed`).
+/// The ok side of the current function's carrier.
 fn carrier_ok(ctx: &LowerCtx<'_>) -> HirTy {
     // A coroutine body's errors ride in its step carrier.
     if let Some(c) = &ctx.coro {
         return c.step_ty(ctx, &ctx.fn_ret_ty);
     }
-    let refs: Vec<HirTy> = ctx.ref_params.iter().map(|(_, t)| t.clone()).collect();
-    super::mono::ref_packed(&ctx.fn_ret_ty, &refs)
+    ctx.fn_ret_ty.clone()
 }
 
 /// A throwing function's body yields the ok carrier.

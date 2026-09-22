@@ -357,6 +357,24 @@ impl<T: Codec> Codec for std::sync::Arc<T> {
     }
 }
 
+impl<T: Codec> Codec for std::cell::RefCell<T> {
+    fn enc(&self, e: &mut Enc) {
+        self.borrow().enc(e);
+    }
+    fn dec(d: &mut Dec<'_>) -> Option<Self> {
+        T::dec(d).map(Self::new)
+    }
+}
+
+impl<T: Codec + Copy> Codec for std::cell::Cell<T> {
+    fn enc(&self, e: &mut Enc) {
+        self.get().enc(e);
+    }
+    fn dec(d: &mut Dec<'_>) -> Option<Self> {
+        T::dec(d).map(Self::new)
+    }
+}
+
 impl<A: Codec, B: Codec> Codec for (A, B) {
     fn enc(&self, e: &mut Enc) {
         self.0.enc(e);

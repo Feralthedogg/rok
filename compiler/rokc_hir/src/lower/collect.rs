@@ -364,8 +364,10 @@ pub fn lower_full(
         found
     });
     let mut lib_items: Program;
-    let (base, lib): (Collected<'_>, &Program) = if let Some((c, lib, type_names)) = kept {
+    let (base, lib): (Collected<'_>, &Program) = if let Some((mut c, lib, type_names)) = kept {
         crate::set_type_names(type_names);
+        // The stage collected the library under another compile's table.
+        c.t.names.uses.clone_from(uses);
         (c, lib)
     } else if let Some(k) = key {
         let lib: &'static mut Program = Box::leak(Box::new(lib));
@@ -426,12 +428,8 @@ pub fn lower_full(
     finish(c, [lib, user], raw_uses, &at)
 }
 
-/// The library's stage of an earlier compile (`HirInput::library`).
-struct LibraryStage {
-    c: Collected<'static>,
-    lib: &'static Program,
-    type_names: [Vec<String>; 2],
-}
+mod stage;
+pub use stage::LibraryStage;
 
 static LIBRARY: std::sync::Mutex<Option<(u64, LibraryStage)>> = std::sync::Mutex::new(None);
 
@@ -445,6 +443,24 @@ pub fn library_kept(library: u64) -> bool {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .is_some_and(|(k, _)| *k == library)
+}
+
+/// Keep `stage` as the library's stage of key `library` (read back from
+/// an earlier build).
+pub fn keep_library(library: u64, stage: LibraryStage) {
+    *LIBRARY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((library, stage));
+}
+
+/// `f` of the library's stage of key `library`, if it is kept.
+pub fn with_library<R>(library: u64, f: impl FnOnce(&LibraryStage) -> R) -> Option<R> {
+    let kept = LIBRARY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    kept.as_ref()
+        .filter(|(k, _)| *k == library)
+        .map(|(_, s)| f(s))
 }
 
 /// What every stage of a compile shares.

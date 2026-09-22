@@ -140,7 +140,7 @@ pub fn include_path(file: &str, lit: &str) -> std::path::PathBuf {
 
 /// The literal `include_bytes!` (`bytes`) or `include_str!` gives for
 /// the path literal `lit` in `file`, or why not.
-fn include_file(file: &str, lit: &str, bytes: bool) -> Result<Literal, String> {
+pub fn include_file(file: &str, lit: &str, bytes: bool) -> Result<Literal, String> {
     let data = std::fs::read(include_path(file, lit)).map_err(|e| {
         let why = if e.kind() == std::io::ErrorKind::NotFound {
             "no such file".to_owned()

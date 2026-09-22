@@ -698,3 +698,10 @@ pub(super) fn in_failed(env: &Env<'_>) -> bool {
         failed.contains(s)
     })
 }
+
+rokc_core::codec_struct!(ParamInfo {
+    name,
+    bounds,
+    all,
+    projs
+});

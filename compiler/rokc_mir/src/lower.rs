@@ -81,13 +81,20 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             .map(|f| f.id)
             .collect(),
     };
-    let mut functions: Vec<MirFunction> = module
+    // The stubs no lowered body reaches are not code.
+    let unlowered: std::collections::HashSet<FunctionId> =
+        module.unlowered.iter().copied().collect();
+    let lowered: Vec<&HirFunction> = module
         .functions
+        .iter()
+        .filter(|f| !unlowered.contains(&f.id))
+        .collect();
+    let mut functions: Vec<MirFunction> = lowered
         .iter()
         .map(|f| lower_fn(f, module, target, &ret_tys, &fnv))
         .collect();
     // Coroutine bodies → resume functions + constructors (spec 708).
-    for (i, hf) in module.functions.iter().enumerate() {
+    for (i, hf) in lowered.iter().enumerate() {
         if !(hf.is_async || hf.is_generator) || hf.body.is_none() {
             continue;
         }
@@ -101,7 +108,6 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         functions.push(ctor_fn);
     }
     finish_fn_values(&mut functions, &fnv);
-    functions.retain(|f| !module.unlowered.contains(&f.id));
     if let Some(roots) = &module.roots {
         retain_reachable(&mut functions, roots.clone());
     }
@@ -199,9 +205,14 @@ impl FnValues {
 }
 
 fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
+    let at: HashMap<FunctionId, usize> = functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.id, i))
+        .collect();
     // Closure bodies: param 0 becomes the boxed env, unpacked on entry.
     for (id, env_ty) in fnv.closures.borrow().iter() {
-        let Some(f) = functions.iter_mut().find(|f| f.id == *id) else {
+        let Some(f) = at.get(id).map(|&i| &mut functions[i]) else {
             continue;
         };
         let (Some(&env_local), false) = (f.params.first(), f.blocks.is_empty()) else {
@@ -228,7 +239,7 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
     }
     // Named fns used as values: `fn #w(env, args..) { return f(args..); }`.
     for (target, wrapper) in fnv.wrappers.borrow().iter() {
-        let Some(f) = functions.iter().find(|f| f.id == *target) else {
+        let Some(f) = at.get(target).map(|&i| &functions[i]) else {
             continue;
         };
         let mut locals = vec![LocalDecl {
@@ -1555,6 +1566,7 @@ impl<'a> FnBuilder<'a> {
                     .iter()
                     .map(|f| self.lower_expr_to_operand(f))
                     .collect();
+                let field_ops = self.carrier_fields(&e.ty, fields, field_ops, &result_ty);
                 let dst = self.fresh_local(result_ty.clone());
                 self.push_stmt(Statement::Assign {
                     target: dst,
@@ -1607,17 +1619,7 @@ impl<'a> FnBuilder<'a> {
                 field_ty,
             } => {
                 let target_op = self.lower_expr_to_operand(target);
-                let mir_field_ty = self.ty(field_ty);
-                let dst = self.fresh_local(mir_field_ty.clone());
-                self.push_stmt(Statement::Assign {
-                    target: dst,
-                    rvalue: RValue::FieldRead {
-                        target: target_op,
-                        index: *index,
-                        field_ty: mir_field_ty,
-                    },
-                });
-                Operand::Copy(dst)
+                self.tuple_field(target_op, &target.ty, *index, field_ty)
             }
             HirExprKind::WithField {
                 target,
@@ -2386,6 +2388,100 @@ impl<'a> FnBuilder<'a> {
             MirTy::Struct(_, mut f) if f.len() == 1 => f.remove(0),
             _ => MirTy::Unit,
         }
+    }
+
+    /// The MIR fields of a tuple of HIR type `hir_ty` (HIR `fields`,
+    /// lowered to `ops`). Of a carrier `(is_err, ok, err)`, the constant
+    /// tag picks which value fills the payload; other tuples and carriers
+    /// without an `ok` slot stay as they are.
+    fn carrier_fields(
+        &mut self,
+        hir_ty: &HirTy,
+        fields: &[HirExpr],
+        mut ops: Vec<Operand>,
+        ty: &MirTy,
+    ) -> Vec<Operand> {
+        if !matches!(hir_ty, HirTy::Throws { .. }) {
+            return ops;
+        }
+        let MirTy::Tuple(parts) = ty else {
+            unreachable!("a carrier is a tuple")
+        };
+        if fields.len() != 3 {
+            return ops;
+        }
+        let HirExprKind::Const(ConstVal::Bool(is_err)) = fields[0].kind else {
+            unreachable!("a carrier's tag is constant")
+        };
+        let i = if is_err { 2 } else { 1 };
+        let v = ops.swap_remove(i);
+        let from = self.ty(&fields[i].ty);
+        let payload = self.payload_cast(v, &from, &parts[1]);
+        let tag = if parts[0] == MirTy::Prim(IrPrimTy::I32) {
+            Operand::Const(ConstVal::Int {
+                value: i128::from(is_err),
+                ty: IrPrimTy::I32,
+            })
+        } else {
+            Operand::Const(ConstVal::Bool(is_err))
+        };
+        vec![tag, payload]
+    }
+
+    /// Field `index` of a tuple `target` of HIR type `ty`; of a carrier,
+    /// through [`Self::carrier_field`].
+    fn tuple_field(
+        &mut self,
+        target: Operand,
+        ty: &HirTy,
+        index: u32,
+        field_ty: &HirTy,
+    ) -> Operand {
+        let mir_field_ty = self.ty(field_ty);
+        let (index, slot_ty) = self
+            .carrier_field(ty, index)
+            .unwrap_or_else(|| (index, mir_field_ty.clone()));
+        let dst = self.fresh_local(slot_ty.clone());
+        self.push_stmt(Statement::Assign {
+            target: dst,
+            rvalue: RValue::FieldRead {
+                target,
+                index,
+                field_ty: slot_ty.clone(),
+            },
+        });
+        // An `i32` carrier tag read as `is_err`.
+        if index == 0 && slot_ty != mir_field_ty {
+            let b = self.fresh_local(mir_field_ty);
+            self.push_stmt(Statement::Assign {
+                target: b,
+                rvalue: RValue::BinOp {
+                    op: PrimOp::Ne,
+                    op_ty: slot_ty,
+                    lhs: Operand::Copy(dst),
+                    rhs: Operand::Const(ConstVal::Int {
+                        value: 0,
+                        ty: IrPrimTy::I32,
+                    }),
+                },
+            });
+            return Operand::Copy(b);
+        }
+        self.payload_cast(Operand::Copy(dst), &slot_ty, &mir_field_ty)
+    }
+
+    /// HIR field `index` of a carrier `ty` (`(is_err, ok, err)`, no
+    /// unit `ok`): its MIR field and that field's type. `None` for any
+    /// other `ty`.
+    fn carrier_field(&self, ty: &HirTy, index: u32) -> Option<(u32, MirTy)> {
+        let HirTy::Throws { .. } = ty else {
+            return None;
+        };
+        let MirTy::Tuple(parts) = self.ty(ty) else {
+            unreachable!("a carrier is a tuple")
+        };
+        let i = index.min(1);
+        Some((i, parts[i as usize].clone()))
     }
 
     /// Move a value into / out of a shared payload slot, keeping bits.

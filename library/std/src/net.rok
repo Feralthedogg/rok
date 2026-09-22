@@ -439,6 +439,16 @@ const fn timed_out(what: str) -> IoError {
 const CHUNK: usize = 16384;
 
 impl Sock {
+    /// The fd for `io::copy`'s kernel path: only without timeouts or
+    /// non-blocking mode, which the kernel copy would not keep (`-1`;
+    /// also on Windows, where a socket is no file handle).
+    const fn copy_fd(self) -> i32 {
+        unsafe {
+            if cfg!(target_os = "windows") || self.opts[0] != 0i64 || self.opts[1] >= 0i64 || self.opts[2] >= 0i64 { return -1; }
+            self.fd[0]
+        }
+    }
+
     const fn live(self) throws (IoError) -> i32 {
         unsafe {
             let fd = self.fd[0];
@@ -791,11 +801,13 @@ impl TcpStream {
 
 impl Reader for TcpStream {
     fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.sock.read(buf) }
+    const fn raw_fd(self) -> RawFd { self.sock.copy_fd() }
     fn read_to_end(ref self) throws (IoError) -> List<u8> { try self.sock.read_to_end() }
 }
 
 impl Writer for TcpStream {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.sock.write(buf.byte_slice()) }
+    const fn raw_fd(self) -> RawFd { self.sock.copy_fd() }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.sock.write_all(buf.byte_slice()); }
     fn write_str(ref self, s: str) throws (IoError) { try self.sock.write_all(s.as_bytes()); }
     const fn flush(ref self) throws (IoError) {}
@@ -1235,12 +1247,14 @@ impl UnixStream {
 #[cfg(target_family = "unix")]
 impl Reader for UnixStream {
     fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.sock.read(buf) }
+    const fn raw_fd(self) -> RawFd { self.sock.copy_fd() }
     fn read_to_end(ref self) throws (IoError) -> List<u8> { try self.sock.read_to_end() }
 }
 
 #[cfg(target_family = "unix")]
 impl Writer for UnixStream {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.sock.write(buf.byte_slice()) }
+    const fn raw_fd(self) -> RawFd { self.sock.copy_fd() }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.sock.write_all(buf.byte_slice()); }
     fn write_str(ref self, s: str) throws (IoError) { try self.sock.write_all(s.as_bytes()); }
     const fn flush(ref self) throws (IoError) {}

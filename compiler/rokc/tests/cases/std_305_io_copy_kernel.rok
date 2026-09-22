@@ -1,0 +1,134 @@
+// spec: std 305-io §3.5.4
+// needs: net threads
+// only-os: macos linux
+// expect-exit: 0
+// expect-stdout:
+// file to file: 99990 true, again 0
+// file to socket: 99990 true
+// socket to file: 70000 true
+// timed socket to file: 70000 true
+// buffered: 99990 true
+// pipes: 1000 true true
+
+// `io::copy` hands two OS descriptors to the runtime, which picks the
+// kernel path per pair (Linux `copy_file_range` file -> file, `sendfile`
+// file -> socket / pipe, `splice` from a socket or pipe; macOS
+// `sendfile` file -> socket) or the read / write loop. Copies start at
+// the reader's offset and leave it at the end. A socket with a timeout
+// and a buffered reader go through `read` / `write`.
+use rok::std::io;
+use rok::std::io::{IoError, Reader, Writer, BufReader, byte_buf};
+use rok::std::fs;
+use rok::std::env;
+use rok::std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
+use rok::std::process::{Command, Stdio, ChildStdin, ChildStdout};
+use rok::std::path::Path;
+use rok::std::thread;
+use rok::std::time::Duration;
+
+fn pattern(n: usize, k: usize) -> List<u8> {
+    let out: List<u8> = List::with_capacity(n);
+    for i in 0..n { out.push(((i * k + i / 251) % 256) as u8); }
+    out
+}
+
+fn tail(xs: List<u8>, from: usize) -> List<u8> {
+    let out: List<u8> = List::new();
+    for i in from..xs.len() { out.push(xs[i]); }
+    out
+}
+
+/// A thread that sends `pattern(n, k)` to one connection and closes it.
+fn sender(n: usize, k: usize) throws (IoError) -> (SocketAddr, thread::JoinHandle<i32>) {
+    let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+    let l = try TcpListener::bind(any);
+    let addr = try l.local_addr();
+    let h = thread::spawn(|| {
+        let (c, _) = try! l.accept();
+        try! c.write_all(pattern(n, k));
+        c.close();
+        l.close();
+        0
+    });
+    (addr, h)
+}
+
+fn main() throws (IoError) {
+    let dir = env::temp_dir() / f"rok_io_copy_{rok::std::process::id()}";
+    try fs::create_dir_all(dir);
+    let big = pattern(100000, 7);
+    let src = dir / "src.bin";
+    let dst = dir / "dst.bin";
+    try fs::write(src, big);
+    let want = tail(big, 10);
+
+    using r = try fs::open(src) {
+        try r.read_exact(byte_buf(10));
+        using w = try fs::create(dst) {
+            let n = try io::copy(ref r, ref w);
+            let again = try io::copy(ref r, ref w);
+            println(f"file to file: {n} {(try fs::read(dst)) == want}, again {again}");
+        }
+    }
+
+    // file -> socket: the peer reads it all.
+    let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+    let l = try TcpListener::bind(any);
+    let addr = try l.local_addr();
+    let got = thread::spawn(|| {
+        let (c, _) = try! l.accept();
+        let all = try! c.read_to_end();
+        c.close();
+        l.close();
+        all
+    });
+    let s = try TcpStream::connect(addr);
+    using r = try fs::open(src) {
+        try r.read_exact(byte_buf(10));
+        let n = try io::copy(ref r, ref s);
+        try s.shutdown(Shutdown::Write);
+        println(f"file to socket: {n} {(try! got.join()) == want}");
+    }
+    s.close();
+
+    // socket -> file, plain and with a read timeout.
+    let sent = pattern(70000, 13);
+    for timed in [false, true] {
+        let (a, h) = try sender(70000, 13);
+        let c = try TcpStream::connect(a);
+        if timed { try c.set_read_timeout(Duration::sec(30)); }
+        using w = try fs::create(dst) {
+            let n = try io::copy(ref c, ref w);
+            let label = if timed { "timed socket to file" } else { "socket to file" };
+            println(f"{label}: {n} {(try fs::read(dst)) == sent}");
+        }
+        try! h.join();
+        c.close();
+    }
+
+    // A buffered reader has no descriptor of its own.
+    using f = try fs::open(src) {
+        try f.read_exact(byte_buf(10));
+        let br = BufReader::new(f);
+        using w = try fs::create(dst) {
+            let n = try io::copy(ref br, ref w);
+            println(f"buffered: {n} {(try fs::read(dst)) == want}");
+        }
+    }
+
+    // file -> child stdin pipe -> child stdout pipe -> file.
+    let small = pattern(1000, 3);
+    try fs::write(src, small);
+    let child = try Command::new(Path::from("cat")).stdin(Stdio::Piped).stdout(Stdio::Piped).spawn();
+    let si: ChildStdin = child.stdin ?? panic("no stdin");
+    let so: ChildStdout = child.stdout ?? panic("no stdout");
+    using r = try fs::open(src) {
+        let n = try io::copy(ref r, ref si);
+        try si.close();
+        using w = try fs::create(dst) {
+            try io::copy(ref so, ref w);
+        }
+        println(f"pipes: {n} {(try fs::read(dst)) == small} {(try child.wait()).success()}");
+    }
+    try fs::remove_dir_all(dir);
+}

@@ -1,0 +1,79 @@
+// spec: refs-lang §8.6.5
+// expect-exit: 0
+// expect-stdout:
+// ok 3 [a b] got
+// err 4 [a b c] at 7
+// unit ok 10 / err 11 msg
+// self ok 2 / err 3 neg
+// pair err 5 6 / ok 6 7 sum 15
+// rethrow 10 at 7
+
+// The carrier overlays ok and error (8.6.5); `ref` values travel beside
+// it, so they are written back on both paths (4.7), whatever the
+// payloads are.
+struct Bad { at: i32; why: str; }
+
+fn push_then(ref n: i32, ref s: str, fail: bool) throws (Bad) -> str {
+    n += 1;
+    s = s + (if fail { " c" } else { "" });
+    if fail { throw Bad { at: 7, why: "x" }; }
+    "got"
+}
+
+fn bump(ref n: i32, fail: bool) throws (str) {
+    n += 1;
+    if fail { throw "msg"; }
+}
+
+struct Counter { n: i32; }
+impl Counter {
+    fn step(ref self, by: i32) throws (str) -> i32 {
+        self.n += by;
+        if self.n > 2 { throw "neg"; }
+        self.n
+    }
+}
+
+fn pair(ref a: i32, ref b: i32, fail: bool) throws (i64) -> (i32, i32) {
+    a += 1;
+    b += 1;
+    if fail { throw 15i64; }
+    (a, b)
+}
+
+fn outer(ref n: i32) throws (Bad) -> str {
+    n += 1;
+    let s = "";
+    let r = try push_then(ref n, ref s, true);
+    r
+}
+
+fn main() {
+    let n = 2;
+    let s = "[a b";
+    let r = try push_then(ref n, ref s, false) catch e: Bad { e.why };
+    println(f"ok {n} {s}] {r}");
+    let r2 = try push_then(ref n, ref s, true) catch e: Bad { f"at {e.at}" };
+    println(f"err {n} {s}] {r2}");
+
+    let m = 9;
+    try bump(ref m, false) catch _ { };
+    let a = m;
+    let why = try { try bump(ref m, true); "" } catch e: str { e };
+    println(f"unit ok {a} / err {m} {why}");
+
+    let c = Counter { n: 1 };
+    let x = try c.step(1) catch _ { 0 };
+    let why2 = try { try c.step(1); "" } catch e: str { e };
+    println(f"self ok {x} / err {c.n} {why2}");
+
+    let (p, q) = (4, 5);
+    let e = try { try pair(ref p, ref q, true); 0i64 } catch e: i64 { e };
+    let (p1, q1) = (p, q);
+    let t = try pair(ref p, ref q, false) catch _ { (0, 0) };
+    println(f"pair err {p1} {q1} / ok {t.0} {t.1} sum {e}");
+
+    let k = 8;
+    let r3 = try outer(ref k) catch e: Bad { f"at {e.at}" };
+    println(f"rethrow {k} {r3}");
+}

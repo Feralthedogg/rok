@@ -373,9 +373,11 @@ impl DebugInfo {
     ) -> Option<String> {
         let (size, align) = self.target.size_align(mir);
         let at = self.target.field_offsets(mir)[1];
-        let tag = self.basic_type(PrimTy::U32)?;
+        let tag_ty = mir.debug_tag();
+        let bits = tag_ty.bit_width(self.target.pointer_width);
+        let tag = self.basic_type(tag_ty)?;
         let mut parts = vec![format!(
-            "#llvm.di_derived_type<tag = DW_TAG_member, baseType = {tag}, sizeInBits = 32>"
+            "#llvm.di_derived_type<tag = DW_TAG_member, baseType = {tag}, sizeInBits = {bits}>"
         )];
         for (t, v, p) in variants {
             let fields: Vec<(String, String, u32)> = match p {

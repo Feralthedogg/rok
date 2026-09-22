@@ -1431,6 +1431,10 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
     let block = lower_block(ctx, b);
     ctx.pop_expected();
     let mut block = check_fn_body(ctx, block, fn_name);
+    if ctx.uncaught_in_main {
+        block = uncaught_in_main(ctx, block, b.span);
+    }
+    finish_throwing_body(ctx, &mut block);
     if !ctx.ref_params.is_empty() && !hir_block_diverges(&block) {
         let span = b.span;
         let v = block
@@ -1439,10 +1443,6 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
             .unwrap_or_else(|| super::throws::unit_value(span));
         block.trailing = Some(ref_pack(ctx, v, span));
     }
-    if ctx.uncaught_in_main {
-        block = uncaught_in_main(ctx, block, b.span);
-    }
-    finish_throwing_body(ctx, &mut block);
     block
 }
 
@@ -1498,16 +1498,12 @@ fn check_fn_body(ctx: &mut LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> 
 /// A function with `ref` parameters really returns `ret` packed with
 /// their final values: `(ret, r1, ..)`, without a unit `ret`, and a
 /// single field unwrapped (`ref self` on a unit method returns `Self`).
-/// A throwing function packs its carrier's ok side.
+/// A throwing function's `ret` is its whole carrier: the `ref` values
+/// sit beside it, so they come back on the error path too (spec 4.7)
+/// while the carrier's payload overlays ok and error (spec 8.6.5).
 pub(super) fn ref_packed(ret: &HirTy, refs: &[HirTy]) -> HirTy {
     if refs.is_empty() {
         return ret.clone();
-    }
-    if let HirTy::Throws { ok, err } = ret {
-        return HirTy::Throws {
-            ok: Box::new(ref_packed(ok, refs)),
-            err: err.clone(),
-        };
     }
     let mut fields: Vec<HirTy> = Vec::new();
     if *ret != HirTy::Unit {
@@ -1568,9 +1564,9 @@ pub(super) fn ref_pack(ctx: &LowerCtx<'_>, v: HirExpr, span: rokc_diagnostic::Sp
 /// packed values, `out` its shape): each `ref` parameter's final value
 /// goes back into its argument place (`places`, by parameter index: a
 /// local, a field chain on one, or a `[ref]` cell), the value comes
-/// out. A throwing callee carries the `ref` values on its error path
-/// too (`raise`), so they are written back before the error moves on,
-/// as with a real reference.
+/// out. A throwing callee's carrier is packed whole (`ref_packed`), so
+/// the values are written back before a thrown error moves on, as with
+/// a real reference.
 pub(super) fn ref_unpack(
     ctx: &mut LowerCtx<'_>,
     call: HirExpr,
@@ -1578,40 +1574,20 @@ pub(super) fn ref_unpack(
     places: &[Option<HirExpr>],
 ) -> HirExpr {
     let span = call.span;
-    let ret = match &out.ret {
-        HirTy::Throws { ok, .. } => (**ok).clone(),
-        t => t.clone(),
-    };
     let call_ty = call.ty.clone();
     let tmp = ctx.declare(None, call_ty.clone());
     let mut stmts = vec![HirStmt::Let {
         local: tmp,
         init: call,
     }];
-    // The packed values: the call's, or its carrier's ok slot (never
-    // unit: there is a `ref` parameter).
-    let (packed, whole) = match &call_ty {
-        HirTy::Throws { ok, .. } => (
-            (**ok).clone(),
-            HirExpr {
-                kind: HirExprKind::TupleField {
-                    target: Box::new(hir_local(tmp, &call_ty, span)),
-                    index: 1,
-                    field_ty: (**ok).clone(),
-                },
-                ty: (**ok).clone(),
-                span,
-            },
-        ),
-        t => (t.clone(), hir_local(tmp, t, span)),
-    };
-    let unit = ret == HirTy::Unit;
-    let n = usize::from(!unit) + out.refs.len();
+    let whole = hir_local(tmp, &call_ty, span);
+    let lead = usize::from(out.ret != HirTy::Unit);
+    let n = lead + out.refs.len();
     let field = |i: usize| -> HirExpr {
         if n == 1 {
             return whole.clone();
         }
-        let ty = match &packed {
+        let ty = match &call_ty {
             HirTy::Tuple(ts) => ts[i].clone(),
             t => t.clone(),
         };
@@ -1627,22 +1603,27 @@ pub(super) fn ref_unpack(
     };
     for (k, (pi, _)) in out.refs.iter().enumerate() {
         let place = places.get(*pi).and_then(Option::as_ref);
-        if let Some(st) = place.and_then(|p| assign_place(ctx, p, field(usize::from(!unit) + k))) {
+        if let Some(st) = place.and_then(|p| assign_place(ctx, p, field(lead + k))) {
             stmts.push(st);
         }
     }
-    if matches!(call_ty, HirTy::Throws { .. }) {
-        // Now route a thrown error on.
-        let raised = unpack_call(ctx, hir_local(tmp, &call_ty, span));
-        stmts.push(HirStmt::Expr(raised));
-    }
+    let value = (lead == 1).then(|| field(0));
+    // A carrier: now route a thrown error on.
+    let (trailing, ty) = match value {
+        Some(c) if matches!(out.ret, HirTy::Throws { .. }) => {
+            let v = unpack_call(ctx, c);
+            let ty = v.ty.clone();
+            (Some(v), ty)
+        }
+        v => (v, out.ret.clone()),
+    };
     HirExpr {
         kind: HirExprKind::Block(Box::new(HirBlock {
             stmts,
-            trailing: (!unit).then(|| field(0)),
+            trailing,
             label: None,
         })),
-        ty: ret,
+        ty,
         span,
     }
 }

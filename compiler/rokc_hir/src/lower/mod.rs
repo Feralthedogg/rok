@@ -45,7 +45,7 @@ mod send_check;
 mod throws;
 
 use collect::collect_unknown_paths;
-pub use collect::{library_kept, lower_full};
+pub use collect::{LibraryStage, keep_library, library_kept, lower_full, with_library};
 pub use coro::FN_BLOCK_LABEL;
 use desugar::{
     desugar_nullish_coalesce, desugar_question_dot, desugar_try_q, lower_closure_expr, lower_for,
@@ -1572,7 +1572,7 @@ struct TraitInfo {
     consts: Vec<(String, Ty)>,
 }
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq, PartialOrd, Ord)]
 enum MethodTarget {
     Struct(StructId),
     Enum(EnumId),

@@ -1,0 +1,21 @@
+// spec: std 209-collections §2.9.2
+// expect-exit: 0
+// expect-stdout:
+// 3 3 2 0
+// 0 none 1
+// 1 none
+
+// `find` takes any `AsBytes` needle: a `[u8; N]` value as well as a
+// `Slice<u8>`, `List<u8>`, `b"..."` or `str`.
+fn main() -> i32 {
+    let hay: List<u8> = [104, 101, 108, 108, 111];
+    let s: Slice<u8> = hay[:];
+    let a: [u8; 2] = [108, 111];
+    println(f"{s.find(a):?} {hay.find(a):?} {s.find(b"ll"):?} {hay.find(hay):?}");
+    let z: [u8; 0] = [];
+    let long: [u8; 6] = [104, 101, 108, 108, 111, 33];
+    println(f"{s.find(z):?} {hay.find(long):?} {hay.find("el"):?}");
+    let tail: Slice<u8> = hay[1:];
+    println(f"{tail.find(a[0:1]):?} {tail.find([104u8]):?}");
+    0
+}

@@ -12,6 +12,8 @@ some of them (same algorithm, same output). Not run by CI.
 | `json_tokenizer` | building a 6 MB `str` with `StrBuf`, byte-wise scanning   | ✓ |
 | `word_count`     | `split_whitespace` + `Dict<str, i64>` counting            | ✓ |
 | `throw_parse`    | recursive throwing calls (`try`), errors caught per expr  | ✓ |
+| `throw_wide`     | throwing calls with a `str` result and a two-word error   |   |
+| `channel_contended` | 4 producer threads into one receiver, unbounded and bounded channels | |
 | `alloc_*`, `gc_*`, `store_heavy`, `wb_threads`, `timers`, `fstring_heavy` | allocation, collector, write barriers, timers, f-strings | |
 
 ## Running

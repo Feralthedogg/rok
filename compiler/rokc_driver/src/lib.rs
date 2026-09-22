@@ -756,6 +756,40 @@ fn compile_unit_in(
         .collect();
     let incr = incr::current();
     let ids = incr::Ids::of(files);
+    // The library's collected stage, kept in this process or read back
+    // from the store: with it, the library's files are not parsed (but
+    // under `ROKC_INCR_VERIFY`, which lowers once more without it).
+    let verify = incr::verify().is_some();
+    let flags = format!(
+        "{:?} {lib:?} {:?} {} {} {} {} {} {:?} {} {}",
+        config.externs,
+        prebuilt.iter().map(|p| &p.rokhir.name).collect::<Vec<_>>(),
+        config.check_library,
+        config.inline_prebuilt,
+        config.target.pointer_width,
+        config.target.stdcall_system(),
+        incr::target_key(&cfg_env, &config.target),
+        config.cfg_flags,
+        config.test,
+        config.bench,
+    );
+    let stage_key = ((config.cache_library || incr.is_some()) && !config.keep_ast && lib.is_none())
+        .then(|| library_key(&flags, &roots, &root_dir_kw, &metas, &ext, &prec, files));
+    let kept_parts = stage_key.and_then(|k| kept_library(k, incr.as_deref(), &ids));
+    if kept_parts.is_some() && !verify {
+        let pkgs = package_roots(&root_dir_kw, &roots);
+        PREPASSED.with(|p| {
+            p.borrow_mut().retain(|path, _| {
+                let user = package_of(&pkgs, path).is_some_and(|(i, _)| i == 0);
+                if !user {
+                    if let Some(i) = &incr {
+                        i.count_parse(true);
+                    }
+                }
+                user
+            });
+        });
+    }
     rokc_diagnostic::time("parse", || {
         real_parse(
             incr.as_deref().map(|i| (i, &ids)),
@@ -824,28 +858,15 @@ fn compile_unit_in(
         config.cfg_flags, config.test, config.bench
     );
     let parse_libs = rokc_diagnostic::time_passes().then(std::time::Instant::now);
-    // A cached library parse keeps what HIR collected of it too: with
-    // that kept, the library's items are not needed again.
-    let mut library = cache.then(|| {
-        let flags = format!(
-            "{:?} {lib:?} {:?} {} {} {} {} {}",
-            config.externs,
-            prebuilt.iter().map(|p| &p.rokhir.name).collect::<Vec<_>>(),
-            config.check_library,
-            config.inline_prebuilt,
-            config.target.pointer_width,
-            config.target.stdcall_system(),
-            incr::target_key(&cfg_env, &config.target),
-        );
-        incr::key(&[key.as_bytes(), &files.len().to_le_bytes(), flags.as_bytes()])
-    });
-    let reused = library
-        .filter(|&k| rokc_hir::library_kept(k))
-        .and_then(|k| cached_parts(&key, files, k));
-    let kept = reused.is_some();
-    let (mut items, mut uses, mut d) = match reused {
-        Some((uses, diags)) => (Vec::new(), uses, diags),
-        None => cached(&LIB_CACHE, cache, key, files, |files| {
+    // A kept library stage holds what HIR collected of the library's
+    // items: they are not needed again.
+    let mut library = stage_key;
+    let kept = kept_parts.is_some();
+    let lib_no_implicit = NO_IMPLICIT.with(|n| n.borrow().len());
+    let files_before = files.len();
+    let (mut items, mut uses, mut d) = match &kept_parts {
+        Some(p) if !verify => (Vec::new(), p.uses.clone(), p.diags.clone()),
+        _ => cached(&LIB_CACHE, cache, key, files, |files| {
             let (mut items, mut uses, mut diags) = (Vec::new(), Vec::new(), Vec::new());
             for (i, (prefix, root)) in roots.iter().enumerate() {
                 let first = sources.len();
@@ -873,12 +894,22 @@ fn compile_unit_in(
             (items, uses, diags)
         }),
     };
-    if let (false, Some(k)) = (kept, library) {
-        let mut libs = Vec::new();
-        native_libs(items.iter().map(|(_, i)| i), &mut libs);
-        *LIB_NATIVE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, libs));
+    let parts = kept_parts.unwrap_or_else(|| {
+        let mut native = Vec::new();
+        native_libs(items.iter().map(|(_, i)| i), &mut native);
+        LibParts {
+            uses: uses.clone(),
+            diags: d.clone(),
+            native,
+            no_implicit: NO_IMPLICIT.with(|n| n.borrow()[lib_no_implicit..].to_vec()),
+        }
+    });
+    if kept && !verify {
+        NO_IMPLICIT.with(|n| n.borrow_mut().extend(parts.no_implicit.iter().cloned()));
+    }
+    // A file the key did not see (the pre-pass did not read it).
+    if !kept && files.len() != files_before {
+        library = None;
     }
     if let Some(t) = parse_libs {
         eprintln!(
@@ -964,14 +995,8 @@ fn compile_unit_in(
     diags.append(&mut use_diags);
     let mut libs = Vec::new();
     native_libs(&program.items, &mut libs);
-    if kept {
-        libs.extend(
-            LIB_NATIVE
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .iter()
-                .flat_map(|(_, l)| l.clone()),
-        );
+    if kept && !verify {
+        libs.extend(parts.native.iter().cloned());
     }
     let mut hir = rokc_diagnostic::time("hir", || {
         let lower = |program, input: &rokc_hir::HirInput| {
@@ -985,6 +1010,7 @@ fn compile_unit_in(
                     program.clone(),
                     &rokc_hir::HirInput {
                         bodies: None,
+                        library: None,
                         ..input.clone()
                     },
                 );
@@ -996,6 +1022,9 @@ fn compile_unit_in(
         }
     });
     diags.append(&mut hir.diagnostics);
+    if let (Some(k), false) = (library, kept) {
+        keep_library(k, parts, files);
+    }
     if let Some(i) = incr::current() {
         i.bodies_reused(hir.reuse.replayed, hir.reuse.lowered);
     }
@@ -1926,36 +1955,161 @@ static PREPASS_CACHE: Cached<(PrecTable, Vec<RokDiagnostic>, PrePass)> =
 static LIB_CACHE: Cached<LibParse> = std::sync::Mutex::new(None);
 /// `#[link]` libraries: name, static.
 type NativeLibs = Vec<(String, bool)>;
-/// The native libraries of the cached library's items, by HIR key.
-static LIB_NATIVE: std::sync::Mutex<Option<(u64, NativeLibs)>> = std::sync::Mutex::new(None);
 
-/// The cached library parse's `use`s and diagnostics without its items
-/// (HIR keeps what it collected of them, `library`): its files are added
-/// again. `None` when another parse is cached.
-fn cached_parts(
-    key: &str,
-    files: &mut SourceMap,
-    library: u64,
-) -> Option<(RawUses, Vec<RokDiagnostic>)> {
-    let native = LIB_NATIVE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// What the library's module tree gave besides its items, kept with its
+/// collected stage (`rokc_hir::LibraryStage`).
+#[derive(Clone)]
+struct LibParts {
+    uses: RawUses,
+    diags: Vec<RokDiagnostic>,
+    native: NativeLibs,
+    /// Its modules without the implicit `use rok::core::**;`.
+    no_implicit: Vec<String>,
+}
+
+rokc_core::codec_struct!(LibParts {
+    uses,
+    diags,
+    native,
+    no_implicit
+});
+
+/// The parts of the library stage kept in this process, by key.
+static LIB_PARTS: std::sync::Mutex<Option<(u64, LibParts)>> = std::sync::Mutex::new(None);
+
+/// The library stage of key `k`: kept in this process, or read back from
+/// the store (and kept); its parts.
+fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<LibParts> {
+    let lock = || {
+        LIB_PARTS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    };
+    let here = lock()
         .as_ref()
-        .is_some_and(|(k, _)| *k == library);
-    if !native {
-        return None;
+        .filter(|(at, _)| *at == k && rokc_hir::library_kept(k))
+        .map(|(_, p)| p.clone());
+    let parts = if let Some(p) = here {
+        p
+    } else {
+        let i = incr?;
+        let (parts, stage) = rokc_diagnostic::time("hir library read", || {
+            i.library_get(k, ids, |d| {
+                Some((
+                    <LibParts as rokc_core::codec::Codec>::dec(d)?,
+                    rokc_hir::LibraryStage::dec(d)?,
+                ))
+            })
+        })?;
+        rokc_hir::keep_library(k, stage);
+        *lock() = Some((k, parts.clone()));
+        parts
+    };
+    if let Some(i) = incr {
+        i.library_reused
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let key = format!("{}|{key}", files.len());
-    let (added, uses, diags) = LIB_CACHE
+    Some(parts)
+}
+
+/// Keep the library stage of key `k` HIR collected (with `parts`) for
+/// the next compile: in this process, and in the store.
+fn keep_library(k: u64, parts: LibParts, files: &SourceMap) {
+    if let Some(i) = incr::current() {
+        let ids = incr::Ids::of(files);
+        rokc_diagnostic::time("hir library write", || {
+            rokc_hir::with_library(k, |s| {
+                i.library_put(k, &ids, |e| {
+                    rokc_core::codec::Codec::enc(&parts, e);
+                    s.enc(e)
+                });
+            });
+        });
+    }
+    *LIB_PARTS
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .as_ref()
-        .filter(|(k, _, _)| *k == key)
-        .map(|(_, added, (_, uses, diags))| (added.clone(), uses.clone(), diags.clone()))?;
-    for (path, text) in added {
-        files.add(path, text);
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, parts));
+}
+
+/// The key of the library's collected stage: the build's flags, each
+/// library package's parse tables, the operators, every file outside
+/// the user package (id, path, text, what it includes) and the source
+/// files under the library's directories (a module's file or folder).
+fn library_key(
+    flags: &str,
+    roots: &[LibRoot],
+    user_dir: &Path,
+    metas: &[MetaCtx],
+    ext: &ExtOps,
+    prec: &PrecTable,
+    files: &SourceMap,
+) -> u64 {
+    let pkgs = package_roots(user_dir, roots);
+    let mut h = incr::key(&[flags.as_bytes(), format!("{roots:?}").as_bytes()]);
+    let mut add = |b: &[u8]| h = rokc_core::hash::fast_add(rokc_core::hash::fast_add(h, b), b"\0");
+    for m in &metas[1..] {
+        add(&m.tables_key(ext).to_le_bytes());
     }
-    Some((uses, diags))
+    let mut ops: Vec<String> = prec.entries().map(|e| format!("{e:?}")).collect();
+    ops.sort();
+    add(ops.join(";").as_bytes());
+    let lib_file = |p: &Path| package_of(&pkgs, p).is_none_or(|(i, _)| i != 0);
+    for (i, (path, text)) in files.files().iter().enumerate() {
+        if lib_file(Path::new(path)) {
+            add(&i.to_le_bytes());
+            add(path.as_bytes());
+            add(text.as_bytes());
+        }
+    }
+    let mut includes: Vec<(PathBuf, Vec<u8>)> = PREPASSED.with(|p| {
+        p.borrow()
+            .iter()
+            .filter(|(path, _)| lib_file(path))
+            .flat_map(|(path, (_, pre))| included(path, &pre.sum.includes))
+            .collect()
+    });
+    includes.sort();
+    for (p, data) in includes {
+        add(p.to_string_lossy().as_bytes());
+        add(&data);
+    }
+    for (_, root) in roots {
+        let dir = root.parent().unwrap_or_else(|| Path::new("."));
+        for p in source_listing(dir) {
+            add(p.to_string_lossy().as_bytes());
+        }
+    }
+    h
+}
+
+/// The source files and folders under `dir`, the overlay's included,
+/// sorted.
+fn source_listing(dir: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = OVERLAY.with(|o| {
+        o.borrow()
+            .keys()
+            .filter(|p| p.starts_with(dir))
+            .cloned()
+            .collect()
+    });
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                todo.push(p.clone());
+                out.push(p);
+            } else if p.extension().is_some_and(|x| x == "rok") {
+                out.push(p);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// `parse(files)`, or (`on`) a copy of its last result when `key` and

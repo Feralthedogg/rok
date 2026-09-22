@@ -59,8 +59,9 @@ pub fn debug_visible(name: &str) -> bool {
 pub enum DebugTy {
     /// As its `MirTy` says.
     Mir(MirTy),
-    /// A sum or enum laid out `(i32 tag, payload)` (`.1`): its name and
-    /// its variants, `(stored tag, name, payload)` (`()`: no data).
+    /// A sum or enum laid out `(i32 tag, payload)` (`.1`), or a `throws`
+    /// carrier `(is_err, payload)`: its name and its variants, `(stored
+    /// tag, name, payload)` (`()`: no data).
     Sum(String, MirTy, Vec<(u32, String, DebugTy)>),
     /// A reference to a `GcBuf` object (its name) of these elements.
     Buf(String, Box<DebugTy>),
@@ -93,6 +94,18 @@ impl DebugTy {
     #[must_use]
     pub fn fits(&self, ty: &MirTy) -> bool {
         self.mir() == *ty
+    }
+}
+
+impl MirTy {
+    /// The discriminant type of a [`DebugTy::Sum`] laid out as `self`:
+    /// a carrier's `bool` tag is a byte, any other tag a `u32`.
+    #[must_use]
+    pub fn debug_tag(&self) -> PrimTy {
+        match self {
+            Self::Tuple(ps) if ps.first() == Some(&Self::Prim(PrimTy::Bool)) => PrimTy::U8,
+            _ => PrimTy::U32,
+        }
     }
 }
 

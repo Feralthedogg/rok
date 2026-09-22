@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Source location as byte offsets plus 1-based line/column. `file` is
 /// a `SourceMap` id (0 = unknown).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct Span {
     pub start: u32,
     pub end: u32,

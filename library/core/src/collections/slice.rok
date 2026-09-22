@@ -202,15 +202,36 @@ impl<T, const N: usize> Sliceable<Range<usize>> for [T; N] {
     }
 }
 
+/// Bytes as a view (std 3.5.1): a `str` (its UTF-8), a `List<u8>`, a
+/// `Slice<u8>` or a `[u8; N]`. `std::io` re-exports it.
+pub trait AsBytes {
+    /// The bytes as a view (no copy).
+    fn byte_slice(self) -> Slice<u8>;
+}
+
+impl AsBytes for str {
+    fn byte_slice(self) -> Slice<u8> { self.as_bytes() }
+}
+
+impl AsBytes for List<u8> {
+    const fn byte_slice(self) -> Slice<u8> { self[0:self.len()] }
+}
+
+impl AsBytes for Slice<u8> {
+    const fn byte_slice(self) -> Slice<u8> { self }
+}
+
+/// `b"..."` and `include_bytes!` data: a view of a copy.
+impl<const N: usize> AsBytes for [u8; N] {
+    const fn byte_slice(self) -> Slice<u8> { self[:] }
+}
+
 impl Slice<u8> {
     /// The offset of the first occurrence of `needle`, or `none`; an
-    /// empty needle is at 0. A `b"..."` argument is a view.
+    /// empty needle is at 0.
     // Naive O(n * m) scan.
-    pub const fn find(self, needle: Slice<u8> | List<u8>) -> usize | none {
-        let p = match needle {
-            s: Slice<u8> => s,
-            l: List<u8> => l[:],
-        };
+    pub const fn find<B: AsBytes>(self, needle: B) -> usize | none {
+        let p = needle.byte_slice();
         let m = p.len;
         if m > self.len {
             return none;
@@ -230,7 +251,7 @@ impl Slice<u8> {
 
 impl List<u8> {
     /// `self[:].find(needle)`.
-    pub const fn find(self, needle: Slice<u8> | List<u8>) -> usize | none {
+    pub const fn find<B: AsBytes>(self, needle: B) -> usize | none {
         self[:].find(needle)
     }
 }

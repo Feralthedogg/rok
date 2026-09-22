@@ -491,6 +491,135 @@ fn front_end_reuses_parses_and_bodies() {
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
 }
 
+/// 902.16: what collecting the library's items made (the toolchain's
+/// library and the prebuilt dependencies) is kept across processes. An
+/// edit in the package (a body, a signature, a `const`, a trait impl)
+/// takes it; an edit of a dependency's item the package uses collects
+/// again; a corrupt store is a miss and is written anew. Each build's
+/// program and warnings are a clean build's, and `ROKC_INCR_VERIFY`
+/// fails a build whose lowering differs from one without the store.
+// spec: §9.1.7
+#[test]
+fn library_stage_persists_across_builds() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("incr-library");
+    let dep = "pub const LIMIT: i64 = 3;\n\n\
+               pub trait Shape {\n    fn area(self) -> i64;\n}\n\n\
+               pub fn scale(x: i64) -> i64 {\n    x * LIMIT\n}\n";
+    put(dir.join("dep/src/lib.rok"), dep).unwrap();
+    put(
+        dir.join("app/src/main.rok"),
+        "mod m;\n\nfn main() {\n    let s = m::Sq { side: 2 };\n    \
+         let w = try dep::scale(0) catch _ { 1 };\n    \
+         println(f\"{m::f(1)} {dep::scale(m::K)} {m::total(s)} {w}\");\n}\n",
+    )
+    .unwrap();
+    let m = "pub const K: i64 = 5;\n\n\
+             pub struct Sq {\n    pub side: i64;\n}\n\n\
+             impl dep::Shape for Sq {\n    fn area(self) -> i64 {\n        self.side * self.side\n    }\n}\n\n\
+             pub fn total<T: dep::Shape>(x: T) -> i64 {\n    x.area()\n}\n\n\
+             pub fn f(x: i64) -> i64 {\n    x + 1\n}\n";
+    put(dir.join("app/src/m.rok"), m).unwrap();
+    let run = |vars: &[(&str, &str)], args: &[&str]| {
+        let out = Command::new(ROKC)
+            .current_dir(&dir)
+            .env("ROK_HOME", workspace())
+            .env("ROKC_INCR_VERIFY", "1")
+            .envs(vars.iter().copied())
+            .args(["run", "-v", "app", "--extern", "dep=dep"])
+            .args(args)
+            .arg("--rokr")
+            .arg(&env.rokr)
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        let err = text(&out.stderr);
+        let warnings: Vec<String> = err
+            .lines()
+            .filter(|l| l.starts_with("warning"))
+            .map(str::to_owned)
+            .collect();
+        let kept = err.contains("the library's items collected");
+        (kept, warnings, text(&out.stdout))
+    };
+    // Whether the library stage was taken, and the program's output; the
+    // warnings and output are a clean build's.
+    let build = || {
+        let (kept, w, out) = run(&[], &[]);
+        let clean = dir.join("clean");
+        let target = ["--target-dir", clean.to_str().unwrap()];
+        let (_, clean_w, clean_out) = run(&[("ROKC_INCREMENTAL", "0")], &target);
+        assert_eq!((&w, &out), (&clean_w, &clean_out));
+        assert!(
+            w.iter().any(|l| l.contains("covers no throwing call")),
+            "{w:?}"
+        );
+        (kept, out)
+    };
+    assert_eq!(build(), (false, "2 15 4 0\n".to_owned()));
+    let edit = |from: &str, to: &str| {
+        let path = dir.join("app/src/m.rok");
+        let src = fs::read_to_string(&path).unwrap();
+        assert!(src.contains(from), "{from}");
+        put(path, src.replace(from, to)).unwrap();
+    };
+    // A body.
+    edit("x + 1", "x + 2");
+    assert_eq!(build(), (true, "3 15 4 0\n".to_owned()));
+    // A signature.
+    edit(
+        "pub fn f(x: i64) -> i64 {\n    x + 2",
+        "pub fn f(x: i32) -> i64 {\n    (x as i64) + 2",
+    );
+    assert_eq!(build(), (true, "3 15 4 0\n".to_owned()));
+    // A const the package uses.
+    edit("K: i64 = 5", "K: i64 = 7");
+    assert_eq!(build(), (true, "3 21 4 0\n".to_owned()));
+    // A trait impl.
+    edit("self.side * self.side", "self.side * self.side * self.side");
+    assert_eq!(build(), (true, "3 21 8 0\n".to_owned()));
+    // A dependency's item the package uses: collected again, then kept.
+    put(
+        dir.join("dep/src/lib.rok"),
+        dep.replace("LIMIT: i64 = 3", "LIMIT: i64 = 4"),
+    )
+    .unwrap();
+    assert_eq!(build(), (false, "3 28 8 0\n".to_owned()));
+    edit(") + 2", ") + 3");
+    assert_eq!(build(), (true, "4 28 8 0\n".to_owned()));
+    // A corrupt store: a miss, written anew.
+    let mut stages = Vec::new();
+    let mut todo = vec![dir.join("app")];
+    while let Some(d) = todo.pop() {
+        for e in fs::read_dir(&d).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("library-"))
+            {
+                stages.push(p);
+            }
+        }
+    }
+    assert!(
+        !stages.is_empty(),
+        "no library stage under {}",
+        dir.display()
+    );
+    for p in &stages {
+        let mut bytes = fs::read(p).unwrap();
+        let n = bytes.len();
+        bytes.truncate(n / 2);
+        fs::write(p, bytes).unwrap();
+    }
+    edit(") + 3", ") + 4");
+    assert_eq!(build(), (false, "5 28 8 0\n".to_owned()));
+    edit(") + 4", ") + 5");
+    assert_eq!(build(), (true, "6 28 8 0\n".to_owned()));
+}
+
 /// 2.10.9 / 902.16: a generic body is checked against its bounds in
 /// every build, incremental or not: breaking it fails the build while
 /// the plain bodies replay, and fixing it builds again.
@@ -1852,7 +1981,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "ROKHIR version: 3\n",
+        "ROKHIR version: 4\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
@@ -1860,6 +1989,42 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     ] {
         assert!(info.contains(want), "{want:?} in\n{info}");
     }
+}
+
+/// A prebuilt library's interface carries its `include_str!` /
+/// `include_bytes!` data (spec 9.4.7): moved away from its sources and
+/// data files, its generic and `const` users still get the bytes.
+// spec: §9.4.7
+#[test]
+fn moved_prebuilt_library_keeps_its_included_files() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("prebuilt-include");
+    fs::create_dir_all(dir.join("dep/src/data")).unwrap();
+    put(dir.join("dep/src/data/blob.bin"), "\x01\x02z\n").unwrap();
+    put(dir.join("dep/src/data/note.txt"), "hi \"there\"\n").unwrap();
+    put(
+        dir.join("dep/src/lib.rok"),
+        "pub const NOTE: str = include_str!(\"data/note.txt\");\n\
+         pub fn blob_len<T>(t: T) -> usize {\n    let b = include_bytes!(\"data/blob.bin\");\n    b.len()\n}\n\
+         #[inline]\npub fn first() -> u8 { let b = include_bytes!(\"data/blob.bin\"); b[0] }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    put(
+        dir.join("app/src/main.rok"),
+        "print(dep::NOTE);\nprintln(f\"{dep::blob_len(0)} {dep::first()}\");\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["build", "dep"]);
+    assert_exit(&out, 0);
+    fs::rename(dir.join("dep"), dir.join("moved")).unwrap();
+    let ext = format!(
+        "dep={}",
+        dir.join("moved/target/debug/dep.rokhir").display()
+    );
+    let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "hi \"there\"\n4 1\n");
 }
 
 /// A ROKHIR from another format version or compiler, or built under

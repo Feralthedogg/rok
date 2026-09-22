@@ -1,0 +1,69 @@
+// Throwing calls whose result and error are both two words: `word`
+// returns a `str` slice or throws `BadWord { at, len }` on a word with
+// a digit, through two forwarding levels. Generated text from an LCG.
+struct BadWord { at: usize; len: usize; }
+
+fn gen(n: i64) -> str {
+    let b = StrBuf::new();
+    let x: u64 = 42;
+    for _ in 0..n {
+        x = x.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+        let r = (x >> 33) as i64;
+        let k = r % 7;
+        if k == 0 {
+            b.push_str("ab7 ");
+        } else if k < 4 {
+            b.push_str("lorem ");
+        } else {
+            b.push_str("ipsumdolor ");
+        }
+    }
+    b.to_str()
+}
+
+fn word(s: str, p: List<usize>) throws (BadWord) -> str {
+    let a = p[0];
+    let i = a;
+    let bad = false;
+    while i < s.len() && s.byte(i) != 32u8 {
+        if s.byte(i) < 58u8 {
+            bad = true;
+        }
+        i += 1;
+    }
+    p[0] = i + 1;
+    if bad {
+        throw BadWord { at: a, len: i - a };
+    }
+    s[a:i]
+}
+
+fn field(s: str, p: List<usize>) throws (BadWord) -> str {
+    let w = try word(s, p);
+    w
+}
+
+fn record(s: str, p: List<usize>) throws (BadWord) -> str {
+    let w = try field(s, p);
+    w
+}
+
+fn main() -> i32 {
+    let s = gen(3000000);
+    let p: List<usize> = [0];
+    let n: usize = 0;
+    let bytes: usize = 0;
+    let errs: usize = 0;
+    let at: usize = 0;
+    while p[0] < s.len() {
+        let w = try record(s, p) catch e: BadWord {
+            errs += 1;
+            at = (at + e.at + e.len) % 1000003;
+            ""
+        };
+        n += 1;
+        bytes += w.len();
+    }
+    println(f"{n} {bytes} {errs} {at}");
+    return 0;
+}

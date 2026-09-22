@@ -5,8 +5,8 @@ use rokc_core::{codec_enum, codec_struct};
 
 use crate::{
     EnumId, FnBounds, HirBlock, HirEnumDef, HirEnumVariant, HirExpr, HirExprKind, HirField,
-    HirFunction, HirLocal, HirMatchArm, HirParam, HirPattern, HirStmt, HirStructDef, HirTy,
-    HirUnionKind, NicheArg, NicheVal, Repr, StructId, TraitRef, UnionStorage,
+    HirFunction, HirLocal, HirMatchArm, HirParam, HirPattern, HirStaticDef, HirStmt, HirStructDef,
+    HirTy, HirUnionKind, NicheArg, NicheVal, Repr, StructId, TraitRef, UnionStorage,
 };
 
 macro_rules! codec_id {
@@ -427,3 +427,13 @@ impl Codec for HirTy {
         })
     }
 }
+codec_struct!(HirStaticDef {
+    name,
+    ty,
+    init,
+    is_mut,
+    is_extern,
+    dll_import,
+    init_fn,
+    span
+});

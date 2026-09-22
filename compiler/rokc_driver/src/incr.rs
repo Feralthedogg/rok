@@ -32,15 +32,20 @@ enum Kept {
 }
 
 impl Store {
-    /// The store at `path` (empty when missing, of another compiler or
-    /// unreadable). `magic` names the format.
-    pub fn open(path: PathBuf, magic: &str) -> Self {
-        let mut s = Self {
+    /// An empty store to be written at `path`.
+    pub fn new(path: PathBuf) -> Self {
+        Self {
             path,
             data: Vec::new(),
             index: HashMap::new(),
             kept: Mutex::new(Vec::new()),
-        };
+        }
+    }
+
+    /// The store at `path` (empty when missing, of another compiler or
+    /// unreadable). `magic` names the format.
+    pub fn open(path: PathBuf, magic: &str) -> Self {
+        let mut s = Self::new(path);
         let head = header(magic);
         let Ok(data) = std::fs::read(&s.path) else {
             return s;
@@ -64,16 +69,36 @@ impl Store {
 
     /// The value at `k`, read with spans renumbered for this build.
     pub fn get<T: Codec>(&self, k: u64, ids: &Ids) -> Option<T> {
+        self.get_with(k, ids, T::dec)
+    }
+
+    /// The value at `k` as `read` reads it.
+    pub fn get_with<T>(
+        &self,
+        k: u64,
+        ids: &Ids,
+        read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
+    ) -> Option<T> {
         let &(a, b) = self.index.get(&k)?;
-        let v = read_value(&self.data[a..b], ids)?;
+        let v = read_value(&self.data[a..b], ids, read)?;
         self.lock().push((k, Kept::Old(a, b)));
         Some(v)
     }
 
     /// Keep `v` at `k`.
     pub fn put<T: Codec>(&self, k: u64, v: &T, ids: &Ids) {
+        self.put_with(k, ids, |e| {
+            v.enc(e);
+            true
+        });
+    }
+
+    /// Keep what `write` writes at `k`, unless it gives `false`.
+    pub fn put_with(&self, k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
         let mut e = Enc::new(true);
-        v.enc(&mut e);
+        if !write(&mut e) {
+            return;
+        }
         let mut out = Enc::new(true);
         e.files
             .iter()
@@ -91,9 +116,16 @@ impl Store {
     }
 
     /// Write the kept entries back (atomically: a concurrent build reads
-    /// the old file or the new one).
+    /// the old file or the new one); not when they are the file's.
     pub fn save(&self, magic: &str) {
         let kept = std::mem::take(&mut *self.lock());
+        let old: std::collections::HashSet<u64> = kept
+            .iter()
+            .filter_map(|(k, v)| matches!(v, Kept::Old(..)).then_some(*k))
+            .collect();
+        if kept.iter().all(|(_, v)| matches!(v, Kept::Old(..))) && old.len() == self.index.len() {
+            return;
+        }
         let mut e = Enc::new(true);
         e.buf.extend_from_slice(&header(magic));
         // The last entry at a key wins (a read one, then its new value).
@@ -146,7 +178,11 @@ impl Ids {
 }
 
 /// An entry's value: its files (old id, path), then the value.
-fn read_value<T: Codec>(bytes: &[u8], ids: &Ids) -> Option<T> {
+fn read_value<T>(
+    bytes: &[u8],
+    ids: &Ids,
+    read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
+) -> Option<T> {
     let mut d = Dec::new(bytes);
     let files = Vec::<(u32, String)>::dec(&mut d)?;
     let mut map = vec![0u32; files.iter().map(|f| f.0 as usize + 1).max().unwrap_or(0)];
@@ -155,7 +191,7 @@ fn read_value<T: Codec>(bytes: &[u8], ids: &Ids) -> Option<T> {
     }
     let mut d = Dec::new(&bytes[bytes.len() - d.rest()..]);
     d.files = Some(&map);
-    let v = T::dec(&mut d)?;
+    let v = read(&mut d)?;
     d.done().then_some(v)
 }
 
@@ -169,11 +205,16 @@ thread_local! {
 pub struct Incr {
     pub parse: Store,
     pub bodies: Store,
+    /// Where the library's collected stages are kept, one file per key
+    /// (`library_store`): shared by the packages of an incremental root.
+    library_dir: Option<PathBuf>,
     /// Files whose parse was read from the store, and all files.
     pub parsed_reused: AtomicUsize,
     pub parsed: AtomicUsize,
     /// `HirModule::reuse` of the compile.
     pub body_reuse: std::sync::Mutex<(usize, usize)>,
+    /// The library's stage was read back.
+    pub library_reused: std::sync::atomic::AtomicBool,
 }
 
 /// What a compile took from the incremental stores (`-v`).
@@ -183,6 +224,8 @@ pub struct Reuse {
     pub files: (usize, usize),
     /// Bodies lowered: replayed, and in all.
     pub bodies: (usize, usize),
+    /// The library's collected stage was read back.
+    pub library: bool,
 }
 
 impl Incr {
@@ -203,17 +246,77 @@ impl Incr {
     }
 }
 
+/// Library stages unused this long go when another is written.
+const LIBRARY_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+impl Incr {
+    fn library_path(&self, k: u64) -> Option<PathBuf> {
+        Some(
+            self.library_dir
+                .as_ref()?
+                .join(format!("library-{k:016x}.rokcol")),
+        )
+    }
+
+    /// The library stage of key `k` as `read` reads it.
+    pub fn library_get<T>(
+        &self,
+        k: u64,
+        ids: &Ids,
+        read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
+    ) -> Option<T> {
+        let path = self.library_path(k)?;
+        let v = Store::open(path.clone(), LIBRARY).get_with(k, ids, read)?;
+        // Used: kept from the sweep of `library_put`.
+        if let Ok(f) = std::fs::File::options().append(true).open(&path) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+        Some(v)
+    }
+
+    /// Keep what `write` writes as the library stage of key `k`; the
+    /// stages not used for a while go.
+    pub fn library_put(&self, k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
+        let Some(path) = self.library_path(k) else {
+            return;
+        };
+        let store = Store::new(path.clone());
+        store.put_with(k, ids, write);
+        store.save(LIBRARY);
+        let Some(Ok(dir)) = path.parent().map(std::fs::read_dir) else {
+            return;
+        };
+        for e in dir.flatten() {
+            let p = e.path();
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let old = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > LIBRARY_KEPT);
+            if p != path && old && name.starts_with("library-") && name.ends_with(".rokcol") {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+}
+
 const PARSE: &str = "ROKAST";
 const BODIES: &str = "ROKBODY";
+const LIBRARY: &str = "ROKCOL";
 
 impl Incr {
     fn open(dir: &Path) -> Self {
         Self {
             parse: Store::open(dir.join("parse.rokast"), PARSE),
             bodies: Store::open(dir.join("bodies.rokbody"), BODIES),
+            library_dir: dir.parent().and_then(Path::parent).map(Path::to_path_buf),
             parsed_reused: AtomicUsize::new(0),
             parsed: AtomicUsize::new(0),
             body_reuse: std::sync::Mutex::new((0, 0)),
+            library_reused: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -250,6 +353,7 @@ pub fn with<T>(
                 .body_reuse
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
+            library: i.library_reused.load(Ordering::Relaxed),
         }
     });
     (r, reuse)

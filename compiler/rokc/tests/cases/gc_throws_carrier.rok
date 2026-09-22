@@ -1,0 +1,91 @@
+// spec: refs-lang §8.6.5
+// expect-exit: 0
+// gc-stress: 7
+// expect-stdout:
+// direct 2000 1000 1000
+// closures 600 300
+// gen 30 err 31
+// async 100 odd3 4
+
+// Carriers whose ok and error sides both hold references share one
+// payload (8.6.5); the collector scans only the side the tag selects
+// while it moves objects, through calls, function values, generator
+// and async frames.
+
+struct Bad { msg: str; seen: List<i32>; }
+
+fn make(i: i32) throws (Bad) -> str {
+    let s = f"v{i}-{i * 3}";
+    if i % 2 == 1 {
+        throw Bad { msg: f"odd{i}", seen: [i, i + 1] };
+    }
+    s
+}
+
+fn forward(i: i32) throws (Bad) -> str {
+    let w = try make(i);
+    let junk = f"junk{i}";
+    let _ = junk;
+    w
+}
+
+yield fn words(n: i32) throws (Bad) -> str {
+    for i in 0..n {
+        if i == n - 1 { throw Bad { msg: f"last{i}", seen: [i] }; }
+        yield try forward(i * 2);
+    }
+}
+
+async fn fetch(i: i32) throws (Bad) -> str {
+    await task::yield_now();
+    try forward(i)
+}
+
+async fn total(n: i32) -> str {
+    let good = 0;
+    for i in 0..n {
+        let s = try await fetch(i * 2) catch e: Bad { e.msg };
+        if s == f"v{i * 2}-{i * 6}" { good += 1; }
+    }
+    let bad = try await fetch(3) catch e: Bad { f"{e.msg} {e.seen[1]}" };
+    f"{good} {bad}"
+}
+
+fn main() {
+    let ok = 0;
+    let errs = 0;
+    let n = 0;
+    for i in 0..2000 {
+        let r = try forward(i) catch e: Bad {
+            if e.msg == f"odd{i}" && e.seen[1] == i + 1 { errs += 1; }
+            ""
+        };
+        if r == f"v{i}-{i * 3}" { ok += 1; }
+        n += 1;
+    }
+    println(f"direct {n} {ok} {errs}");
+
+    let f: fn(i32) throws (Bad) -> str = forward;
+    let good = 0;
+    let bad = 0;
+    for i in 0..600 {
+        let r = try f(i) catch e: Bad { e.msg };
+        if r.starts_with("v") { good += 1; } else if r.starts_with("odd") { bad += 1; }
+    }
+    println(f"closures {good * 2} {bad}");
+
+    let g = words(31);
+    let count = 0;
+    let last = try {
+        while true {
+            match try g.next() {
+                w: str => { if w.starts_with("v") { count += 1; } }
+                none => { break; }
+            }
+        }
+        ""
+    } catch e: Bad { e.msg };
+    println(f"gen {count} err {if last == "last30" { 31 } else { 0 }}");
+
+    println(f"async {task::block_on(total(100))}");
+}

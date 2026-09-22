@@ -604,7 +604,7 @@ impl Info<'_> {
                 self.structure(&format!("{name}::{v}"), size, &fields),
             ));
         }
-        let tag = self.base(PrimTy::U32)?;
+        let tag = self.base(mir.debug_tag())?;
         let off = self.b.len() as u32;
         self.b.push(A_STRUCT);
         cstr(&mut self.b, name);

@@ -323,3 +323,19 @@ fn collect_attr(
         },
     );
 }
+
+rokc_core::codec_enum!(LangItemKind {
+    Trait,
+    Struct,
+    Enum,
+    Fn,
+    Const,
+    Static,
+    TypeAlias
+});
+rokc_core::codec_struct!(LangEntry {
+    slot,
+    item_name,
+    kind
+});
+rokc_core::codec_struct!(LangTable { by_slot });

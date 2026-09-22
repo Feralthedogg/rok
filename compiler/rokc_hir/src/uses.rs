@@ -615,3 +615,15 @@ fn resolve_root(segs: &[String], module_path: &str, earlier: &[UseEntry]) -> Vec
             .collect(),
     }
 }
+
+rokc_core::codec_enum!(UseEntry {
+    Single { local, full },
+    Glob { prefix },
+    GlobDeep { prefix }
+});
+rokc_core::codec_struct!(ReExport {
+    module_path,
+    short_name,
+    full_path,
+    vis
+});

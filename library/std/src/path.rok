@@ -10,7 +10,7 @@
 
 use rok::std::fs;
 use rok::std::fs::Metadata;
-use rok::std::io::{IoError, fetch, text_of, list_of, list_of_str, region};
+use rok::std::io::{IoError, fetch, text_of, list_of, list_of_str};
 
 pub struct Path {
     s: str;
@@ -374,23 +374,9 @@ impl RawPath {
         Path { s: s }
     }
 
-    /// The path with each invalid sequence (a bad byte and the
-    /// continuation bytes after it) replaced by U+FFFD.
-    pub fn to_path_lossy(self) -> Path {
-        let (buf, at, n) = region(self.raw);
-        let out = StrBuf::new();
-        let i = 0usize;
-        loop {
-            let bad = unsafe { rok_buf_utf8_error(buf, at + i, n - i) };
-            let good = if bad < 0 { n - i } else { bad as usize };
-            out.push_str(unsafe { rok_str_from_buf(buf, at + i, good) });
-            if bad < 0 { break; }
-            out.push_str("\u{FFFD}");
-            i += good + 1;
-            while i < n && (self.raw[i] & 0xC0u8) == 0x80u8 { i += 1; }
-        }
-        Path { s: out.to_str() }
-    }
+    /// The path with each maximal ill-formed subsequence replaced by
+    /// one U+FFFD (`str::from_utf8_lossy`; Windows: each lone surrogate).
+    pub fn to_path_lossy(self) -> Path { Path { s: str::from_utf8_lossy(self.raw) } }
 }
 
 /// An OS path that need not be valid UTF-16 (3.8.5): Windows WTF-16

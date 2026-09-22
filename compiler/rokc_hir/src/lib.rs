@@ -15,7 +15,9 @@ pub mod walk;
 pub use lower::FN_BLOCK_LABEL;
 pub use lower::type_visible;
 pub use lower::{Bodies, BodyCache, BodyReuse, Unit};
-pub use lower::{library_kept, lower, lower_full, lower_with_uses};
+pub use lower::{
+    LibraryStage, keep_library, library_kept, lower, lower_full, lower_with_uses, with_library,
+};
 pub use print::{instance, print_hir};
 
 /// Origin of the root `main`.
@@ -162,7 +164,7 @@ pub struct HirStaticDef {
     pub span: Span,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct EnumId(pub u32);
 
 #[derive(Clone, Debug)]
@@ -193,7 +195,7 @@ pub struct HirEnumVariant {
     pub arity: usize,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct StructId(pub u32);
 
 #[derive(Clone, Debug)]

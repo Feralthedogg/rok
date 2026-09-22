@@ -30,17 +30,24 @@ pub fn code_ty(args: Vec<MirTy>, ret: MirTy) -> MirTy {
     MirTy::Fn(all, Box::new(ret))
 }
 
-/// Return value of a throwing function: `(is_err: bool, ok, err)`, with
-/// a unit `ok` left out (HIR reads the fields at the same indices). The
-/// payloads sit side by side, not in a union: `ref` parameters ride the
-/// ok slot on the error path too.
-fn carrier(ok: MirTy, err: MirTy) -> MirTy {
-    let mut fields = vec![MirTy::Prim(PrimTy::Bool)];
-    if ok != MirTy::Unit {
-        fields.push(ok);
+/// Return value of a throwing function (spec 8.6.5): `(is_err, payload)`,
+/// the payload one slot for `ok` (tag 0) and `err` (tag 1), or `err`
+/// alone when `ok` is unit. HIR still names `(is_err, ok, err)`; MIR
+/// lowering maps those fields onto the slot (`carrier_field`). A
+/// payload that holds a GC reference is a [`MirTy::Union`] behind an
+/// `i32` tag, so the collector scans it as a sum; the payload is word
+/// aligned there, so the layout is the spec's `i1` one.
+fn carrier(ok: MirTy, err: MirTy, target: &Target) -> MirTy {
+    if ok == MirTy::Unit {
+        return MirTy::Tuple(vec![MirTy::Prim(PrimTy::Bool), err]);
     }
-    fields.push(err);
-    MirTy::Tuple(fields)
+    let payload = unify_payload(&[(0, ok), (1, err)], target).expect("two variants");
+    let tag = if matches!(payload, MirTy::Union(..)) {
+        PrimTy::I32
+    } else {
+        PrimTy::Bool
+    };
+    MirTy::Tuple(vec![MirTy::Prim(tag), payload])
 }
 
 /// The MIR type of `ty` on `target`.
@@ -102,7 +109,7 @@ pub fn lower_ty(ty: &HirTy, module: &HirModule, target: &Target) -> MirTy {
         HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => {
             fat_fn(args.iter().map(lower).collect(), lower(ret))
         }
-        HirTy::Throws { ok, err } => carrier(lower(ok), lower(err)),
+        HirTy::Throws { ok, err } => carrier(lower(ok), lower(err), target),
         HirTy::GcBuf(_) => MirTy::GcRef,
         HirTy::Mlir(t) => MirTy::Mlir(t.clone()),
     }
@@ -123,6 +130,14 @@ pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Debug
             return Some(DebugTy::Buf(debug_name(ty, module), Box::new(of(t))));
         }
         HirTy::AnyTrait(_) => return Some(DebugTy::Any),
+        // A carrier: `ok` / `err` over the payload, by `is_err`.
+        HirTy::Throws { ok, err } if **ok != HirTy::Unit && **ok != HirTy::Never => {
+            return Some(DebugTy::Sum(
+                debug_name(ty, module),
+                lower_ty(ty, module, target),
+                vec![(0, "ok".to_owned(), of(ok)), (1, "err".to_owned(), of(err))],
+            ));
+        }
         HirTy::Closure { env, .. } => {
             let name = format!("env<{}>", debug_name(env, module));
             return Some(DebugTy::Closure(
@@ -201,6 +216,11 @@ fn debug_name(ty: &HirTy, module: &HirModule) -> String {
         HirTy::Tuple(ts) => format!("({})", list(ts)),
         HirTy::Array(t, n) => format!("[{}; {n}]", debug_name(t, module)),
         HirTy::Fn(..) | HirTy::Closure { .. } => "fn".to_owned(),
+        HirTy::Throws { ok, err } => format!(
+            "throws ({}) -> {}",
+            debug_name(err, module),
+            debug_name(ok, module)
+        ),
         _ => "any".to_owned(),
     }
 }
@@ -360,6 +380,8 @@ pub fn enum_payload_ty(id: rokc_hir::EnumId, module: &HirModule, target: &Target
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gc_abi::INTERIOR_REF;
+    use crate::target::GcSlot;
 
     const fn p(t: PrimTy) -> MirTy {
         MirTy::Prim(t)
@@ -399,6 +421,74 @@ mod tests {
         assert_eq!(
             unify_payload(&tagged(&[pair, p(PrimTy::I16)]), &t),
             Some(MirTy::Array(Box::new(p(PrimTy::U32)), 2))
+        );
+    }
+
+    /// Spec 8.6.5: `{i1, union(T, E)}`. An `i32` tag (a payload with GC
+    /// references) keeps the `i1` layout: same offsets and size.
+    #[test]
+    fn carriers_overlay_ok_and_err() {
+        let m = HirModule::default();
+        let throws = |ok: PrimTy, err: HirTy| HirTy::Throws {
+            ok: Box::new(HirTy::Prim(ok)),
+            err: Box::new(err),
+        };
+        let (str_, i64_) = (HirTy::Prim(PrimTy::Str), HirTy::Prim(PrimTy::I64));
+        for triple in [
+            "x86_64-unknown-linux-gnu",
+            "wasm32-wasi",
+            "i686-unknown-linux-gnu",
+        ] {
+            let t = Target::builtin(triple);
+            let c = lower_ty(&throws(PrimTy::Str, i64_.clone()), &m, &t);
+            let MirTy::Tuple(ps) = &c else {
+                panic!("{c:?}")
+            };
+            assert_eq!(ps[0], p(PrimTy::I32));
+            assert!(matches!(ps[1], MirTy::Union(..)));
+            let spec = MirTy::Tuple(vec![p(PrimTy::Bool), ps[1].clone()]);
+            assert_eq!(t.field_offsets(&c), t.field_offsets(&spec), "{triple}");
+            assert_eq!(t.size_align(&c), t.size_align(&spec), "{triple}");
+            // Only the ok side's `str` is a reference, under tag 0.
+            let mut slots = Vec::new();
+            t.gc_offsets(&c, 0, &mut slots);
+            let at = t.field_offsets(&c)[1];
+            assert_eq!(
+                slots,
+                [GcSlot::Sum(
+                    0,
+                    vec![(0, vec![GcSlot::Word(at, INTERIOR_REF)])]
+                )]
+            );
+        }
+        let t = x64();
+        // `-g`: `ok` / `err` variants over the payload, by the tag.
+        let c = throws(PrimTy::Str, i64_);
+        let Some(DebugTy::Sum(name, mir, vs)) = debug_ty(&c, &m, &t) else {
+            panic!("no variant part")
+        };
+        assert_eq!(name, "throws (i64) -> str");
+        assert_eq!(mir.debug_tag(), PrimTy::U32);
+        assert_eq!(
+            vs,
+            [
+                (0, "ok".to_owned(), DebugTy::Mir(p(PrimTy::Str))),
+                (1, "err".to_owned(), DebugTy::Mir(p(PrimTy::I64)))
+            ]
+        );
+        let narrow = debug_ty(&throws(PrimTy::I64, HirTy::Prim(PrimTy::U32)), &m, &t);
+        assert!(matches!(narrow, Some(DebugTy::Sum(_, mir, _)) if mir.debug_tag() == PrimTy::U8));
+        assert_eq!(
+            lower_ty(&throws(PrimTy::I64, HirTy::Prim(PrimTy::U32)), &m, &t),
+            MirTy::Tuple(vec![p(PrimTy::Bool), p(PrimTy::U64)])
+        );
+        let unit_ok = HirTy::Throws {
+            ok: Box::new(HirTy::Unit),
+            err: Box::new(str_),
+        };
+        assert_eq!(
+            lower_ty(&unit_ok, &m, &t),
+            MirTy::Tuple(vec![p(PrimTy::Bool), p(PrimTy::Str)])
         );
     }
 

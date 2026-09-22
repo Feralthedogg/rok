@@ -561,12 +561,14 @@ impl Drop for ReadDirStream {
 
 impl Reader for File {
     fn read(ref self, buf: List<u8>) throws (IoError) -> usize { try self.read(buf) }
+    const fn raw_fd(self) -> i32 { self.fd() }
     fn read_to_end(ref self) throws (IoError) -> List<u8> { try self.read_to_end() }
     fn read_to_str(ref self) throws (IoError) -> str { try self.read_to_str() }
 }
 
 impl Writer for File {
     fn write(ref self, buf: List<u8>) throws (IoError) -> usize { try self.write(buf) }
+    const fn raw_fd(self) -> i32 { self.fd() }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.write_all(buf); }
     fn write_str(ref self, s: str) throws (IoError) { try self.write_str(s); }
     const fn flush(ref self) throws (IoError) {}

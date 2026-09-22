@@ -8,6 +8,7 @@
 // ok a/b true
 // bad 1 a�b
 // lossy x�y
+// maximal a��b�
 // bytes 3
 
 // spec 3.8.3: `Div<str>` and `Div<Path>` on `Path` (and `/=`); 3.8.4 /
@@ -28,7 +29,10 @@ fn main() {
     let bad = RawPath::from_bytes([97u8, 0xFFu8, 98u8]);
     let msg = try bad.try_to_path().as_str() catch e { f"{e.valid_up_to}" };
     println(f"bad {msg} {bad.to_path_lossy().as_str()}");
-    // A stray lead byte with its continuation byte: one replacement.
+    // A truncated sequence is one replacement (a maximal subpart, as
+    // `str::from_utf8_lossy`); a stray continuation byte is its own.
     println(f"lossy {RawPath::from_bytes([120u8, 0xE2u8, 0x82u8, 121u8]).to_path_lossy().as_str()}");
+    let mixed = RawPath::from_bytes([97u8, 0xFFu8, 0x80u8, 98u8, 0xF0u8, 0x9Fu8, 0x98u8]);
+    println(f"maximal {mixed.to_path_lossy().as_str()}");
     println(f"bytes {good.as_bytes().len()}");
 }

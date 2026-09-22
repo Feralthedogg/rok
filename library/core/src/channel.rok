@@ -3,12 +3,14 @@
 // thread, `recv_async` / `for await` / `send_async` suspend the task
 // (`task::park`: receivers on the `meta` address, senders one past it).
 //
-// One `Mutex` and two `Condvar`s around the queue (2.17.6): a bounded
-// channel's is a fixed ring (a `Deque` made at its capacity, so it never
-// grows), an unbounded one's a list of fixed segments (it grows without
-// copying, and drained segments are dropped).
+// The queue (2.17.6): a bounded channel's is a lock-free ring (Vyukov's
+// MPMC: per-slot stamps, CAS on head / tail), an unbounded one's a list
+// of fixed segments behind its own lock (it grows without copying, and
+// drained segments are dropped). Waiting needs no lock: a waiter counts
+// itself in a wait word (`rx` / `tx`) and looks at the queue again before
+// sleeping on it; a push / pop wakes only when someone is counted.
 
-use rok::core::rt::key;
+use rok::core::rt::{atomic_add, atomic_cas, atomic_load, atomic_sub, atomic_xchg, key};
 
 /// What `send` hands back when this sender was closed.
 pub enum SendError<T> {
@@ -53,85 +55,192 @@ impl<T> Error for TrySendError<T> {}
 
 // `meta` slots.
 const SENDERS: usize = 0;
-/// Queue limit, 0 = unbounded (a rendezvous channel has 1).
-const LIMIT: usize = 1;
-/// Values ever pushed / popped (rendezvous senders wait on `POPPED`).
-const PUSHED: usize = 2;
-const POPPED: usize = 3;
 /// 1: `channel_bounded(0)`, a send returns once a receiver took it.
-const RENDEZVOUS: usize = 4;
-/// Receivers blocked in `recv`.
-const WAITING: usize = 5;
-/// 1 while the receiver is suspended in `recv_async` / `for await`.
-const ASYNC_WAITING: usize = 6;
+const RENDEZVOUS: usize = 1;
+
+// Wait words `rx` / `tx` (futex-style, `rok_sync_wait`): a sequence
+// bumped on every wake, threads blocked, tasks suspended.
+const SEQ: usize = 0;
+const BLOCKED: usize = 1;
+const SUSPENDED: usize = 2;
+
+/// `push` result of a full bounded queue.
+const FULL: usize = usize::MAX;
 
 struct Chan<T> {
-    lock: Mutex<i32>;
     meta: GcBuf<usize>;
-    queue: Deque<T> | Segments<T>;
-    not_empty: Condvar;
-    not_full: Condvar;
+    queue: Ring<T> | Segments<T>;
+    /// The receiver waits here for a value or a close.
+    rx: GcBuf<i32>;
+    /// Senders wait here for room or for a rendezvous value to be taken.
+    tx: GcBuf<i32>;
 }
 
-// `queue` is only touched with `lock` held.
 unsafe impl<T: Send> Send for Chan<T> {}
 unsafe impl<T: Send> Sync for Chan<T> {}
 
 impl<T> Chan<T> {
-    const fn get(self, i: usize) -> usize {
-        unsafe {
-            self.meta[i]
+    fn senders(self) -> usize {
+        atomic_load(self.meta, SENDERS, SeqCst)
+    }
+
+    fn rendezvous(self) -> bool {
+        atomic_load(self.meta, RENDEZVOUS, SeqCst) == 1
+    }
+
+    /// Queue `v`; its position (rendezvous), or `FULL`.
+    fn push(self, v: T) -> usize {
+        match self.queue {
+            q: Ring<T> => q.push(v),
+            q: Segments<T> => q.push(v),
         }
     }
 
-    /// Wake tasks parked in `recv_async` (a value or a close arrived).
-    fn notify_async(self) {
-        rok::core::task::unpark(key(self.meta));
+    /// The oldest value, waking senders waiting for room; `none` if empty.
+    fn take(self) -> T | none {
+        let v = match self.queue {
+            q: Ring<T> => q.pop(),
+            q: Segments<T> => q.pop(),
+        };
+        if !(v is none) {
+            self.wake_senders();
+        }
+        v
     }
 
-    /// Wake tasks suspended in `send_async` (room, or a value taken).
-    fn notify_senders(self) {
-        self.not_full.notify_all();
-        rok::core::task::unpark(self.send_key());
+    const fn len(self) -> usize {
+        match self.queue {
+            q: Ring<T> => q.len(),
+            q: Segments<T> => q.len(),
+        }
+    }
+
+    /// Whether the value queued at `pos` has been taken.
+    fn taken(self, pos: usize) -> bool {
+        match self.queue {
+            q: Ring<T> => atomic_load(q.head, 0, SeqCst) > pos,
+            q: Segments<T> => true,
+        }
+    }
+
+    /// After a push or a close.
+    fn wake_receiver(self) {
+        if wake_blocked(self.rx) {
+            rok::core::task::unpark(self.recv_key());
+        }
+    }
+
+    /// After a pop.
+    fn wake_senders(self) {
+        if wake_blocked(self.tx) {
+            rok::core::task::unpark(self.send_key());
+        }
+    }
+
+    fn recv_key(self) -> usize {
+        key(self.meta)
     }
 
     fn send_key(self) -> usize {
         key(self.meta) + 1
     }
-    const fn put(self, i: usize, v: usize) {
-        unsafe {
-            self.meta[i] = v;
+
+}
+
+/// Wake the threads blocked on `w`; whether tasks are suspended on it.
+/// Each waiter counts itself in `w` before its last look at the queue,
+/// and each change to the queue is sequentially consistent before this
+/// reads the counts: one of the two sees the other.
+fn wake_blocked(w: GcBuf<i32>) -> bool {
+    if atomic_load(w, BLOCKED, SeqCst) > 0 {
+        atomic_add(w, SEQ, 1, SeqCst);
+        unsafe { rok_sync_wake(w, SEQ) };
+    }
+    atomic_load(w, SUSPENDED, SeqCst) > 0
+}
+
+// Blocking on a wait word: `let s = enter(w)`, look at the queue once
+// more, `sleep(w, s)` if still not done, then `leave(w)`.
+fn enter(w: GcBuf<i32>) -> i32 {
+    let s = atomic_load(w, SEQ, SeqCst);
+    atomic_add(w, BLOCKED, 1, SeqCst);
+    s
+}
+
+fn sleep(w: GcBuf<i32>, s: i32) {
+    unsafe { rok_sync_wait(w, SEQ, s, -1) };
+}
+
+fn leave(w: GcBuf<i32>) {
+    atomic_sub(w, BLOCKED, 1, SeqCst);
+}
+
+/// A bounded MPMC ring (Vyukov): a slot's stamp is `2 * pos` while the
+/// producer of position `pos` may fill it, `2 * pos + 1` once filled
+/// (the consumer of `pos` may take it), then `2 * (pos + cap)`. Producers
+/// claim positions by CAS on `tail`, the consumer on `head`; the value
+/// moves under the stamp's release / acquire.
+struct Ring<T> {
+    slots: GcBuf<T>;
+    stamps: GcBuf<usize>;
+    head: GcBuf<usize>;
+    tail: GcBuf<usize>;
+    /// One zeroed `T`: what a vacated slot holds (so it keeps nothing alive).
+    zero: GcBuf<T>;
+    cap: usize;
+}
+
+const fn ring<T>(cap: usize) -> Ring<T> {
+    unsafe {
+        let stamps: GcBuf<usize> = buf_new(cap);
+        for i in 0..cap {
+            stamps[i] = 2 * i;
         }
+        Ring { slots: buf_new(cap), stamps: stamps, head: buf_new(1), tail: buf_new(1), zero: buf_new(1), cap: cap }
+    }
+}
+
+impl<T> Ring<T> {
+    fn len(self) -> usize {
+        let h = atomic_load(self.head, 0, SeqCst);
+        atomic_load(self.tail, 0, SeqCst) - h
     }
 
-    const fn full(self) -> bool {
-        self.get(LIMIT) > 0 && self.len() >= self.get(LIMIT)
-    }
-
-    const fn len(self) -> usize {
-        match self.queue {
-            q: Deque<T> => q.len(),
-            q: Segments<T> => q.len(),
-        }
-    }
-
-    // The lock is held for the calls below.
-    const fn push(self, v: T) {
+    fn push(self, v: T) -> usize {
         unsafe {
-            match self.queue {
-                q: Deque<T> => q.push_back(v),
-                q: Segments<T> => q.push(v),
+            loop {
+                let pos = atomic_load(self.tail, 0, Relaxed);
+                let i = pos % self.cap;
+                let s = atomic_load(self.stamps, i, SeqCst);
+                if s == 2 * pos {
+                    if atomic_cas(self.tail, 0, pos, pos + 1, SeqCst, Relaxed) == pos {
+                        self.slots[i] = v;
+                        atomic_xchg(self.stamps, i, 2 * pos + 1, SeqCst);
+                        return pos;
+                    }
+                } else if s < 2 * pos {
+                    return FULL;
+                }
             }
-            self.meta[PUSHED] += 1;
         }
     }
 
-    const fn pop(self) -> T {
+    fn pop(self) -> T | none {
         unsafe {
-            self.meta[POPPED] += 1;
-            match self.queue {
-                q: Deque<T> => q.pop_front() ?? panic("channel: pop from an empty queue"),
-                q: Segments<T> => q.pop(),
+            loop {
+                let pos = atomic_load(self.head, 0, Relaxed);
+                let i = pos % self.cap;
+                let s = atomic_load(self.stamps, i, SeqCst);
+                if s == 2 * pos + 1 {
+                    if atomic_cas(self.head, 0, pos, pos + 1, SeqCst, Relaxed) == pos {
+                        let v = self.slots[i];
+                        self.slots[i] = self.zero[0];
+                        atomic_xchg(self.stamps, i, 2 * (pos + self.cap), SeqCst);
+                        return v;
+                    }
+                } else if s < 2 * pos + 1 {
+                    return none;
+                }
             }
         }
     }
@@ -153,9 +262,11 @@ const fn segment<T>() -> Segment<T> {
     }
 }
 
-/// An unbounded FIFO: values enter the tail segment and leave the head
-/// one; a full tail links a new segment, a drained head is unlinked.
+/// An unbounded FIFO behind its own lock: values enter the tail segment
+/// and leave the head one; a full tail links a new segment, a drained
+/// head is unlinked.
 struct Segments<T> {
+    lock: Mutex<i32>;
     /// `[head, tail]`.
     ends: GcBuf<Segment<T>>;
     /// `[head index, tail index, len]`.
@@ -170,67 +281,71 @@ const fn segments<T>() -> Segments<T> {
         let s = segment();
         ends[0] = s;
         ends[1] = s;
-        Segments { ends: ends, at: buf_new(3), zero: buf_new(1) }
+        Segments { lock: Mutex::new(0), ends: ends, at: buf_new(3), zero: buf_new(1) }
     }
 }
 
 impl<T> Segments<T> {
-    const fn len(self) -> usize {
-        unsafe { self.at[2] }
-    }
-
-    const fn push(self, v: T) {
-        unsafe {
-            if self.at[1] == SEGMENT {
-                let s = segment();
-                self.ends[1].next[0] = s;
-                self.ends[1] = s;
-                self.at[1] = 0;
-            }
-            self.ends[1].slots[self.at[1]] = v;
-            self.at[1] += 1;
-            self.at[2] += 1;
+    fn len(self) -> usize {
+        using g = self.lock.lock() {
+            return unsafe { self.at[2] };
         }
     }
 
-    /// The oldest value; the queue is not empty.
-    const fn pop(self) -> T {
+    fn push(self, v: T) -> usize {
         unsafe {
-            if self.at[2] == 0 {
-                panic("channel: pop from an empty queue");
+            using g = self.lock.lock() {
+                if self.at[1] == SEGMENT {
+                    let s = segment();
+                    self.ends[1].next[0] = s;
+                    self.ends[1] = s;
+                    self.at[1] = 0;
+                }
+                self.ends[1].slots[self.at[1]] = v;
+                self.at[1] += 1;
+                self.at[2] += 1;
             }
-            if self.at[0] == SEGMENT {
-                self.ends[0] = self.ends[0].next[0] ?? panic("channel: segment list broken");
-                self.at[0] = 0;
+        }
+        0
+    }
+
+    fn pop(self) -> T | none {
+        unsafe {
+            using g = self.lock.lock() {
+                if self.at[2] == 0 {
+                    return none;
+                }
+                if self.at[0] == SEGMENT {
+                    self.ends[0] = self.ends[0].next[0] ?? panic("channel: segment list broken");
+                    self.at[0] = 0;
+                }
+                let head = self.ends[0];
+                let v = head.slots[self.at[0]];
+                head.slots[self.at[0]] = self.zero[0];
+                self.at[0] += 1;
+                self.at[2] -= 1;
+                return v;
             }
-            let head = self.ends[0];
-            let v = head.slots[self.at[0]];
-            head.slots[self.at[0]] = self.zero[0];
-            self.at[0] += 1;
-            self.at[2] -= 1;
-            v
         }
     }
 }
 
 const fn make<T>(limit: usize, rendezvous: bool) -> (Sender<T>, Receiver<T>) {
     unsafe {
-        let meta: GcBuf<usize> = buf_new(7);
+        let meta: GcBuf<usize> = buf_new(2);
         meta[SENDERS] = 1;
-        meta[LIMIT] = limit;
         if rendezvous {
             meta[RENDEZVOUS] = 1;
         }
         let ch = Chan {
-            lock: Mutex::new(0),
             meta: meta,
             queue: if limit > 0 {
-                Deque::<T>::with_capacity(limit)
+                ring::<T>(limit)
             } else {
                 segments::<T>()
             },
-            not_empty: Condvar::new(),
-            not_full: Condvar::new(),
+            rx: buf_new(3),
+            tx: buf_new(3),
         };
         let open: GcBuf<bool> = buf_new(1);
         open[0] = true;
@@ -261,27 +376,35 @@ pub struct Sender<T> {
 }
 
 impl<T> Sender<T> {
+    fn is_open(self) -> bool {
+        atomic_load(self.open, 0, SeqCst)
+    }
+
     /// Queue `value` (blocking while a bounded channel is full, and on a
     /// rendezvous channel until it is received). Throws it back if this
     /// sender was closed.
     pub fn send(self, value: T) throws (SendError<T>) {
-        unsafe {
-            if !self.open[0] {
-                throw SendError::Closed(value);
+        if !self.is_open() {
+            throw SendError::Closed(value);
+        }
+        let ch = self.ch;
+        let pos = ch.push(value);
+        while pos == FULL {
+            let s = enter(ch.tx);
+            pos = ch.push(value);
+            if pos == FULL {
+                sleep(ch.tx, s);
             }
-            using g = self.ch.lock.lock() {
-                while self.ch.full() {
-                    g = self.ch.not_full.wait(g);
+            leave(ch.tx);
+        }
+        ch.wake_receiver();
+        if ch.rendezvous() {
+            while !ch.taken(pos) {
+                let s = enter(ch.tx);
+                if !ch.taken(pos) {
+                    sleep(ch.tx, s);
                 }
-                let ticket = self.ch.get(PUSHED);
-                self.ch.push(value);
-                self.ch.not_empty.notify_all();
-                self.ch.notify_async();
-                if self.ch.get(RENDEZVOUS) == 1 {
-                    while self.ch.get(POPPED) <= ticket {
-                        g = self.ch.not_full.wait(g);
-                    }
-                }
+                leave(ch.tx);
             }
         }
     }
@@ -289,49 +412,35 @@ impl<T> Sender<T> {
     /// Queue `value` without blocking: `Full` if a bounded channel is
     /// full, or if no receiver is waiting on a rendezvous channel.
     pub fn try_send(self, value: T) throws (TrySendError<T>) {
-        unsafe {
-            if !self.open[0] {
-                throw TrySendError::Closed(value);
-            }
-            let sent = false;
-            using g = self.ch.lock.lock() {
-                let ready = if self.ch.get(RENDEZVOUS) == 1 {
-                    self.ch.get(WAITING) + self.ch.get(ASYNC_WAITING) > self.ch.len()
-                } else {
-                    !self.ch.full()
-                };
-                if ready {
-                    self.ch.push(value);
-                    sent = true;
-                }
-            }
-            if !sent {
+        if !self.is_open() {
+            throw TrySendError::Closed(value);
+        }
+        let ch = self.ch;
+        if ch.rendezvous() {
+            let waiting = atomic_load(ch.rx, BLOCKED, SeqCst) + atomic_load(ch.rx, SUSPENDED, SeqCst);
+            if waiting as usize <= ch.len() {
                 throw TrySendError::Full(value);
             }
-            self.ch.not_empty.notify_all();
-            self.ch.notify_async();
         }
+        if ch.push(value) == FULL {
+            throw TrySendError::Full(value);
+        }
+        ch.wake_receiver();
     }
 
     /// `try await tx.send_async(v)` inside async code: like `send`, but
     /// suspends the task (not the thread) while a bounded channel is
     /// full, and on a rendezvous channel until the value is received.
     pub const fn send_async(self, value: T) -> SendFuture<T> {
-        SendFuture { tx: self, value: value, pushed: false, ticket: 0 }
+        SendFuture { tx: self, value: value, pushed: false, ticket: 0, counted: false }
     }
 
     /// Close this sender; later `send`s on it throw `Closed`.
     pub fn close(self) {
-        unsafe {
-            using g = self.ch.lock.lock() {
-                if self.open[0] {
-                    self.open[0] = false;
-                    self.ch.meta[SENDERS] -= 1;
-                }
-            }
-            self.ch.not_empty.notify_all();
-            self.ch.notify_async();
+        if atomic_xchg(self.open, 0, false, SeqCst) {
+            atomic_sub(self.ch.meta, SENDERS, 1, SeqCst);
         }
+        self.ch.wake_receiver();
     }
 }
 
@@ -339,9 +448,7 @@ impl<T> Clone for Sender<T> {
     /// Another open sender on the same channel.
     fn clone(self) -> Sender<T> {
         unsafe {
-            using g = self.ch.lock.lock() {
-                self.ch.meta[SENDERS] += 1;
-            }
+            atomic_add(self.ch.meta, SENDERS, 1, SeqCst);
             let open: GcBuf<bool> = buf_new(1);
             open[0] = true;
             Sender { ch: self.ch, open: open }
@@ -364,41 +471,30 @@ impl<T> Receiver<T> {
     /// The next value, blocking until one arrives; `none` once the queue
     /// is empty and every sender has closed.
     pub fn recv(self) -> T | none {
-        unsafe {
-            let got = false;
-            let v: T | none = none;
-            using g = self.ch.lock.lock() {
-                self.ch.meta[WAITING] += 1;
-                while self.ch.len() == 0 && self.ch.get(SENDERS) > 0 {
-                    g = self.ch.not_empty.wait(g);
-                }
-                self.ch.meta[WAITING] -= 1;
-                if self.ch.len() > 0 {
-                    v = self.ch.pop();
-                    got = true;
-                }
+        let ch = self.ch;
+        loop {
+            // `closed` first: what a sender queued before closing is in
+            // the queue by then.
+            let closed = ch.senders() == 0;
+            let v = ch.take();
+            if closed || !(v is none) {
+                return v;
             }
-            if got {
-                self.ch.notify_senders();
+            let s = enter(ch.rx);
+            closed = ch.senders() == 0;
+            v = ch.take();
+            if closed || !(v is none) {
+                leave(ch.rx);
+                return v;
             }
-            v
+            sleep(ch.rx, s);
+            leave(ch.rx);
         }
     }
 
     /// The next value if one is queued; `none` if empty or closed.
     pub fn try_recv(self) -> T | none {
-        let got = false;
-        let v: T | none = none;
-        using g = self.ch.lock.lock() {
-            if self.ch.len() > 0 {
-                v = self.ch.pop();
-                got = true;
-            }
-        }
-        if got {
-            self.ch.notify_senders();
-        }
-        v
+        self.ch.take()
     }
 
     /// Values until the channel closes (also `for v in rx`).
@@ -444,36 +540,23 @@ impl<T> rok::core::future::Future for RecvFuture<T> {
 impl<T> rok::core::stream::Stream for Receiver<T> {
     type Item = T;
     fn poll_next(ref self, ref ctx: rok::core::future::Context) -> rok::core::future::Poll<T | none> {
+        let ch = self.ch;
         // A cancelled task leaves at this `await`: a value taken now
         // would be dropped, so leave it queued (and stop counting as a
         // suspended receiver).
         if rok::core::task::cancel_requested(ctx) {
-            using g = self.ch.lock.lock() {
-                self.ch.put(ASYNC_WAITING, 0);
-            }
+            atomic_xchg(ch.rx, SUSPENDED, 0, SeqCst);
             return rok::core::future::Poll::Pending;
         }
-        // Park before looking, so a send after the look unparks us.
-        rok::core::task::park(key(self.ch.meta), ctx.waker());
-        let got = false;
-        let closed = false;
-        let v: T | none = none;
-        using g = self.ch.lock.lock() {
-            if self.ch.len() > 0 {
-                v = self.ch.pop();
-                got = true;
-            } else if self.ch.get(SENDERS) == 0 {
-                closed = true;
-            }
-            // A rendezvous `try_send` counts a suspended receiver.
-            self.ch.put(ASYNC_WAITING, if got || closed { 0 } else { 1 });
-        }
-        if got {
-            self.ch.notify_senders();
+        // Park and count before looking, so a send after the look
+        // unparks us (single consumer: the count is a flag).
+        rok::core::task::park(ch.recv_key(), ctx.waker());
+        atomic_xchg(ch.rx, SUSPENDED, 1, SeqCst);
+        let closed = ch.senders() == 0;
+        let v = ch.take();
+        if closed || !(v is none) {
+            atomic_xchg(ch.rx, SUSPENDED, 0, SeqCst);
             return rok::core::future::Poll::Ready(v);
-        }
-        if closed {
-            return rok::core::future::Poll::Ready(none);
         }
         rok::core::future::Poll::Pending
     }
@@ -485,49 +568,51 @@ pub struct SendFuture<T> {
     value: T;
     pushed: bool;
     ticket: usize;
+    /// Counted in the channel's suspended senders.
+    counted: bool;
 }
 
 impl<T> SendFuture<T> {
-    pub fn poll(ref self, ref ctx: rok::core::future::Context) throws (SendError<T>) -> rok::core::future::Poll<()> {
-        unsafe {
-            let ch = self.tx.ch;
-            if !self.pushed {
-                if !self.tx.open[0] {
-                    throw SendError::Closed(self.value);
-                }
-                // A cancelled task does not send.
-                if rok::core::task::cancel_requested(ctx) {
-                    return rok::core::future::Poll::Pending;
-                }
-                // Park before looking, so a receive after the look unparks us.
-                rok::core::task::park(ch.send_key(), ctx.waker());
-                using g = ch.lock.lock() {
-                    if !ch.full() {
-                        self.ticket = ch.get(PUSHED);
-                        ch.push(self.value);
-                        self.pushed = true;
-                    }
-                }
-                if !self.pushed {
-                    return rok::core::future::Poll::Pending;
-                }
-                ch.not_empty.notify_all();
-                ch.notify_async();
-                if ch.get(RENDEZVOUS) == 0 {
-                    return rok::core::future::Poll::Ready(());
-                }
-            }
-            // Rendezvous: done once a receiver took our value.
-            rok::core::task::park(ch.send_key(), ctx.waker());
-            let taken = false;
-            using g = ch.lock.lock() {
-                taken = ch.get(POPPED) > self.ticket;
-            }
-            if taken {
-                return rok::core::future::Poll::Ready(());
-            }
-            rok::core::future::Poll::Pending
+    fn uncount(ref self) {
+        if self.counted {
+            atomic_sub(self.tx.ch.tx, SUSPENDED, 1, SeqCst);
+            self.counted = false;
         }
+    }
+
+    pub fn poll(ref self, ref ctx: rok::core::future::Context) throws (SendError<T>) -> rok::core::future::Poll<()> {
+        let ch = self.tx.ch;
+        // A cancelled task does not send.
+        if rok::core::task::cancel_requested(ctx) && !self.pushed {
+            self.uncount();
+            return rok::core::future::Poll::Pending;
+        }
+        // Park and count before looking, so a receive after the look
+        // unparks us.
+        rok::core::task::park(ch.send_key(), ctx.waker());
+        if !self.counted {
+            atomic_add(ch.tx, SUSPENDED, 1, SeqCst);
+            self.counted = true;
+        }
+        if !self.pushed {
+            if !self.tx.is_open() {
+                self.uncount();
+                throw SendError::Closed(self.value);
+            }
+            let pos = ch.push(self.value);
+            if pos == FULL {
+                return rok::core::future::Poll::Pending;
+            }
+            self.pushed = true;
+            self.ticket = pos;
+            ch.wake_receiver();
+        }
+        // Rendezvous: done once a receiver took our value.
+        if ch.rendezvous() && !ch.taken(self.ticket) {
+            return rok::core::future::Poll::Pending;
+        }
+        self.uncount();
+        rok::core::future::Poll::Ready(())
     }
 }
 

@@ -879,3 +879,16 @@ rokc_core::codec_struct!(LiteralDef {
     file,
     span
 });
+
+rokc_core::codec_enum!(Shape {
+    List,
+    Dict,
+    Set,
+    Range,
+    RangeInclusive,
+    RangeFrom,
+    RangeTo,
+    RangeToInclusive,
+    RangeFull,
+    Tuple
+});

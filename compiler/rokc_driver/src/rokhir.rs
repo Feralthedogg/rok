@@ -29,7 +29,7 @@ use crate::SourceFile;
 use rokc_diagnostic::SourceMap;
 
 /// Bumped on any change to the layout or to what the body holds.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 const MAGIC: &[u8; 4] = b"ROKH";
 
 #[derive(Clone, Debug, Default)]
@@ -333,6 +333,41 @@ fn strip(text: &str, file_id: u32, items: &[Item]) -> String {
     out
 }
 
+/// `text` (of `file`) with each `include_str!` / `include_bytes!` replaced
+/// by the literal it reads (line breaks kept), so a relocated interface
+/// reads no file.
+fn inline_includes(text: &str, file: &Path) -> String {
+    use rokc_lexer::TokenKind as K;
+    let (tokens, _) = rokc_lexer::Lexer::new(text, String::new()).lex_all();
+    let file = file.to_string_lossy();
+    let mut out = String::new();
+    let mut at = 0;
+    for w in tokens.windows(5) {
+        let (K::Ident(name), K::Bang, K::LParen, K::StrLit(lit), K::RParen) =
+            (&w[0].kind, &w[1].kind, &w[2].kind, &w[3].kind, &w[4].kind)
+        else {
+            continue;
+        };
+        let bytes = match name.as_str() {
+            "include_bytes" => true,
+            "include_str" => false,
+            _ => continue,
+        };
+        let (s, e) = (w[0].span.start as usize, w[4].span.end as usize);
+        let lit = match rokc_parser::parser::include_file(&file, lit, bytes) {
+            Ok(rokc_ast::Literal::ByteStr(b)) => format!("b\"{b}\""),
+            Ok(rokc_ast::Literal::Str(b)) => format!("\"{b}\""),
+            _ => continue,
+        };
+        out.push_str(&text[at..s]);
+        out.push_str(&lit);
+        out.extend(text[s..e].chars().filter(|&c| c == '\n'));
+        at = e;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// The interface files of package `pkg` (its `SourceFile`s, mounted at
 /// `pkg`) whose root file is in `dir`, with its `any` seeds (`(module,
 /// text)`, HIR `any_seeds`) appended to their modules' files.
@@ -367,6 +402,7 @@ pub fn interface(
             } else {
                 text.clone()
             };
+            text = inline_includes(&text, &f.path);
             let module = f.module.join("::");
             let root = f.module.len() <= 1;
             for (m, seed) in seeds {

@@ -2,13 +2,15 @@
 // expect-exit: 0
 // spec: std 308-path §3.8.2 / §3.8.5
 //
-// Windows OS surface: `RawPath` UTF-16 forms, `ExitStatus` codes,
+// Windows OS surface: `RawPath` UTF-16 forms, `RawStr` as UTF-16, `ExitStatus` codes,
 // argument quoting through `CreateProcessW`, user directories, `;` path
 // lists and a file round trip through UTF-16 paths.
 // expect-stdout:
 // raw ok
 // lone surrogate at 1
 // a?b
+// rawstr 5 true
+// args ok
 // exit 3
 // quoted ok
 // home ok
@@ -32,6 +34,10 @@ fn main() {
     let r = RawPath::from_wide(bad);
     try r.try_to_path() catch e { println(f"lone surrogate at {e.valid_up_to}"); };
     println(r.to_path_lossy().as_str().replace("\u{FFFD}", "?"));
+    let rs = env::RawStr::from_wide(bad);
+    println(f"rawstr {rs.len()} {rs.as_wide() == bad}");
+    let a0 = env::args_os()[0];
+    if env::RawStr::from_wide(a0.as_wide()) == a0 { println("args ok"); }
 
     let st = try Command::new("cmd").args(["/c", "exit 3"]).status() catch _ { panic("spawn") };
     println(f"exit {st.code() ?? -1}");
