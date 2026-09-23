@@ -109,7 +109,8 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use rokr_common::object_header::{
     FLAG_CARDED, FLAG_FORWARDED, FLAG_LARGE, FLAG_MARK, FLAG_NOEVAC, FLAG_NOMOVE, FLAG_PINNED,
-    FLAG_SATB, FLAG_SCANNED, FLAG_STICKY, FLAG_UNLOGGED, HEADER_ALIGN, HEADER_SIZE, ObjectHeader,
+    FLAG_SATB, FLAG_SCANNED, FLAG_STICKY, FLAG_UNLOGGED, FLAG_WIPE, HEADER_ALIGN, HEADER_SIZE,
+    ObjectHeader,
 };
 use rokr_common::{fatal, sys};
 
@@ -117,8 +118,8 @@ mod concurrent;
 pub mod world;
 
 use rokr_common::gc_abi::{
-    AMBIGUOUS, ANY_SLOT, INTERIOR_REF, KIND_MASK, STRONG_REF, SUM_DESC_SHIFT, SUM_PAYLOAD,
-    USER_TYPE_BASE, WEAK_REF, WEAK_TYPE_ID,
+    AMBIGUOUS, ANY_SLOT, INTERIOR_REF, KIND_MASK, MIN_OBJECT_SIZE, PLAIN_TYPE_ID, STRONG_REF,
+    SUM_DESC_SHIFT, SUM_PAYLOAD, USER_TYPE_BASE, WEAK_REF, WEAK_TYPE_ID,
 };
 pub use rokr_common::gc_abi::{ANY_BOXED, SCAN_WORDS_TYPE_ID};
 
@@ -507,7 +508,7 @@ pub fn alloc(size: usize, align: usize, type_id: u32) -> *mut u8 {
     // Type id 0 (invalid, 801 §8.1.2) would read as free memory in a
     // block.
     if size8 >= LOS_THRESHOLD || align > HEADER_ALIGN || type_id == 0 {
-        return alloc_large(size, align, type_id);
+        return alloc_large(size, align, type_id, 0);
     }
     let [cursor, limit] = rokr_common::tls::tlab();
     // SAFETY: this thread's own TLAB slots; `cursor..limit` is zeroed
@@ -1034,9 +1035,10 @@ const fn los_total(p: &Prefix) -> usize {
     p.offset + p.size + p.size.div_ceil(CARD_SIZE)
 }
 
-/// A large (or over-aligned) object: its own zeroed allocation. The
-/// payload (after the header) is `align`-aligned.
-fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
+/// A large (or over-aligned) object: its own zeroed allocation, header
+/// flags `LARGE | flags`. The payload (after the header) is
+/// `align`-aligned.
+fn alloc_large(size: usize, align: usize, type_id: u32, flags: u32) -> *mut u8 {
     let align = align.max(HEADER_ALIGN);
     let offset = (size_of::<Prefix>() + HEADER_SIZE).next_multiple_of(align) - HEADER_SIZE;
     let Some(total) = size
@@ -1073,7 +1075,7 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
             offset,
             cards: obj.add(size),
         });
-        init_header(obj, type_id, size, FLAG_LARGE);
+        init_header(obj, type_id, size, FLAG_LARGE | flags);
         h.los = obj;
         h.los_count += 1;
         h.live_bytes += size;
@@ -1081,6 +1083,42 @@ fn alloc_large(size: usize, align: usize, type_id: u32) -> *mut u8 {
     };
     world::unlock();
     obj
+}
+
+/// A secret buffer of `len` zeroed bytes (`rok_gc_secret_new`).
+///
+/// A LOS object with no references, so it never moves and is never
+/// copied, marked `WIPE`, so the sweep that frees it zeroes it first
+/// ([`wipe`]).
+pub fn alloc_secret(len: usize) -> *mut u8 {
+    let Some(size) = len
+        .checked_add(HEADER_SIZE + 7)
+        .filter(|&s| isize::try_from(s).is_ok())
+    else {
+        fatal(b"rok runtime: allocation too large");
+    };
+    let size = (size & !7).max(MIN_OBJECT_SIZE as usize);
+    alloc_large(size, HEADER_ALIGN, PLAIN_TYPE_ID, FLAG_WIPE)
+}
+
+/// Zero the payload of the LOS object `obj` with volatile stores, which
+/// the optimizer keeps even when nothing reads the memory again (the
+/// release right after the sweep's wipe).
+///
+/// # Safety
+/// `obj` must be a live LOS object (or one the sweep is freeing).
+#[allow(clippy::cast_ptr_alignment)] // the payload is 8-aligned
+pub unsafe fn wipe(obj: *mut u8) {
+    // SAFETY: a LOS object's size (header included) is a multiple of 8
+    // and its payload is 8-aligned.
+    unsafe {
+        let words = ((*prefix(obj)).size - HEADER_SIZE) / 8;
+        let p = obj.add(HEADER_SIZE).cast::<u64>();
+        for i in 0..words {
+            p.add(i).write_volatile(0);
+        }
+    }
+    core::sync::atomic::compiler_fence(Ordering::SeqCst);
 }
 
 /// Register the 802 `ScanTable` for `type_id`. Ids below the user range
@@ -2141,6 +2179,11 @@ fn sweep_los(full: bool, concurrent: bool) -> usize {
             } else {
                 *link = (*p).next;
                 h.los_count -= 1;
+                if (*header(o)).gc_flags.load(Ordering::Relaxed) & FLAG_WIPE != 0 {
+                    wipe(o);
+                    #[cfg(test)]
+                    tests::WIPED.fetch_add(1, Ordering::Relaxed);
+                }
                 let (base, total) = (o.sub((*p).offset), los_total(&*p));
                 if total >= LOS_MAP_MIN {
                     sys::unmap(base, total);
@@ -2701,6 +2744,49 @@ mod tests {
         concurrent_mark_keeps_the_snapshot();
         evacuation_defragments_sparse_blocks();
         weak_cells_clear_and_follow_moves();
+        secrets_stay_in_place_and_are_wiped();
+    }
+
+    /// Secret buffers freed by a sweep, which wipes them first.
+    pub static WIPED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    /// A secret buffer: zeroed, a LOS object (never moved), kept by a
+    /// collection while reachable, zeroed by `wipe`, and wiped by the
+    /// sweep that frees it.
+    fn secrets_stay_in_place_and_are_wiped() {
+        let base = live_bytes();
+        let s = alloc_secret(37);
+        // SAFETY: `s` has a payload of 40 bytes; the frame is unlinked
+        // before it dies.
+        unsafe {
+            let f = (*header(s)).gc_flags.load(Ordering::Relaxed);
+            assert_eq!(f & (FLAG_LARGE | FLAG_WIPE), FLAG_LARGE | FLAG_WIPE);
+            assert_eq!((*prefix(s)).size, HEADER_SIZE + 40);
+            let pay = core::slice::from_raw_parts_mut(s.add(HEADER_SIZE), 40);
+            assert!(pay.iter().all(|&b| b == 0));
+            pay.fill(0xa5);
+            let mut root = s as usize;
+            let mut frame: (Frame, *mut usize) = (
+                Frame {
+                    prev: ptr::null_mut(),
+                    count: 1,
+                },
+                &mut root,
+            );
+            let top = rokr_common::tls::shadow_stack_top();
+            *top = (&raw mut frame).cast();
+            collect();
+            assert!(pay.iter().all(|&b| b == 0xa5));
+            wipe(s);
+            assert!(pay.iter().all(|&b| b == 0));
+            pay.fill(0x5a);
+            let wiped = WIPED.load(Ordering::Relaxed);
+            *frame.1 = 0;
+            collect();
+            assert_eq!(WIPED.load(Ordering::Relaxed), wiped + 1);
+            assert_eq!(live_bytes(), base);
+            *top = ptr::null_mut();
+        }
     }
 
     /// Weak cells: a minor collection clears the one whose young referent

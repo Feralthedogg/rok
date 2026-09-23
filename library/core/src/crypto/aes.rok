@@ -1,12 +1,9 @@
 // AES-128 / AES-256 encryption (FIPS 197), constant time: bitsliced
 // over 32-bit words, two blocks at a time (BearSSL's aes_ct layout). No
-// table lookup; the S-box is the Boyar-Peralta circuit.
+// table lookup; the S-box is the Boyar-Peralta circuit. Round keys are
+// in secret storage.
 
-/// An expanded AES key: `rounds + 1` round keys of 8 bitsliced words.
-pub(pkg) struct AesKey {
-    sk: [u32; 120];
-    rounds: usize;
-}
+use sup::secret::SecretWords;
 
 /// Bit `i` of every byte gathered into word `i` (and back: an
 /// involution).
@@ -227,86 +224,75 @@ fn le32(k: Slice<u8>, i: usize) -> u32 {
     (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
 }
 
-impl AesKey {
-    /// The schedule of a 16- or 32-byte key (the caller checks the
-    /// length).
-    pub(pkg) fn new(key: Slice<u8>) -> AesKey {
-        let rcon: [u32; 10] = [0x01u32, 0x02u32, 0x04u32, 0x08u32, 0x10u32, 0x20u32, 0x40u32, 0x80u32, 0x1bu32, 0x36u32];
-        let nk = key.len() / 4;
-        let rounds = nk + 6;
-        let nkf = (rounds + 1) * 4;
-        let w: [u32; 120] = [0u32; 120];
-        let tmp = 0u32;
-        for i in 0..nk {
-            tmp = le32(key, 4 * i);
-            w[2 * i] = tmp;
-            w[2 * i + 1] = tmp;
-        }
-        let j = 0usize;
-        let k = 0usize;
-        for i in nk..nkf {
-            if j == 0 {
-                tmp = sub_word(tmp.rotate_right(8)) ^ rcon[k];
-            } else if nk > 6 && j == 4 {
-                tmp = sub_word(tmp);
-            }
-            tmp = tmp ^ w[2 * (i - nk)];
-            w[2 * i] = tmp;
-            w[2 * i + 1] = tmp;
-            j += 1;
-            if j == nk {
-                j = 0;
-                k += 1;
-            }
-        }
-        // Each round key orthogonalized, then compressed (one copy per
-        // block slot kept) and expanded back to both slots.
-        let sk: [u32; 120] = [0u32; 120];
-        let r = 0usize;
-        while r < nkf {
-            let q: [u32; 8] = [0u32; 8];
-            for t in 0usize..8 { q[t] = w[2 * r + t]; }
-            ortho(ref q);
-            for t in 0usize..4 {
-                let c = (q[2 * t] & 0x55555555u32) | (q[2 * t + 1] & 0xaaaaaaaau32);
-                let x = c & 0x55555555u32;
-                let y = c & 0xaaaaaaaau32;
-                sk[2 * (r + t)] = x | (x << 1);
-                sk[2 * (r + t) + 1] = y | (y >> 1);
-            }
-            r += 4;
-        }
-        AesKey { sk, rounds }
+/// Expand a 16- or 32-byte key (the caller checks the length) into
+/// `sk[0..8 * (rounds + 1)]`: the bitsliced round keys. The number of
+/// rounds.
+pub(pkg) fn aes_expand(key: Slice<u8>, sk: SecretWords) -> usize {
+    let rcon: [u32; 10] = [0x01u32, 0x02u32, 0x04u32, 0x08u32, 0x10u32, 0x20u32, 0x40u32, 0x80u32, 0x1bu32, 0x36u32];
+    let nk = key.len() / 4;
+    let rounds = nk + 6;
+    let nkf = (rounds + 1) * 4;
+    let w: [u32; 120] = [0u32; 120];
+    let tmp = 0u32;
+    for i in 0..nk {
+        tmp = le32(key, 4 * i);
+        w[2 * i] = tmp;
+        w[2 * i + 1] = tmp;
     }
-
-    /// Encrypt two blocks in place: `w[0..4]` and `w[4..8]`, each four
-    /// little-endian words.
-    pub(pkg) fn encrypt2(self, ref w: [u32; 8]) {
-        let q: [u32; 8] = [w[0], w[4], w[1], w[5], w[2], w[6], w[3], w[7]];
-        let sk = self.sk;
-        ortho(ref q);
-        for i in 0usize..8 { q[i] = q[i] ^ sk[i]; }
-        for u in 1..self.rounds {
-            sbox(ref q);
-            shift_rows(ref q);
-            mix_columns(ref q);
-            for i in 0usize..8 { q[i] = q[i] ^ sk[8 * u + i]; }
+    let j = 0usize;
+    let k = 0usize;
+    for i in nk..nkf {
+        if j == 0 {
+            tmp = sub_word(tmp.rotate_right(8)) ^ rcon[k];
+        } else if nk > 6 && j == 4 {
+            tmp = sub_word(tmp);
         }
+        tmp = tmp ^ w[2 * (i - nk)];
+        w[2 * i] = tmp;
+        w[2 * i + 1] = tmp;
+        j += 1;
+        if j == nk {
+            j = 0;
+            k += 1;
+        }
+    }
+    // Each round key orthogonalized, then compressed (one copy per
+    // block slot kept) and expanded back to both slots.
+    let r = 0usize;
+    while r < nkf {
+        let q: [u32; 8] = [0u32; 8];
+        for t in 0usize..8 { q[t] = w[2 * r + t]; }
+        ortho(ref q);
+        for t in 0usize..4 {
+            let c = (q[2 * t] & 0x55555555u32) | (q[2 * t + 1] & 0xaaaaaaaau32);
+            let x = c & 0x55555555u32;
+            let y = c & 0xaaaaaaaau32;
+            sk[2 * (r + t)] = x | (x << 1);
+            sk[2 * (r + t) + 1] = y | (y >> 1);
+        }
+        r += 4;
+    }
+    rounds
+}
+
+/// Encrypt two blocks in place under the round keys `sk`: `w[0..4]`
+/// and `w[4..8]`, each four little-endian words. Inlined: a call per
+/// block pair would root `sk` each time.
+#[inline(always)]
+pub(pkg) fn aes_encrypt2(sk: SecretWords, rounds: usize, ref w: [u32; 8]) {
+    if sk.len() < 8 * (rounds + 1) { panic("AES schedule too short"); }
+    let q: [u32; 8] = [w[0], w[4], w[1], w[5], w[2], w[6], w[3], w[7]];
+    ortho(ref q);
+    for i in 0usize..8 { q[i] = q[i] ^ unsafe { sk.at(i) }; }
+    for u in 1..rounds {
         sbox(ref q);
         shift_rows(ref q);
-        for i in 0usize..8 { q[i] = q[i] ^ sk[8 * self.rounds + i]; }
-        ortho(ref q);
-        w = [q[0], q[2], q[4], q[6], q[1], q[3], q[5], q[7]];
+        mix_columns(ref q);
+        for i in 0usize..8 { q[i] = q[i] ^ unsafe { sk.at(8 * u + i) }; }
     }
-
-    /// One block, 16 bytes in, 16 out.
-    pub(pkg) fn encrypt_block(self, b: Slice<u8>) -> List<u8> {
-        let w: [u32; 8] = [le32(b, 0), le32(b, 4), le32(b, 8), le32(b, 12), 0u32, 0u32, 0u32, 0u32];
-        self.encrypt2(ref w);
-        let out: List<u8> = List::with_capacity(16);
-        for i in 0..16 {
-            out.push((w[i / 4] >> (8 * (i % 4)) as u32) as u8);
-        }
-        out
-    }
+    sbox(ref q);
+    shift_rows(ref q);
+    for i in 0usize..8 { q[i] = q[i] ^ unsafe { sk.at(8 * rounds + i) }; }
+    ortho(ref q);
+    w = [q[0], q[2], q[4], q[6], q[1], q[3], q[5], q[7]];
 }

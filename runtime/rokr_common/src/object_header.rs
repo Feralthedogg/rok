@@ -6,7 +6,8 @@
 //!   4  : `gc_flags`  u32 (bit 0=MARK, 1=STICKY, 2=PINNED, 3=FORWARDED,
 //!                          4=LARGE, 5=IMMORTAL (unused); 6=UNLOGGED, 7=CARDED
 //!                          are this runtime's write-barrier bits,
-//!                          8=NOMOVE, 9=NOEVAC its evacuation bits)
+//!                          8=NOMOVE, 9=NOEVAC its evacuation bits,
+//!                          12=WIPE: zeroed when freed)
 //!   8  : `gc_word`   u64 (forwarding pointer or LOS payload size)
 //!   16 : payload     ...
 
@@ -53,6 +54,9 @@ pub const FLAG_SATB: u32 = 1 << 10;
 /// Collector-internal, one concurrent mark: the marker has scanned the
 /// object, so the first store into it need not log its references.
 pub const FLAG_SCANNED: u32 = 1 << 11;
+/// A secret buffer (`rok_gc_secret_new`, a LOS object): the sweep that
+/// frees it zeroes its payload first. Implementation bit; permanent.
+pub const FLAG_WIPE: u32 = 1 << 12;
 
 pub const HEADER_SIZE: usize = crate::gc_abi::HEADER_SIZE as usize;
 pub const HEADER_ALIGN: usize = 8;

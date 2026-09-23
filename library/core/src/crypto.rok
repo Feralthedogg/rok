@@ -2,6 +2,7 @@
 // `rok::std::crypto::random`). Secret data is handled in constant time:
 // no branch or memory index depends on it.
 
+pub mod secret;
 pub mod sha2;
 pub mod hmac;
 pub mod sha3;
@@ -17,6 +18,7 @@ pub mod ecdsa;
 pub mod rsa;
 pub mod mlkem;
 
+pub use secret::Secret;
 pub use sha2::{HashAlgorithm, Digest};
 pub use sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 pub use hmac::{Hmac, Hkdf};
@@ -48,8 +50,8 @@ pub(pkg) fn ct_mask_i64(bit: i64) -> i64 {
     -bit ^ (CT_ZERO.load(AtomicOrdering::Relaxed) as i64)
 }
 
-/// Byte input: a list, a view or a string's UTF-8 bytes.
-pub type Bytes = List<u8> | Slice<u8> | str;
+/// Byte input: a list, a view, a string's UTF-8 bytes or a secret.
+pub type Bytes = List<u8> | Slice<u8> | str | Secret;
 
 /// `b` as a view.
 pub(pkg) fn view(b: Bytes) -> Slice<u8> {
@@ -57,6 +59,7 @@ pub(pkg) fn view(b: Bytes) -> Slice<u8> {
         l: List<u8> => l[0:l.len()],
         s: Slice<u8> => s,
         t: str => t.as_bytes(),
+        k: Secret => k.as_bytes(),
     }
 }
 

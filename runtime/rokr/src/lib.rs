@@ -218,6 +218,23 @@ pub unsafe extern "C" fn rok_gc_unpin(obj: *mut u8) {
     unsafe { rokr_gc::unpin(obj) };
 }
 
+/// A secret buffer of `len` zeroed bytes (`rok::core::crypto::Secret`):
+/// never moved or copied by the collector, zeroed before it is freed.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_secret_new(len: usize) -> *mut u8 {
+    rokr_gc::alloc_secret(len)
+}
+
+/// Zero a secret buffer now, with stores the optimizer keeps.
+///
+/// # Safety
+/// `obj` must come from `rok_gc_secret_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_gc_secret_wipe(obj: *mut u8) {
+    // SAFETY: caller contract.
+    unsafe { rokr_gc::wipe(obj) };
+}
+
 /// A weak reference cell to `obj` (802 §8.2.8; `rok::bare::gc::Weak`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_weak_new(obj: *mut u8) -> *mut u8 {

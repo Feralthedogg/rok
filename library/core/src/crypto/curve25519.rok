@@ -340,11 +340,11 @@ const L_WORDS: [u32; 8] = [
     0x00000000u32, 0x00000000u32, 0x00000000u32, 0x10000000u32,
 ];
 
-/// Little-endian bytes (any length) mod L, as 32 bytes. Constant time
-/// in the value: one shift-in and masked subtraction per bit.
-pub(pkg) fn sc25519_reduce(b: Slice<u8>) -> [u8; 32] {
+/// 64 little-endian bytes mod L, as 32 bytes. Constant time in the
+/// value: one shift-in and masked subtraction per bit.
+pub(pkg) fn sc25519_reduce(b: [u8; 64]) -> [u8; 32] {
     let r: [u32; 8] = [0u32; 8];
-    let i = b.len() * 8;
+    let i = 512usize;
     while i > 0 {
         i -= 1;
         let bit = ((b[i / 8] >> (i % 8) as u8) & 1u8) as u32;
@@ -397,7 +397,7 @@ pub(pkg) fn sc25519_muladd(a: [u8; 32], b: [u8; 32], c: [u8; 32]) -> [u8; 32] {
     }
     let bytes: [u8; 64] = [0u8; 64];
     for j in 0usize..64 { bytes[j] = (p[j / 4] >> (8 * (j % 4)) as u64) as u8; }
-    sc25519_reduce(bytes[0:64])
+    sc25519_reduce(bytes)
 }
 
 /// Whether a 32-byte scalar is below L (variable time).

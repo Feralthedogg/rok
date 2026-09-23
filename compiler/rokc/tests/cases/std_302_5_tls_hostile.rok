@@ -41,6 +41,7 @@ use rok::core::crypto::hmac::{Hmac, Hkdf};
 use rok::core::crypto::aead::{Aead, AeadAlgorithm};
 use rok::core::crypto::x25519::X25519;
 use rok::core::crypto::ed25519::Ed25519;
+use rok::core::crypto::Secret;
 
 const CA: str = "-----BEGIN CERTIFICATE-----
 MIIBVzCCAQmgAwIBAgIUTEx+6YUTAbdTdjG820F1ykbaMgowBQYDK2VwMBgxFjAU
@@ -261,7 +262,7 @@ const H: HashAlgorithm = HashAlgorithm::Sha256;
 
 fn label(secret: List<u8>, l: str, ctx: List<u8>, n: usize) -> List<u8> {
     let info = cat(cat(u16b(n), v8(("tls13 " + l).as_bytes().to_list())), v8(ctx));
-    try! Hkdf::expand(H, secret, info, n)
+    (try! Hkdf::expand(H, secret, info, n)).as_bytes().to_list()
 }
 
 fn derive(secret: List<u8>, l: str, transcript: List<u8>) -> List<u8> { label(secret, l, H.digest(transcript), 32) }
@@ -389,9 +390,9 @@ fn evil_serve(s: TcpStream, ref r: Rng, e: Evil) {
     let sh_exts = cat(cat(ext(43, [3u8, 4u8]), ext(51, ks)), e.sh_ext);
     let sh = msg(2u8, cat(cat(cat(cat([3u8, 3u8], random), v8(sid)), [0x13u8, 0x01u8, 0u8]), v16(sh_exts)));
     let tr = cat(ch[5:ch.len()].to_list(), sh);
-    let shared = match try! X25519::shared_secret(eph, share) { b: List<u8> => b, none => return };
-    let early = Hkdf::extract(H, [0u8], zeros(32));
-    let hs = Hkdf::extract(H, derive(early, "derived", []), shared);
+    let shared = match try! X25519::shared_secret(eph, share) { b: Secret => b.as_bytes().to_list(), none => return };
+    let early = Hkdf::extract(H, [0u8], zeros(32)).as_bytes().to_list();
+    let hs = Hkdf::extract(H, derive(early, "derived", []), shared).as_bytes().to_list();
     let s_hs = derive(hs, "s hs traffic", tr);
     let k = keys(s_hs);
 
@@ -438,7 +439,7 @@ fn evil_serve(s: TcpStream, ref r: Rng, e: Evil) {
         let _ = drain(s);
         return;
     }
-    let master = Hkdf::extract(H, derive(hs, "derived", []), zeros(32));
+    let master = Hkdf::extract(H, derive(hs, "derived", []), zeros(32)).as_bytes().to_list();
     let ka = keys(derive(master, "s ap traffic", tr));
     let _ = read_some(s);
     let post = e.post;
@@ -584,9 +585,9 @@ fn evil_client(s: TcpStream, ref r: Rng, what: usize) {
             // ServerHello: its key share is the last 32 bytes.
             tr = cat(tr, body);
             sh_end = tr.len();
-            let shared = match try! X25519::shared_secret(eph, body[body.len() - 32:body.len()]) { b: List<u8> => b, none => return };
-            let early = Hkdf::extract(H, [0u8], zeros(32));
-            hs = Hkdf::extract(H, derive(early, "derived", []), shared);
+            let shared = match try! X25519::shared_secret(eph, body[body.len() - 32:body.len()]) { b: Secret => b.as_bytes().to_list(), none => return };
+            let early = Hkdf::extract(H, [0u8], zeros(32)).as_bytes().to_list();
+            hs = Hkdf::extract(H, derive(early, "derived", []), shared).as_bytes().to_list();
             k = keys(derive(hs, "s hs traffic", tr));
             continue;
         }
@@ -603,7 +604,7 @@ fn evil_client(s: TcpStream, ref r: Rng, what: usize) {
         }
     }
     let c_hs = derive(hs, "c hs traffic", tr[0:sh_end].to_list());
-    let master = Hkdf::extract(H, derive(hs, "derived", []), zeros(32));
+    let master = Hkdf::extract(H, derive(hs, "derived", []), zeros(32)).as_bytes().to_list();
     let c_ap = derive(master, "c ap traffic", tr);
     let kc = keys(c_hs);
 

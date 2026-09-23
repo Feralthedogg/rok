@@ -32,6 +32,7 @@ use rok::std::net::tls::der::{Der, SEQUENCE, INTEGER, OCTET_STRING, OID};
 use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
 use rok::core::crypto::ed25519::Ed25519;
 use rok::core::crypto::rsa::{RsaPrivateKey, RsaPublicKey};
+use rok::core::crypto::Secret;
 
 /// What failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -125,9 +126,9 @@ pub struct PrivateKey {
 
 pub(pkg) enum KeyKind {
     /// The 32-byte seed.
-    Ed25519(List<u8>),
+    Ed25519(Secret),
     /// The big-endian scalar.
-    Ec(EcCurve, List<u8>),
+    Ec(EcCurve, Secret),
     Rsa(RsaPrivateKey),
 }
 
@@ -154,7 +155,7 @@ fn ec_key(b: Slice<u8>, curve: EcCurve | none) throws (TlsError) -> PrivateKey {
     let cv = c ?? EcCurve::P256;
     // Check the scalar now rather than at the first handshake.
     try Ecdsa::public_key(cv, d) catch _ { throw TlsError::certificate("bad EC private key"); };
-    PrivateKey { key: KeyKind::Ec(cv, d.to_list()) }
+    PrivateKey { key: KeyKind::Ec(cv, Secret::new(d)) }
 }
 
 fn rsa_key(b: Slice<u8>) throws (TlsError) -> PrivateKey {
@@ -182,7 +183,7 @@ impl PrivateKey {
             try alg.finish();
             let seed = try Der::new(inner).expect(OCTET_STRING);
             if seed.len() != 32 { throw TlsError::certificate("bad Ed25519 private key"); }
-            return PrivateKey { key: KeyKind::Ed25519(seed.to_list()) };
+            return PrivateKey { key: KeyKind::Ed25519(Secret::new(seed)) };
         }
         if oid == "1.2.840.10045.2.1" {
             let curve = try curve_of_oid(try der::oid_text(try alg.expect(OID)));
@@ -333,7 +334,7 @@ pub(pkg) struct Ticket {
     pub(pkg) host: str;
     pub(pkg) suite: CipherSuite;
     pub(pkg) ticket: List<u8>;
-    pub(pkg) psk: List<u8>;
+    pub(pkg) psk: Secret;
     pub(pkg) age_add: u32;
     pub(pkg) lifetime: u32;
     pub(pkg) received: Instant;
@@ -403,7 +404,7 @@ fn hash_offered(s: CipherSuite, suites: List<CipherSuite>) -> bool {
 /// A session the server can resume.
 pub(pkg) struct Session {
     pub(pkg) id: List<u8>;
-    pub(pkg) psk: List<u8>;
+    pub(pkg) psk: Secret;
     pub(pkg) suite: CipherSuite;
     pub(pkg) alpn: List<u8> | none;
     pub(pkg) sni: str | none;
@@ -651,6 +652,7 @@ impl Shared {
             let c = self.c[0];
             if c.failed is none && c.done { try c.close_notify() catch _ {}; }
             c.sock.close();
+            c.wipe();
             self.c[0] = c;
         }
     }

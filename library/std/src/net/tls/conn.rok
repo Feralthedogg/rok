@@ -29,7 +29,7 @@ use rok::core::crypto::x25519::X25519;
 use rok::core::crypto::mlkem::MlKem768;
 use rok::core::crypto::ed25519::Ed25519;
 use rok::core::crypto::ecdsa::{Ecdsa, EcCurve};
-use rok::core::crypto::constant_time_eq;
+use rok::core::crypto::{constant_time_eq, Secret};
 
 // Content types.
 const CHANGE_CIPHER_SPEC: u8 = 20u8;
@@ -289,7 +289,7 @@ fn suite_aead(s: CipherSuite) -> AeadAlgorithm {
     }
 }
 
-fn expand_label(h: HashAlgorithm, secret: List<u8>, label: str, ctx: List<u8>, len: usize) -> List<u8> {
+fn expand_label(h: HashAlgorithm, secret: Secret, label: str, ctx: List<u8>, len: usize) -> Secret {
     let info: List<u8> = [];
     put_u16(info, len);
     let full = "tls13 " + label;
@@ -297,10 +297,10 @@ fn expand_label(h: HashAlgorithm, secret: List<u8>, label: str, ctx: List<u8>, l
     put(info, full.as_bytes());
     vec8(info, ctx);
     // `len` is at most a hash length: within HKDF's limit.
-    try Hkdf::expand(h, secret, info, len) catch _ { [] }
+    try Hkdf::expand(h, secret, info, len) catch _ { Secret::zeroed(0) }
 }
 
-fn derive_secret(h: HashAlgorithm, secret: List<u8>, label: str, transcript: Digest) -> List<u8> {
+fn derive_secret(h: HashAlgorithm, secret: Secret, label: str, transcript: Digest) -> Secret {
     expand_label(h, secret, label, transcript.finish(), h.output_len())
 }
 
@@ -310,24 +310,41 @@ fn zeros(n: usize) -> List<u8> {
     z
 }
 
-/// One direction of the record layer.
+/// One direction of the record layer. It owns its traffic secret and
+/// key; the IV is not secret (every record nonce derives from it).
 struct Dir {
     aead: Aead | none;
     iv: List<u8>;
     seq: u64;
-    secret: List<u8>;
+    secret: Secret;
 }
 
-fn plain_dir() -> Dir { Dir { aead: none, iv: [], seq: 0u64, secret: [] } }
+fn plain_dir() -> Dir { Dir { aead: none, iv: [], seq: 0u64, secret: Secret::zeroed(0) } }
 
-fn dir_of(suite: CipherSuite, secret: List<u8>) -> Dir {
+fn dir_of(suite: CipherSuite, secret: Secret) -> Dir {
     let h = suite_hash(suite);
     let alg = suite_aead(suite);
     let key = expand_label(h, secret, "key", [], alg.key_len());
-    let iv = expand_label(h, secret, "iv", [], 12);
+    let iv = expand_label(h, secret, "iv", [], 12).as_bytes().to_list();
     // The key has the suite's length.
     let aead = try Aead::new(alg, key) catch _ { panic("AEAD key length") };
-    Dir { aead, iv, seq: 0u64, secret }
+    key.wipe();
+    Dir { aead, iv, seq: 0u64, secret: Secret::new(secret) }
+}
+
+impl Dir {
+    fn wipe(self) {
+        if let a: Aead = self.aead { a.wipe(); }
+        self.secret.wipe();
+    }
+}
+
+/// `a || b` as one secret.
+fn joined(a: Secret, b: Secret) -> Secret {
+    let s = Secret::zeroed(a.len() + b.len());
+    for i in 0..a.len() { s[i] = a[i]; }
+    for i in 0..b.len() { s[a.len() + i] = b[i]; }
+    s
 }
 
 fn nonce(d: Dir) -> List<u8> {
@@ -388,7 +405,7 @@ pub(pkg) struct Conn {
     /// master secret.
     host: str;
     cache: SessionCache | none;
-    res_master: List<u8>;
+    res_master: Secret;
 }
 
 pub(pkg) fn new_conn(sock: TcpStream, is_client: bool) -> Conn {
@@ -420,7 +437,7 @@ pub(pkg) fn new_conn(sock: TcpStream, is_client: bool) -> Conn {
         skip_early: 0,
         host: "",
         cache: none,
-        res_master: [],
+        res_master: Secret::zeroed(0),
     }
 }
 
@@ -677,7 +694,9 @@ impl Conn {
                 if body.len() != 1 || body[0] > 1u8 { throw decode_err("KeyUpdate"); }
                 try self.boundary();
                 let next = self.next_secret(self.rd.secret);
+                self.rd.wipe();
                 self.rd = dir_of(self.suite, next);
+                next.wipe();
                 if body[0] == 1u8 { try self.key_update(false); }
             } else if t == NEW_SESSION_TICKET && self.is_client {
                 try self.ticket(body);
@@ -712,7 +731,7 @@ impl Conn {
         }
     }
 
-    fn next_secret(self, secret: List<u8>) -> List<u8> {
+    fn next_secret(self, secret: Secret) -> Secret {
         let h = suite_hash(self.suite);
         expand_label(h, secret, "traffic upd", [], h.output_len())
     }
@@ -721,7 +740,17 @@ impl Conn {
     pub(pkg) fn key_update(ref self, request: bool) throws (TlsError) {
         try self.send(HANDSHAKE, message(KEY_UPDATE, [if request { 1u8 } else { 0u8 }]));
         let next = self.next_secret(self.wr.secret);
+        self.wr.wipe();
         self.wr = dir_of(self.suite, next);
+        next.wipe();
+    }
+
+    /// Overwrite every secret the connection holds with zeros (at close).
+    pub(pkg) fn wipe(ref self) {
+        self.rd.wipe();
+        self.wr.wipe();
+        self.res_master.wipe();
+        self.x.wipe();
     }
 
     pub(pkg) fn write_app(ref self, data: Slice<u8>) throws (TlsError) {
@@ -838,6 +867,7 @@ impl Conn {
                 let g = hello.group;
                 if g != 0u16 {
                     if !x.groups.contains(g) || shares.has(g) { throw proto("HelloRetryRequest for an unusable group", ALERT_ILLEGAL_PARAMETER); }
+                    shares.wipe();
                     shares = Shares::new([g]);
                     x.shares = shares;
                 } else if hello.cookie is none {
@@ -874,7 +904,7 @@ impl Conn {
             }
             tr.update(all);
             self.suite = suite;
-            let psk = zeros(h.output_len());
+            let psk = Secret::zeroed(h.output_len());
             if let i: usize = hello.psk {
                 let tk: Ticket = x.ticket else { throw proto("pre_shared_key not offered", ALERT_ILLEGAL_PARAMETER); };
                 if i != 0 || suite_hash(tk.suite) != h { throw proto("server chose an unusable PSK", ALERT_ILLEGAL_PARAMETER); }
@@ -887,6 +917,8 @@ impl Conn {
             x.hs_secret = Hkdf::extract(h, derive_secret(h, early, "derived", Digest::new(h)), shared);
             x.c_hs = derive_secret(h, x.hs_secret, "c hs traffic", tr);
             x.s_hs = derive_secret(h, x.hs_secret, "s hs traffic", tr);
+            early.wipe();
+            shared.wipe();
             try self.boundary();
             self.rd = dir_of(suite, x.s_hs);
             // Write keys now too, so that an alert is encrypted.
@@ -977,6 +1009,7 @@ impl Conn {
             try self.boundary();
             if !x.ccs_sent { try self.send_record(CHANGE_CIPHER_SPEC, [1u8][0:1]); }
             if self.early_accepted {
+                self.wr.wipe();
                 self.wr = x.early_dir;
                 let eoed = message(END_OF_EARLY_DATA, []);
                 try self.send(HANDSHAKE, eoed);
@@ -1011,10 +1044,14 @@ impl Conn {
             try self.send(HANDSHAKE, fin);
             tr.update(fin);
             self.res_master = derive_secret(h, master, "res master", tr);
+            self.wr.wipe();
             self.wr = dir_of(suite, c_ap);
+            self.rd.wipe();
             self.rd = dir_of(suite, s_ap);
+            for k in [master, c_ap, s_ap] { k.wipe(); }
             self.done = true;
             let late: List<u8> = if self.early_accepted { [] } else { x.early_data };
+            x.wipe();
             self.x = new_hs(DONE);
             if late.len() > 0 { try self.write_app(late[0:late.len()]); }
             return;
@@ -1048,6 +1085,7 @@ impl Conn {
             if body.len() != 0 { throw decode_err("EndOfEarlyData"); }
             x.transcript.update(all);
             try self.boundary();
+            self.rd.wipe();
             self.rd = dir_of(self.suite, x.c_hs);
             x.state = S_FIN;
             self.x = x;
@@ -1091,13 +1129,17 @@ impl Conn {
                 throw proto("bad client Finished", ALERT_DECRYPT_ERROR);
             }
             try self.boundary();
+            self.rd.wipe();
             self.rd = dir_of(self.suite, x.c_ap);
             self.done = true;
             self.x = new_hs(DONE);
             if let st: TicketStore = x.store {
                 x.transcript.update(all);
-                try self.issue_ticket(st, derive_secret(h, x.master, "res master", x.transcript), x.max_early);
+                let rm = derive_secret(h, x.master, "res master", x.transcript);
+                try self.issue_ticket(st, rm, x.max_early);
+                rm.wipe();
             }
+            x.wipe();
             return;
         }
         if t != CLIENT_HELLO { throw proto(f"expected ClientHello, got handshake message {t}", ALERT_UNEXPECTED_MESSAGE); }
@@ -1168,7 +1210,7 @@ impl Conn {
             }
         }
         tr.update(all);
-        let psk = zeros(hl);
+        let psk = Secret::zeroed(hl);
         let accept_early = false;
         if let s: Session = session {
             psk = s.psk;
@@ -1256,7 +1298,9 @@ impl Conn {
         x.master = Hkdf::extract(h, derive_secret(h, hs_secret, "derived", Digest::new(h)), zeros(hl));
         x.c_ap = derive_secret(h, x.master, "c ap traffic", tr);
         let s_ap = derive_secret(h, x.master, "s ap traffic", tr);
+        self.wr.wipe();
         self.wr = dir_of(suite, s_ap);
+        for k in [early, shared, hs_secret, s_hs, s_ap] { k.wipe(); }
 
         // The client's flight comes under its early, then handshake key.
         try self.boundary();
@@ -1268,7 +1312,7 @@ impl Conn {
     }
 
     /// Store a session and send its NewSessionTicket.
-    fn issue_ticket(ref self, st: TicketStore, res_master: List<u8>, max_early: u32) throws (TlsError) {
+    fn issue_ticket(ref self, st: TicketStore, res_master: Secret, max_early: u32) throws (TlsError) {
         let h = suite_hash(self.suite);
         let nonce: List<u8> = [0u8];
         let id = random::bytes(32);
@@ -1342,10 +1386,10 @@ struct Hs {
     retried: bool;
     suites: List<CipherSuite>;
     alpn: List<List<u8>>;
-    hs_secret: List<u8>;
-    c_hs: List<u8>;
-    s_hs: List<u8>;
-    c_ap: List<u8>;
+    hs_secret: Secret;
+    c_hs: Secret;
+    s_hs: Secret;
+    c_ap: Secret;
     /// Our certificate chain and key (the client's, if any).
     chain: List<Certificate>;
     key: PrivateKey | none;
@@ -1374,8 +1418,8 @@ struct Hs {
     ocsp: List<u8>;
     store: TicketStore | none;
     max_early: u32;
-    c_early: List<u8>;
-    master: List<u8>;
+    c_early: Secret;
+    master: Secret;
 }
 
 fn new_hs(state: u8) -> Hs {
@@ -1385,10 +1429,10 @@ fn new_hs(state: u8) -> Hs {
         retried: false,
         suites: [],
         alpn: [],
-        hs_secret: [],
-        c_hs: [],
-        s_hs: [],
-        c_ap: [],
+        hs_secret: Secret::zeroed(0),
+        c_hs: Secret::zeroed(0),
+        s_hs: Secret::zeroed(0),
+        c_ap: Secret::zeroed(0),
         chain: [],
         key: none,
         roots: [],
@@ -1413,8 +1457,16 @@ fn new_hs(state: u8) -> Hs {
         ocsp: [],
         store: none,
         max_early: 0u32,
-        c_early: [],
-        master: [],
+        c_early: Secret::zeroed(0),
+        master: Secret::zeroed(0),
+    }
+}
+
+impl Hs {
+    fn wipe(self) {
+        for k in [self.hs_secret, self.c_hs, self.s_hs, self.c_ap, self.c_early, self.master] { k.wipe(); }
+        if let s: Shares = self.shares { s.wipe(); }
+        self.early_dir.wipe();
     }
 }
 
@@ -1446,8 +1498,8 @@ fn pick_suite(suites: List<CipherSuite>, offered: List<u16>) throws (TlsError) -
 
 /// The client's key-exchange secrets for the groups it offers shares of.
 struct Shares {
-    x25519: List<u8> | none;
-    mlkem_dk: List<u8> | none;
+    x25519: Secret | none;
+    mlkem_dk: Secret | none;
     mlkem_ek: List<u8>;
     groups: List<u16>;
 }
@@ -1459,21 +1511,27 @@ impl Shares {
         let s = Shares { x25519: none, mlkem_dk: none, mlkem_ek: [], groups: [] };
         for g in groups {
             if g == HYBRID_GROUP {
-                let seed = random::bytes(64);
+                let seed = random::secret(64);
                 let (ek, dk) = try MlKem768::keygen(seed[0:32], seed[32:64]) catch _ { panic("ML-KEM seed length") };
+                seed.wipe();
                 s.mlkem_dk = dk;
                 s.mlkem_ek = ek;
                 s.groups.push(HYBRID_GROUP);
             }
         }
-        s.x25519 = random::bytes(32);
+        s.x25519 = random::secret(32);
         if groups.contains(X25519_GROUP) { s.groups.push(X25519_GROUP); }
         s
     }
 
     fn has(self, g: u16) -> bool { self.groups.contains(g) }
 
-    fn x_secret(self) -> List<u8> { self.x25519 ?? [] }
+    fn x_secret(self) -> Secret { self.x25519 ?? Secret::zeroed(0) }
+
+    fn wipe(self) {
+        if let k: Secret = self.x25519 { k.wipe(); }
+        if let k: Secret = self.mlkem_dk { k.wipe(); }
+    }
 
     /// The key_share extension body.
     fn entries(self) -> List<u8> {
@@ -1491,24 +1549,26 @@ impl Shares {
     }
 
     /// The shared secret from the server's share for `group`.
-    fn finish(self, group: u16, share: List<u8>) throws (TlsError) -> List<u8> {
+    fn finish(self, group: u16, share: List<u8>) throws (TlsError) -> Secret {
         if !self.has(group) { throw proto("server chose a key share not offered", ALERT_ILLEGAL_PARAMETER); }
         let bad = proto("bad key share", ALERT_ILLEGAL_PARAMETER);
         if group == HYBRID_GROUP {
             if share.len() != MlKem768::CIPHERTEXT_LEN + 32 { throw bad; }
-            let ss = try MlKem768::decapsulate(self.mlkem_dk ?? [], share[0:MlKem768::CIPHERTEXT_LEN]) catch _ { throw bad; };
+            let ss = try MlKem768::decapsulate(self.mlkem_dk ?? Secret::zeroed(0), share[0:MlKem768::CIPHERTEXT_LEN]) catch _ { throw bad; };
             let x = try X25519::shared_secret(self.x_secret(), share[MlKem768::CIPHERTEXT_LEN:share.len()]) catch _ { throw bad; };
             match x {
-                v: List<u8> => {
-                    put_list(ss, v);
-                    return ss;
+                v: Secret => {
+                    let j = joined(ss, v);
+                    ss.wipe();
+                    v.wipe();
+                    return j;
                 },
                 none => throw bad,
             }
         }
         if share.len() != 32 { throw bad; }
         match try X25519::shared_secret(self.x_secret(), share) catch _ { throw bad; } {
-            v: List<u8> => v,
+            v: Secret => v,
             none => throw bad,
         }
     }
@@ -1938,28 +1998,33 @@ fn choose_group(c: ClientHelloInfo) -> u16 {
 }
 
 /// The server's share for `group` given the client's: `(reply, shared)`.
-fn server_share(group: u16, client: Slice<u8>) throws (TlsError) -> (List<u8>, List<u8>) {
+fn server_share(group: u16, client: Slice<u8>) throws (TlsError) -> (List<u8>, Secret) {
     let bad = proto("bad client key share", ALERT_ILLEGAL_PARAMETER);
-    let secret = random::bytes(32);
-    let public_key = try X25519::public_key(secret) catch _ { throw bad; };
-    if group == HYBRID_GROUP {
-        let ek_len = MlKem768::ENCAPSULATION_KEY_LEN;
-        if client.len() != ek_len + 32 { throw bad; }
-        let (ss, ct) = try MlKem768::encapsulate(client[0:ek_len], random::bytes(32)) catch _ { throw bad; };
-        let x = try X25519::shared_secret(secret, client[ek_len:client.len()]) catch _ { throw bad; };
-        match x {
-            v: List<u8> => {
-                put_list(ss, v);
-                put_list(ct, public_key);
-                return (ct, ss);
-            },
+    using secret = random::secret(32) {
+        let public_key = try X25519::public_key(secret) catch _ { throw bad; };
+        if group == HYBRID_GROUP {
+            let ek_len = MlKem768::ENCAPSULATION_KEY_LEN;
+            if client.len() != ek_len + 32 { throw bad; }
+            let m = random::secret(32);
+            let (ss, ct) = try MlKem768::encapsulate(client[0:ek_len], m) catch _ { throw bad; };
+            m.wipe();
+            let x = try X25519::shared_secret(secret, client[ek_len:client.len()]) catch _ { throw bad; };
+            match x {
+                v: Secret => {
+                    let j = joined(ss, v);
+                    ss.wipe();
+                    v.wipe();
+                    put_list(ct, public_key);
+                    return (ct, j);
+                },
+                none => throw bad,
+            }
+        }
+        if client.len() != 32 { throw bad; }
+        match try X25519::shared_secret(secret, client) catch _ { throw bad; } {
+            v: Secret => (public_key, v),
             none => throw bad,
         }
-    }
-    if client.len() != 32 { throw bad; }
-    match try X25519::shared_secret(secret, client) catch _ { throw bad; } {
-        v: List<u8> => (public_key, v),
-        none => throw bad,
     }
 }
 

@@ -8,16 +8,19 @@ use sup::curve25519::{EdPoint, ge_base, ge_add, ge_negate, ge_encode, ge_decode,
 /// signatures.
 pub struct Ed25519;
 
-/// The secret scalar (clamped) and the nonce prefix of a seed.
-fn expand(seed: Bytes) throws (ValueError) -> ([u8; 32], List<u8>) {
+/// SHA-512 of a seed: the secret scalar (clamped) from the first half;
+/// the nonce prefix is the second.
+fn expand(seed: Bytes) throws (ValueError) -> ([u8; 32], [u8; 64]) {
     let s = view(seed);
     if s.len() != 32 { throw ValueError { msg: "Ed25519 seed must be 32 bytes" }; }
-    let h = HashAlgorithm::Sha512.digest(s);
+    let d = Digest::new(HashAlgorithm::Sha512);
+    d.update(s);
+    let h = d.finish_raw();
     let a: [u8; 32] = [0u8; 32];
     for i in 0usize..32 { a[i] = h[i]; }
     a[0] &= 248u8;
     a[31] = (a[31] & 127u8) | 64u8;
-    (a, h[32:64].to_list())
+    (a, h)
 }
 
 /// `SHA-512(parts) mod L`.
@@ -26,7 +29,7 @@ fn hash_scalar(a: Slice<u8>, b: Slice<u8>, c: Slice<u8>) -> [u8; 32] {
     h.update(a);
     h.update(b);
     h.update(c);
-    sc25519_reduce(h.finish()[0:64])
+    sc25519_reduce(h.finish_raw())
 }
 
 impl Ed25519 {
@@ -37,10 +40,15 @@ impl Ed25519 {
 
     /// The signature `R || S` of `msg` (deterministic).
     pub fn sign(seed: Bytes, msg: Bytes) throws (ValueError) -> List<u8> {
-        let (a, prefix) = try expand(seed);
+        let (a, hs) = try expand(seed);
         let m = view(msg);
         let pk = ge_encode(ge_mul_ct(a, ge_base()));
-        let r = hash_scalar(prefix[0:32], m, m[0:0]);
+        let prefix: [u8; 128] = [0u8; 128];
+        for i in 0usize..32 { prefix[i] = hs[32 + i]; }
+        let rh = Digest::new(HashAlgorithm::Sha512);
+        rh.update_raw(prefix, 32);
+        rh.update(m);
+        let r = sc25519_reduce(rh.finish_raw());
         let rb = ge_encode(ge_mul_ct(r, ge_base()));
         let k = hash_scalar(rb[0:32], pk[0:32], m);
         let s = sc25519_muladd(k, a, r);

@@ -185,8 +185,27 @@ impl Sha256State {
         self.total = self.total.wrapping_add(s.len() as u64);
     }
 
-    /// The digest (of a copy: `self` is a value).
-    fn finish(self) -> List<u8> {
+    /// `update` with `b[0:len]`.
+    fn update_raw(ref self, b: [u8; 128], len: usize) {
+        let h = self.h;
+        let buf = self.buf;
+        let n = self.n;
+        for i in 0..len {
+            buf[n] = b[i];
+            n += 1;
+            if n == 64 {
+                h = compress256(h, buf);
+                n = 0;
+            }
+        }
+        self.h = h;
+        self.buf = buf;
+        self.n = n;
+        self.total = self.total.wrapping_add(len as u64);
+    }
+
+    /// The digest in the first 32 bytes (of a copy: `self` is a value).
+    fn finish(self) -> [u8; 64] {
         let bits = self.total.wrapping_mul(8u64);
         self.buf[self.n] = 0x80u8;
         self.n += 1;
@@ -200,13 +219,9 @@ impl Sha256State {
             self.buf[56 + i] = (bits >> (56 - 8 * i) as u64) as u8;
         }
         self.h = compress256(self.h, self.buf);
-        let out: List<u8> = List::with_capacity(32);
-        for i in 0..8 {
-            let v = self.h[i];
-            out.push((v >> 24) as u8);
-            out.push((v >> 16) as u8);
-            out.push((v >> 8) as u8);
-            out.push(v as u8);
+        let out: [u8; 64] = [0u8; 64];
+        for i in 0..32 {
+            out[i] = (self.h[i / 4] >> (24 - 8 * (i % 4)) as u32) as u8;
         }
         out
     }
@@ -247,7 +262,25 @@ impl Sha512State {
         self.total = self.total.wrapping_add(s.len() as u64);
     }
 
-    fn finish(self) -> List<u8> {
+    fn update_raw(ref self, b: [u8; 128], len: usize) {
+        let h = self.h;
+        let buf = self.buf;
+        let n = self.n;
+        for i in 0..len {
+            buf[n] = b[i];
+            n += 1;
+            if n == 128 {
+                h = compress512(h, buf);
+                n = 0;
+            }
+        }
+        self.h = h;
+        self.buf = buf;
+        self.n = n;
+        self.total = self.total.wrapping_add(len as u64);
+    }
+
+    fn finish(self) -> [u8; 64] {
         // Message lengths stay below 2^61 bytes: the high length word is 0.
         let bits = self.total.wrapping_mul(8u64);
         self.buf[self.n] = 0x80u8;
@@ -262,9 +295,9 @@ impl Sha512State {
             self.buf[120 + i] = (bits >> (56 - 8 * i) as u64) as u8;
         }
         self.h = compress512(self.h, self.buf);
-        let out: List<u8> = List::with_capacity(self.out_len);
+        let out: [u8; 64] = [0u8; 64];
         for i in 0..self.out_len {
-            out.push((self.h[i / 8] >> (56 - 8 * (i % 8)) as u64) as u8);
+            out[i] = (self.h[i / 8] >> (56 - 8 * (i % 8)) as u64) as u8;
         }
         out
     }
@@ -328,6 +361,22 @@ impl Digest {
     }
 
     pub fn finish(self) -> List<u8> {
+        let d = self.finish_raw();
+        let out: List<u8> = List::with_capacity(self.alg.output_len());
+        for i in 0..self.alg.output_len() { out.push(d[i]); }
+        out
+    }
+
+    /// `update` with `b[0:len]`: secret input that is in no list.
+    pub(pkg) fn update_raw(ref self, b: [u8; 128], len: usize) {
+        match self.alg {
+            HashAlgorithm::Sha256 => self.s256.update_raw(b, len),
+            _ => self.s512.update_raw(b, len),
+        }
+    }
+
+    /// `finish` into the first `output_len` bytes of an array.
+    pub(pkg) fn finish_raw(self) -> [u8; 64] {
         match self.alg {
             HashAlgorithm::Sha256 => self.s256.finish(),
             _ => self.s512.finish(),

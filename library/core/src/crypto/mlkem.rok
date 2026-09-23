@@ -1,13 +1,15 @@
 // ML-KEM-768 (FIPS 203): k = 3, eta1 = eta2 = 2, du = 10, dv = 4.
 //
-// Polynomials are 256 coefficients in [0, q) held in `List<u32>`
-// (a vector of k polynomials is one list of 256k). Secret values never
+// Polynomials are 256 coefficients in [0, q) held in secret storage
+// (`SecretWords`; a vector of k polynomials is one buffer of 256k), and
+// so are the secret seeds, keys and messages. Secret values never
 // steer a branch or an index: reduction is an exact multiply-shift
 // division by q, the re-encryption compare and the implicit-rejection
 // key select are masks. Only the rejection sampling of the public
 // matrix branches.
 
-use sup::{view, Bytes, ct_mask};
+use sup::{view, Bytes, Secret, ct_mask};
+use sup::secret::SecretWords;
 use sup::sha3::{Sha3_256, Sha3_512, Shake128, Shake256};
 
 const Q: u32 = 3329u32;
@@ -52,14 +54,17 @@ fn sub_q(a: u32, b: u32) -> u32 { mod_q(a + Q - b) }
 
 fn mul_q(a: u32, b: u32) -> u32 { mod_q(a * b) }
 
-fn zeros(n: usize) -> List<u32> {
-    let p: List<u32> = List::with_capacity(n);
-    for _ in 0..n { p.push(0u32); }
-    p
+fn zeros(n: usize) -> SecretWords { SecretWords::new(n) }
+
+/// `b[at..at + n]` as a secret.
+fn secret_of(b: [u8; 168], at: usize, n: usize) -> Secret {
+    let s = Secret::zeroed(n);
+    for i in 0..n { s[i] = b[at + i]; }
+    s
 }
 
 /// In-place NTT of the polynomial at `f[o..o + 256]` (Algorithm 9).
-fn ntt(f: List<u32>, o: usize) {
+fn ntt(f: SecretWords, o: usize) {
     let i = 1usize;
     let len = 128usize;
     while len >= 2 {
@@ -79,7 +84,7 @@ fn ntt(f: List<u32>, o: usize) {
 }
 
 /// In-place inverse NTT (Algorithm 10).
-fn inv_ntt(f: List<u32>, o: usize) {
+fn inv_ntt(f: SecretWords, o: usize) {
     let i = 127usize;
     let len = 2usize;
     while len <= 128 {
@@ -100,7 +105,7 @@ fn inv_ntt(f: List<u32>, o: usize) {
 }
 
 /// `acc[ao..] += a[ai..] * b[bi..]` in the NTT domain (Algorithm 11).
-fn mul_acc(acc: List<u32>, ao: usize, a: List<u32>, ai: usize, b: List<u32>, bi: usize) {
+fn mul_acc(acc: SecretWords, ao: usize, a: SecretWords, ai: usize, b: SecretWords, bi: usize) {
     for i in 0usize..128 {
         let a0 = a[ai + 2 * i];
         let a1 = a[ai + 2 * i + 1];
@@ -115,7 +120,7 @@ fn mul_acc(acc: List<u32>, ao: usize, a: List<u32>, ai: usize, b: List<u32>, bi:
 
 /// The NTT-domain matrix A from `rho` (Algorithm 7), row-major;
 /// `A[i][j]` from `rho || j || i`.
-fn matrix(rho: Slice<u8>) -> List<u32> {
+fn matrix(rho: Slice<u8>) -> SecretWords {
     let a = zeros(K * K * N);
     for i in 0..K {
         for j in 0..K {
@@ -141,11 +146,11 @@ fn matrix(rho: Slice<u8>) -> List<u32> {
 }
 
 /// CBD with eta = 2 of `PRF(s, b)` into `f[o..]` (Algorithms 8, 4.3).
-fn cbd(f: List<u32>, o: usize, s: Slice<u8>, b: u8) {
+fn cbd(f: SecretWords, o: usize, s: Slice<u8>, b: u8) {
     let x = Shake256::new();
     x.update(s);
     x.update([b]);
-    let buf = x.squeeze(128);
+    let buf = x.squeeze_raw(128);
     for i in 0..N {
         // Four bits of coefficient i: x0 + x1 - y0 - y1.
         let bits = ((buf[i / 2] as u32) >> ((4 * (i % 2)) as u32)) & 15u32;
@@ -155,35 +160,38 @@ fn cbd(f: List<u32>, o: usize, s: Slice<u8>, b: u8) {
     }
 }
 
-/// `ByteEncode_d` of `f[0..n]`.
-fn encode(f: List<u32>, n: usize, d: u32, out: List<u8>) {
+/// `ByteEncode_d` of `f[0..n]` into `out[at..]`; the end.
+fn encode(f: SecretWords, n: usize, d: u32, out: Secret, at: usize) -> usize {
     let acc = 0u64;
     let bits = 0u32;
+    let p = at;
     for i in 0..n {
         acc = acc | ((f[i] as u64) << (bits as u64));
         bits += d;
         while bits >= 8u32 {
-            out.push(acc as u8);
+            out[p] = acc as u8;
+            p += 1;
             acc = acc >> 8u64;
             bits -= 8u32;
         }
     }
+    p
 }
 
 /// `ByteDecode_d` of `b` into `n` values (no reduction).
-fn decode(b: Slice<u8>, n: usize, d: u32) -> List<u32> {
-    let f: List<u32> = List::with_capacity(n);
+fn decode(b: Slice<u8>, n: usize, d: u32) -> SecretWords {
+    let f = SecretWords::new(n);
     let mask = (1u64 << (d as u64)) - 1u64;
     let acc = 0u64;
     let bits = 0u32;
     let p = 0usize;
-    for _ in 0..n {
+    for i in 0..n {
         while bits < d {
             acc = acc | ((b[p] as u64) << (bits as u64));
             p += 1;
             bits += 8u32;
         }
-        f.push((acc & mask) as u32);
+        f[i] = (acc & mask) as u32;
         acc = acc >> (d as u64);
         bits -= d;
     }
@@ -191,14 +199,14 @@ fn decode(b: Slice<u8>, n: usize, d: u32) -> List<u32> {
 }
 
 /// `Compress_d` in place: `round(2^d x / q) mod 2^d`.
-fn compress(f: List<u32>, d: u32) {
+fn compress(f: SecretWords, d: u32) {
     for i in 0..f.len() {
         f[i] = div_q((f[i] << d) + 1664u32) & ((1u32 << d) - 1u32);
     }
 }
 
 /// `Decompress_d` in place: `round(q y / 2^d)`.
-fn decompress(f: List<u32>, d: u32) {
+fn decompress(f: SecretWords, d: u32) {
     for i in 0..f.len() {
         f[i] = (f[i] * Q + (1u32 << (d - 1u32))) >> d;
     }
@@ -229,14 +237,15 @@ fn encrypt(ek: Slice<u8>, m: Slice<u8>, r: Slice<u8>) -> List<u8> {
     for c in 0..N { v[c] = add_q(add_q(v[c], e2[c]), mu[c]); }
     compress(u, 10u32);
     compress(v, 4u32);
-    let out: List<u8> = List::with_capacity(1088);
-    encode(u, K * N, 10u32, out);
-    encode(v, N, 4u32, out);
-    out
+    let c = Secret::zeroed(1088);
+    let at = encode(u, K * N, 10u32, c, 0);
+    encode(v, N, 4u32, c, at);
+    for w in [y, e1, e2, mu, u, v] { w.wipe(); }
+    c.as_bytes().to_list()
 }
 
-/// K-PKE.Decrypt (Algorithm 15).
-fn decrypt(dk: Slice<u8>, c: Slice<u8>) -> List<u8> {
+/// K-PKE.Decrypt (Algorithm 15): the 32-byte message.
+fn decrypt(dk: Slice<u8>, c: Slice<u8>) -> Secret {
     let u = decode(c[0:320 * K], K * N, 10u32);
     decompress(u, 10u32);
     let v = decode(c[320 * K:1088], N, 4u32);
@@ -249,15 +258,10 @@ fn decrypt(dk: Slice<u8>, c: Slice<u8>) -> List<u8> {
     inv_ntt(w, 0);
     for c in 0..N { w[c] = sub_q(v[c], w[c]); }
     compress(w, 1u32);
-    let m: List<u8> = List::with_capacity(32);
-    encode(w, N, 1u32, m);
+    let m = Secret::zeroed(32);
+    encode(w, N, 1u32, m, 0);
+    for x in [u, v, s, w] { x.wipe(); }
     m
-}
-
-fn concat(a: Slice<u8>, b: Slice<u8>) -> List<u8> {
-    let out = a.to_list();
-    for x in b { out.push(x); }
-    out
 }
 
 fn need(b: Slice<u8>, n: usize, what: str) throws (ValueError) {
@@ -275,7 +279,7 @@ impl MlKem768 {
     pub const SHARED_KEY_LEN: usize = 32;
 
     /// KeyGen from 32-byte seeds `d` and `z`: `(ek, dk)`.
-    pub fn keygen(d: Bytes, z: Bytes) throws (ValueError) -> (List<u8>, List<u8>) {
+    pub fn keygen(d: Bytes, z: Bytes) throws (ValueError) -> (List<u8>, Secret) {
         let dv = view(d);
         let zv = view(z);
         try need(dv, 32, "d");
@@ -283,14 +287,16 @@ impl MlKem768 {
         let g = Sha3_512::new();
         g.update(dv);
         g.update([K as u8]);
-        let rs = g.finish();
-        let rho = rs[0:32];
-        let sigma = rs[32:64];
-        let a = matrix(rho);
+        let rs = g.finish_raw();
+        let rho: List<u8> = List::with_capacity(32);
+        for i in 0..32 { rho.push(rs[i]); }
+        let sigma = secret_of(rs, 32, 32);
+        let a = matrix(rho[0:32]);
         let s = zeros(K * N);
         let e = zeros(K * N);
-        for i in 0..K { cbd(s, i * N, sigma, i as u8); }
-        for i in 0..K { cbd(e, i * N, sigma, (K + i) as u8); }
+        for i in 0..K { cbd(s, i * N, sigma[0:32], i as u8); }
+        for i in 0..K { cbd(e, i * N, sigma[0:32], (K + i) as u8); }
+        sigma.wipe();
         for i in 0..K {
             ntt(s, i * N);
             ntt(e, i * N);
@@ -300,36 +306,43 @@ impl MlKem768 {
             for j in 0..K { mul_acc(t, i * N, a, (i * K + j) * N, s, j * N); }
             for c in 0..N { t[i * N + c] = add_q(t[i * N + c], e[i * N + c]); }
         }
-        let ek: List<u8> = List::with_capacity(1184);
-        encode(t, K * N, 12u32, ek);
-        for x in rho { ek.push(x); }
-        let dk: List<u8> = List::with_capacity(2400);
-        encode(s, K * N, 12u32, dk);
-        for x in ek { dk.push(x); }
-        for x in Sha3_256::digest(ek) { dk.push(x); }
-        for x in zv { dk.push(x); }
+        // dk = s || ek || H(ek) || z, ek = t || rho.
+        let dk = Secret::zeroed(2400);
+        let at = encode(s, K * N, 12u32, dk, 0);
+        let ek_at = at;
+        at = encode(t, K * N, 12u32, dk, at);
+        for x in rho { dk[at] = x; at += 1; }
+        let ek = dk[ek_at:at].to_list();
+        for x in Sha3_256::digest(ek) { dk[at] = x; at += 1; }
+        for x in zv { dk[at] = x; at += 1; }
+        for w in [s, e, t] { w.wipe(); }
         (ek, dk)
     }
 
     /// Encaps with the 32-byte message `m`: `(shared key, ciphertext)`.
     /// `ek` must pass the length and modulus checks (FIPS 203 7.2).
-    pub fn encapsulate(ek: Bytes, m: Bytes) throws (ValueError) -> (List<u8>, List<u8>) {
+    pub fn encapsulate(ek: Bytes, m: Bytes) throws (ValueError) -> (Secret, List<u8>) {
         let e = view(ek);
         let mv = view(m);
         try need(e, 1184, "encapsulation key");
         try need(mv, 32, "m");
         let t = decode(e[0:384 * K], K * N, 12u32);
-        for x in t {
-            if x >= Q { throw ValueError { msg: "ML-KEM-768: encapsulation key coefficient out of range" }; }
+        for i in 0..K * N {
+            if t[i] >= Q { throw ValueError { msg: "ML-KEM-768: encapsulation key coefficient out of range" }; }
         }
-        let kr = Sha3_512::digest(concat(mv, Sha3_256::digest(e)[0:32]));
-        let c = encrypt(e, mv, kr[32:64]);
-        (kr[0:32].to_list(), c)
+        let g = Sha3_512::new();
+        g.update(mv);
+        g.update(Sha3_256::digest(e));
+        let kr = g.finish_raw();
+        let r = secret_of(kr, 32, 32);
+        let c = encrypt(e, mv, r[0:32]);
+        r.wipe();
+        (secret_of(kr, 0, 32), c)
     }
 
     /// Decaps: the shared key, or (implicit rejection) a key derived
     /// from `z` and `c` when `c` does not re-encrypt to itself.
-    pub fn decapsulate(dk: Bytes, c: Bytes) throws (ValueError) -> List<u8> {
+    pub fn decapsulate(dk: Bytes, c: Bytes) throws (ValueError) -> Secret {
         let d = view(dk);
         let cv = view(c);
         try need(d, 2400, "decapsulation key");
@@ -342,18 +355,24 @@ impl MlKem768 {
         for i in 0..32 { bad = bad | (hd[i] ^ h[i]); }
         if bad != 0u8 { throw ValueError { msg: "ML-KEM-768: decapsulation key hash mismatch" }; }
         let m = decrypt(d, cv);
-        let kr = Sha3_512::digest(concat(m[0:32], h));
+        let g = Sha3_512::new();
+        g.update(m);
+        g.update(h);
+        let kr = g.finish_raw();
         let j = Shake256::new();
         j.update(z);
         j.update(cv);
-        let kbar = j.squeeze(32);
-        let c2 = encrypt(ek, m[0:32], kr[32:64]);
+        let kbar = j.squeeze_raw(32);
+        let r = secret_of(kr, 32, 32);
+        let c2 = encrypt(ek, m[0:32], r[0:32]);
+        m.wipe();
+        r.wipe();
         let diff = 0u32;
         for i in 0..1088 { diff = diff | ((cv[i] ^ c2[i]) as u32); }
         // 0xff when the ciphertexts differ, else 0.
         let mask = ct_mask(0u32.wrapping_sub(diff) >> 31) as u8;
-        let out: List<u8> = List::with_capacity(32);
-        for i in 0..32 { out.push(kr[i] ^ (mask & (kr[i] ^ kbar[i]))); }
+        let out = Secret::zeroed(32);
+        for i in 0..32 { out[i] = kr[i] ^ (mask & (kr[i] ^ kbar[i])); }
         out
     }
 }

@@ -349,6 +349,7 @@ impl RsaPrivateKey {
         let rb = try Hkdf::expand(HashAlgorithm::Sha512, Hkdf::extract(HashAlgorithm::Sha512, salt, ikm), info, k);
         rb[0] = 0u8;
         let r: List<u32> = Nat::from_be(rb[0:k], n) else { throw ValueError { msg: "RSA blinding" }; };
+        rb.wipe();
         Nat::to_be(try self.private_op(m, r), k)
     }
 }

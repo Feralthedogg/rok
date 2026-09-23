@@ -81,7 +81,7 @@
 // line of vectors.txt, a subset that ../gen_vectors.py makes from the
 // pinned sources it lists. A line is `<suite> <op> <field>...`: hex
 // fields, `-` for empty, `@name` for a `def name <hex>` line before it.
-use rok::core::crypto::{constant_time_eq, HashAlgorithm, Digest, Sha3_256, Sha3_512, Shake128, Shake256, Hmac, Hkdf, Aead, AeadAlgorithm, X25519, Ed25519, Ecdsa, EcCurve, RsaPublicKey, RsaPrivateKey, MlKem768};
+use rok::core::crypto::{constant_time_eq, HashAlgorithm, Digest, Sha3_256, Sha3_512, Shake128, Shake256, Hmac, Hkdf, Aead, AeadAlgorithm, X25519, Ed25519, Ecdsa, EcCurve, RsaPublicKey, RsaPrivateKey, MlKem768, Secret};
 
 fn nib(c: u8) -> u8 {
     if c >= 0x30u8 && c <= 0x39u8 { return c - 0x30u8; }
@@ -235,8 +235,8 @@ fn run(op: str, f: List<str>, pubs: Dict<str, RsaPublicKey>, privs: Dict<str, Rs
         let h = hash_of(f[0]);
         let size = try f[4].parse::<usize>() catch _ { 0 };
         let prk = Hkdf::extract(h, unhex(f[2]), unhex(f[1]));
-        let okm: List<u8> = try Hkdf::expand(h, prk, unhex(f[3]), size) catch _ { return f[6] == "0"; };
-        return want(f[6], hex(okm) == f[5]);
+        let okm = try Hkdf::expand(h, prk, unhex(f[3]), size) catch _ { return f[6] == "0"; };
+        return want(f[6], hex(okm.as_bytes().to_list()) == f[5]);
     }
     if op == "aead" {
         // alg key iv aad msg ct tag valid
@@ -248,7 +248,7 @@ fn run(op: str, f: List<str>, pubs: Dict<str, RsaPublicKey>, privs: Dict<str, Rs
         let zero = true;
         for x in unhex(f[2]) { if x != 0u8 { zero = false; } }
         return match r {
-            s: List<u8> => f[3] == "1" && hex(s) == f[2],
+            s: Secret => f[3] == "1" && hex(s.as_bytes().to_list()) == f[2],
             none => zero || f[3] == "0",
         };
     }
@@ -307,24 +307,24 @@ fn run(op: str, f: List<str>, pubs: Dict<str, RsaPublicKey>, privs: Dict<str, Rs
     if op == "mlkem-keygen" {
         // d z sha256(ek) sha256(dk)
         let (ek, dk) = try MlKem768::keygen(unhex(f[0]), unhex(f[1])) catch _ { return false; };
-        return sha256(ek) == f[2] && sha256(dk) == f[3];
+        return sha256(ek) == f[2] && sha256(dk.as_bytes().to_list()) == f[3];
     }
     if op == "mlkem-encaps" {
         // ek m key sha256(c) valid
         let (k, c) = try MlKem768::encapsulate(unhex(f[0]), unhex(f[1])) catch _ { return f[4] == "0"; };
-        return f[4] == "1" && hex(k) == f[2] && sha256(c) == f[3];
+        return f[4] == "1" && hex(k.as_bytes().to_list()) == f[2] && sha256(c) == f[3];
     }
     if op == "mlkem-decaps" {
         // dk c key valid
         let k = try MlKem768::decapsulate(unhex(f[0]), unhex(f[1])) catch _ { return f[3] == "0"; };
-        return f[3] == "1" && hex(k) == f[2];
+        return f[3] == "1" && hex(k.as_bytes().to_list()) == f[2];
     }
     if op == "mlkem-seed" {
         // d z sha256(ek) c key valid: keygen, then decapsulate c
         let (_, dk) = try MlKem768::keygen(unhex(f[0]), unhex(f[1])) catch _ { return f[5] != "1"; };
         let ek_ok = f[2] == "-" || sha256(dk[1152:2336].to_list()) == f[2];
         let k = try MlKem768::decapsulate(dk, unhex(f[3])) catch _ { return ek_ok && f[5] == "0"; };
-        return ek_ok && want(f[5], hex(k) == f[4]);
+        return ek_ok && want(f[5], hex(k.as_bytes().to_list()) == f[4]);
     }
     false
 }

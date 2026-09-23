@@ -37,7 +37,7 @@ fn main() {
     let tag = Hmac::mac(HashAlgorithm::Sha256, "key", "msg");
     println(f"hmac {Hmac::verify(HashAlgorithm::Sha256, "key", "msg", tag)}");
     let prk = Hkdf::extract(HashAlgorithm::Sha256, "salt", "ikm");
-    let okm = try Hkdf::expand(HashAlgorithm::Sha256, prk, "", 42usize) catch _ { [] };
+    let okm = try Hkdf::expand(HashAlgorithm::Sha256, prk, "", 42usize) catch _ { crypto::Secret::zeroed(0) };
     println(f"hkdf {okm.len()}");
     let key: List<u8> = [];
     for _ in 0..32 { key.push(7u8); }

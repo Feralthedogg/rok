@@ -1,10 +1,12 @@
 // Authenticated encryption with associated data: AES-GCM (NIST SP
-// 800-38D, 96-bit nonces) and ChaChaState-Poly1305State (RFC 8439). Tags are
-// 16 bytes, appended to the ciphertext.
+// 800-38D, 96-bit nonces) and ChaCha20-Poly1305 (RFC 8439). Tags are
+// 16 bytes, appended to the ciphertext. The key material is in secret
+// storage; per-message state is in locals.
 
 use sup::{view, Bytes, constant_time_eq};
-use sup::aes::AesKey;
+use sup::aes::{aes_expand, aes_encrypt2};
 use sup::chacha::{ChaChaState, Poly1305State};
+use sup::secret::SecretWords;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AeadAlgorithm {
@@ -29,10 +31,11 @@ impl AeadAlgorithm {
 /// A key ready for `seal` / `open`.
 pub struct Aead {
     alg: AeadAlgorithm;
-    aes: AesKey;
-    // GHASH key (AES-GCM) or the ChaChaState key.
-    h: [u64; 2];
-    key: List<u8>;
+    // AES-GCM: the AES round keys, then the GHASH key H (the big-endian
+    // halves as high and low words); ChaCha20-Poly1305: the eight key
+    // words.
+    k: SecretWords;
+    rounds: usize;
 }
 
 impl Aead {
@@ -42,17 +45,24 @@ impl Aead {
             throw ValueError { msg: f"{alg:?} key must be {alg.key_len()} bytes, not {k.len()}" };
         }
         if alg == AeadAlgorithm::ChaCha20Poly1305 {
-            let zero: [u8; 32] = [0u8; 32];
-            return Aead { alg, aes: AesKey::new(zero[0:16]), h: [0u64, 0u64], key: k.to_list() };
+            let w = SecretWords::new(8);
+            for i in 0usize..8 { w[i] = le32(k, 4 * i); }
+            return Aead { alg, k: w, rounds: 0 };
         }
-        let aes = AesKey::new(k);
-        let w: [u32; 8] = [0u32; 8];
-        aes.encrypt2(ref w);
-        let h: [u64; 2] = [be64(w[0], w[1]), be64(w[2], w[3])];
-        Aead { alg, aes, h, key: [] }
+        let rk = 8 * (k.len() / 4 + 7);
+        let w = SecretWords::new(rk + 4);
+        let rounds = aes_expand(k, w);
+        let b: [u32; 8] = [0u32; 8];
+        aes_encrypt2(w, rounds, ref b);
+        for i in 0usize..4 { w[rk + i] = b[i].swap_bytes(); }
+        Aead { alg, k: w, rounds }
     }
 
     pub fn algorithm(self) -> AeadAlgorithm { self.alg }
+
+    /// Overwrite the key material with zeros now (every copy shares
+    /// it); `seal` and `open` are meaningless afterwards.
+    pub fn wipe(self) { self.k.wipe(); }
 
     /// `plaintext` encrypted, then the tag.
     pub fn seal(self, nonce: Bytes, aad: Bytes, plaintext: Bytes) throws (ValueError) -> List<u8> {
@@ -61,7 +71,7 @@ impl Aead {
         let p = view(plaintext);
         try self.check_len(p.len());
         if self.alg == AeadAlgorithm::ChaCha20Poly1305 {
-            let c = ChaChaState::new(self.key[0:32], n, 1u32);
+            let c = ChaChaState::new(self.k, n, 1u32);
             let out = c.xor(p);
             let tag = self.poly_tag(n, a, out[0:out.len()]);
             for x in tag { out.push(x); }
@@ -85,7 +95,7 @@ impl Aead {
         try self.check_len(body.len());
         if self.alg == AeadAlgorithm::ChaCha20Poly1305 {
             if !constant_time_eq(self.poly_tag(n, a, body), tag) { return none; }
-            let c = ChaChaState::new(self.key[0:32], n, 1u32);
+            let c = ChaChaState::new(self.k, n, 1u32);
             return c.xor(body);
         }
         if !constant_time_eq(self.gcm_tag(n, a, body), tag) { return none; }
@@ -103,16 +113,7 @@ impl Aead {
     }
 
     fn poly_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {
-        let otk = ChaChaState::new(self.key[0:32], n, 0u32).block();
-        let kb: List<u8> = List::with_capacity(32);
-        for i in 0usize..8 {
-            let w = otk[i];
-            kb.push(w as u8);
-            kb.push((w >> 8) as u8);
-            kb.push((w >> 16) as u8);
-            kb.push((w >> 24) as u8);
-        }
-        let m = Poly1305State::new(kb[0:32]);
+        let m = Poly1305State::new(ChaChaState::new(self.k, n, 0u32).block());
         m.update(a);
         m.pad16();
         m.update(c);
@@ -131,13 +132,12 @@ impl Aead {
         let n0 = le32(n, 0);
         let n1 = le32(n, 4);
         let n2 = le32(n, 8);
-        let aes = self.aes;
         let ctr = 2u32;
         let i = 0usize;
         while i < len {
             let w: [u32; 8] = [n0, n1, n2, ctr.swap_bytes(), n0, n1, n2, ctr.wrapping_add(1u32).swap_bytes()];
             ctr = ctr.wrapping_add(2u32);
-            aes.encrypt2(ref w);
+            aes_encrypt2(self.k, self.rounds, ref w);
             let m = if len - i < 32 { len - i } else { 32 };
             for j in 0usize..m {
                 out.push(data[i + j] ^ ((w[j / 4] >> (8 * (j % 4)) as u32) as u8));
@@ -148,15 +148,17 @@ impl Aead {
     }
 
     fn gcm_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {
+        let r = 8 * (self.rounds + 1);
+        let h: [u64; 2] = [((self.k[r] as u64) << 32) | (self.k[r + 1] as u64), ((self.k[r + 2] as u64) << 32) | (self.k[r + 3] as u64)];
         let x: [u64; 2] = [0u64, 0u64];
-        ghash(ref x, self.h, a);
-        ghash(ref x, self.h, c);
+        ghash(ref x, h, a);
+        ghash(ref x, h, c);
         let lens: [u64; 2] = [(a.len() as u64) * 8u64, (c.len() as u64) * 8u64];
         x[0] = x[0] ^ lens[0];
         x[1] = x[1] ^ lens[1];
-        x = gmul(x, self.h);
+        x = gmul(x, h);
         let w: [u32; 8] = [le32(n, 0), le32(n, 4), le32(n, 8), 0x01000000u32, 0u32, 0u32, 0u32, 0u32];
-        self.aes.encrypt2(ref w);
+        aes_encrypt2(self.k, self.rounds, ref w);
         let out: List<u8> = List::with_capacity(16);
         for i in 0usize..16 {
             let e = (w[i / 4] >> (8 * (i % 4)) as u32) as u8;
@@ -164,6 +166,11 @@ impl Aead {
         }
         out
     }
+}
+
+/// `using` release wipes.
+impl Drop for Aead {
+    fn drop(ref self) { self.wipe(); }
 }
 
 fn nonce12(nonce: Bytes) throws (ValueError) -> Slice<u8> {
@@ -180,12 +187,6 @@ fn le32(k: Slice<u8>, i: usize) -> u32 {
 
 fn put_le64(out: List<u8>, v: u64) {
     for i in 0u64..8 { out.push((v >> (8u64 * i)) as u8); }
-}
-
-/// Two little-endian AES words as the big-endian 64-bit value of their
-/// eight bytes.
-fn be64(a: u32, b: u32) -> u64 {
-    ((a.swap_bytes() as u64) << 32) | (b.swap_bytes() as u64)
 }
 
 fn be64at(d: Slice<u8>, i: usize) -> u64 {

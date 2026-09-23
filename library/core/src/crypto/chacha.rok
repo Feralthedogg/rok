@@ -3,6 +3,7 @@
 // products.
 
 use sup::ct_mask;
+use sup::secret::SecretWords;
 
 /// The ChaCha20 state words: constants, key, block counter, nonce.
 pub(pkg) struct ChaChaState {
@@ -11,10 +12,11 @@ pub(pkg) struct ChaChaState {
 
 impl ChaChaState {
     /// `key`: 32 bytes; `nonce`: 12 bytes.
-    pub(pkg) fn new(key: Slice<u8>, nonce: Slice<u8>, counter: u32) -> ChaChaState {
+    /// `key`: the eight little-endian key words.
+    pub(pkg) fn new(key: SecretWords, nonce: Slice<u8>, counter: u32) -> ChaChaState {
         let s: [u32; 16] = [0x61707865u32, 0x3320646eu32, 0x79622d32u32, 0x6b206574u32,
             0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
-        for i in 0usize..8 { s[4 + i] = le32(key, 4 * i); }
+        for i in 0usize..8 { s[4 + i] = key[i]; }
         s[12] = counter;
         for i in 0usize..3 { s[13 + i] = le32(nonce, 4 * i); }
         ChaChaState { s }
@@ -161,13 +163,14 @@ pub(pkg) struct Poly1305State {
 }
 
 impl Poly1305State {
-    /// `key`: 32 bytes, `r || s`.
-    pub(pkg) fn new(key: Slice<u8>) -> Poly1305State {
+    /// `k[0..8]`: the key `r || s` as little-endian words (a ChaCha20
+    /// block).
+    pub(pkg) fn new(k: [u32; 16]) -> Poly1305State {
         Poly1305State {
-            r: [le32(key, 0) & 0x3ffffffu32, (le32(key, 3) >> 2) & 0x3ffff03u32,
-                (le32(key, 6) >> 4) & 0x3ffc0ffu32, (le32(key, 9) >> 6) & 0x3f03fffu32,
-                (le32(key, 12) >> 8) & 0x00fffffu32],
-            pad: [le32(key, 16), le32(key, 20), le32(key, 24), le32(key, 28)],
+            r: [k[0] & 0x3ffffffu32, ((k[0] >> 26) | (k[1] << 6)) & 0x3ffff03u32,
+                ((k[1] >> 20) | (k[2] << 12)) & 0x3ffc0ffu32, ((k[2] >> 14) | (k[3] << 18)) & 0x3f03fffu32,
+                (k[3] >> 8) & 0x00fffffu32],
+            pad: [k[4], k[5], k[6], k[7]],
             h: [0u32; 5],
             buf: [0u8; 16],
             n: 0,

@@ -1,6 +1,6 @@
 // HMAC (RFC 2104) and HKDF (RFC 5869) over a SHA-2 function.
 
-use sup::{view, Bytes};
+use sup::{view, Bytes, Secret};
 use sup::constant_time_eq;
 use sup::sha2::{HashAlgorithm, Digest};
 
@@ -14,18 +14,23 @@ impl Hmac {
     pub fn new(alg: HashAlgorithm, key: Bytes) -> Hmac {
         let k = view(key);
         let bl = alg.block_len();
-        let kb: List<u8> = if k.len() > bl { alg.digest(k) } else { k.to_list() };
-        while kb.len() < bl { kb.push(0u8); }
-        let ipad: List<u8> = List::with_capacity(bl);
-        let opad: List<u8> = List::with_capacity(bl);
-        for x in kb {
-            ipad.push(x ^ 0x36u8);
-            opad.push(x ^ 0x5cu8);
+        // The key, zero-padded to a block, in arrays: no list holds it.
+        let kb: [u8; 128] = [0u8; 128];
+        if k.len() > bl {
+            let d = Digest::new(alg);
+            d.update(k);
+            let h = d.finish_raw();
+            for i in 0..alg.output_len() { kb[i] = h[i]; }
+        } else {
+            for i in 0..k.len() { kb[i] = k[i]; }
         }
+        let pad: [u8; 128] = [0u8; 128];
+        for i in 0..bl { pad[i] = kb[i] ^ 0x36u8; }
         let inner = Digest::new(alg);
-        inner.update(ipad);
+        inner.update_raw(pad, bl);
+        for i in 0..bl { pad[i] = kb[i] ^ 0x5cu8; }
         let outer = Digest::new(alg);
-        outer.update(opad);
+        outer.update_raw(pad, bl);
         Hmac { inner, outer }
     }
 
@@ -44,8 +49,18 @@ impl Hmac {
     pub fn update(ref self, data: Bytes) { self.inner.update(data); }
 
     pub fn finish(self) -> List<u8> {
-        self.outer.update(self.inner.finish());
-        self.outer.finish()
+        self.outer_raw().finish()
+    }
+
+    /// The outer hash with the inner one absorbed (through an array).
+    fn outer_raw(self) -> Digest {
+        let alg = self.outer.algorithm();
+        let h = self.inner.finish_raw();
+        let b: [u8; 128] = [0u8; 128];
+        for i in 0..alg.output_len() { b[i] = h[i]; }
+        let o = self.outer;
+        o.update_raw(b, alg.output_len());
+        o
     }
 }
 
@@ -55,36 +70,48 @@ pub struct Hkdf;
 
 impl Hkdf {
     /// `HMAC(salt, ikm)`; an empty salt is `output_len` zero bytes.
-    pub fn extract(alg: HashAlgorithm, salt: Bytes, ikm: Bytes) -> List<u8> {
+    pub fn extract(alg: HashAlgorithm, salt: Bytes, ikm: Bytes) -> Secret {
         let s = view(salt);
-        if s.len() == 0 {
-            let zeros: List<u8> = List::with_capacity(alg.output_len());
-            for _ in 0..alg.output_len() { zeros.push(0u8); }
-            return Hmac::mac(alg, zeros, ikm);
-        }
-        Hmac::mac(alg, s, ikm)
+        // A zero key and an empty one give the same HMAC.
+        let h = Hmac::new(alg, s);
+        h.update(ikm);
+        let prk = Secret::zeroed(alg.output_len());
+        let t = h.outer_raw().finish_raw();
+        for i in 0..alg.output_len() { prk[i] = t[i]; }
+        prk
     }
 
     /// `len` bytes of output keying material; `len` is at most
     /// `255 * output_len`.
-    pub fn expand(alg: HashAlgorithm, prk: Bytes, info: Bytes, len: usize) throws (ValueError) -> List<u8> {
-        if len > 255 * alg.output_len() {
+    pub fn expand(alg: HashAlgorithm, prk: Bytes, info: Bytes, len: usize) throws (ValueError) -> Secret {
+        let ol = alg.output_len();
+        if len > 255 * ol {
             throw ValueError { msg: "HKDF output too long" };
         }
         let base = Hmac::new(alg, prk);
         let inf = view(info);
-        let out: List<u8> = List::with_capacity(len);
-        let t: List<u8> = [];
+        let out = Secret::zeroed(len);
+        // T(i - 1) || i, in an array.
+        let t: [u8; 128] = [0u8; 128];
+        let tn = 0usize;
         let i = 1u8;
-        while out.len() < len {
+        let at = 0usize;
+        while at < len {
             let h = base;
-            h.update(t);
+            h.inner.update_raw(t, tn);
             h.update(inf);
-            h.update([i]);
-            t = h.finish();
-            for x in t {
-                if out.len() < len { out.push(x); }
+            let c: [u8; 128] = [0u8; 128];
+            c[0] = i;
+            h.inner.update_raw(c, 1);
+            let d = h.outer_raw().finish_raw();
+            for j in 0..ol {
+                t[j] = d[j];
+                if at < len {
+                    out[at] = d[j];
+                    at += 1;
+                }
             }
+            tn = ol;
             i = i.wrapping_add(1u8);
         }
         out

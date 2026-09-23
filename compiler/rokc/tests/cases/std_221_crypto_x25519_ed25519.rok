@@ -30,6 +30,7 @@
 // rok::core::crypto: X25519 (RFC 7748 5.2, 6.1, iterated), Ed25519 (RFC 8032 7.1)
 // and Wycheproof subsets.
 use rok::core::crypto::x25519::X25519;
+use rok::core::crypto::Secret;
 use rok::core::crypto::ed25519::Ed25519;
 
 fn hex(b: List<u8>) -> str {
@@ -60,7 +61,7 @@ fn check(name: str, got: str, want: str) {
 
 fn x(k: str, u: str) -> str {
     match try X25519::shared_secret(unhex(k), unhex(u)) catch _ { none } {
-        s: List<u8> => hex(s),
+        s: Secret => hex(s.as_bytes().to_list()),
         none => "none",
     }
 }
@@ -81,7 +82,7 @@ fn main() {
     let k = unhex("0900000000000000000000000000000000000000000000000000000000000000");
     let u = k;
     for i in 1..1001 {
-        let r: List<u8> = (try X25519::shared_secret(k, u) catch _ { none }) ?? [];
+        let r = ((try X25519::shared_secret(k, u) catch _ { none }) ?? Secret::zeroed(0)).as_bytes().to_list();
         u = k;
         k = r;
         if i == 1 { check("x25519 iter 1", hex(k), "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079"); }

@@ -48,6 +48,20 @@ impl Keccak {
     }
 
     fn squeeze(ref self, n: usize) -> List<u8> {
+        let out: List<u8> = List::with_capacity(n);
+        let left = n;
+        while left > 0 {
+            let m = if left < 168 { left } else { 168 };
+            let b = self.squeeze_raw(m);
+            for i in 0..m { out.push(b[i]); }
+            left -= m;
+        }
+        out
+    }
+
+    /// The next `n <= 168` output bytes, in an array (secret output in
+    /// no list).
+    fn squeeze_raw(ref self, n: usize) -> [u8; 168] {
         let st = self.st;
         let p = self.pos;
         if !self.squeezing {
@@ -57,13 +71,13 @@ impl Keccak {
             p = 0;
             self.squeezing = true;
         }
-        let out: List<u8> = List::with_capacity(n);
-        for _ in 0..n {
+        let out: [u8; 168] = [0u8; 168];
+        for i in 0..n {
             if p == self.rate {
                 st = keccak_f(st);
                 p = 0;
             }
-            out.push((st[p / 8] >> ((8 * (p % 8)) as u64)) as u8);
+            out[i] = (st[p / 8] >> ((8 * (p % 8)) as u64)) as u8;
             p += 1;
         }
         self.st = st;
@@ -156,6 +170,9 @@ impl Sha3_512 {
     pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
 
     pub fn finish(self) -> List<u8> { self.k.squeeze(64) }
+
+    /// `finish` into the first 64 bytes of an array.
+    pub(pkg) fn finish_raw(self) -> [u8; 168] { self.k.squeeze_raw(64) }
 }
 
 /// SHAKE128: `update` the input, then `squeeze` output in any pieces.
@@ -183,4 +200,7 @@ impl Shake256 {
     pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
 
     pub fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
+
+    /// `squeeze` of `n <= 168` bytes into an array.
+    pub(pkg) fn squeeze_raw(ref self, n: usize) -> [u8; 168] { self.k.squeeze_raw(n) }
 }
