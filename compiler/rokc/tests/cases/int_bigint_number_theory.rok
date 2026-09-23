@@ -1,0 +1,154 @@
+// expect-exit: 0
+// expect-stdout:
+// 0 1 1 1 2 3 4 4 9 10 3037000499
+// 3037000499 4294967295 4294967296 100000000000000000000 99999999999999999999
+// 33 true 87926069625040
+// 200 true 969801349263044856
+// 1000 true 2112517847418359992
+// 5000 true 936109803951353785
+// 30000 true 809872164764362651
+// 120000 true 1008292074926328862
+// true true 1125899906842624
+// 2 1 -3 2 -2 1 3 2 2 0 -2 0 9223372036854775808 0 -3074457345618258603 1
+// 1026249300881796294 10147063811967024 1279593708331897656 2295695945401857994 1279593708331897657 10147063811967024 1026249300881796295 2295695945401857994 1878292682783510666 5 2305843009213693950 131062
+// 445 52 -52 1 0 0 1 312267046
+// 2282233531432672302 217731388292945465 true 1
+// 0 12 6 9223372036854775808 9223372036854775808 2 36 0 27670116110564327424 4 1099511627776
+// 64 25 21258732 1225309889129818698
+// 300 108 1472233761422212812 945512563372632682
+// 2000 696 1062513347730161373 335103139879683039
+// 20000 3464 1119639929340467511 1016005041945310008
+// 21000 177 1674777105715210919 1629375524834359953
+// 100000 10382 1144563849254659124 1983544135943640936
+// 1 4 20827
+// 1899872977833965494 1791585529112335911 148552 95425 790041299783450136 790041299783450137
+
+// stdlib spec 2.1.2: `int` isqrt / checked_isqrt, div_euclid /
+// rem_euclid, modpow, gcd / lcm, on one-word values and past them
+// (Lehmer's gcd on operands of every length, Newton square roots
+// across the multiplication cut-offs). Expected values from Python
+// (math.isqrt, divmod, pow, math.gcd, math.lcm); big results reduced
+// mod 2^61 - 1.
+
+fn p(b: i64, e: u32) -> int { int::from(b).pow(e) }
+
+fn line(xs: List<int>) -> str {
+    let t: List<str> = List::new();
+    for x in xs { t.push(f"{x}"); }
+    t.join(" ")
+}
+
+fn main() {
+    let h: int = 2305843009213693951;
+    let small: List<int> = [0, 1, 2, 3, 4, 15, 16, 17, 99, 100, 9223372036854775807];
+    let roots: List<int> = List::new();
+    for x in small { roots.push(x.isqrt()); }
+    println(line(roots));
+    let big: List<int> = [9223372036854775808, 18446744073709551615, 18446744073709551616, p(10, 40), p(10, 40) - 1];
+    roots = List::new();
+    for x in big { roots.push(x.isqrt()); }
+    println(line(roots));
+    // Around perfect squares of many sizes.
+    for e in [33u32, 200u32, 1000u32, 5000u32, 30000u32, 120000u32] {
+        let s = p(3, e) + int::from(e);
+        let sq = s * s;
+        let ok = sq.isqrt() == s && (sq - int::from(1)).isqrt() == s - int::from(1) && (sq + s + s).isqrt() == s;
+        println(f"{e} {ok} {p(7, e).isqrt() %% h}");
+    }
+    let neg: int = -4;
+    println(f"{neg.checked_isqrt() is none} {int::from(-1).checked_isqrt() is none} {(p(2, 100)).checked_isqrt() ?? 0}");
+
+    // div_euclid / rem_euclid: every sign, one word and big.
+    let pairs: List<(int, int)> = [(7, 3), (-7, 3), (7, -3), (-7, -3), (6, 3), (-6, 3), (-9223372036854775808, -1), (-9223372036854775808, 3)];
+    let qs: List<int> = List::new();
+    for (a, b) in pairs {
+        qs.push(a.div_euclid(b));
+        qs.push(a.rem_euclid(b));
+    }
+    println(line(qs));
+    let ba = p(3, 300) + int::from(1);
+    let bb = p(2, 200) - int::from(5);
+    qs = List::new();
+    for (a, b) in [(ba, bb), (-ba, bb), (ba, -bb), (-ba, -bb), (-ba, int::from(7)), (int::from(-5), bb)] {
+        let q = a.div_euclid(b);
+        let r = a.rem_euclid(b);
+        if q * b + r != a || r.is_negative() || r >= b.abs() { println("bad euclid"); }
+        qs.push(q %% h);
+        qs.push(r %% h);
+    }
+    println(line(qs));
+
+    // modpow: the sign of the modulus, as `%%`.
+    let mp: List<int> = [
+        int::from(4).modpow(13, 497),
+        int::from(-4).modpow(13, 497),
+        int::from(4).modpow(13, -497),
+        int::from(5).modpow(0, 7),
+        int::from(5).modpow(0, 1),
+        int::from(5).modpow(3, -1),
+        int::from(0).modpow(0, 13),
+        int::from(2).modpow(p(10, 30), p(10, 9) + int::from(7)),
+    ];
+    println(line(mp));
+    let m4096 = p(3, 2584) + int::from(2);
+    let r1 = p(7, 1500).modpow(p(5, 1700), m4096);
+    let r2 = (-p(7, 1500)).modpow(p(5, 1700) + int::from(1), -m4096);
+    // Fermat: 2^(q-1) = 1 mod a prime q (2^521 - 1).
+    let m521 = p(2, 521) - int::from(1);
+    let f = int::from(2).modpow(m521 - int::from(1), m521);
+    println(f"{r1 %% h} {r2 %% h} {r2 <= 0} {f}");
+
+    // gcd / lcm.
+    let gs: List<int> = [
+        int::from(0).gcd(0),
+        int::from(0).gcd(-12),
+        int::from(-12).gcd(18),
+        int::from(-9223372036854775808i64).gcd(0),
+        int::from(-9223372036854775808i64).gcd(-9223372036854775808),
+        int::from(-9223372036854775808i64).gcd(6),
+        int::from(12).lcm(-18),
+        int::from(0).lcm(5),
+        int::from(-9223372036854775808i64).lcm(3),
+        int::from(4).gcd(p(2, 100)),
+        p(2, 100).gcd(p(6, 40)),
+    ];
+    println(line(gs));
+    // Shared factors on operands of 1 to 10^5 limbs, both orders,
+    // balanced and not (the first division).
+    for (e1, e2, k) in [(64u32, 40u32, 6u32), (300u32, 250u32, 30u32), (2000u32, 1900u32, 200u32), (20000u32, 12000u32, 1000u32), (21000u32, 300u32, 50u32), (100000u32, 70000u32, 3000u32)] {
+        let g = p(11, k) * int::from(6);
+        let a = (p(3, e1) + int::from(1)) * g;
+        let b = (p(5, e2) + int::from(7)) * g;
+        let x = a.gcd(b);
+        let y = (-b).gcd(a);
+        let l = a.lcm(b);
+        if x != y || !(a % x).is_zero() || !(b % x).is_zero() || l * x != (a * b).abs() { println("bad gcd"); }
+        println(f"{e1} {x.bit_length()} {x %% h} {l %% h}");
+    }
+    // Fibonacci neighbours: every quotient is 1.
+    let (fa, fb): (int, int) = (0, 1);
+    for _ in 0..30000 {
+        let t = fa + fb;
+        fa = fb;
+        fb = t;
+    }
+    println(f"{fa.gcd(fb)} {(fa * int::from(10)).gcd(fb * int::from(4))} {fb.bit_length()}");
+
+    // Burnikel-Ziegler levels with the divisor halves' transforms kept;
+    // decimal output with kept power tables (twice: built, then reused).
+    let a = p(3, 200000);
+    let b = p(7, 60000) + int::from(1);
+    let (q, r) = a.div_rem(b);
+    let (nq, nr) = (-a).div_rem(b);
+    if q * b + r != a || r >= b || nq != -q || nr != -r { println("bad division"); }
+    let s1 = f"{a}";
+    let s2 = f"{a + int::from(1)}";
+    println(f"{q %% h} {r %% h} {q.bit_length()} {s1.len()} {hstr(s1)} {hstr(s2)}");
+}
+
+fn hstr(t: str) -> u64 {
+    let b = t.as_bytes();
+    let h = 0u64;
+    for i in 0..b.len() { h = h.wrapping_mul(31u64).wrapping_add(b[i] as u64); }
+    h
+}

@@ -1,8 +1,9 @@
 //! `int` limb kernels (`library/core/src/num/bigint.rok`) over
 //! `GcBuf<u32>` limbs (little-endian, base 2^32), computed on machine
 //! words: multiplication (schoolbook, Karatsuba, Toom-3, three-prime
-//! NTT, squaring variants), Knuth D division, single-limb division,
-//! add / sub / shifts and the base case of decimal output. The library
+//! NTT, squaring variants, products by an operand transformed once),
+//! Knuth D division, single-limb division, Lehmer gcd, add / sub /
+//! shifts and the base case of decimal output. The library
 //! does the rest (signs, recursive division, radix conversion,
 //! allocation). None of these allocate, so no collection runs while
 //! they hold the buffers: scratch space comes from the caller.
@@ -26,6 +27,15 @@ type W = u128;
 type L = u32;
 #[cfg(not(target_pointer_width = "64"))]
 type W = u64;
+// Signed `L` / `W` (Lehmer cofactors and their sums).
+#[cfg(target_pointer_width = "64")]
+type SL = i64;
+#[cfg(target_pointer_width = "64")]
+type SW = i128;
+#[cfg(not(target_pointer_width = "64"))]
+type SL = i32;
+#[cfg(not(target_pointer_width = "64"))]
+type SW = i64;
 
 const LB: u32 = L::BITS;
 /// `u32` limbs per `L`.
@@ -491,17 +501,19 @@ const fn packed(n: usize) -> usize {
 // ---- three-prime NTT ----
 //
 // The `u32` digits of both operands are coefficients; their cyclic
-// convolution is computed modulo three primes p < 2^31 with 2^26 | p - 1
+// convolution is computed modulo three primes p < 2^30 with 2^23 | p - 1
 // (Montgomery arithmetic, R = 2^32) and put back together by Garner's
-// CRT. A coefficient of the product is below min(len) 2^64 < 2^90 <
-// p1 p2 p3, so transform lengths up to 2^26 are exact.
+// CRT. A coefficient of the product is below min(len) 2^64 <= 2^86 <
+// p1 p2 p3 (2^88.2), so transform lengths up to 2^23 are exact. The
+// butterflies keep values in [0, 2p) (Harvey's lazy reduction, which
+// needs 4p < 2^32).
 
-/// The primes and a primitive root of each.
-const P1: u32 = 2_013_265_921;
-const P2: u32 = 1_811_939_329;
+/// The primes.
+const P1: u32 = 998_244_353;
+const P2: u32 = 754_974_721;
 const P3: u32 = 469_762_049;
 /// The longest transform (`u32` coefficients).
-const NTT_MAX: usize = 1 << 26;
+const NTT_MAX: usize = 1 << 23;
 
 const fn pow_mod(b: u64, e: u64, p: u64) -> u64 {
     let (mut b, mut e, mut r) = (b % p, e, 1u64);
@@ -521,6 +533,7 @@ struct Mont<const P: u32>;
 impl<const P: u32> Mont<P> {
     /// -P^-1 mod 2^32 (Newton: x (2 - P x) doubles the correct bits).
     const PINV: u32 = {
+        assert!(P < 1 << 30);
         let mut x = 1u32;
         let mut i = 0;
         while i < 5 {
@@ -530,25 +543,21 @@ impl<const P: u32> Mont<P> {
         x.wrapping_neg()
     };
 
-    /// a b / R mod P (`a, b < P`).
+    /// a b / R mod P, in [0, 2P) for `a b < 2^32 P` (`a < 4P, b < P`, or
+    /// both below 2P).
     #[inline]
     const fn mul(a: u32, b: u32) -> u32 {
         let t = a as u64 * b as u64;
         // The low half of `t`, as 32-bit products (vectorizes).
         let m = a.wrapping_mul(b).wrapping_mul(Self::PINV);
-        let u = ((t + m as u64 * P as u64) >> 32) as u32;
-        if u >= P { u - P } else { u }
+        ((t + m as u64 * P as u64) >> 32) as u32
     }
 
+    /// [0, 2k P) to [0, k P) (`k` = 1, 2): wraps unless `x >= k P`.
     #[inline]
-    const fn add(a: u32, b: u32) -> u32 {
-        let s = a + b;
-        if s >= P { s - P } else { s }
-    }
-
-    #[inline]
-    const fn sub(a: u32, b: u32) -> u32 {
-        if a >= b { a - b } else { a + P - b }
+    const fn fold<const K: u32>(x: u32) -> u32 {
+        let y = x.wrapping_sub(K * P);
+        if y < x { y } else { x }
     }
 
     /// `x R mod P`.
@@ -557,19 +566,27 @@ impl<const P: u32> Mont<P> {
     }
 
     /// Root tables for length `n`: `rt[h + j] = w_2h^j` for each half
-    /// length `h` (Montgomery form), `irt` the same for the inverses.
+    /// length `h` (Montgomery form, below P), `irt` the same for the
+    /// inverses.
     fn roots(g: u32, n: usize, rt: &mut [u32], irt: &mut [u32]) {
+        // The first `K` powers in sequence, then each from the one `K`
+        // back: independent products instead of one chain of `h`.
+        const K: usize = 16;
         let p = u64::from(P);
         let w = pow_mod(u64::from(g), (p - 1) / n as u64, p);
         let wi = pow_mod(w, p - 2, p);
         let h = n / 2;
         let (mut x, mut y) = (Self::to_mont(1), Self::to_mont(1));
         let (wm, wim) = (Self::to_mont(w), Self::to_mont(wi));
-        for j in 0..h {
+        for j in 0..h.min(K) {
             rt[h + j] = x;
             irt[h + j] = y;
-            x = Self::mul(x, wm);
-            y = Self::mul(y, wim);
+            x = Self::fold::<1>(Self::mul(x, wm));
+            y = Self::fold::<1>(Self::mul(y, wim));
+        }
+        for j in K..h {
+            rt[h + j] = Self::fold::<1>(Self::mul(rt[h + j - K], x));
+            irt[h + j] = Self::fold::<1>(Self::mul(irt[h + j - K], y));
         }
         let mut h = h / 2;
         while h >= 1 {
@@ -581,83 +598,185 @@ impl<const P: u32> Mont<P> {
         }
     }
 
-    /// Forward transform (decimation in frequency): natural order in,
-    /// bit-reversed out.
+    /// Forward transform (decimation in frequency, length >= 4): natural
+    /// order in, bit-reversed out; values in [0, 2P) both ends.
     fn forward(a: &mut [u32], rt: &[u32]) {
         let mut h = a.len() / 2;
-        while h >= 1 {
+        while h >= 4 {
             let w = &rt[h..2 * h];
             for blk in a.chunks_exact_mut(2 * h) {
                 let (x, y) = blk.split_at_mut(h);
                 for ((u, v), &w) in x.iter_mut().zip(y.iter_mut()).zip(w) {
                     let (s, d) = (*u, *v);
-                    *u = Self::add(s, d);
-                    *v = Self::mul(Self::sub(s, d), w);
+                    *u = Self::fold::<2>(s + d);
+                    *v = Self::mul(s + 2 * P - d, w);
                 }
             }
             h /= 2;
         }
+        // h = 2 and 1 together; the twiddles are 1 but for w_4.
+        let w4 = rt[3];
+        for p in a.chunks_exact_mut(4) {
+            let (y0, y2) = (
+                Self::fold::<2>(p[0] + p[2]),
+                Self::fold::<2>(p[0] + 2 * P - p[2]),
+            );
+            let (y1, y3) = (
+                Self::fold::<2>(p[1] + p[3]),
+                Self::mul(p[1] + 2 * P - p[3], w4),
+            );
+            p[0] = Self::fold::<2>(y0 + y1);
+            p[1] = Self::fold::<2>(y0 + 2 * P - y1);
+            p[2] = Self::fold::<2>(y2 + y3);
+            p[3] = Self::fold::<2>(y2 + 2 * P - y3);
+        }
     }
 
-    /// Inverse transform without the 1/n (decimation in time):
-    /// bit-reversed in, natural order out.
+    /// Inverse transform without the 1/n (decimation in time, length >=
+    /// 4): bit-reversed in, natural order out; values in [0, 2P) both
+    /// ends.
     fn inverse(a: &mut [u32], irt: &[u32]) {
         let n = a.len();
-        let mut h = 1;
+        // h = 1 and 2 together; the twiddles are 1 but for w_4^-1.
+        let w4 = irt[3];
+        for p in a.chunks_exact_mut(4) {
+            let (y0, y1) = (
+                Self::fold::<2>(p[0] + p[1]),
+                Self::fold::<2>(p[0] + 2 * P - p[1]),
+            );
+            let (y2, y3) = (
+                Self::fold::<2>(p[2] + p[3]),
+                Self::fold::<2>(p[2] + 2 * P - p[3]),
+            );
+            let t = Self::mul(y3, w4);
+            p[0] = Self::fold::<2>(y0 + y2);
+            p[2] = Self::fold::<2>(y0 + 2 * P - y2);
+            p[1] = Self::fold::<2>(y1 + t);
+            p[3] = Self::fold::<2>(y1 + 2 * P - t);
+        }
+        let mut h = 4;
         while h < n {
             let w = &irt[h..2 * h];
             for blk in a.chunks_exact_mut(2 * h) {
                 let (x, y) = blk.split_at_mut(h);
                 for ((u, v), &w) in x.iter_mut().zip(y.iter_mut()).zip(w) {
                     let (s, d) = (*u, Self::mul(*v, w));
-                    *u = Self::add(s, d);
-                    *v = Self::sub(s, d);
+                    *u = Self::fold::<2>(s + d);
+                    *v = Self::fold::<2>(s + 2 * P - d);
                 }
             }
             h *= 2;
         }
     }
 
-    /// `f` = the convolution of `da` and `db` (`db` empty: `da` with
-    /// itself) mod P, each still to be multiplied (`mul`) by the factor
-    /// returned; `fb`, `rt`, `irt` scratch of `f.len()`.
-    fn convolve(
-        g: u32,
-        f: &mut [u32],
-        fb: &mut [u32],
-        rt: &mut [u32],
-        irt: &mut [u32],
-        da: &[u32],
-        db: &[u32],
-    ) -> u32 {
-        let n = f.len();
-        Self::roots(g, n, rt, irt);
-        let load = |f: &mut [u32], d: &[u32]| {
-            for (x, &v) in f.iter_mut().zip(d) {
-                *x = v % P;
-            }
-            f[d.len()..].fill(0);
-        };
-        load(f, da);
-        Self::forward(f, rt);
-        if db.is_empty() {
+    /// `f = d mod P`, zero-extended.
+    fn load(f: &mut [u32], d: &[u32]) {
+        for (x, &v) in f.iter_mut().zip(d) {
+            *x = v % P;
+        }
+        f[d.len()..].fill(0);
+    }
+
+    /// `f = f g` pointwise (`g` empty: `f^2`).
+    fn pointwise(f: &mut [u32], g: &[u32]) {
+        if g.is_empty() {
             for x in f.iter_mut() {
                 *x = Self::mul(*x, *x);
             }
         } else {
-            load(fb, db);
-            Self::forward(fb, rt);
-            for (x, &y) in f.iter_mut().zip(fb.iter()) {
+            for (x, &y) in f.iter_mut().zip(g) {
                 *x = Self::mul(*x, y);
             }
         }
-        Self::inverse(f, irt);
-        // The factor that undoes the 1/R of the pointwise products and
-        // the factor n (applied in the CRT pass).
-        let p = u64::from(P);
+    }
+
+    /// The factor that undoes the 1/R of the pointwise products and the
+    /// factor `n` of the transforms (applied in the CRT pass).
+    const fn scale(n: usize) -> u32 {
+        let p = P as u64;
         let r2 = (1u64 << 32) % p;
         (r2 * r2 % p * pow_mod(n as u64, p - 2, p) % p) as u32
     }
+}
+
+/// Primitive roots of P1, P2, P3.
+const G: [u32; 3] = [3, 11, 3];
+
+/// The `u32` limbs of `res` (three residue vectors of `n`, in [0, 2p),
+/// each times its `s`) put back together (Garner: x = r1 + p1 (t2 + p2
+/// t3)) and carried into `out`.
+fn garner(out: &mut [u32], res: &[u32], n: usize, s: [u32; 3]) {
+    let (r1, rest) = res.split_at(n);
+    let (r2, r3) = rest.split_at(n);
+    let (p1, p2, p3) = (u64::from(P1), u64::from(P2), u64::from(P3));
+    let i12 = const { pow_mod(P1 as u64, P2 as u64 - 2, P2 as u64) };
+    let i123 = const { pow_mod(P1 as u64 * P2 as u64 % P3 as u64, P3 as u64 - 2, P3 as u64) };
+    let mut carry = 0u128;
+    for (i, o) in out.iter_mut().enumerate() {
+        let x1 = u64::from(Mont::<P1>::fold::<1>(Mont::<P1>::mul(r1[i], s[0])));
+        let x2 = u64::from(Mont::<P2>::fold::<1>(Mont::<P2>::mul(r2[i], s[1])));
+        let x3 = u64::from(Mont::<P3>::fold::<1>(Mont::<P3>::mul(r3[i], s[2])));
+        let t2 = (x2 + p2 - x1 % p2) % p2 * i12 % p2;
+        let x12 = x1 + p1 * t2;
+        let t3 = (x3 + p3 - x12 % p3) % p3 * i123 % p3;
+        let v = carry + x12 as u128 + (p1 * p2) as u128 * t3 as u128;
+        *o = v as u32;
+        carry = v >> 32;
+    }
+    debug_assert!(carry == 0);
+}
+
+/// Root tables for transforms up to length `n`: per prime `rt` then
+/// `irt`, `n` each. `rt[h + j]` depends on `h` only, so a table serves
+/// every shorter transform.
+fn ntt_roots(w: &mut [u32], n: usize) {
+    let (w1, rest) = w.split_at_mut(2 * n);
+    let (w2, w3) = rest.split_at_mut(2 * n);
+    let (a, b) = w1.split_at_mut(n);
+    Mont::<P1>::roots(G[0], n, a, b);
+    let (a, b) = w2.split_at_mut(n);
+    Mont::<P2>::roots(G[1], n, a, b);
+    let (a, b) = w3[..2 * n].split_at_mut(n);
+    Mont::<P3>::roots(G[2], n, a, b);
+}
+
+/// The forward transforms of `d` into `f` (`n` per prime), roots `w`
+/// (`ntt_roots` for at least `n`, of `wn`).
+fn ntt_forward(f: &mut [u32], n: usize, d: &[u32], w: &[u32], wn: usize) {
+    let (f1, rest) = f.split_at_mut(n);
+    let (f2, f3) = rest.split_at_mut(n);
+    Mont::<P1>::load(f1, d);
+    Mont::<P1>::forward(f1, &w[..wn]);
+    Mont::<P2>::load(f2, d);
+    Mont::<P2>::forward(f2, &w[2 * wn..3 * wn]);
+    Mont::<P3>::load(&mut f3[..n], d);
+    Mont::<P3>::forward(&mut f3[..n], &w[4 * wn..5 * wn]);
+}
+
+/// `res = ntt_forward(d) * g` pointwise, inverted (`g` the transforms of
+/// the other operand, empty to square `d`); the CRT factors.
+fn ntt_finish(res: &mut [u32], n: usize, g: &[u32], w: &[u32], wn: usize) -> [u32; 3] {
+    let (f1, rest) = res.split_at_mut(n);
+    let (f2, f3) = rest.split_at_mut(n);
+    let f3 = &mut f3[..n];
+    let gi = |i: usize| {
+        if g.is_empty() {
+            g
+        } else {
+            &g[i * n..(i + 1) * n]
+        }
+    };
+    Mont::<P1>::pointwise(f1, gi(0));
+    Mont::<P1>::inverse(f1, &w[wn..2 * wn]);
+    Mont::<P2>::pointwise(f2, gi(1));
+    Mont::<P2>::inverse(f2, &w[3 * wn..4 * wn]);
+    Mont::<P3>::pointwise(f3, gi(2));
+    Mont::<P3>::inverse(f3, &w[5 * wn..6 * wn]);
+    [
+        Mont::<P1>::scale(n),
+        Mont::<P2>::scale(n),
+        Mont::<P3>::scale(n),
+    ]
 }
 
 /// The `u32` digits of `a`.
@@ -676,10 +795,34 @@ const fn ntt_scratch(n: usize, m: usize) -> usize {
     6 * ntt_len(n, m) / PER
 }
 
-/// `r = a * b` by the NTT (`b` empty squares `a`), scratch `t`.
+/// `f` = the cyclic convolution of `da` and `db` (`db` empty: `da` with
+/// itself) mod P, in [0, 2P); `fb`, `rt`, `irt` scratch of `f.len()`.
+fn convolve<const P: u32>(
+    g: u32,
+    f: &mut [u32],
+    fb: &mut [u32],
+    rt: &mut [u32],
+    irt: &mut [u32],
+    da: &[u32],
+    db: &[u32],
+) {
+    Mont::<P>::roots(g, f.len(), rt, irt);
+    Mont::<P>::load(f, da);
+    Mont::<P>::forward(f, rt);
+    if db.is_empty() {
+        Mont::<P>::pointwise(f, &[]);
+    } else {
+        Mont::<P>::load(fb, db);
+        Mont::<P>::forward(fb, rt);
+        Mont::<P>::pointwise(f, fb);
+    }
+    Mont::<P>::inverse(f, irt);
+}
+
+/// `r = a * b` by the NTT (`b` empty squares `a`), scratch `t`: one
+/// prime at a time.
 fn ntt_mul(r: &mut [L], a: &[L], b: &[L], t: &mut [L]) {
-    let square = b.is_empty();
-    let n = ntt_len(a.len(), if square { a.len() } else { b.len() });
+    let n = ntt_len(a.len(), if b.is_empty() { a.len() } else { b.len() });
     let (da, db) = (digits32(a), digits32(b));
     // SAFETY: `t` is `L`s; any bit pattern is a `u32`.
     let t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr().cast::<u32>(), t.len() * PER) };
@@ -689,33 +832,94 @@ fn ntt_mul(r: &mut [L], a: &[L], b: &[L], t: &mut [L]) {
     let irt = &mut t[..n];
     let (r1, rest) = res.split_at_mut(n);
     let (r2, r3) = rest.split_at_mut(n);
-    let s1 = Mont::<P1>::convolve(31, r1, fb, rt, irt, da, db);
-    let s2 = Mont::<P2>::convolve(13, r2, fb, rt, irt, da, db);
-    let s3 = Mont::<P3>::convolve(3, r3, fb, rt, irt, da, db);
-    // Garner: x = r1 + p1 (t2 + p2 t3).
-    let (p1, p2, p3) = (u64::from(P1), u64::from(P2), u64::from(P3));
-    let i12 = const { pow_mod(P1 as u64, P2 as u64 - 2, P2 as u64) };
-    let i123 = const { pow_mod(P1 as u64 * P2 as u64 % P3 as u64, P3 as u64 - 2, P3 as u64) };
-    let mut carry = 0u128;
-    let mut acc: L = 0;
-    let out = r.len() * PER;
-    for i in 0..out {
-        let x1 = u64::from(Mont::<P1>::mul(r1[i], s1));
-        let x2 = u64::from(Mont::<P2>::mul(r2[i], s2));
-        let x3 = u64::from(Mont::<P3>::mul(r3[i], s3));
-        let t2 = (x2 + p2 - x1 % p2) % p2 * i12 % p2;
-        let x12 = x1 + p1 * t2;
-        let t3 = (x3 + p3 - x12 % p3) % p3 * i123 % p3;
-        let v = carry + x12 as u128 + (p1 * p2) as u128 * t3 as u128;
-        let j = i % PER;
-        acc |= ((v as u32) as L) << (32 * j);
-        if j == PER - 1 {
-            r[i / PER] = acc;
-            acc = 0;
-        }
-        carry = v >> 32;
-    }
-    debug_assert!(carry == 0);
+    convolve::<P1>(G[0], r1, fb, rt, irt, da, db);
+    convolve::<P2>(G[1], r2, fb, rt, irt, da, db);
+    convolve::<P3>(G[2], r3, fb, rt, irt, da, db);
+    // SAFETY: as `t` above.
+    let out = unsafe { slice::from_raw_parts_mut(r.as_mut_ptr().cast::<u32>(), r.len() * PER) };
+    let s = [
+        Mont::<P1>::scale(n),
+        Mont::<P2>::scale(n),
+        Mont::<P3>::scale(n),
+    ];
+    garner(out, res, n, s);
+}
+
+/// The transform length `rok_nat_mul` takes for an `an` × `bn` product
+/// (`u32` limbs), 0 when it does not use the NTT.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_nat_ntt_len(an: usize, bn: usize) -> usize {
+    let (na, nb) = (packed(an), packed(bn));
+    let lo = if na < nb { na } else { nb };
+    let n = ntt_len(na, nb);
+    if lo >= NTT && n <= NTT_MAX { n } else { 0 }
+}
+
+/// `w[0..6 n]` = root tables for transforms up to length `n` (a power of
+/// two, at most what `rok_nat_ntt_len` returns).
+///
+/// # Safety
+/// A live `GcBuf<u32>` of at least `6 n` elements.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_nat_ntt_roots(w: *mut u8, n: usize) {
+    assert!(n.is_power_of_two() && n <= NTT_MAX);
+    // SAFETY: caller contract.
+    ntt_roots(unsafe { limbs(w, 6 * n) }, n);
+}
+
+/// `f[0..3 n]` = the transforms of `b[0..bn]` for products of up to `n`
+/// limbs, roots `w` from `rok_nat_ntt_roots(w, wn)`, `wn >= n`.
+///
+/// # Safety
+/// Live `GcBuf<u32>`s of at least those lengths; `f` distinct from the
+/// others.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_nat_ntt_prep(
+    f: *mut u8,
+    b: *mut u8,
+    bn: usize,
+    n: usize,
+    w: *mut u8,
+    wn: usize,
+) {
+    assert!(n.is_power_of_two() && bn <= n && n <= wn);
+    // SAFETY: caller contract; `b` and `w` only read.
+    let (f, b, w) = unsafe { (limbs(f, 3 * n), &*limbs(b, bn), &*limbs(w, 6 * wn)) };
+    ntt_forward(f, n, b, w, wn);
+}
+
+/// `r[0..an + bn] = a * b` for `b` prepared in `f` (`rok_nat_ntt_prep`,
+/// length `n >= an + bn`, roots `w` of `wn`); `t` holds `3 n` limbs.
+///
+/// # Safety
+/// Live `GcBuf<u32>`s of at least those lengths; `r` and `t` distinct
+/// from each other and from the rest.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_nat_ntt_mul(
+    r: *mut u8,
+    a: *mut u8,
+    an: usize,
+    f: *mut u8,
+    bn: usize,
+    n: usize,
+    w: *mut u8,
+    wn: usize,
+    t: *mut u8,
+) {
+    assert!(an + bn <= n && n <= wn);
+    // SAFETY: caller contract; `a`, `f` and `w` only read.
+    let (r, a, f, w, t) = unsafe {
+        (
+            limbs(r, an + bn),
+            &*limbs(a, an),
+            &*limbs(f, 3 * n),
+            &*limbs(w, 6 * wn),
+            limbs(t, 3 * n),
+        )
+    };
+    ntt_forward(t, n, a, w, wn);
+    let s = ntt_finish(t, n, f, w, wn);
+    garner(r, t, n, s);
 }
 
 // `PER` consecutive `u32` limbs are one `L` in memory.
@@ -1033,6 +1237,178 @@ pub unsafe extern "C" fn rok_nat_divmod(
     unpack(r, &u[..nb]);
 }
 
+/// gcd of two words (binary).
+const fn gcd_word(mut a: L, mut b: L) -> L {
+    if a == 0 {
+        return b;
+    }
+    if b == 0 {
+        return a;
+    }
+    let k = (a | b).trailing_zeros();
+    a >>= a.trailing_zeros();
+    loop {
+        b >>= b.trailing_zeros();
+        if a > b {
+            (a, b) = (b, a);
+        }
+        b -= a;
+        if b == 0 {
+            return a << k;
+        }
+    }
+}
+
+/// Lehmer cofactors stay below 2^LEHMER in magnitude (see
+/// `lehmer_apply`).
+const LEHMER: u32 = LB - 2;
+
+/// Knuth TAOCP 4.5.2 algorithm L on the top `2 LB - 2` bits of `x >= y`
+/// (`n >= 2` limbs, `x[n - 1] != 0`; `y` at the same shift): cofactors
+/// `(a, b, c, d)` such that `a x + b y` and `c x + d y` are two
+/// consecutive remainders of Euclid's sequence; `b == 0` when not even
+/// the first quotient is certain. `a`, `b` (and `c`, `d`) have opposite
+/// signs. Two limbs of precision give quotients until the cofactors
+/// reach about one limb, where the bound stops them.
+fn lehmer(x: &[L], y: &[L]) -> (SL, SL, SL, SL) {
+    const CAP: SW = 1 << LEHMER;
+    let n = x.len();
+    let z = x[n - 1].leading_zeros();
+    let top = |v: &[L]| {
+        let hi = (((v[n - 1] as W) << LB) | v[n - 2] as W) << z;
+        let lo = if n > 2 && z > 0 {
+            (v[n - 3] >> (LB - z)) as W
+        } else {
+            0
+        };
+        ((hi | lo) >> 2) as SW
+    };
+    let (mut xh, mut yh) = (top(x), top(y));
+    let (mut a, mut b, mut c, mut d): (SW, SW, SW, SW) = (1, 0, 0, 1);
+    while yh + c != 0 && yh + d != 0 {
+        let q = (xh + a) / (yh + c);
+        if q != (xh + b) / (yh + d) {
+            break;
+        }
+        let next = |u: SW, v: SW| {
+            q.checked_mul(v)
+                .and_then(|p| u.checked_sub(p))
+                .filter(|t| t.abs() < CAP)
+        };
+        let (Some(nc), Some(nd)) = (next(a, c), next(b, d)) else {
+            break;
+        };
+        (a, c) = (c, nc);
+        (b, d) = (d, nd);
+        (xh, yh) = (yh, xh - q * yh);
+    }
+    (a as SL, b as SL, c as SL, d as SL)
+}
+
+/// `(x, y) = (a x + b y, c x + d y)` for Lehmer cofactors (both results
+/// non-negative and at most `x`).
+fn lehmer_apply(x: &mut [L], y: &mut [L], (a, b, c, d): (SL, SL, SL, SL)) {
+    // |a u + b v| < 2^LEHMER 2^LB (opposite signs), so the sums fit `SW`.
+    let (mut cx, mut cy): (SW, SW) = (0, 0);
+    for (u, v) in x.iter_mut().zip(y.iter_mut()) {
+        let (p, q) = (*u as SW, *v as SW);
+        cx += a as SW * p + b as SW * q;
+        cy += c as SW * p + d as SW * q;
+        *u = cx as L;
+        *v = cy as L;
+        cx >>= LB;
+        cy >>= LB;
+    }
+    debug_assert!(cx == 0 && cy == 0);
+}
+
+/// Limbs of `a` without leading zeros.
+fn significant(a: &[L]) -> usize {
+    a.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1)
+}
+
+/// `gcd(x, y)` (`x >= y`, both `x.len()` limbs, zero-extended); the
+/// result is left in `x` or `y`: which, and its limbs. Lehmer steps
+/// replace runs of single-limb quotients by one linear pass; a step
+/// that finds no quotient divides (Knuth D, scratch `t` of `3 x.len() +
+/// 1`).
+fn gcd_lehmer<'a>(mut x: &'a mut [L], mut y: &'a mut [L], t: &mut [L]) -> (&'a [L], usize) {
+    let mut n = significant(x);
+    loop {
+        let yn = significant(&y[..n]);
+        if yn == 0 {
+            return (x, n);
+        }
+        if n == 1 {
+            x[0] = gcd_word(x[0], y[0]);
+            return (x, 1);
+        }
+        let f = lehmer(&x[..n], &y[..n]);
+        if f.1 != 0 {
+            lehmer_apply(&mut x[..n], &mut y[..n], f);
+            n = significant(&x[..n]);
+            continue;
+        }
+        // x = x mod y, then swap.
+        let (u, rest) = t.split_at_mut(n + 1);
+        let (v, rest) = rest.split_at_mut(yn);
+        let q = &mut rest[..=n - yn];
+        let sh = y[yn - 1].leading_zeros();
+        v.copy_from_slice(&y[..yn]);
+        shl_in(v, sh);
+        u[..n].copy_from_slice(&x[..n]);
+        u[n] = shl_in(&mut u[..n], sh);
+        knuth_d(q, u, v);
+        shr_in(&mut u[..yn], sh);
+        x[..yn].copy_from_slice(&u[..yn]);
+        x[yn..n].fill(0);
+        core::mem::swap(&mut x, &mut y);
+        n = yn;
+    }
+}
+
+/// `u32` limbs of scratch `rok_nat_gcd` needs.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_nat_gcd_scratch(an: usize, bn: usize) -> usize {
+    let m = packed(if an > bn { an } else { bn });
+    (5 * m + 1) * PER
+}
+
+/// `r = gcd(a, b)` (`an >= bn >= 1`, `a >= b`, both without leading
+/// zero limbs); its limbs (at most `bn`). `t` holds
+/// `rok_nat_gcd_scratch(an, bn)` limbs.
+///
+/// # Safety
+/// Live `GcBuf<u32>`s of at least those lengths (`r` of `bn`); `r` and
+/// `t` distinct from each other and from `a` / `b`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_nat_gcd(
+    r: *mut u8,
+    a: *mut u8,
+    an: usize,
+    b: *mut u8,
+    bn: usize,
+    t: *mut u8,
+) -> usize {
+    let m = packed(an);
+    let tn = rok_nat_gcd_scratch(an, bn) / PER;
+    // SAFETY: caller contract; `a` / `b` only read.
+    let (a, b, r) = unsafe { (&*limbs(a, an), &*limbs(b, bn), limbs(r, bn)) };
+    // SAFETY: as above; `t` is its own buffer of `tn * PER` limbs.
+    let t = unsafe { slice::from_raw_parts_mut(t.add(HEADER_SIZE).cast::<L>(), tn) };
+    let (x, t) = t.split_at_mut(m);
+    let (y, t) = t.split_at_mut(m);
+    pack(x, a);
+    y.fill(0);
+    pack(&mut y[..packed(bn)], b);
+    let (g, gn) = gcd_lehmer(x, y, t);
+    // SAFETY: as in `digits32`.
+    let g32 = unsafe { slice::from_raw_parts(g.as_ptr().cast::<u32>(), gn * PER) };
+    let k = g32.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1);
+    r[..k].copy_from_slice(&g32[..k]);
+    k
+}
+
 /// `r[0..an] = a + b` (`an >= bn`); the carry.
 ///
 /// # Safety
@@ -1203,6 +1579,156 @@ mod tests {
             sqr(&mut got, &a, &mut t);
             assert_eq!(got, want, "{n}^2");
         }
+    }
+
+    /// Binary gcd on `L` vectors (reference).
+    fn gcd_ref(mut a: Vec<L>, mut b: Vec<L>) -> Vec<L> {
+        let n = a.len().max(b.len());
+        a.resize(n, 0);
+        b.resize(n, 0);
+        let zero = |v: &[L]| v.iter().all(|&x| x == 0);
+        let even = |v: &[L]| v[0] & 1 == 0;
+        let less =
+            |x: &[L], y: &[L]| x.iter().rev().cmp(y.iter().rev()) == core::cmp::Ordering::Less;
+        if zero(&a) {
+            return b;
+        }
+        let mut k = 0;
+        while even(&a) && even(&b) && !zero(&b) {
+            shr_in(&mut a, 1);
+            shr_in(&mut b, 1);
+            k += 1;
+        }
+        while !zero(&b) {
+            while even(&a) {
+                shr_in(&mut a, 1);
+            }
+            while !zero(&b) && even(&b) {
+                shr_in(&mut b, 1);
+            }
+            if zero(&b) {
+                break;
+            }
+            if less(&b, &a) {
+                core::mem::swap(&mut a, &mut b);
+            }
+            sub_in(&mut b, &a);
+        }
+        a.push(0);
+        for _ in 0..k {
+            shl1_in(&mut a);
+        }
+        a
+    }
+
+    /// (B^k - 1)^2 = B^2k - 2 B^k + 1 (`u32` digits): every coefficient
+    /// of the convolution at its maximum, the products and squares
+    /// through the NTT (`k` u32 limbs).
+    #[test]
+    fn ntt_max_coefficients() {
+        let k = 1 << 16;
+        let a = vec![L::MAX; k / PER];
+        let mut want = vec![0u32; 2 * k];
+        want[0] = 1;
+        want[k] = 0xFFFF_FFFE;
+        want[k + 1..].fill(u32::MAX);
+        let mut t = vec![0; ntt_scratch(a.len(), a.len())];
+        for square in [false, true] {
+            let mut r = vec![0; 2 * a.len()];
+            ntt_mul(&mut r, &a, if square { &[] } else { &a }, &mut t);
+            assert_eq!(digits32(&r), &want[..], "square {square}");
+        }
+    }
+
+    #[test]
+    fn ntt_prepared_matches_mul() {
+        let mut seed = 0xA076_1D64_78BD_642Fu64;
+        let wn = 1 << 13;
+        let mut w = vec![0u32; 6 * wn];
+        ntt_roots(&mut w, wn);
+        for &(an, bn, n) in &[
+            (1usize, 1usize, 4usize),
+            (1500, 1400, 4096),
+            (2000, 2096, 4096),
+            (3000, 2000, 8192),
+        ] {
+            let a = digits32(&rand_limbs(&mut seed, an.div_ceil(PER)))[..an].to_vec();
+            let b = digits32(&rand_limbs(&mut seed, bn.div_ceil(PER)))[..bn].to_vec();
+            let mut f = vec![0u32; 3 * n];
+            ntt_forward(&mut f, n, &b, &w, wn);
+            let mut t = vec![0u32; 3 * n];
+            ntt_forward(&mut t, n, &a, &w, wn);
+            let s = ntt_finish(&mut t, n, &f, &w, wn);
+            let mut got = vec![0u32; an + bn];
+            garner(&mut got, &t, n, s);
+            // Schoolbook on u32 digits.
+            let mut want = vec![0u32; an + bn];
+            for (i, &x) in a.iter().enumerate() {
+                let mut c = 0u64;
+                for (j, &y) in b.iter().enumerate() {
+                    let v = u64::from(x) * u64::from(y) + u64::from(want[i + j]) + c;
+                    want[i + j] = v as u32;
+                    c = v >> 32;
+                }
+                want[i + bn] = c as u32;
+            }
+            assert_eq!(got, want, "{an} x {bn} in {n}");
+        }
+    }
+
+    #[test]
+    fn gcd_matches_binary_gcd() {
+        let mut seed = 0x5DEE_CE66_D1CE_4E5Bu64;
+        for &(n, m, gl) in &[
+            (1, 1, 1),
+            (2, 1, 1),
+            (2, 2, 1),
+            (3, 2, 2),
+            (5, 5, 3),
+            (9, 4, 4),
+            (17, 16, 6),
+            (30, 30, 1),
+        ] {
+            for _ in 0..30 {
+                // Shared factor g, cofactors without the all-ones bias.
+                let g = rand_limbs(&mut seed, gl);
+                let mut a = vec![0; n + gl];
+                let mut b = vec![0; m + gl];
+                let (ca, cb) = (rand_limbs(&mut seed, n), rand_limbs(&mut seed, m));
+                mul_basecase(&mut a, &ca, &g);
+                if m >= gl {
+                    mul_basecase(&mut b, &cb, &g);
+                } else {
+                    mul_basecase(&mut b, &g, &cb);
+                }
+                let mut want = gcd_ref(a.clone(), b.clone());
+                let (a, b) = if gcd_ref_less(&a, &b) { (b, a) } else { (a, b) };
+                let w = a.len();
+                let mut x = a.clone();
+                let mut y = b.clone();
+                y.resize(w, 0);
+                let mut t = vec![0; 3 * w + 1];
+                let (gv, gn) = gcd_lehmer(&mut x, &mut y, &mut t);
+                let mut got = gv[..gn].to_vec();
+                got.resize(want.len().max(gn), 0);
+                want.resize(got.len(), 0);
+                assert_eq!(got, want, "{n} {m} {gl}");
+            }
+        }
+    }
+
+    fn gcd_ref_less(x: &[L], y: &[L]) -> bool {
+        let n = x.len().max(y.len());
+        (0..n)
+            .rev()
+            .map(|i| {
+                (
+                    x.get(i).copied().unwrap_or(0),
+                    y.get(i).copied().unwrap_or(0),
+                )
+            })
+            .find(|(p, q)| p != q)
+            .is_some_and(|(p, q)| p < q)
     }
 
     #[test]

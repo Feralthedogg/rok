@@ -209,6 +209,12 @@ extern "rok" {
     fn rok_nat_sub(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
     fn rok_nat_shl(r: GcBuf<u32>, off: usize, a: GcBuf<u32>, n: usize, s: u32);
     fn rok_nat_shr(r: GcBuf<u32>, a: GcBuf<u32>, n: usize, s: u64);
+    fn rok_nat_ntt_len(an: usize, bn: usize) -> usize;
+    fn rok_nat_ntt_roots(w: GcBuf<u32>, n: usize);
+    fn rok_nat_ntt_prep(f: GcBuf<u32>, b: GcBuf<u32>, bn: usize, n: usize, w: GcBuf<u32>, wn: usize);
+    fn rok_nat_ntt_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, f: GcBuf<u32>, bn: usize, n: usize, w: GcBuf<u32>, wn: usize, t: GcBuf<u32>);
+    fn rok_nat_gcd_scratch(an: usize, bn: usize) -> usize;
+    fn rok_nat_gcd(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>) -> usize;
     fn rok_os_errno_kind(code: i32) -> i32;
     fn rok_os_getpid() -> u32;
     fn rok_os_getppid() -> u32;

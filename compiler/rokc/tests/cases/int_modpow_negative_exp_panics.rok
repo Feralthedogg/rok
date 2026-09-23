@@ -1,0 +1,11 @@
+// stdlib spec 2.1.2: `modpow` with a negative exponent panics at the
+// call (no modular inverse).
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/int_modpow_negative_exp_panics.rok:10:16:
+// expect-stderr: modpow with a negative exponent
+// expect-stdout:
+
+fn main() {
+    let x: int = 3;
+    println(f"{x.modpow(-1, 7)}");
+}
