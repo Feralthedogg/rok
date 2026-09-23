@@ -1,0 +1,28 @@
+// spec: 008.09-lowering-control §8.9.12
+// expect-exit: 0
+// expect-stdout:
+// 1 0 0 0
+
+// 8.9.12: root words hold zero, not stack garbage. A sum value's payload
+// words past its variant's own (a word another variant may hold a
+// reference in) read as zero: `Small`'s tail, built after `Big` used the
+// same scratch, has none of `Big`'s bytes.
+use rok::bare::mem::transmute_unchecked;
+
+enum E {
+    Small(i8),
+    Big(usize, usize, usize, usize),
+}
+
+fn words(e: E) -> [usize; 5] { unsafe { transmute_unchecked(e) } }
+
+fn pick(i: usize) -> E {
+    let big = E::Big(i, i, i, i);
+    if words(big)[1] == 0usize { return big; }
+    E::Small(1i8)
+}
+
+fn main() {
+    let w = words(pick(usize::MAX));
+    println(f"{w[1]} {w[2]} {w[3]} {w[4]}");
+}

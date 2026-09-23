@@ -4328,15 +4328,31 @@ impl<'a> FnEmit<'a> {
                 mlir_type(from_ty, self.target),
                 mlir_type(to_ty, self.target),
             );
-            let scratch = self
-                .union_scratch
-                .get(&from)
-                .or_else(|| self.union_scratch.get(&to))
-                .cloned();
-            let Some(slot) = scratch else {
+            let scratch = [(&from, from_ty), (&to, to_ty)]
+                .into_iter()
+                .find_map(|(k, t)| Some((self.union_scratch.get(k)?.clone(), t)));
+            let Some((slot, slot_ty)) = scratch else {
                 return self.unsupported(&format!("payload of `{from}` stored as `{to}`"));
             };
             let _ = writeln!(self.body, "    llvm.store {v}, {slot} : {from}, !llvm.ptr");
+            // The tail a shorter payload leaves reads as zero, not stale
+            // stack: a root word copied out of the union is null (8.9.12).
+            let (fs, ss) = (
+                self.target.size_align(from_ty).0,
+                self.target.size_align(slot_ty).0,
+            );
+            if ss > fs {
+                let [tail, z, n] = std::array::from_fn(|_| self.fresh_value());
+                let _ = write!(
+                    self.body,
+                    "    {tail} = llvm.getelementptr {slot}[{fs}] : (!llvm.ptr) -> !llvm.ptr, i8
+    {z} = llvm.mlir.constant(0 : i8) : i8
+    {n} = llvm.mlir.constant({} : i{pw}) : i{pw}
+    \"llvm.intr.memset\"({tail}, {z}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, i8, i{pw}) -> ()
+",
+                    ss - fs
+                );
+            }
             let n = self.fresh_value();
             let _ = writeln!(self.body, "    {n} = llvm.load {slot} : !llvm.ptr -> {to}");
             return n;
