@@ -353,6 +353,8 @@ pub struct Sysroot {
     /// for that target; Linux: its C runtime objects and C library).
     /// The repository's is `target/lib/rok/targets/` (`targets/build.sh`).
     pub targets: PathBuf,
+    /// `lib/rok/lldb/rok_lldb.py`: lldb formatters for `-g` programs.
+    pub lldb: Result<PathBuf, String>,
 }
 
 /// The sysroot's library directory.
@@ -381,6 +383,17 @@ pub fn sysroot() -> Sysroot {
                 lib_dirs[1].join("core/src/lib.rok").display(),
             )
         });
+    let lldb = lib_dirs
+        .iter()
+        .map(|d| d.join("lldb/rok_lldb.py"))
+        .find(|p| p.is_file())
+        .ok_or_else(|| {
+            format!(
+                "the lldb formatters are missing: no {} nor {}",
+                lib_dirs[0].join("lldb/rok_lldb.py").display(),
+                lib_dirs[1].join("lldb/rok_lldb.py").display(),
+            )
+        });
     let rt_lib = TargetSpec::host().runtime_lib();
     let rt = [root.join("lib").join(&rt_lib), bin.join(&rt_lib)];
     let rokr = rt.iter().find(|p| p.is_file()).cloned().ok_or_else(|| {
@@ -396,6 +409,7 @@ pub fn sysroot() -> Sysroot {
         libs,
         rokr,
         targets: root.join("lib/rok/targets"),
+        lldb,
     }
 }
 

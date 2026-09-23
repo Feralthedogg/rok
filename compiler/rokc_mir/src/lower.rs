@@ -112,12 +112,12 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         retain_reachable(&mut functions, roots.clone());
     }
     let next_id = functions.iter().map(|f| f.id.0 + 1).max().unwrap_or(0);
-    crate::specialize::closures(&mut functions, next_id);
+    let copies = crate::specialize::closures(&mut functions, next_id);
     for f in &mut functions {
         crate::rotate::rotate(f);
     }
     crate::stable_names::stable_names(&mut functions, &rokc_hir::type_name);
-    let debug = debug_types(module, &functions, target);
+    let debug = debug_types(module, &functions, &copies, target);
     MirModule {
         debug,
         functions,
@@ -144,8 +144,14 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
 }
 
 /// The `DebugTy`s of the named locals of `functions` and of struct
-/// fields, where they tell more than the `MirTy`.
-fn debug_types(module: &HirModule, functions: &[MirFunction], target: &Target) -> DebugTypes {
+/// fields, where they tell more than the `MirTy`. A specialized copy's
+/// locals are its original's (`copies`: `(copy, original)`).
+fn debug_types(
+    module: &HirModule,
+    functions: &[MirFunction],
+    copies: &[(FunctionId, FunctionId)],
+    target: &Target,
+) -> DebugTypes {
     let mut out = DebugTypes::default();
     let lowered: HashSet<FunctionId> = functions.iter().map(|f| f.id).collect();
     for f in module.functions.iter().filter(|f| lowered.contains(&f.id)) {
@@ -161,6 +167,15 @@ fn debug_types(module: &HirModule, functions: &[MirFunction], target: &Target) -
                 out.locals.insert((f.id, l.id), d);
             }
         }
+    }
+    for &(copy, orig) in copies {
+        let of: Vec<_> = out
+            .locals
+            .iter()
+            .filter(|((f, _), _)| *f == orig)
+            .map(|((_, l), d)| ((copy, *l), d.clone()))
+            .collect();
+        out.locals.extend(of);
     }
     out.any = crate::ty::any_variants(module, target);
     for s in module.structs.iter().filter(|s| s.union_kind.is_none()) {

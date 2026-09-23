@@ -541,7 +541,14 @@ fn held(a: any) -> i32 {
     let total = 5;
     let f = [ref total] |k: i32| { total += k; return total; };
     let r = f(3);
-    return r + total;
+    return r + total + call(dbl, 1);
+}
+
+fn dbl(k: i32) -> i32 { return k * 2; }
+
+fn call(g: fn(i32) -> i32, k: i32) -> i32 {
+    let r = g(k);
+    return r;
 }
 ";
 
@@ -549,9 +556,11 @@ fn held(a: any) -> i32 {
 /// struct over the whole value, selected by its stored tag), and so is an
 /// `any` (over the types stored into one, by their tags), a `GcBuf`
 /// reference points at its object (header, then the elements), a
-/// `[ref]`-captured variable is its value, and the C `main` and
-/// `rok.register_types` have subprograms. With `lldb`, `frame variable`
-/// shows them.
+/// `[ref]`-captured variable is its value, a `fn` value is `{code, env}`
+/// (the code a pointer to its subroutine type), and the C `main` and
+/// `rok.register_types` have subprograms. With `lldb` (rok's formatters
+/// loaded) and `gdb` (DWARF only), a sum or an `any` shows its active
+/// variant only, a `fn` value its target function.
 #[test]
 fn debug_info_shows_sums_and_gc_objects() {
     let Some(env) = setup() else { return };
@@ -622,6 +631,18 @@ fn debug_info_shows_sums_and_gc_objects() {
                 "{backend}: no parameter `{p}`:\n{show}"
             );
         }
+        let fv = info
+            .split("DW_TAG_structure_type")
+            .find(|s| s.contains("DW_AT_name\t(\"fn(i32) -> i32\")"))
+            .unwrap_or_else(|| panic!("{backend}: no `fn(i32) -> i32` type:\n{info}"));
+        assert!(
+            fv.contains("(\"code\")") && fv.contains("(\"env\")"),
+            "{backend}: {fv}"
+        );
+        assert!(
+            info.contains("DW_TAG_subroutine_type"),
+            "{backend}: no subroutine type:\n{info}"
+        );
         assert!(
             info.split("DW_TAG_subprogram")
                 .any(|s| s.contains("(\"rok.register_types\")")),
@@ -634,6 +655,34 @@ fn debug_info_shows_sums_and_gc_objects() {
                 >= 2,
             "{backend}: no subprogram for the C `main`:\n{info}"
         );
+        // `call` stops before its call: past its last use the slot of
+        // `g` is cleared (a dead GC root).
+        if let Some(out) = gdb(
+            &exe,
+            &[
+                "break main.rok:10",
+                "break main.rok:23",
+                "break main.rok:29",
+                "run",
+                "info args",
+                "c",
+                "info args",
+                "info locals",
+                "c",
+                "info args",
+            ],
+        ) {
+            for want in [
+                "s = Shape::Rect(3, 4)",
+                "v = f64 | i64::f64(1.5)",
+                "a = any::i64(7)",
+                "total = 8",
+                "g = fn(i32) -> i32 {code: 0x",
+                "<dbl__fnval>, env: 0x0}",
+            ] {
+                assert!(out.contains(want), "{backend}: no `{want}`:\n{out}");
+            }
+        }
         let Some(out) = lldb(
             &exe,
             &[
@@ -643,36 +692,82 @@ fn debug_info_shows_sums_and_gc_objects() {
                 "b main.rok:23",
                 "c",
                 "frame variable a total",
+                "b main.rok:29",
+                "c",
+                "frame variable g",
             ],
         ) else {
             continue;
         };
+        // The active variant only: its name, then its fields.
         let vars = out.split("frame variable").nth(1).unwrap_or_default();
-        assert!(vars.contains("value = (0 = 3, 1 = 4)"), "{backend}: {out}");
-        assert!(vars.contains("value = (0 = 1.5)"), "{backend}: {out}");
-        assert!(vars.contains("$discr$ = 1"), "{backend}: {out}");
+        assert!(
+            vars.contains("(Shape) s = Rect {\n  0 = 3\n  1 = 4\n}"),
+            "{backend}: {out}"
+        );
+        assert!(vars.contains("v = f64 {\n  0 = 1.5\n}"), "{backend}: {out}");
+        assert!(
+            !vars.contains("Circle") && !vars.contains("$discr$"),
+            "{backend}: {out}"
+        );
         assert!(vars.contains("= 30"), "{backend}: {out}");
         let held = out.split("frame variable").nth(2).unwrap_or_default();
-        assert!(held.contains("value = (0 = 7)"), "{backend}: {out}");
+        assert!(
+            held.contains("(any) a = i64 {\n  0 = 7\n}"),
+            "{backend}: {out}"
+        );
         assert!(held.contains("total = 8"), "{backend}: {out}");
+        let g = out.split("frame variable").nth(3).unwrap_or_default();
+        assert!(
+            g.contains("(fn(i32) -> i32) g = {\n  code = 0x")
+                && g.contains("`dbl__fnval at main.rok:26"),
+            "{backend}: {out}"
+        );
     }
     // The same entries, tag and name, in the program's unit.
     assert!(units[0].len() > 20, "{:?}", units[0]);
     assert_eq!(units[0], units[1], "llvm vs native DIEs");
 }
 
-/// The output of `lldb --batch` running `cmds` on `exe`, then `kill`;
-/// `None` without an lldb that can run it (none, a wedged debug service
-/// that makes `run` hang a minute, no stop), or off arm64 (no debugger
+/// The output of `lldb --batch` running `cmds` on `exe` with rok's
+/// formatters loaded (`rokc --print lldbinit`), then `kill`; `None`
+/// without an lldb that can run it (none, a wedged debug service that
+/// makes `run` hang a minute, no stop), or on an `x86_64` Mac (no debugger
 /// on Rosetta processes).
 fn lldb(exe: &Path, cmds: &[&str]) -> Option<String> {
-    if std::env::consts::ARCH != "aarch64" {
+    if cfg!(target_os = "macos") && std::env::consts::ARCH != "aarch64" {
         return None;
     }
+    let init = Command::new(ROKC)
+        .args(["--print", "lldbinit"])
+        .output()
+        .unwrap();
+    ok(&init);
+    let init = text(&init.stdout);
     let mut c = Command::new("lldb");
-    c.arg("--batch");
-    for cmd in cmds.iter().chain(&["kill"]) {
-        c.args(["-o", cmd]);
+    c.args(["--batch", "-O", init.trim()]);
+    debugger(c, exe, cmds, "-o", "kill").filter(|o| o.contains("stop reason"))
+}
+
+/// The output of `gdb -batch` running `cmds` on `exe`; `None` without a
+/// gdb that runs it.
+fn gdb(exe: &Path, cmds: &[&str]) -> Option<String> {
+    let mut c = Command::new("gdb");
+    c.args(["-batch", "-nx"]);
+    // A stop: `Breakpoint 2, f (..) at ..` (`Thread 1 "out" hit Breakpoint 2.1, ..`).
+    let stop = |l: &str| {
+        l.split_once("Breakpoint ")
+            .and_then(|(_, r)| r.split_once(", "))
+            .is_some_and(|(n, _)| n.chars().all(|c| c.is_ascii_digit() || c == '.'))
+    };
+    debugger(c, exe, cmds, "-ex", "kill").filter(|o| o.lines().any(stop))
+}
+
+/// The stdout of debugger `c` running `cmds` (each after `flag`), then
+/// `last`, on `exe`; `None` if it cannot start or runs past a minute.
+fn debugger(mut c: Command, exe: &Path, cmds: &[&str], flag: &str, last: &str) -> Option<String> {
+    for cmd in cmds.iter().chain(&[last]) {
+        c.args([flag, cmd]);
     }
     let mut child = c
         .arg(exe)
@@ -685,13 +780,12 @@ fn lldb(exe: &Path, cmds: &[&str]) -> Option<String> {
         if std::time::Instant::now() > deadline {
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!("skipped: lldb did not finish");
+            eprintln!("skipped: {c:?} did not finish");
             return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let out = text(&child.wait_with_output().unwrap().stdout);
-    out.contains("stop reason").then_some(out)
+    Some(text(&child.wait_with_output().unwrap().stdout))
 }
 
 const DEBUGGEE_OPT: &str = "struct Wrap { inner: any; n: i32; }
@@ -779,6 +873,11 @@ fn debug_info_optimized_coroutines_closures() {
             assert_eq!(opt, name == "o2", "{name}: {unit}");
         }
         if name == "o2" {
+            // Elsewhere the optimizer keeps `fib` recursive: `finish`
+            // stops at the breakpoint again.
+            if std::env::consts::ARCH != "aarch64" {
+                continue;
+            }
             let Some(out) = lldb(
                 &exe,
                 &[
@@ -837,7 +936,7 @@ fn debug_info_optimized_coroutines_closures() {
         );
         let w = out.split("frame variable").nth(3).unwrap_or_default();
         assert!(
-            w.contains("inner = {") && w.contains("0 = 5"),
+            w.contains("(any) w = Wrap {") && w.contains("inner = i64 {") && w.contains("0 = 5"),
             "{name}: {out}"
         );
         assert!(w.contains("Return value: (int) $0 = 1"), "{name}: {out}");

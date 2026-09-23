@@ -74,9 +74,10 @@ pub enum DebugTy {
     /// A `[ref]`-captured variable's cell (a local only): shown as the
     /// value in it.
     Cell(Box<DebugTy>),
-    /// A closure value (this fat `fn` type) with its environment object
-    /// (a `Boxed`).
-    Closure(MirTy, Box<DebugTy>),
+    /// A function value (this fat `fn` type), named for the debugger,
+    /// with its environment: the object (a `Boxed`) of a closure whose
+    /// type is known, else `GcRef`.
+    Closure(String, MirTy, Box<DebugTy>),
 }
 
 impl DebugTy {
@@ -84,7 +85,7 @@ impl DebugTy {
     #[must_use]
     pub fn mir(&self) -> MirTy {
         match self {
-            Self::Mir(m) | Self::Sum(_, m, _) | Self::Closure(m, _) => m.clone(),
+            Self::Mir(m) | Self::Sum(_, m, _) | Self::Closure(_, m, _) => m.clone(),
             Self::Buf(..) | Self::Boxed(..) | Self::Cell(_) => MirTy::GcRef,
             Self::Any => crate::any_ty(),
         }
@@ -99,12 +100,14 @@ impl DebugTy {
 
 impl MirTy {
     /// The discriminant type of a [`DebugTy::Sum`] laid out as `self`:
-    /// a carrier's `bool` tag is a byte, any other tag a `u32`.
+    /// a carrier's `bool` tag is a byte, any other tag the `i32` it is
+    /// (gdb sign-extends a 4-byte `DW_AT_discr_value`, so an `any` tag
+    /// with the high bit set matches only a signed discriminant).
     #[must_use]
     pub fn debug_tag(&self) -> PrimTy {
         match self {
             Self::Tuple(ps) if ps.first() == Some(&Self::Prim(PrimTy::Bool)) => PrimTy::U8,
-            _ => PrimTy::U32,
+            _ => PrimTy::I32,
         }
     }
 }

@@ -85,8 +85,13 @@ fn fixed_fn_params(f: &MirFunction) -> Vec<usize> {
 }
 
 /// Specialize the calls of every function in `functions` (see the
-/// module doc); `next_id` is the first unused function id.
-pub fn closures(functions: &mut Vec<MirFunction>, mut next_id: u32) {
+/// module doc); `next_id` is the first unused function id. Returns each
+/// copy with the function it copies.
+pub fn closures(
+    functions: &mut Vec<MirFunction>,
+    mut next_id: u32,
+) -> Vec<(FunctionId, FunctionId)> {
+    let mut made = Vec::new();
     let index: HashMap<FunctionId, usize> = functions
         .iter()
         .enumerate()
@@ -169,6 +174,7 @@ pub fn closures(functions: &mut Vec<MirFunction>, mut next_id: u32) {
             built.insert(id);
             let mut copy = functions[index[&orig]].clone();
             copy.id = id;
+            made.push((id, orig));
             let args = copy.facts.mono_args.take().unwrap_or_default();
             let tag = format!("{args}|fn{p}={}", functions[index[&g]].name);
             copy.name = format!("{}{MONO_MARK}{tag}", copy.path());
@@ -196,4 +202,5 @@ pub fn closures(functions: &mut Vec<MirFunction>, mut next_id: u32) {
             work.push((functions.len() - 1, HashMap::from([(param, g)])));
         }
     }
+    made
 }

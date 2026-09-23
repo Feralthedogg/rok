@@ -2640,6 +2640,26 @@ fn print_target_list_and_spec() {
     assert!(text(&out.stderr).contains("unknown target `nope`"));
 }
 
+/// `--print lldbinit`: the lldb command that loads the formatters the
+/// toolchain ships (a repository build: `library/lldb/`).
+// spec: §9.9.6
+#[test]
+fn print_lldbinit() {
+    let dir = scratch("print_lldbinit");
+    let out = rokc(None, &dir, &["--print", "lldbinit"]);
+    assert_exit(&out, 0);
+    let line = text(&out.stdout);
+    let path = line
+        .strip_prefix("command script import '")
+        .and_then(|p| p.strip_suffix("'\n"))
+        .unwrap_or_else(|| panic!("{line:?}"));
+    let path = Path::new(path);
+    assert!(
+        path.ends_with("lldb/rok_lldb.py") && path.is_file(),
+        "{line:?}"
+    );
+}
+
 /// A custom target (`--target <name>.rokon`): a copy of the host's spec
 /// builds the same code under its own name; its runtime is looked up in
 /// `lib/rok/targets/<name>/`; a bad field is an error at its line.

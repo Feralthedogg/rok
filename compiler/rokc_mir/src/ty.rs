@@ -141,8 +141,17 @@ pub fn debug_ty(ty: &HirTy, module: &HirModule, target: &Target) -> Option<Debug
         HirTy::Closure { env, .. } => {
             let name = format!("env<{}>", debug_name(env, module));
             return Some(DebugTy::Closure(
+                format!("{} {name}", debug_name(ty, module)),
                 lower_ty(ty, module, target),
                 Box::new(DebugTy::Boxed(name, Box::new(of(env)))),
+            ));
+        }
+        // The environment's type is unknown here.
+        HirTy::Fn(..) if !ty.is_c_fn() => {
+            return Some(DebugTy::Closure(
+                debug_name(ty, module),
+                lower_ty(ty, module, target),
+                Box::new(DebugTy::Mir(MirTy::GcRef)),
             ));
         }
         HirTy::Sum(parts) => (0u32..)
@@ -215,7 +224,10 @@ fn debug_name(ty: &HirTy, module: &HirModule) -> String {
         HirTy::Sum(_) => ty.sum_name(|t| debug_name(t, module)),
         HirTy::Tuple(ts) => format!("({})", list(ts)),
         HirTy::Array(t, n) => format!("[{}; {n}]", debug_name(t, module)),
-        HirTy::Fn(..) | HirTy::Closure { .. } => "fn".to_owned(),
+        HirTy::Fn(args, ret, _) | HirTy::Closure { args, ret, .. } => match &**ret {
+            HirTy::Unit => format!("fn({})", list(args)),
+            r => format!("fn({}) -> {}", list(args), debug_name(r, module)),
+        },
         HirTy::Throws { ok, err } => format!(
             "throws ({}) -> {}",
             debug_name(err, module),
@@ -468,7 +480,7 @@ mod tests {
             panic!("no variant part")
         };
         assert_eq!(name, "throws (i64) -> str");
-        assert_eq!(mir.debug_tag(), PrimTy::U32);
+        assert_eq!(mir.debug_tag(), PrimTy::I32);
         assert_eq!(
             vs,
             [

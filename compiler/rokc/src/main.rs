@@ -119,6 +119,8 @@ build options:
                                debug_assertions below -O1) and exit
   --print target-list          print the built-in targets and exit
   --print target-spec          print the --target's spec as ROKON and exit
+  --print lldbinit             print the lldb command that loads rok's
+                               formatters (sums, any) and exit
   --load-mlir-plugin <path|name>
                                MLIR dialect plugin (a name is searched
                                in $ROK_MLIR_PLUGIN_PATH; repeatable)
@@ -605,8 +607,15 @@ fn real_main() {
             println!("{}", a.spec().to_rokon());
             return;
         }
+        Some("lldbinit") => {
+            match rokc_interface::sysroot().lldb {
+                Ok(p) => println!("command script import '{}'", p.display()),
+                Err(e) => fail(&e),
+            }
+            return;
+        }
         Some(what) => usage_error(&format!(
-            "`--print` takes `cfg`, `target-list` or `target-spec`, not `{what}`"
+            "`--print` takes `cfg`, `target-list`, `target-spec` or `lldbinit`, not `{what}`"
         )),
     }
     if a.print.is_some() {

@@ -5,7 +5,8 @@
 //! relative), in lexical blocks; their types (primitives, structs with
 //! field names, tuples, `str`, `any` (recursive), arrays, tagged sums as
 //! variant parts, `GcBuf` references and closures' environments as
-//! pointers to their objects; scalar returns); a line table. Generated
+//! pointers to their objects, function values as `{code, env}`, the code
+//! a pointer to its subroutine type; scalar returns); a line table. Generated
 //! functions (the C `main`, ..) get a subprogram too.
 
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ const DW_TAG_MEMBER: u8 = 0x0d;
 const DW_TAG_POINTER_TYPE: u8 = 0x0f;
 const DW_TAG_COMPILE_UNIT: u8 = 0x11;
 const DW_TAG_STRUCTURE_TYPE: u8 = 0x13;
+const DW_TAG_SUBROUTINE_TYPE: u8 = 0x15;
 const DW_TAG_VARIANT: u8 = 0x19;
 const DW_TAG_SUBRANGE_TYPE: u8 = 0x21;
 const DW_TAG_VARIANT_PART: u8 = 0x33;
@@ -58,6 +60,7 @@ const DW_FORM_DATA1: u8 = 0x0b;
 const DW_FORM_DATA2: u8 = 0x05;
 const DW_FORM_DATA4: u8 = 0x06;
 const DW_FORM_STRING: u8 = 0x08;
+const DW_FORM_SDATA: u8 = 0x0d;
 const DW_FORM_UDATA: u8 = 0x0f;
 const DW_FORM_REF4: u8 = 0x13;
 const DW_FORM_SEC_OFFSET: u8 = 0x17;
@@ -105,6 +108,12 @@ const A_SUB_RET: u8 = 20;
 // Subprograms without parameters or locals: no child list (as LLVM).
 const A_SUB_LEAF: u8 = 21;
 const A_SUB_RET_LEAF: u8 = 22;
+// Subroutine types: with a return type or not, with parameters or not.
+const A_FN_RET: u8 = 23;
+const A_FN: u8 = 24;
+const A_FN_RET_LEAF: u8 = 25;
+const A_FN_LEAF: u8 = 26;
+const A_FN_PARAM: u8 = 27;
 
 fn uleb(b: &mut Vec<u8>, mut v: u64) {
     loop {
@@ -300,7 +309,7 @@ fn abbrevs(split: bool) -> Vec<u8> {
         A_VARIANT,
         DW_TAG_VARIANT,
         true,
-        &[(DW_AT_DISCR_VALUE, DW_FORM_UDATA)],
+        &[(DW_AT_DISCR_VALUE, DW_FORM_SDATA)],
     );
     add(
         A_DISCR,
@@ -312,6 +321,12 @@ fn abbrevs(split: bool) -> Vec<u8> {
             (DW_AT_ARTIFICIAL, DW_FORM_FLAG_PRESENT),
         ],
     );
+    let ret = [(DW_AT_TYPE, DW_FORM_REF4)];
+    add(A_FN_RET, DW_TAG_SUBROUTINE_TYPE, true, &ret);
+    add(A_FN, DW_TAG_SUBROUTINE_TYPE, true, &[]);
+    add(A_FN_RET_LEAF, DW_TAG_SUBROUTINE_TYPE, false, &ret);
+    add(A_FN_LEAF, DW_TAG_SUBROUTINE_TYPE, false, &[]);
+    add(A_FN_PARAM, DW_TAG_FORMAL_PARAMETER, false, &ret);
     b.push(0);
     b
 }
@@ -545,8 +560,8 @@ impl Info<'_> {
                 off
             }
             DebugTy::Sum(name, mir, variants) => self.variant_part(name, mir, variants)?,
-            // `{code, env}`, the env a pointer to its object.
-            DebugTy::Closure(mir, env) => {
+            // `{code, env}`.
+            DebugTy::Closure(name, mir, env) => {
                 let MirTy::Tuple(ps) = mir else {
                     return self.ty(mir);
                 };
@@ -555,7 +570,7 @@ impl Info<'_> {
                 let at = self.t.field_offsets(mir);
                 let size = self.t.size_align(mir).0;
                 self.structure(
-                    "closure",
+                    name,
                     size,
                     &[("code".into(), code, at[0]), ("env".into(), env, at[1])],
                 )
@@ -623,8 +638,9 @@ impl Info<'_> {
         self.u32(tag);
         self.b.push(0);
         for (t, v, ty) in arms {
+            // As the discriminant reads it: an `i32` (a `u8` tag is 0 or 1).
             self.b.push(A_VARIANT);
-            uleb(&mut self.b, u64::from(t));
+            sleb(&mut self.b, i64::from(t as i32));
             self.member(v, ty, 0);
             self.b.push(0);
         }
@@ -666,12 +682,31 @@ impl Info<'_> {
                 )
             }
             MirTy::Prim(p) => return self.base(*p),
-            MirTy::GcRef | MirTy::Fn(..) | MirTy::Mlir(_) => {
-                let name = match ty {
-                    MirTy::GcRef => "gcref",
-                    MirTy::Fn(..) => "fn",
-                    _ => "mlir",
-                };
+            // A pointer to its subroutine type (`()` parameters left out).
+            MirTy::Fn(args, ret) => {
+                let ret = self.ty(ret);
+                let args: Vec<u32> = args.iter().filter_map(|a| self.ty(a)).collect();
+                let sub = self.b.len() as u32;
+                self.b.push(match (ret.is_some(), args.is_empty()) {
+                    (true, false) => A_FN_RET,
+                    (false, false) => A_FN,
+                    (true, true) => A_FN_RET_LEAF,
+                    (false, true) => A_FN_LEAF,
+                });
+                if let Some(r) = ret {
+                    self.type_ref(r);
+                }
+                for a in &args {
+                    self.b.push(A_FN_PARAM);
+                    self.type_ref(*a);
+                }
+                if !args.is_empty() {
+                    self.b.push(0);
+                }
+                self.pointer_to(sub)
+            }
+            MirTy::GcRef | MirTy::Mlir(_) => {
+                let name = if *ty == MirTy::GcRef { "gcref" } else { "mlir" };
                 let o = self.b.len() as u32;
                 self.b.push(A_PTR_NAMED);
                 cstr(&mut self.b, name);

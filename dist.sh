@@ -6,6 +6,7 @@
 #       bin/{rok,rokc,rokls}                (Windows: .exe)
 #       lib/librokr.a                       (Windows: rokr.lib)
 #       lib/rok/{core,std,bare}/src/      the standard library sources
+#       lib/rok/lldb/rok_lldb.py    lldb formatters for -g programs (rokc --print lldbinit)
 #       lib/rok/targets/<triple>/   what --target links (targets/build.sh)
 #       lib/libclang.{so,dylib,dll}, lib/clang/<major>/include
 #                                   what `rokc bindgen` loads (llvm/build-libclang.sh;
@@ -115,7 +116,7 @@ fi
 }
 runtime/rokr/localize.sh "$target/$rt" "$stage/lib/$rt"
 # The library sources.
-tar -C library -cf - core/src std/src bare/src | tar -C "$stage/lib/rok" -xf -
+tar -C library -cf - core/src std/src bare/src lldb | tar -C "$stage/lib/rok" -xf -
 cp -R "${CARGO_TARGET_DIR:-target}/lib/rok/targets" "$stage/lib/rok/"
 # libclang (the file a Linux .so link names) and its built-in headers.
 if [ -z "$static" ]; then

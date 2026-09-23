@@ -1091,8 +1091,8 @@ impl Key<'_> {
                 self.b.push_str("cell ");
                 self.debug_ty(e);
             }
-            DebugTy::Closure(t, e) => {
-                self.b.push_str("closure ");
+            DebugTy::Closure(n, t, e) => {
+                let _ = write!(self.b, "closure {n} ");
                 self.ty(t);
                 self.debug_ty(e);
             }

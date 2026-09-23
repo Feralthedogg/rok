@@ -10,9 +10,10 @@
 //! `any` as one over the types stored into one, by their tags (an `any`
 //! inside them is the same, recursive type); a `GcBuf` reference as a
 //! pointer to its object, header then elements; a `[ref]`-captured
-//! variable as its value, through its cell; a closure value as `{code,
-//! env}`, the env pointing at its object; other GC references and `fn`
-//! values as pointers). Scalar returns are typed. The unit's language is Rust:
+//! variable as its value, through its cell; a function value as `{code,
+//! env}`, the code a pointer to its subroutine type, the env pointing at
+//! its object when the closure is known; other GC references as
+//! pointers). Scalar returns are typed. The unit's language is Rust:
 //! debuggers read variant parts in it (lldb only there).
 //!
 //! The attribute aliases are module-level text placed before `module`;
@@ -327,8 +328,8 @@ impl DebugInfo {
                 )
             }
             DebugTy::Sum(name, mir, variants) => self.variant_part(name, mir, variants)?,
-            // `{code, env}`, the env a pointer to its object.
-            DebugTy::Closure(mir, env) => {
+            // `{code, env}`.
+            DebugTy::Closure(name, mir, env) => {
                 let MirTy::Tuple(ps) = mir else {
                     return self.di_type(mir);
                 };
@@ -337,7 +338,7 @@ impl DebugInfo {
                 let (size, align) = self.target.size_align(mir);
                 let at = self.target.field_offsets(mir);
                 Self::composite(
-                    "closure",
+                    name,
                     size,
                     align,
                     &[("code", code, at[0]), ("env", env, at[1])],
@@ -454,14 +455,24 @@ impl DebugInfo {
                 Self::composite("str", size, align, &[("ptr", ptr, 0), ("len", len, pw / 8)])
             }
             MirTy::Prim(p) => return self.basic_type(*p),
-            MirTy::GcRef | MirTy::Fn(..) | MirTy::Mlir(_) => {
-                let name = match ty {
-                    MirTy::GcRef => "gcref",
-                    MirTy::Fn(..) => "fn",
-                    _ => "mlir",
-                };
+            MirTy::GcRef | MirTy::Mlir(_) => {
+                let name = if *ty == MirTy::GcRef { "gcref" } else { "mlir" };
                 format!(
                     "#llvm.di_derived_type<tag = DW_TAG_pointer_type, name = \"{name}\", sizeInBits = {pw}>"
+                )
+            }
+            // A pointer to its subroutine type (`()` parameters left out).
+            MirTy::Fn(args, ret) => {
+                let mut types = vec![
+                    self.di_type(ret)
+                        .unwrap_or_else(|| "#llvm.di_null_type".to_owned()),
+                ];
+                types.extend(args.iter().filter_map(|a| self.di_type(a)));
+                format!(
+                    "#llvm.di_derived_type<tag = DW_TAG_pointer_type, baseType = \
+                     #llvm.di_subroutine_type<callingConvention = DW_CC_normal, types = {}>, \
+                     sizeInBits = {pw}>",
+                    types.join(", ")
                 )
             }
             MirTy::Any => {
