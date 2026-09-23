@@ -1620,6 +1620,14 @@ fn cmd_bindgen(a: &Args) {
         stdcall: spec.stdcall_system(),
         sdk,
         clang_args: &a.run_args,
+        // This machine's headers serve its own platform, every Apple
+        // target (the SDK holds all of them) and every MSVC target on an
+        // MSVC host (one set for all architectures); another target's
+        // come from the clang arguments.
+        system_headers: spec.is_host()
+            || spec.vendor == "apple"
+            || spec.env == "msvc" && TargetSpec::host().env == "msvc"
+            || a.run_args.iter().any(|x| x.starts_with("--sysroot")),
     };
     let out = rokc_tools::bindgen::generate(&libclang, &opts).unwrap_or_else(|e| fail(&e));
     match &a.output {

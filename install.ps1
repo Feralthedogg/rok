@@ -14,7 +14,7 @@ param([string]$Archive, [string]$Version)
 $ErrorActionPreference = 'Stop'
 
 if (-not $Version) { $Version = if ($env:ROK_VERSION) { $env:ROK_VERSION } else { '0.1.0' } }
-$dist = if ($env:ROK_DIST) { $env:ROK_DIST } else { 'https://github.com/rok-lang/rok/releases/download' }
+$dist = if ($env:ROK_DIST) { $env:ROK_DIST } else { 'https://github.com/rok-lang/rok/releases' }
 $home_ = if ($env:ROK_HOME) { $env:ROK_HOME } else { Join-Path $env:USERPROFILE '.rok' }
 
 function HostTriple {
@@ -34,7 +34,7 @@ try {
         $src = $here
     } else {
         if (-not $Archive) {
-            $url = "$dist/v$Version/rok-$Version-$(HostTriple).zip"
+            $url = "$dist/download/v$Version/rok-$Version-$(HostTriple).zip"
             Write-Output "downloading $url"
             $Archive = Join-Path $tmp 'rok.zip'
             Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $Archive

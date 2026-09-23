@@ -12,7 +12,7 @@
 set -eu
 
 version="${ROK_VERSION:-0.1.0}"
-dist="${ROK_DIST:-https://github.com/rok-lang/rok/releases/download}"
+dist="${ROK_DIST:-https://github.com/rok-lang/rok/releases}"
 home="${ROK_HOME:-$HOME/.rok}"
 archive=""
 
@@ -77,7 +77,7 @@ if [ -z "$archive" ] && [ -n "$here" ] && [ -x "$here/bin/rok" ] && [ -x "$here/
 else
   if [ -z "$archive" ]; then
     triple=$(host_triple)
-    url="$dist/v$version/rok-$version-$triple.tar.gz"
+    url="$dist/download/v$version/rok-$version-$triple.tar.gz"
     say "downloading $url"
     archive="$tmp/rok.tar.gz"
     curl -fsSL --proto '=https' -o "$archive" "$url" || die "cannot download $url"

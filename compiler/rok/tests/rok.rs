@@ -1729,6 +1729,130 @@ fn install_sh_checks_sums() {
     );
 }
 
+/// `rok toolchain update` against a local release server: the newest
+/// release (`latest/download/rok-version`) or a given one, checked
+/// against its `.sha256`, becomes the default with new proxies; a
+/// toolchain whose proxies do not run is rolled back.
+// spec: §9.10.6
+#[cfg(unix)]
+#[test]
+fn update_toolchain() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = scratch("update-toolchain");
+    let home = root.join("home");
+    let host = env!("ROK_HOST");
+    let dist = root.join("dist");
+    let release = |v: &str, sum: Option<&str>, broken_rok: bool| {
+        let stage = root.join("stage").join(v);
+        let top = stage.join(format!("rok-{v}"));
+        fake_toolchain(&top, v);
+        if broken_rok {
+            let rok = top.join("bin/rok");
+            write(&rok, "#!/bin/sh\nexit 1\n");
+            fs::set_permissions(&rok, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let name = format!("rok-{v}-{host}.tar.gz");
+        let to = dist.join(format!("download/v{v}"));
+        fs::create_dir_all(&to).unwrap();
+        let tar = Command::new("tar")
+            .current_dir(&stage)
+            .arg("-czf")
+            .arg(to.join(&name))
+            .arg(format!("rok-{v}"))
+            .status()
+            .unwrap();
+        assert!(tar.success());
+        let sum = sum.map_or_else(|| sha256_of(&to.join(&name)), str::to_owned);
+        write(
+            &to.join(format!("{name}.sha256")),
+            &format!("{sum}  {name}\n"),
+        );
+        write(&dist.join("latest/download/rok-version"), &format!("{v}\n"));
+    };
+    let url = format!("http://127.0.0.1:{}", serve_dir(dist.clone()));
+    let update = |args: &[&str]| {
+        let mut c = rok_cmd(&home, &root, &[&["toolchain", "update"][..], args].concat());
+        c.env("ROK_DIST", &url);
+        c.output().unwrap()
+    };
+    let proxy = |args: &[&str]| {
+        let mut c = Command::new(home.join("bin/rokc"));
+        c.current_dir(&root)
+            .env_remove("ROK_HOME")
+            .env_remove("ROK_TOOLCHAIN")
+            .args(args);
+        ok(&c.output().unwrap())
+    };
+    let list = || ok(&rok(&home, &root, &["toolchain", "list"]));
+
+    fails(&update(&[]), "latest/download/rok-version");
+    release("9.9.1", None, false);
+    let out = update(&[]);
+    ok(&out);
+    assert!(text(&out.stderr).contains("Updated to rok 9.9.1"));
+    assert_eq!(list(), format!("9.9.1-{host} (default)\n"));
+    assert_eq!(proxy(&["x"]), "rokc 9.9.1: x\n");
+    let out = update(&[]);
+    assert_eq!(text(&out.stderr), "rok 9.9.1 is up to date\n");
+
+    // Through the proxy, which updates itself.
+    release("9.10.0", None, false);
+    let mut c = Command::new(home.join("bin/rok"));
+    c.current_dir(&root)
+        .env_remove("ROK_HOME")
+        .env_remove("ROK_TOOLCHAIN")
+        .env("ROK_DIST", &url)
+        .args(["toolchain", "update"]);
+    let out = c.output().unwrap();
+    ok(&out);
+    assert!(
+        text(&out.stderr).contains(&format!("note: 9.9.1-{host} stays installed")),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(list(), format!("9.9.1-{host}\n9.10.0-{host} (default)\n"));
+    assert_eq!(proxy(&["x"]), "rokc 9.10.0: x\n");
+
+    // A damaged download is refused before anything changes.
+    release("9.11.0", Some(&"0".repeat(64)), false);
+    fails(&update(&[]), "its .sha256 says 0000");
+    // Proxies that do not run the new toolchain are rolled back.
+    release("9.12.0", None, true);
+    fails(
+        &update(&[]),
+        "rolled back: the default toolchain and the proxies are as they were",
+    );
+    assert_eq!(list(), format!("9.9.1-{host}\n9.10.0-{host} (default)\n"));
+    assert_eq!(proxy(&["x"]), "rokc 9.10.0: x\n");
+    let leftovers: Vec<_> = fs::read_dir(home.join("bin"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .filter(|n| n.to_string_lossy().starts_with('.'))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    // A given version: the default already, or installed (no download).
+    let out = update(&["9.10.0"]);
+    assert_eq!(text(&out.stderr), "rok 9.10.0 is up to date\n");
+    fails(
+        &update(&["greet"]),
+        "rok toolchain update: `greet` is not a version",
+    );
+    fs::remove_dir_all(dist.join("download/v9.9.1")).unwrap();
+    ok(&update(&["9.9.1"]));
+    assert_eq!(list(), format!("9.9.1-{host} (default)\n9.10.0-{host}\n"));
+    assert_eq!(proxy(&["x"]), "rokc 9.9.1: x\n");
+    assert_eq!(update(&["9.9.1", "x"]).status.code(), Some(2));
+    assert_eq!(update(&["--from", "x"]).status.code(), Some(2));
+    for gone in ["self", "upgrade"] {
+        fails(
+            &rok(&home, &root, &[gone]),
+            &format!("unknown command `{gone}`"),
+        );
+    }
+}
+
 /// `GET /<name>` of the files in `dir` on `http://127.0.0.1:<port>`
 /// (the port); 404 for others.
 #[cfg(unix)]
@@ -2342,4 +2466,29 @@ fn stone_features_round_trip() {
     assert_eq!(enabled(&home, &app, &[]), "codec[default,std]");
     // `num` stays pinned: the lock covers every optional stone.
     assert_eq!(read(&app.join("rok.lock")), lock);
+
+    // Index features are checked against the stone's rok.rokon at its
+    // commit, in any order.
+    let entry = read(&index.join("3/n/num"));
+    let forged = entry.replace(
+        "features: { \"big\": [] }",
+        "features: { \"big\": [], \"fast\": [] }",
+    );
+    assert_ne!(forged, entry);
+    commit(&index, &[("3/n/num", &forged)]);
+    let home2 = root.join("home2");
+    write(
+        &home2.join("config.rokon"),
+        &format!("Config {{ registry: {qreg} }}\n"),
+    );
+    let app2 = root.join("app2");
+    write(&app2.join("src/main.rok"), "println(1);\n");
+    write(
+        &app2.join("rok.rokon"),
+        &APP0.replace("// deps go here", "\"num\": \"^1.0\","),
+    );
+    fails(
+        &rok(&home2, &app2, &["deps"]),
+        "stone `num` 1.0.0: the index's features differ from its rok.rokon's at commit",
+    );
 }

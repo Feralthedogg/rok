@@ -428,6 +428,28 @@ impl Activation<'_> {
     }
 }
 
+/// The index entry `e`'s `features` against the stone's own `rok.rokon`
+/// at its commit (checked out at `dir`): the same features, each enabling
+/// the same entries, in any order.
+fn check_stone_features(dir: &Path, name: &str, e: &registry::Entry) -> Result<(), String> {
+    let own = match manifest::find(dir) {
+        Some(p) => manifest::load(&p)?.features,
+        None => Features::new(),
+    };
+    let set = |f: &Features| -> BTreeSet<(String, BTreeSet<String>)> {
+        f.iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect()
+    };
+    if set(&own) != set(&e.features) {
+        return Err(format!(
+            "stone `{name}` {}: the index's features differ from its rok.rokon's at commit {}",
+            e.vers, e.rev
+        ));
+    }
+    Ok(())
+}
+
 /// `items` each after the ones its `deps` name.
 fn order<T>(
     items: Vec<T>,
@@ -727,6 +749,7 @@ impl Resolver<'_> {
                 e.vers, e.rev, e.cksum
             ));
         }
+        check_stone_features(&dir, name, &e)?;
         if !self
             .new
             .packages

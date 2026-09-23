@@ -132,6 +132,12 @@ toolchains ($ROK_HOME/toolchains/<version>-<triple>/):
   toolchain default [<version>]
                                the toolchain the $ROK_HOME/bin proxies run
   toolchain remove <version>   remove one
+  toolchain update [<version>]
+                               install the newest release (or <version>),
+                               checked against its .sha256, make it the
+                               default and update the proxies; rolled back
+                               if they then do not run it. Releases: $ROK_DIST (default
+                               https://github.com/rok-lang/rok/releases)
   +<version>                   (first) use that toolchain for this command;
                                else $ROK_TOOLCHAIN, else rok.rokon's
                                `toolchain`, else the default

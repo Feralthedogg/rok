@@ -19,7 +19,8 @@
 #       lib/rokc.lib                        (Windows) rokc.exe's import library
 #       example/answer.cpp README.md        docs/mlir-plugins.md
 #
-# and their .sha256. Usage: ./dist.sh [--out <dir>] (on Windows from Git
+# and their .sha256, and dist/rok-version (the version, one line). Every
+# file is a release asset. Usage: ./dist.sh [--out <dir>] (on Windows from Git
 # Bash / MSYS2, in a Developer prompt for the MSVC build tools).
 #
 # rokc links the pinned LLVM / MLIR / lld statically: ROK_LLVM_PREFIX,
@@ -168,3 +169,7 @@ for n in "$name" $devname; do
   echo "archive: $(mb "$out/$n.$ext")"
   echo "$out/$n.$ext"
 done
+# The release's version: `rok toolchain update` reads the newest release's
+# from releases/latest/download/rok-version.
+printf '%s\n' "$version" > "$out/rok-version"
+echo "$out/rok-version"

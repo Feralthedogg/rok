@@ -78,6 +78,8 @@ rok toolchain list
 rok toolchain install 0.1.0 --from rok-0.1.0-aarch64-apple-darwin.tar.gz   # directory, archive, or URL
 rok toolchain default 0.1
 rok toolchain remove 0.1.0-aarch64-apple-darwin
+rok toolchain update             # the newest release becomes the default (older ones stay installed)
+rok toolchain update 0.1.1       # a given release
 ```
 
 ## Quick start

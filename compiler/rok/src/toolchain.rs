@@ -323,25 +323,50 @@ fn verify(top: &Path, version: &str) -> Result<String, String> {
     Ok(full.to_owned())
 }
 
-fn install(home: &Path, version: &str, from: &str) -> Result<String, String> {
+/// A scratch directory under `toolchains/`, removed when dropped.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Unpack and check `from` in a scratch directory: it, the toolchain's
+/// top directory in it, and the toolchain's full version.
+fn stage(home: &Path, version: &str, from: &str) -> Result<(Scratch, PathBuf, String), String> {
     std::fs::create_dir_all(root(home)).map_err(|e| e.to_string())?;
-    let tmp = root(home).join(format!(".tmp-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    let result = (|| {
-        let top = unpack(from, &tmp)?;
-        let full = verify(&top, version)?;
-        let name = format!("{full}-{HOST}");
-        let dest = root(home).join(&name);
-        // Reinstalling replaces.
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    let tmp = Scratch(root(home).join(format!(".tmp-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&tmp.0);
+    std::fs::create_dir_all(&tmp.0).map_err(|e| format!("{}: {e}", tmp.0.display()))?;
+    let top = unpack(from, &tmp.0)?;
+    let full = verify(&top, version)?;
+    Ok((tmp, top, full))
+}
+
+/// Move the staged toolchain `top` to `toolchains/<full>-<host>`; its
+/// name. One already there is moved aside into `tmp` first, and back if
+/// the move fails.
+fn place(home: &Path, tmp: &Scratch, top: &Path, full: &str) -> Result<String, String> {
+    let name = format!("{full}-{HOST}");
+    let dest = root(home).join(&name);
+    let old = tmp.0.join("old");
+    let had = dest.exists();
+    if had {
+        std::fs::rename(&dest, &old).map_err(|e| format!("{}: {e}", dest.display()))?;
+    }
+    if let Err(e) = std::fs::rename(top, &dest) {
+        if had {
+            let _ = std::fs::rename(&old, &dest);
         }
-        std::fs::rename(&top, &dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-        Ok(name)
-    })();
-    let _ = std::fs::remove_dir_all(&tmp);
-    result
+        return Err(format!("{}: {e}", dest.display()));
+    }
+    Ok(name)
+}
+
+fn install(home: &Path, version: &str, from: &str) -> Result<String, String> {
+    let (tmp, top, full) = stage(home, version, from)?;
+    place(home, &tmp, &top, &full)
 }
 
 /// `$ROK_HOME/bin/{rok,rokc,rokls}`: copies of `toolchain`'s `rok`.
@@ -386,11 +411,168 @@ fn set_default(home: &Path, pin: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The release server: `<dist>/download/v<version>/rok-<version>-<triple>.<ext>`
+/// with its `.sha256`, and `<dist>/latest/download/rok-version`, the
+/// newest release's version (GitHub releases' layout). `ROK_DIST`
+/// overrides it.
+fn dist() -> String {
+    std::env::var("ROK_DIST")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| "https://github.com/rok-lang/rok/releases".to_owned())
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+const ARCHIVE: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
+
+/// `v` if it can be a release's full version.
+fn release_version(v: &str, from: &str) -> Result<String, String> {
+    let ok = v.starts_with(|c: char| c.is_ascii_digit())
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
+    if ok {
+        Ok(v.to_owned())
+    } else {
+        Err(format!("{from}: `{v}` is not a version"))
+    }
+}
+
+/// The newest release's version, from `<dist>/latest/download/rok-version`.
+fn latest(dist: &str) -> Result<String, String> {
+    let url = format!("{dist}/latest/download/rok-version");
+    let out = run(
+        Command::new("curl").args(["-fsSL", "--proto", "=https,http", &url]),
+        &format!("curl {url}"),
+    )?;
+    release_version(out.trim(), &url)
+}
+
+/// `bin/rok` runs and `bin/rokc` is `full`, as the default toolchain
+/// (no `ROK_TOOLCHAIN`, outside any project).
+fn check_proxies(home: &Path, full: &str) -> Result<(), String> {
+    let version = |tool: &str| {
+        let exe = home.join("bin").join(exe_name(tool));
+        run(
+            Command::new(&exe)
+                .arg("--version")
+                .env("ROK_HOME", home)
+                .env_remove("ROK_TOOLCHAIN")
+                .current_dir(home),
+            &exe.display().to_string(),
+        )
+    };
+    version("rok")?;
+    let out = version("rokc")?;
+    let first = out.lines().next().unwrap_or("");
+    let want = format!("rokc {full}");
+    if first != want && !first.starts_with(&format!("{want} ")) {
+        return Err(format!("the rokc proxy says {first:?}, not {want}"));
+    }
+    Ok(())
+}
+
+/// Make `full` (installed at `dir`) the default and write its proxies,
+/// then check that they run it. On failure the config and the proxies
+/// are put back, and `dir` removed if `fresh` (installed for this).
+fn switch(home: &Path, full: &str, dir: &Path, fresh: bool) -> Result<(), String> {
+    let bin = home.join("bin");
+    let config = home.join("config.rokon");
+    let old_config = std::fs::read(&config).ok();
+    let mut kept = Vec::new();
+    for t in TOOLS {
+        let p = bin.join(exe_name(t));
+        if p.is_file() {
+            let prev = bin.join(format!(".{t}.prev"));
+            std::fs::copy(&p, &prev).map_err(|e| format!("{}: {e}", p.display()))?;
+            kept.push((p, prev));
+        }
+    }
+    let Err(e) = set_default(home, full).and_then(|_| check_proxies(home, full)) else {
+        for (_, prev) in &kept {
+            let _ = std::fs::remove_file(prev);
+        }
+        return Ok(());
+    };
+    let mut lost = Vec::new();
+    let restored = match &old_config {
+        Some(c) => std::fs::write(&config, c),
+        None => std::fs::remove_file(&config),
+    };
+    if let Err(e) = restored {
+        lost.push(format!("{}: {e}", config.display()));
+    }
+    for t in TOOLS {
+        let p = bin.join(exe_name(t));
+        let r = match kept.iter().find(|(q, _)| *q == p) {
+            Some((_, prev)) => {
+                if cfg!(windows) {
+                    set_aside(&bin, &p);
+                }
+                std::fs::rename(prev, &p)
+            }
+            None if p.exists() => std::fs::remove_file(&p),
+            None => Ok(()),
+        };
+        if let Err(e) = r {
+            lost.push(format!("{}: {e}", p.display()));
+        }
+    }
+    if fresh {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    if lost.is_empty() {
+        Err(format!(
+            "{e}\nrolled back: the default toolchain and the proxies are as they were"
+        ))
+    } else {
+        Err(format!("{e}\nrolling back failed: {}", lost.join("; ")))
+    }
+}
+
+/// `rok toolchain update`: install release `version` (default: the newest), make
+/// it the default and update the proxies.
+fn update(home: &Path, version: Option<&str>, quiet: bool) -> Result<(), String> {
+    let dist = dist();
+    let full = match version {
+        Some(v) => release_version(v, "rok toolchain update")?,
+        None => latest(&dist)?,
+    };
+    let name = format!("{full}-{HOST}");
+    let dir = root(home).join(&name);
+    let current = default_pin(home)?.and_then(|p| find(home, &p));
+    if current.as_ref() == Some(&dir) && check_proxies(home, &full).is_ok() {
+        if !quiet {
+            eprintln!("rok {full} is up to date");
+        }
+        return Ok(());
+    }
+    let fresh = !dir.is_dir();
+    if fresh {
+        let url = format!("{dist}/download/v{full}/rok-{full}-{HOST}.{ARCHIVE}");
+        if !quiet {
+            eprintln!(" Downloading {url}");
+        }
+        let (tmp, top, _) = stage(home, &full, &url)?;
+        place(home, &tmp, &top, &full)?;
+    }
+    switch(home, &full, &dir, fresh)?;
+    if !quiet {
+        eprintln!("     Updated to rok {full} ({name})");
+        if let Some(old) = current.filter(|c| *c != dir) {
+            let old = old.file_name().unwrap_or_default().to_string_lossy();
+            eprintln!("        note: {old} stays installed (`rok toolchain remove {old}`)");
+        }
+    }
+    Ok(())
+}
+
 pub const USAGE: &str = "\
 usage: rok toolchain list
        rok toolchain install <version> --from <dir | .tar[.gz] | .zip | url>
        rok toolchain default [<version>]
-       rok toolchain remove <version>";
+       rok toolchain remove <version>
+       rok toolchain update [<version>]";
 
 pub fn cmd(args: &[String], quiet: bool) -> Result<i32, String> {
     let h = home();
@@ -434,6 +616,8 @@ pub fn cmd(args: &[String], quiet: bool) -> Result<i32, String> {
                 write_proxies(&h, &d.unwrap_or_else(|| root(&h).join(&name)))?;
             }
         }
+        ["update"] => update(&h, None, quiet)?,
+        ["update", v] if !v.starts_with('-') => update(&h, Some(v), quiet)?,
         ["default"] => match default_pin(&h)? {
             Some(p) => println!("{p}"),
             None => return Err("no default toolchain".into()),

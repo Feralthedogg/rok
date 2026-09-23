@@ -11,7 +11,9 @@
 //! globals `extern "C"` items (`extern "system"` for stdcall), object
 //! pointers `CPtr<T>`, function pointers `unsafe extern "C" fn(..) | none`,
 //! and object-like macros that clang evaluates to a number or string
-//! `const` items. Anything else is skipped with a comment.
+//! `const` items. Anything else is skipped with a comment, and so is a
+//! function or function pointer passing a byte-blob record by value (C
+//! classifies it by its real fields).
 
 mod clang;
 
@@ -38,6 +40,9 @@ pub struct Options<'a> {
     pub sdk: Option<PathBuf>,
     /// More compiler arguments (`-I`, `-D`, ...).
     pub clang_args: &'a [String],
+    /// The machine's own system include directories describe the
+    /// target's C library; else clang gets none (`-nostdlibinc`).
+    pub system_headers: bool,
 }
 
 /// libclang and clang's resource directory (`lib/clang/<major>`,
@@ -64,8 +69,20 @@ pub fn generate(libclang: &Libclang, opts: &Options<'_>) -> Result<String, Strin
     if let Some(sdk) = &opts.sdk {
         args.extend(["-isysroot".to_owned(), sdk.to_string_lossy().into_owned()]);
     }
+    if !opts.system_headers {
+        args.push("-nostdlibinc".to_owned());
+    }
     args.extend(opts.clang_args.iter().cloned());
-    let unit = clang.parse(&header, &args, &[], true)?;
+    let unit = clang.parse(&header, &args, &[], true).map_err(|e| {
+        if opts.system_headers || !e.contains("file not found") {
+            return e;
+        }
+        format!(
+            "{e}\nnote: {} is not this machine's platform, so its system headers are not used; \
+             give the target's after `--` (`-isystem <dir>` or `--sysroot <dir>`)",
+            opts.target
+        )
+    })?;
     let decls = top_level(&clang, unit.cursor());
     let roots = Roots {
         c: &clang,
@@ -88,6 +105,7 @@ pub fn generate(libclang: &Libclang, opts: &Options<'_>) -> Result<String, Strin
         values: HashSet::new(),
         typedefs: HashMap::new(),
         anon: HashMap::new(),
+        layouts: HashMap::new(),
         queue: VecDeque::new(),
         cptr: false,
     };
@@ -406,6 +424,7 @@ const fn round_up(x: i64, a: i64) -> i64 {
 }
 
 /// One field as rok lays it out.
+#[derive(Clone)]
 struct Field {
     name: String,
     ty: String,
@@ -441,6 +460,9 @@ struct Gen<'a> {
     typedefs: HashMap<String, Result<String, Skip>>,
     /// Names given to anonymous structs, unions and enums, by USR.
     anon: HashMap<String, String>,
+    /// Records' `repr` and fields, or why they are written as bytes, by
+    /// USR.
+    layouts: HashMap<String, Result<(String, Vec<Field>), Skip>>,
     /// Types used but not yet written.
     queue: VecDeque<Dep>,
     cptr: bool,
@@ -694,9 +716,12 @@ impl Gen<'_> {
             let n = (api.clang_getNumArgTypes)(f).max(0) as u32;
             let mut params = Vec::new();
             for i in 0..n {
-                params.push(self.ty((api.clang_getArgType)(f, i))?);
+                let p = (api.clang_getArgType)(f, i);
+                params.push(self.ty(p)?);
+                self.by_value(p)?;
             }
             let ret = self.ret((api.clang_getResultType)(f))?;
+            self.by_value((api.clang_getResultType)(f))?;
             if ret.contains("| none") {
                 return Err("a function pointer returning a function pointer".to_owned());
             }
@@ -817,13 +842,47 @@ impl Gen<'_> {
             );
             return;
         }
+        let (repr, fields) = match self.layout(def, name) {
+            Ok(l) => l,
+            Err(why) => {
+                // SAFETY: a record of a live unit.
+                let (size, align) = self.size_align(unsafe { (api.clang_getCursorType)(def) });
+                return self.blob(name, size, align, &why);
+            }
+        };
+        let kw = if def.kind == clang::UNION_DECL {
+            "union"
+        } else {
+            "struct"
+        };
+        let _ = writeln!(self.items, "#[repr({repr})]\npub {kw} {name} {{");
+        for f in fields {
+            if let Some(n) = f.note {
+                let _ = writeln!(self.items, "    // {n}");
+            }
+            let _ = writeln!(self.items, "    pub {}: {};", f.name, f.ty);
+        }
+        self.items.push_str("}\n");
+    }
+
+    /// The `repr` and fields of record definition `def` named `name`, or
+    /// why it has no rok form (it is then written as bytes).
+    fn layout(&mut self, def: Cursor, name: &str) -> Result<(String, Vec<Field>), Skip> {
+        let usr = self.c.usr(def);
+        if let Some(l) = self.layouts.get(&usr) {
+            return l.clone();
+        }
+        let l = self.compute_layout(def, name);
+        self.layouts.insert(usr, l.clone());
+        l
+    }
+
+    fn compute_layout(&mut self, def: Cursor, name: &str) -> Result<(String, Vec<Field>), Skip> {
+        let api = self.c.api();
         let union = def.kind == clang::UNION_DECL;
         // SAFETY: a record of a live unit.
         let (size, align) = self.size_align(unsafe { (api.clang_getCursorType)(def) });
-        let fields = match self.fields(def, name, union) {
-            Ok(f) => f,
-            Err(why) => return self.blob(name, size, align, &why),
-        };
+        let fields = self.fields(def, name, union)?;
         // rok's C layout of these fields, against clang's.
         let lay = |packed: bool| {
             let (mut end, mut al) = (0i64, 1);
@@ -838,6 +897,7 @@ impl Gen<'_> {
             }
             Some((end, al))
         };
+        let no_form = || "clang's layout has no rok form".to_owned();
         let (repr, end, al) = match (lay(false), lay(true)) {
             (Some((end, al)), _) if align >= al => {
                 let repr = if align > al {
@@ -848,20 +908,54 @@ impl Gen<'_> {
                 (repr, end, align)
             }
             (None, Some((end, _))) if align == 1 && !union => ("packed".to_owned(), end, 1),
-            _ => return self.blob(name, size, align, "clang's layout has no rok form"),
+            _ => return Err(no_form()),
         };
         if round_up(end, al) != size {
-            return self.blob(name, size, align, "clang's layout has no rok form");
+            return Err(no_form());
         }
-        let kw = if union { "union" } else { "struct" };
-        let _ = writeln!(self.items, "#[repr({repr})]\npub {kw} {name} {{");
-        for f in fields {
-            if let Some(n) = f.note {
-                let _ = writeln!(self.items, "    // {n}");
+        Ok((repr, fields))
+    }
+
+    /// `Err` when a value of type `t` would not cross the C ABI as C
+    /// passes it: a record written as bytes, alone or inside one passed
+    /// by value, is classified unlike its C fields.
+    fn by_value(&mut self, t: Type) -> Result<(), Skip> {
+        let api = self.c.api();
+        // SAFETY: a type of a live unit.
+        let t = unsafe { (api.clang_getCanonicalType)(t) };
+        match t.kind {
+            // SAFETY: an array type of a live unit.
+            clang::T_CONSTANT_ARRAY => self.by_value(unsafe { (api.clang_getArrayElementType)(t) }),
+            clang::T_RECORD => {
+                // SAFETY: a record type of a live unit.
+                let def =
+                    unsafe { (api.clang_getCursorDefinition)((api.clang_getTypeDeclaration)(t)) };
+                // An incomplete type is not passed by value; an unnamed one
+                // has no rok form already.
+                // SAFETY: a cursor of a live unit.
+                if unsafe { (api.clang_Cursor_isNull)(def) } != 0 {
+                    return Ok(());
+                }
+                let Some(name) = self.tag_name(def) else {
+                    return Ok(());
+                };
+                self.layout(def, &name).map_err(|why| {
+                    format!("`{name}` is passed by value but written as bytes ({why})")
+                })?;
+                for f in self.c.children(def) {
+                    // SAFETY: a member of a live record.
+                    let member = f.kind == clang::FIELD_DECL
+                        || matches!(f.kind, clang::STRUCT_DECL | clang::UNION_DECL)
+                            && unsafe { (api.clang_Cursor_isAnonymousRecordDecl)(f) } != 0;
+                    if member {
+                        // SAFETY: a member of a live record.
+                        self.by_value(unsafe { (api.clang_getCursorType)(f) })?;
+                    }
+                }
+                Ok(())
             }
-            let _ = writeln!(self.items, "    pub {}: {};", f.name, f.ty);
+            _ => Ok(()),
         }
-        self.items.push_str("}\n");
     }
 
     /// A record's fields, bitfield runs as byte arrays. `Err` when one
@@ -1101,15 +1195,15 @@ impl Gen<'_> {
                 if name.is_empty() || !seen.insert(name.clone()) {
                     name = format!("arg{i}");
                 }
-                params.push(format!(
-                    "{name}: {}",
-                    self.ty((api.clang_getCursorType)(p))?
-                ));
+                let pt = (api.clang_getCursorType)(p);
+                params.push(format!("{name}: {}", self.ty(pt)?));
+                self.by_value(pt)?;
             }
             if (api.clang_isFunctionTypeVariadic)(f) != 0 {
                 params.push("...".to_owned());
             }
             let ret = self.ret((api.clang_getResultType)(f))?;
+            self.by_value((api.clang_getResultType)(f))?;
             Ok((abi, format!("({}){ret}", params.join(", "))))
         }
     }

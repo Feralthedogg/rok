@@ -272,6 +272,21 @@ fn forward_ctrl_c(running: Arc<AtomicU32>) {
     }
 }
 
+/// Unix terminal: Ctrl-C during a cell sends SIGINT to the foreground
+/// process group, rokc and the host alike. The host ends the cell;
+/// rokc ignores it. A handler, unlike `SIG_IGN`, is reset by `exec`,
+/// so the host does not inherit it.
+#[cfg(unix)]
+fn survive_ctrl_c() {
+    const extern "C" fn ignore(_: i32) {}
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+    const SIGINT: i32 = 2;
+    // SAFETY: installs a handler that does nothing.
+    unsafe { signal(SIGINT, ignore as extern "C" fn(i32) as usize) };
+}
+
 pub struct Repl {
     bootstrap: Vec<PathBuf>,
     /// Dependencies (`--extern name=<name>.rokhir`).
@@ -389,6 +404,8 @@ impl Repl {
     pub fn run_tty(&mut self) {
         #[cfg(windows)]
         forward_ctrl_c(self.running.clone());
+        #[cfg(unix)]
+        survive_ctrl_c();
         let mut ed = crate::line_edit::Editor::new();
         let mut buf = String::new();
         loop {

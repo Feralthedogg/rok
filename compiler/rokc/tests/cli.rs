@@ -3874,6 +3874,105 @@ fn bindgen_binds_a_c_library() {
     );
 }
 
+const BINDGEN_UNSUPPORTED_H: &str = r"#include <stddef.h>
+typedef int (*vcb)(const char *fmt, ...);
+__int128 add128(__int128 a);
+unsigned __int128 uadd128(unsigned __int128 a);
+_Float16 half(_Float16 x);
+long double ld(long double x);
+struct wide { long double x; int y; };
+struct inner { __int128 v; };
+struct outer { struct inner i; int k; };
+struct plain { int a; double b; };
+void take_wide(struct wide w);
+void take_wide_ptr(struct wide *w);
+struct outer give_outer(void);
+void take_plain(struct plain p, size_t n);
+typedef void (*wide_cb)(struct wide);
+struct has_vcb { vcb f; int n; };
+int use_vcb(vcb f);
+#define LD_ONE 1.0L
+#define HALF_ONE 1.0f16
+";
+
+/// What rok has no type for (128-bit integers, `_Float16`, a 16-byte
+/// `long double`, variadic function pointers) is skipped; a struct
+/// holding one is bytes, and is never passed by value. A target that is
+/// not this machine's gets no system headers but clang's own.
+// spec: std §1.7.6
+#[test]
+fn bindgen_skips_what_rok_cannot_express() {
+    if common::test_target().is_some() {
+        return;
+    }
+    let dir = scratch("bindgen_unsupported");
+    put(dir.join("u.h"), BINDGEN_UNSUPPORTED_H).unwrap();
+    put(dir.join("app/src/main.rok"), "mod u;\n\nfn main() {}\n").unwrap();
+    let t = "x86_64-unknown-linux-gnu";
+    let Some(out) = bindgen(&dir, &["u.h", "--target", t, "-o", "app/src/u.rok"]) else {
+        return;
+    };
+    assert_exit(&out, 0);
+    let b = fs::read_to_string(dir.join("app/src/u.rok")).unwrap();
+    for want in [
+        "// skipped typedef `vcb`: a variadic function pointer\n",
+        "// skipped fn `add128`: type `__int128` has no rok form\n",
+        "// skipped fn `uadd128`: type `unsigned __int128` has no rok form\n",
+        "// skipped fn `half`: type `_Float16` has no rok form\n",
+        "// skipped fn `ld`: type `long double` has no rok form\n",
+        "// `wide` as bytes (field `x`: type `long double` has no rok form)\n\
+         #[repr(C, align(16))]\npub struct wide {\n    pub _opaque: [u8; 32];\n}\n",
+        "#[repr(C)]\npub struct outer {\n    pub i: inner;\n    pub k: i32;\n}\n",
+        "// skipped fn `take_wide`: `wide` is passed by value but written as bytes (field `x`: \
+         type `long double` has no rok form)\n",
+        "// skipped fn `give_outer`: `inner` is passed by value but written as bytes (field `v`: \
+         type `__int128` has no rok form)\n",
+        "// skipped typedef `wide_cb`: `wide` is passed by value but written as bytes",
+        "// `has_vcb` as bytes (field `f`: `vcb` is a variadic function pointer)\n",
+        "// skipped fn `use_vcb`: `vcb` is a variadic function pointer\n",
+        "    pub fn take_wide_ptr(w: CPtr<wide>);\n",
+        "    pub fn take_plain(p: plain, n: usize);\n",
+    ] {
+        assert!(b.contains(want), "lacks {want:?}:\n{b}");
+    }
+    assert!(!b.contains("LD_ONE") && !b.contains("HALF_ONE"), "{b}");
+    assert_exit(
+        &rokc(None, &dir.join("app"), &["-q", "check", "--target", t]),
+        0,
+    );
+
+    // wasm32-wasi is never this machine: its headers are given.
+    put(dir.join("s.h"), "#include <stdio.h>\nint f(FILE *f);\n").unwrap();
+    let out = bindgen(&dir, &["s.h", "--target", "wasm32-wasi"]).unwrap();
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains(
+            "'stdio.h' file not found\nnote: wasm32-wasi is not this machine's platform, so its \
+             system headers are not used; give the target's after `--` (`-isystem <dir>` or \
+             `--sysroot <dir>`)"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    put(dir.join("inc/stdio.h"), "typedef struct _IO_FILE FILE;\n").unwrap();
+    let inc = dir.join("inc");
+    let args = [
+        "s.h",
+        "--target",
+        "wasm32-wasi",
+        "--",
+        "-isystem",
+        inc.to_str().unwrap(),
+    ];
+    let out = bindgen(&dir, &args).unwrap();
+    assert_exit(&out, 0);
+    assert!(
+        text(&out.stdout).contains("    pub fn f(f: CPtr<FILE>) -> i32;\n"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
 /// System headers bind (with what they include from their own tree)
 /// into declarations rokc accepts.
 // spec: std §1.7.6
