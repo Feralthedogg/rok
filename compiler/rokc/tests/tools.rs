@@ -102,6 +102,49 @@ f64
     assert!(stderr.contains("cannot find value `x`"), "{stderr}");
 }
 
+/// Stdlib 2.10.11: the REPL prints an expression cell as `type: value`
+/// with `Debug`, only the type without it; `println` uses `Display`
+/// (`{x:?}`: `Debug`); a `let` cell prints nothing (9.7.1).
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+// spec: §9.7.1 / std §2.10.11
+fn repl_prints_debug_and_println_display() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+\"hello\"
+struct Q { v: i32; }
+impl Display for Q { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f\"Q={self.v}\") } }
+let q = Q { v: 3 };
+q
+println(f\"{q}\");
+#[derive(Debug)]
+struct D { v: i32; }
+let d = D { v: 4 };
+println(f\"{d:?}\");
+d
+let x = 42;
+x
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        text(&out.stdout),
+        "str: \"hello\"\nQ\nQ=3\nD { v: 4 }\nD: D { v: 4 }\ni32: 42\n",
+        "stderr: {stderr}"
+    );
+}
+
 /// Piped input that ends inside a cell (907.8 continuation) is an error,
 /// not a silently dropped cell.
 #[test]

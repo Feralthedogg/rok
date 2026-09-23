@@ -344,6 +344,13 @@ pub(super) fn monomorphize_on(
         }
     }
 
+    if let Some(HirTy::Param(p)) = self_hint {
+        if let Err(msg) = super::bounds::pick_bound(ctx, fn_def, *p, &mut subst) {
+            ctx.emit_error(rokc_diagnostic::ErrorKind::Type, msg);
+            return None;
+        }
+    }
+
     // Spec 2.10.5: unbound params take their defaults. One pass: a default
     // can't depend on another default.
     for gp in &fn_def.generics.params {

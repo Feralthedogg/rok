@@ -777,7 +777,7 @@ fn wasm_tls_object(t: &TargetSpec, dir: &Path) -> Result<PathBuf, RokDiagnostic>
     let ir = format!(
         "declare ptr @llvm.threadlocal.address.p0(ptr)\n\
          @rok_tls = thread_local global [{size} x i8] zeroinitializer, align {align}\n\
-         define hidden ptr @rokr_tls_addr() nounwind {{\n\
+         define hidden ptr @rok_tls_addr() nounwind {{\n\
          \x20 %p = call ptr @llvm.threadlocal.address.p0(ptr @rok_tls)\n\
          \x20 ret ptr %p\n}}\n"
     );

@@ -787,7 +787,7 @@ fn collect<'a>(
     impl_param_types(owned, &names, &base_trait_defs);
     add_self_assoc_sigs(owned);
     let program: &'a Program = owned;
-    check_bound_names(program, &names, &mut pre_diags);
+    check_bound_names(program, &names, &base_trait_defs, &mut pre_diags);
     check_niche_attrs(program, &mut pre_diags);
     check_repr_attrs(program, &mut pre_diags);
 
@@ -4695,12 +4695,25 @@ fn check_pod(
 
 /// Every trait named in a bound position — generic parameters, `where`
 /// clauses, supertraits, `impl Tr for` — must exist (`any Tr` and
-/// `fn() + Tr` check their own).
+/// `fn() + Tr` check their own), with no more type arguments than it
+/// has parameters (`T: Into<U>` of the parameterless `Into`, stdlib
+/// 2.11.3).
 fn check_bound_names(
     program: &Program,
     names: &TypeNames,
+    base: &HashMap<String, &rokc_ast::TraitDef>,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) {
+    let arity: HashMap<&str, usize> = program
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Trait(t) => Some(t),
+            _ => None,
+        })
+        .chain(base.values().copied())
+        .map(|t| (t.name.as_str(), t.generics.params.len()))
+        .collect();
     let mut check = |b: &Ty, module: &str| {
         let AstTyKind::Path(p) = &b.kind else {
             return;
@@ -4708,14 +4721,41 @@ fn check_bound_names(
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
         let key = names.trait_key(&segs, module, b.span);
         // A bootstrap trait keys by its leaf (see `trait_key`).
-        if names.traits.contains(&key) || names.traits.iter().any(|t| leaf_name(t) == key) {
+        let Some(found) = names
+            .traits
+            .get(&key)
+            .or_else(|| names.traits.iter().find(|t| leaf_name(t) == key))
+        else {
+            pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Resolve,
+                b.span,
+                format!("cannot find trait `{}` (named in a bound)", segs.join("::")),
+            ));
             return;
+        };
+        let written = p.segments.last().map_or(0, |s| {
+            s.generics
+                .iter()
+                .filter(|g| rokc_ast::as_assoc_binding(g).is_none())
+                .count()
+        });
+        let Some(&n) = arity.get(found.as_str()) else {
+            return;
+        };
+        if written > n {
+            let takes = match n {
+                0 => "no type argument".to_owned(),
+                n => format!("{n} type argument(s)"),
+            };
+            pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                b.span,
+                format!(
+                    "`{}` takes {takes}, but the bound gives {written} (spec 2.8.5)",
+                    segs.join("::")
+                ),
+            ));
         }
-        pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
-            rokc_diagnostic::ErrorKind::Resolve,
-            b.span,
-            format!("cannot find trait `{}` (named in a bound)", segs.join("::")),
-        ));
     };
     let mut generics = |g: &rokc_ast::Generics, w: &[rokc_ast::WherePred], module: &str| {
         for gp in &g.params {

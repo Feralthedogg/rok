@@ -4210,21 +4210,26 @@ impl<'a> LowerCtx<'a> {
             [n] => self.ty_bounds.get(*n).cloned(),
             _ => None,
         };
-        let with_args: Vec<TraitRef> = match pre.as_slice() {
-            [n] => self
-                .ty_bound_args
-                .get(*n)
-                .into_iter()
-                .flatten()
-                .map(|p| {
-                    resolve::trait_ref(&self.env.names, p, &self.current_module, self.here(), |t| {
-                        self.resolve_ty_inner(t)
-                    })
-                })
-                .collect(),
+        let with_args = match pre.as_slice() {
+            [n] => self.bound_wants(n),
             _ => Vec::new(),
         };
         Some(self.project_or_report(&base, &last.name, via.as_deref(), &with_args, false))
+    }
+
+    /// The bounds written on type parameter `name`, as trait refs: what
+    /// its `T::X` / `T::N` must come from.
+    fn bound_wants(&self, name: &str) -> Vec<TraitRef> {
+        self.ty_bound_args
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                resolve::trait_ref(&self.env.names, p, &self.current_module, self.here(), |t| {
+                    self.resolve_ty_inner(t)
+                })
+            })
+            .collect()
     }
 
     /// `project`, reporting a miss. `strict`: only `traits` count;
@@ -4271,7 +4276,7 @@ impl<'a> LowerCtx<'a> {
         args: &[TraitRef],
     ) -> Option<HirTy> {
         if let HirTy::Param(p) = base {
-            return bounds::project(self, *p, name, traits);
+            return bounds::project(self, *p, name, traits, args);
         }
         let key = (
             base.clone(),

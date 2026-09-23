@@ -1,4 +1,4 @@
-// spec: refs-lang 802-scan-table §8.2.8
+// spec: refs-lang 802-scan-table §8.2.8 / std §1.6.9
 // gc-stress: 30
 // expect-exit: 0
 // expect-stdout:

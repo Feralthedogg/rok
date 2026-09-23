@@ -35,8 +35,8 @@ pub(super) struct ParamInfo {
     bounds: Vec<TraitRef>,
     /// `bounds` with every supertrait, once asked for.
     all: Option<Vec<TraitRef>>,
-    /// Associated types projected so far: name → type.
-    projs: Vec<(String, HirTy)>,
+    /// Associated types projected so far: (bound, name) → type.
+    projs: Vec<(TraitRef, String, HirTy)>,
 }
 
 fn fresh(env: &Env<'_>, name: String) -> HirTy {
@@ -172,49 +172,140 @@ pub(super) fn has(ctx: &LowerCtx<'_>, p: u32, want: &TraitRef) -> bool {
     traits_of(ctx, p).iter().any(|r| r.satisfies(want))
 }
 
-/// Associated type `name` of `p` (of `traits` only, when given): the
-/// binding a bound gives it (`I: Iterator<Item = i32>`), else an
-/// opaque projection `I::Item` bounded as the trait declares it and as
-/// `where` clauses add.
+/// The bounds of `p` (with supertraits) on trait `key`: several when a
+/// bound names the trait twice (`T: From<A> + From<B>`).
+pub(super) fn of_trait(ctx: &LowerCtx<'_>, p: u32, key: &str) -> Vec<TraitRef> {
+    traits_of(ctx, p)
+        .into_iter()
+        .filter(|r| r.path == key)
+        .collect()
+}
+
+/// Is bound `r` one of `wants` of its trait (`<T as Tr<A>>::X`, the
+/// written bounds `T: Tr<A> + Tr<B>`), when there are any? An argument
+/// not yet concrete matches anything.
+fn fits_wants(r: &TraitRef, wants: &[TraitRef]) -> bool {
+    let mut of = wants.iter().filter(|w| w.path == r.path).peekable();
+    of.peek().is_none()
+        || of.any(|w| {
+            w.args.iter().zip(&r.args).all(|(w, h)| {
+                let mut open = Vec::new();
+                collect_unknown_paths(w, &mut open);
+                !open.is_empty() || *w == HirTy::Unknown || w == h
+            })
+        })
+}
+
+/// The one bound of `p` an associated item `name` comes from: of
+/// `traits`, agreeing with `wants`, and one `has` accepts. Two left
+/// (`T: Add<i32> + Add<f64>` asked for `T::Output`) are an ambiguity
+/// error (spec 2.8.3, 2.13.4), reported here as `Err`.
+fn item_bound(
+    ctx: &LowerCtx<'_>,
+    p: u32,
+    name: &str,
+    traits: Option<&[String]>,
+    wants: &[TraitRef],
+    has: impl Fn(&TraitRef) -> bool,
+) -> Option<Result<TraitRef, ()>> {
+    // One trait with the same arguments is one bound, its bindings
+    // merged (`I: Iterator<Item = i32>` and a supertrait's `Iterator`).
+    let mut cands: Vec<TraitRef> = Vec::new();
+    for r in traits_of(ctx, p) {
+        if !traits.is_none_or(|ts| ts.contains(&r.path)) || !fits_wants(&r, wants) {
+            continue;
+        }
+        match cands
+            .iter_mut()
+            .find(|c| c.path == r.path && c.args == r.args)
+        {
+            Some(c) => {
+                for b in r.binds {
+                    if !c.binds.iter().any(|(n, _)| *n == b.0) {
+                        c.binds.push(b);
+                    }
+                }
+            }
+            None => cands.push(r),
+        }
+    }
+    cands.retain(|r| has(r));
+    match cands.as_slice() {
+        [] => None,
+        [r] => Some(Ok(r.clone())),
+        [a, b, ..] => {
+            let t = ctx.ty_name(&HirTy::Param(p));
+            let show = |r: &TraitRef| r.render(leaf_name(&r.path), |t| ctx.ty_name(t));
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "`{t}::{name}` is ambiguous: the bounds `{}` and `{}` of `{t}` both give it \
+                     — name the bound (`<{t} as {}>::{name}`) (spec 2.13.4)",
+                    show(a),
+                    show(b),
+                    show(a)
+                ),
+            );
+            Some(Err(()))
+        }
+    }
+}
+
+/// `T::name` as shown: `<T as Tr<A>>::name` when `p` has `r`'s trait
+/// more than once.
+fn item_shown(ctx: &LowerCtx<'_>, p: u32, r: &TraitRef, name: &str) -> String {
+    let t = ctx.env.sink.params.borrow()[p as usize].name.clone();
+    if of_trait(ctx, p, &r.path).len() > 1 {
+        let tr = r.render(leaf_name(&r.path), |t| ctx.ty_name(t));
+        return format!("<{t} as {tr}>::{name}");
+    }
+    format!("{t}::{name}")
+}
+
+/// Associated type `name` of `p` (of `traits` only, when given, and of
+/// the bound `wants` names): the binding the bound gives it
+/// (`I: Iterator<Item = i32>`), else an opaque projection `I::Item`
+/// bounded as the trait declares it and as `where` clauses add.
 pub(super) fn project(
     ctx: &LowerCtx<'_>,
     p: u32,
     name: &str,
     traits: Option<&[String]>,
+    wants: &[TraitRef],
 ) -> Option<HirTy> {
-    let wanted = |r: &&TraitRef| traits.is_none_or(|ts| ts.contains(&r.path));
-    let all = traits_of(ctx, p);
-    if let Some(t) = all.iter().filter(wanted).find_map(|r| {
-        r.binds
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, t)| t.clone())
-    }) {
-        return Some(t);
+    let has = |r: &TraitRef| {
+        r.binds.iter().any(|(n, _)| n == name)
+            || ctx
+                .env
+                .trait_of(&r.path)
+                .is_some_and(|i| i.assoc.iter().any(|(n, _)| n == name))
+    };
+    let Ok(r) = item_bound(ctx, p, name, traits, wants, has)? else {
+        return Some(HirTy::Unknown);
+    };
+    if let Some((_, t)) = r.binds.iter().find(|(n, _)| n == name) {
+        return Some(t.clone());
     }
-    let (r, decl) = all.iter().filter(wanted).find_map(|r| {
-        let info = ctx.env.trait_of(&r.path)?;
-        let bounds = info.assoc.iter().find(|(n, _)| n == name)?;
-        Some((r, &bounds.1))
-    })?;
-    if let Some((_, t)) = ctx.env.sink.params.borrow()[p as usize]
+    if let Some((.., t)) = ctx.env.sink.params.borrow()[p as usize]
         .projs
         .iter()
-        .find(|(n, _)| n == name)
+        .find(|(b, n, _)| *b == r && n == name)
     {
         return Some(t.clone());
     }
-    let shown = format!("{}::{name}", ctx.env.sink.params.borrow()[p as usize].name);
-    let t = fresh(ctx.env, shown);
-    ctx.env.sink.params.borrow_mut()[p as usize]
-        .projs
-        .push((name.to_owned(), t.clone()));
+    let info = ctx.env.trait_of(&r.path).expect("a trait");
+    let decl = &info.assoc.iter().find(|(n, _)| n == name)?.1;
+    let t = fresh(ctx.env, item_shown(ctx, p, &r, name));
+    ctx.env.sink.params.borrow_mut()[p as usize].projs.push((
+        r.clone(),
+        name.to_owned(),
+        t.clone(),
+    ));
     let HirTy::Param(q) = t else {
         unreachable!("fresh makes a Param")
     };
-    let info = ctx.env.trait_of(&r.path).expect("a trait");
     let mut subst = TySubst::new();
-    let rcx = in_trait(ctx, info, r, &HirTy::Param(p), &mut subst);
+    let rcx = in_trait(ctx, info, &r, &HirTy::Param(p), &mut subst);
     for b in decl {
         if let Some(b) = bound_on(&rcx, b, &info.module, &t) {
             add_bound(ctx.env, q, b);
@@ -223,23 +314,33 @@ pub(super) fn project(
     Some(t)
 }
 
-/// The template calling method `method` of `p`'s bound traits (of
-/// trait `only` when given) goes through.
-pub(super) fn bound_method<'e>(
+/// The templates calling method `method` of `p`'s bound traits (of
+/// trait `only` when given) goes through, one per trait providing it.
+pub(super) fn bound_methods<'e>(
     ctx: &LowerCtx<'e>,
     p: u32,
     method: &str,
     only: Option<&str>,
-) -> Option<&'e GenericMethod> {
+) -> Vec<&'e GenericMethod> {
     let env: &'e Env<'e> = ctx.env;
-    traits_of(ctx, p)
-        .iter()
-        .filter(|r| only.is_none_or(|k| k == r.path))
-        .find_map(|r| env.bound_method(&r.path, method))
+    let mut out: Vec<&'e GenericMethod> = Vec::new();
+    for r in traits_of(ctx, p) {
+        if only.is_some_and(|k| k != r.path) {
+            continue;
+        }
+        if let Some(gm) = env.bound_method(&r.path, method) {
+            if !out.iter().any(|g| std::ptr::eq(*g, gm)) {
+                out.push(gm);
+            }
+        }
+    }
+    out
 }
 
 /// `bind_self` for a bound template (`bound_methods`): the trait's
-/// parameters take the arguments of `p`'s bound.
+/// parameters take the arguments of `p`'s bound. With several bounds of
+/// the trait, only the arguments they share; the call's arguments and
+/// expected type bind the rest, and `pick_bound` checks them.
 pub(super) fn bind_trait_args(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
@@ -249,15 +350,140 @@ pub(super) fn bind_trait_args(
     let Some(key) = ctx.env.bound_trait(&fn_def.name) else {
         return;
     };
-    let Some(r) = traits_of(ctx, p).into_iter().find(|r| r.path == *key) else {
+    let cands = of_trait(ctx, p, key);
+    let Some(first) = cands.first() else {
         return;
     };
     let info = ctx.env.trait_of(key).expect("a trait");
-    for (gp, a) in info.generics.params.iter().zip(r.args) {
+    for (k, (gp, a)) in info.generics.params.iter().zip(&first.args).enumerate() {
         let (rokc_ast::GenericParam::Type { name, .. }
         | rokc_ast::GenericParam::Const { name, .. }) = gp;
-        subst.entry(name.clone()).or_insert(a);
+        if cands.iter().all(|r| r.args.get(k) == Some(a)) {
+            subst.entry(name.clone()).or_insert_with(|| a.clone());
+        }
     }
+}
+
+/// The bound a call of bound template `fn_def` on `p` goes through,
+/// when `p` has its trait more than once: the one whose arguments the
+/// call bound in `subst` (spec 3.1.3), its other arguments then bound
+/// too. None, or several (an argument nothing bound), is an error
+/// (spec 4.9.6).
+pub(super) fn pick_bound(
+    ctx: &LowerCtx<'_>,
+    fn_def: &FnDef,
+    p: u32,
+    subst: &mut HashMap<String, HirTy>,
+) -> Result<(), String> {
+    let Some(key) = ctx.env.bound_trait(&fn_def.name) else {
+        return Ok(());
+    };
+    let info = ctx.env.trait_of(key).expect("a trait");
+    let names: Vec<&String> = info
+        .generics
+        .params
+        .iter()
+        .map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => name,
+        })
+        .collect();
+    // Bounds that differ past the trait's parameters (`Into<A>` of the
+    // parameterless `Into`) are one for its methods.
+    let mut cands: Vec<TraitRef> = Vec::new();
+    for r in of_trait(ctx, p, key) {
+        let n = names.len().min(r.args.len());
+        if !cands.iter().any(|c| c.args.get(..n) == r.args.get(..n)) {
+            cands.push(r);
+        }
+    }
+    if cands.len() < 2 {
+        return Ok(());
+    }
+    let have: Vec<Option<HirTy>> = names.iter().map(|n| subst.get(*n).cloned()).collect();
+    // Inference variables settle later; the instance is a signature.
+    if have.iter().flatten().any(|t| super::infer::has_var(ctx, t)) {
+        return Ok(());
+    }
+    let fits: Vec<&TraitRef> = cands
+        .iter()
+        .filter(|r| {
+            r.args
+                .iter()
+                .zip(&have)
+                .all(|(a, h)| h.as_ref().is_none_or(|h| h == a))
+        })
+        .collect();
+    let t = ctx.ty_name(&HirTy::Param(p));
+    let show = |r: &TraitRef| format!("`{}`", r.render(leaf_name(key), |t| ctx.ty_name(t)));
+    let all: Vec<String> = cands.iter().map(show).collect();
+    let method = fn_def.name.rsplit("__").next().unwrap_or_default();
+    match fits.as_slice() {
+        [r] => {
+            for (n, a) in names.iter().zip(&r.args) {
+                subst.entry((*n).clone()).or_insert_with(|| a.clone());
+            }
+            Ok(())
+        }
+        [] => {
+            let asked: Vec<String> = have
+                .iter()
+                .map(|h| {
+                    h.as_ref()
+                        .map_or_else(|| "_".to_owned(), |t| ctx.ty_name(t))
+                })
+                .collect();
+            Err(format!(
+                "`{method}` on `{t}` needs a bound `{}<{}>`, but `{t}` has {} (spec 3.1.3)",
+                leaf_name(key),
+                asked.join(", "),
+                all.join(" and ")
+            ))
+        }
+        _ => Err(format!(
+            "`{method}` on `{t}` is ambiguous: the arguments do not choose between its \
+             bounds {} — name one (`<{t} as {}>::{method}(..)`) (spec 4.9.6)",
+            all.join(" and "),
+            cands[0].render(leaf_name(key), |t| ctx.ty_name(t))
+        )),
+    }
+}
+
+/// The types parameter `i` of bound template `fn_def` takes under each
+/// of `p`'s bounds of its trait, when it is a bare trait parameter
+/// those bounds give differently (`From<T>::from(value: T)` under
+/// `From<i64> + From<str>`): what an unsuffixed literal there chooses
+/// from (spec 3.1.3).
+pub(super) fn slot_choices(ctx: &LowerCtx<'_>, fn_def: &FnDef, p: u32, i: usize) -> Vec<HirTy> {
+    let Some(key) = ctx.env.bound_trait(&fn_def.name) else {
+        return Vec::new();
+    };
+    let cands = of_trait(ctx, p, key);
+    let info = ctx.env.trait_of(key).expect("a trait");
+    let slot = fn_def.params.get(i).and_then(|q| q.ty.as_ref());
+    let Some(AstTyKind::Path(path)) = slot.map(|t| &t.kind) else {
+        return Vec::new();
+    };
+    let [seg] = path.segments.as_slice() else {
+        return Vec::new();
+    };
+    let Some(k) = info.generics.params.iter().position(
+        |gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if *name == seg.name),
+    ) else {
+        return Vec::new();
+    };
+    let mut out: Vec<HirTy> = Vec::new();
+    for r in &cands {
+        if let Some(a) = r.args.get(k) {
+            if !out.contains(a) {
+                out.push(a.clone());
+            }
+        }
+    }
+    if out.len() < 2 {
+        out.clear();
+    }
+    out
 }
 
 /// The templates `bound_methods` holds: per trait method, its
@@ -284,7 +510,12 @@ pub(super) fn templates(
             seen.push(k);
             let Some(i) = trait_info.get(k) else { continue };
             for (n, _) in &i.assoc {
-                assoc.entry(n.clone()).or_insert_with(|| self_assoc(n));
+                // The trait's own `X` is its bound's, `<Self as Tr<A>>::X`:
+                // `Self` may have `Tr<B>`, or another trait's `X` (2.8.3).
+                let own = (k == key).then(|| own_assoc(key, i, n));
+                assoc
+                    .entry(n.clone())
+                    .or_insert_with(|| own.unwrap_or_else(|| self_assoc(n)));
             }
             stack.extend(i.supers.iter().map(String::as_str));
         }
@@ -346,6 +577,48 @@ fn self_assoc(name: &str) -> Ty {
             segments: vec![seg("Self"), seg(name)],
             span: Span::DUMMY,
         }),
+        span: Span::DUMMY,
+    }
+}
+
+/// `<Self as Tr<P..>>::name` for trait `key` (`info`), over its own
+/// parameter names, as written in its module.
+fn own_assoc(key: &str, info: &TraitInfo, name: &str) -> Ty {
+    let ty = |n: &str| Ty {
+        kind: AstTyKind::Path(AstPath {
+            segments: vec![rokc_ast::PathSegment {
+                name: n.to_owned(),
+                generics: Vec::new(),
+            }],
+            span: Span::DUMMY,
+        }),
+        span: Span::DUMMY,
+    };
+    let args = info
+        .generics
+        .params
+        .iter()
+        .map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => ty(name),
+        })
+        .collect();
+    Ty {
+        kind: AstTyKind::QPath(Box::new(rokc_ast::QPath {
+            self_ty: Ty {
+                kind: AstTyKind::SelfUpper,
+                span: Span::DUMMY,
+            },
+            trait_path: AstPath {
+                segments: vec![rokc_ast::PathSegment {
+                    name: leaf_name(key).to_owned(),
+                    generics: args,
+                }],
+                span: Span::DUMMY,
+            },
+            item: name.to_owned(),
+            member: None,
+        })),
         span: Span::DUMMY,
     }
 }
@@ -632,21 +905,23 @@ pub(super) fn assoc_const(
     p: u32,
     name: &str,
     traits: Option<&[String]>,
+    wants: &[TraitRef],
 ) -> Option<HirExpr> {
     let me = HirTy::Param(p);
-    let (r, decl) = traits_of(ctx, p).into_iter().find_map(|r| {
-        if traits.is_some_and(|ts| !ts.contains(&r.path)) {
-            return None;
-        }
-        let info = ctx.env.trait_of(&r.path)?;
-        let (_, ty) = info.consts.iter().find(|(n, _)| n == name)?;
-        Some((r, ty.clone()))
-    })?;
+    let span = ctx.here();
+    let has = |r: &TraitRef| {
+        ctx.env
+            .trait_of(&r.path)
+            .is_some_and(|i| i.consts.iter().any(|(n, _)| n == name))
+    };
+    let Ok(r) = item_bound(ctx, p, name, traits, wants, has)? else {
+        return Some(poison(span));
+    };
     let info = ctx.env.trait_of(&r.path).expect("a trait");
+    let decl = info.consts.iter().find(|(n, _)| n == name)?.1.clone();
     let mut subst = TySubst::new();
     let ty = in_trait(ctx, info, &r, &me, &mut subst).resolve_ast_ty(&decl);
-    let span = ctx.here();
-    let shown = format!("{}::{name}", ctx.ty_name(&me));
+    let shown = item_shown(ctx, p, &r, name);
     let value = match &ty {
         HirTy::Prim(PrimTy::Bool) => Some(ConstVal::Bool(true)),
         HirTy::Prim(PrimTy::Char) => Some(ConstVal::Char(u32::from('a'))),

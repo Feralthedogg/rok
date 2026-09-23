@@ -3306,7 +3306,10 @@ fn run_passes_arguments_codes_and_progress() {
 }
 
 /// The runtime ABI in emitted code. MLIR uses upstream dialects only
-/// (0.2.3). The TLS block `rok_tls` is an external thread-local the code
+/// (0.2.3, 8.7.4): functions are `func` ops, arithmetic `arith`, branches
+/// `cf`, memory `llvm` (8.7.3); runtime functions are external
+/// `llvm.func` declarations called with `llvm.call`, coroutines use no
+/// `llvm.coro.*` (8.7.6). The TLS block `rok_tls` is an external thread-local the code
 /// reaches at fixed offsets: the safepoint poll loads the yield flag at
 /// 10p+8 and calls `rok_runtime_yield` (8.3.1, 8.3.8, 8.4.12, 8.7.7,
 /// 8.9.11); the TLAB fast path takes the cursor at p and the limit at 2p
@@ -3318,7 +3321,7 @@ fn run_passes_arguments_codes_and_progress() {
 /// (stdlib 1.5.5). At -O2 `#[inline(never)]` keeps its call (8.6.8) and
 /// a self tail call runs in constant stack (8.6.7).
 // spec: §0.2.3 §8.3.1 §8.3.2 §8.3.4 §8.3.5 §8.3.8 §8.4.12 §8.5.6 §8.5.10 §8.5.11 §8.6.4 §8.6.7
-// spec: §8.6.8 §8.7.7 §8.9.11 §9.2.12 / std §1.5.5
+// spec: §8.6.8 §8.7.3 §8.7.4 §8.7.6 §8.7.7 §8.9.11 §9.2.12 / std §1.5.5
 #[test]
 fn emitted_code_follows_the_runtime_abi() {
     let Some(env) = setup() else { return };
@@ -3379,9 +3382,28 @@ fn emitted_code_follows_the_runtime_abi() {
         "llvm.mlir.global external thread_local @rok_tls()",
         "[88] : (!llvm.ptr) -> !llvm.ptr, i8",
         "llvm.call @rok_runtime_yield() ",
+        "llvm.func @rok_gc_alloc_slow(i64, i64, i32) -> !llvm.ptr",
+        "llvm.func @rok_runtime_yield()",
+        "llvm.call @rok_gc_alloc_slow(",
     ] {
         assert!(mlir.contains(want), "no {want:?} in the MLIR");
     }
+    for op in [
+        "func.func",
+        "func.call",
+        "func.return",
+        "arith.addi",
+        "arith.muli",
+        "arith.cmpi",
+        "cf.cond_br",
+        "cf.br",
+        "llvm.alloca",
+        "llvm.load",
+        "llvm.store",
+    ] {
+        assert!(mlir.contains(&format!("{op} ")), "no `{op}` in the MLIR");
+    }
+    assert!(!mlir.contains("llvm.coro"), "`llvm.coro.*` in the MLIR");
     let ll = read("debug/build/abi.ll");
     for want in [
         "@rok_tls = external thread_local",
@@ -3436,6 +3458,65 @@ fn emitted_code_follows_the_runtime_abi() {
         "{}",
         text(&out.stdout)
     );
+}
+
+/// Every C symbol the runtime defines is `rok_`-prefixed (8.5.8), so it
+/// cannot collide with user code or a C library; the normative ones sit
+/// under their area's prefix. Toolchain symbols (Rust-mangled, compiler
+/// builtins) are not the runtime's.
+// spec: §8.5.8
+#[test]
+fn runtime_symbols_carry_the_rok_prefix() {
+    if cfg!(windows) || Command::new("nm").arg("--version").output().is_err() {
+        eprintln!("skipped: no nm");
+        return;
+    }
+    let env = common::setup_runtime();
+    let out = Command::new("nm")
+        .arg("-g")
+        .arg(&env.rokr)
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    let listing = text(&out.stdout);
+    let defined: std::collections::BTreeSet<&str> = listing
+        .lines()
+        .filter_map(|l| match l.split_whitespace().collect::<Vec<_>>()[..] {
+            [_, kind, name] if "TDBRSC".contains(kind) => Some(name),
+            _ => None,
+        })
+        .map(|s| {
+            s.strip_prefix('_')
+                .filter(|_| cfg!(target_os = "macos"))
+                .unwrap_or(s)
+        })
+        .collect();
+    let toolchain = |s: &str| {
+        // Rust-mangled and reserved `_` names, compiler builtins.
+        ["_", "rust_", "anon.", "ltmp", "atomic_", "."]
+            .iter()
+            .any(|p| s.starts_with(p))
+    };
+    let foreign: Vec<&&str> = defined
+        .iter()
+        .filter(|s| !toolchain(s) && !s.starts_with("rok_"))
+        .collect();
+    assert!(
+        foreign.is_empty(),
+        "runtime symbols without `rok_`: {foreign:?}"
+    );
+    for want in [
+        "rok_gc_alloc_slow",
+        "rok_runtime_init",
+        "rok_thread_spawn",
+        "rok_coro_park",
+        "rok_task_key",
+        "rok_io_poll",
+        "rok_timer_register",
+        "rok_panic",
+    ] {
+        assert!(defined.contains(want), "the runtime lacks `{want}`");
+    }
 }
 
 /// Stdlib 1.8: a prebuilt dependency's ROKHIR carries the `.wit` files

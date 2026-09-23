@@ -1,0 +1,82 @@
+// spec: std §2.21.5
+// expect-exit: 0
+// expect-stdout:
+// ok mlkem keys from the seeds
+// ok mlkem encapsulation from m
+// ok mlkem round trip
+// ok mlkem rejection key is J(z || c)
+// ok mlkem rejection is deterministic
+// ok ecdsa nonce from the key and message
+// ok ed25519 deterministic
+// ok x25519 key from the secret
+// ok tag comparison
+// ok forged tag rejected
+
+// Stdlib 2.21.5: every random input is an argument (seeds, `m`, secrets),
+// so the same inputs give the same outputs and signing needs no random
+// source (RFC 6979 nonces); ML-KEM decapsulation of a ciphertext that
+// does not re-encrypt returns the implicit-rejection key J(z ‖ c) on the
+// same path; tag comparisons answer by value. The timing guarantee
+// itself is checked off-line (block counters of an instrumented -O2
+// build run with two secrets).
+use rok::core::crypto::{constant_time_eq, Ecdsa, EcCurve, Ed25519, HashAlgorithm, Hmac, X25519};
+use rok::core::crypto::mlkem::MlKem768;
+use rok::core::crypto::sha3::Shake256;
+
+fn bytes(n: usize, seed: u8) -> List<u8> {
+    let out: List<u8> = [];
+    for i in 0..n { out.push((i as u8) * 7u8 + seed); }
+    out
+}
+
+fn flag(name: str, cond: bool) {
+    if cond { println(f"ok {name}"); } else { println(f"FAIL {name}"); }
+}
+
+fn main() {
+    let d = bytes(32, 1u8);
+    let z = bytes(32, 2u8);
+    let (ek, dk) = try! MlKem768::keygen(d, z);
+    let (ek2, dk2) = try! MlKem768::keygen(d, z);
+    flag("mlkem keys from the seeds", ek.len() == 1184 && constant_time_eq(ek, ek2) && constant_time_eq(dk, dk2));
+    let m = bytes(32, 3u8);
+    let (k, c) = try! MlKem768::encapsulate(ek, m);
+    let (k2, c2) = try! MlKem768::encapsulate(ek, m);
+    flag("mlkem encapsulation from m", constant_time_eq(k, k2) && constant_time_eq(c, c2));
+    let back = try! MlKem768::decapsulate(dk, c);
+    flag("mlkem round trip", constant_time_eq(back, k));
+
+    // A ciphertext that does not re-encrypt: K = J(z ‖ c) (FIPS 203).
+    let bad = c.clone();
+    bad[10] = bad[10] ^ 1u8;
+    let rejected = try! MlKem768::decapsulate(dk, bad);
+    let j = Shake256::new();
+    j.update(z);
+    j.update(bad);
+    flag("mlkem rejection key is J(z || c)", constant_time_eq(rejected, j.squeeze(32)));
+    let again = try! MlKem768::decapsulate(dk, bad);
+    flag("mlkem rejection is deterministic", constant_time_eq(rejected, again) && !constant_time_eq(rejected, k));
+
+    let priv = bytes(32, 9u8);
+    let s1 = try! Ecdsa::sign(EcCurve::P256, HashAlgorithm::Sha256, priv, "msg");
+    let s2 = try! Ecdsa::sign(EcCurve::P256, HashAlgorithm::Sha256, priv, "msg");
+    let pk = try! Ecdsa::public_key(EcCurve::P256, priv);
+    flag(
+        "ecdsa nonce from the key and message",
+        s1.len() > 0 && constant_time_eq(s1, s2)
+            && Ecdsa::verify(EcCurve::P256, HashAlgorithm::Sha256, pk, "msg", s1),
+    );
+    let seed = bytes(32, 5u8);
+    let e1 = try! Ed25519::sign(seed, "msg");
+    let e2 = try! Ed25519::sign(seed, "msg");
+    flag("ed25519 deterministic", e1.len() == 64 && constant_time_eq(e1, e2));
+    let x1 = try! X25519::public_key(seed);
+    let x2 = try! X25519::public_key(seed);
+    flag("x25519 key from the secret", x1.len() == 32 && constant_time_eq(x1, x2));
+
+    let tag = Hmac::mac(HashAlgorithm::Sha256, "key", "data");
+    let forged = tag.clone();
+    forged[31] = forged[31] ^ 0x80u8;
+    flag("tag comparison", Hmac::verify(HashAlgorithm::Sha256, "key", "data", tag) && !constant_time_eq(tag, forged));
+    flag("forged tag rejected", !Hmac::verify(HashAlgorithm::Sha256, "key", "data", forged));
+}

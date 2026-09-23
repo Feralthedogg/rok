@@ -4914,7 +4914,7 @@ pub(super) fn method_call_on(
     let pick = match pick_method(ctx, &recv_h.ty, method, None) {
         Ok(p) => p,
         Err(msg) => {
-            if let Some(p) = pick_by_first_arg(ctx, &recv_h.ty, method, args) {
+            if let Some(p) = pick_by_args(ctx, &recv_h.ty, method, args) {
                 Some(p)
             } else {
                 lower_args_only(ctx);
@@ -5112,22 +5112,35 @@ fn assign_trait_call(
 /// (`impl Index<usize> for G` + `impl Index<(usize, usize)> for G`,
 /// `impl<T> AddAssign<T> for List<T>` + `impl<T> AddAssign<List<T>> for
 /// List<T>`): the only impl whose first parameter after `self` takes
-/// the first argument (each tried in a rolled-back probe).
-fn pick_by_first_arg<'e>(
+/// the first argument (each tried in a rolled-back probe); with no
+/// argument, the only one returning the expected type (spec 3.1.3).
+fn pick_by_args<'e>(
     ctx: &mut LowerCtx<'e>,
     ty: &HirTy,
     method: &str,
     args: &[CallArg],
 ) -> Option<MethodPick<'e>> {
-    let Some(CallArg::Positional(arg)) = args.first() else {
-        return None;
+    let arg = match args.first() {
+        Some(CallArg::Positional(arg)) => Some(arg),
+        None => None,
+        Some(_) => return None,
     };
+    let expected = ctx.current_expected().cloned();
+    if arg.is_none() && expected.as_ref().is_none_or(|t| *t == HirTy::Unknown) {
+        return None;
+    }
     let env = ctx.env;
+    // (trait, slot: the first parameter's type, else the return type).
     let mut cands: Vec<(String, HirTy, MethodPick<'e>)> = Vec::new();
     let ids = env.methods_on(ty, method);
     for id in ids.into_iter().flatten() {
         let tr = env.method_info(*id).and_then(|i| i.trait_name.clone())?;
-        if let Some(slot) = ctx.sig_by_id(*id).param_tys.get(1).cloned() {
+        let sig = ctx.sig_by_id(*id);
+        let slot = match arg {
+            Some(_) => sig.param_tys.get(1).cloned(),
+            None => Some(sig.ret_ty.clone()),
+        };
+        if let Some(slot) = slot {
             cands.push((tr, slot, MethodPick::Concrete(*id)));
         }
     }
@@ -5136,7 +5149,11 @@ fn pick_by_first_arg<'e>(
         .collect();
     for (gi, subst) in gis {
         let gm = &gi.methods[method];
-        let Some(p) = gm.def.params.get(1).and_then(|p| p.ty.as_ref()) else {
+        let slot = match arg {
+            Some(_) => gm.def.params.get(1).and_then(|p| p.ty.clone()),
+            None => Some(super::throws::sig_ret_ast(&gm.def)),
+        };
+        let Some(p) = slot else {
             continue;
         };
         // A slot naming a parameter the receiver leaves open (`[T; N]`
@@ -5144,7 +5161,7 @@ fn pick_by_first_arg<'e>(
         let mark = ctx.probe_mark();
         let mut rcx = LowerCtx::new(env, &subst, None, ctx.here());
         rcx.current_module.clone_from(&gi.module);
-        let slot = rcx.resolve_ast_ty(p);
+        let slot = rcx.resolve_ast_ty(&p);
         if !ctx.probe_clean(&mark) {
             ctx.rollback(&mark);
             continue;
@@ -5156,10 +5173,16 @@ fn pick_by_first_arg<'e>(
     }
     let mut hits = Vec::new();
     for (_, slot, pick) in cands {
-        let mark = ctx.probe_mark();
-        let h = lower_expected(ctx, arg, slot.clone());
-        let ok = ctx.probe_clean(&mark) && coercible(ctx, &slot, &h.ty);
-        ctx.rollback(&mark);
+        let ok = match arg {
+            Some(arg) => {
+                let mark = ctx.probe_mark();
+                let h = lower_expected(ctx, arg, slot.clone());
+                let ok = ctx.probe_clean(&mark) && coercible(ctx, &slot, &h.ty);
+                ctx.rollback(&mark);
+                ok
+            }
+            None => expected.as_ref() == Some(&slot),
+        };
         if ok {
             hits.push(pick);
         }
@@ -5875,26 +5898,29 @@ pub(super) fn pick_method<'e>(
     trait_key: Option<&str>,
 ) -> Result<Option<MethodPick<'e>>, String> {
     let env = ctx.env;
-    // A type parameter's bound declares it (spec 2.10.9).
-    if let HirTy::Param(p) = ty {
-        if let Some(gm) = super::bounds::bound_method(ctx, *p, method, trait_key) {
-            return Ok(Some(MethodPick::Generic(gm)));
-        }
-    }
     let mut cands: Vec<(Option<&'e str>, MethodPick<'e>)> = Vec::new();
-    if let Some(ids) = env.methods_on(ty, method) {
-        for id in ids {
-            let tn = env.method_info(*id).and_then(|i| i.trait_name.as_deref());
-            cands.push((tn, MethodPick::Concrete(*id)));
+    // A type parameter's bounds declare it (spec 2.10.9); one candidate
+    // per bound trait.
+    if let HirTy::Param(p) = ty {
+        for gm in super::bounds::bound_methods(ctx, *p, method, trait_key) {
+            cands.push((gm.info.trait_name.as_deref(), MethodPick::Generic(gm)));
         }
     }
-    for gm in generic_method_for(ctx, ty, method) {
-        cands.push((gm.info.trait_name.as_deref(), MethodPick::Generic(gm)));
-    }
-    for (gi, _) in ctx.generic_impls(ty, super::Pick::Method(method), 0) {
-        // An empty key: a generic inherent impl (`impl<..> [T; N]`).
-        let key = Some(gi.trait_key.as_str()).filter(|k| !k.is_empty());
-        cands.push((key, MethodPick::Generic(&gi.methods[method])));
+    if cands.is_empty() {
+        if let Some(ids) = env.methods_on(ty, method) {
+            for id in ids {
+                let tn = env.method_info(*id).and_then(|i| i.trait_name.as_deref());
+                cands.push((tn, MethodPick::Concrete(*id)));
+            }
+        }
+        for gm in generic_method_for(ctx, ty, method) {
+            cands.push((gm.info.trait_name.as_deref(), MethodPick::Generic(gm)));
+        }
+        for (gi, _) in ctx.generic_impls(ty, super::Pick::Method(method), 0) {
+            // An empty key: a generic inherent impl (`impl<..> [T; N]`).
+            let key = Some(gi.trait_key.as_str()).filter(|k| !k.is_empty());
+            cands.push((key, MethodPick::Generic(&gi.methods[method])));
+        }
     }
     if let Some(k) = trait_key {
         cands.retain(|(t, _)| *t == Some(k));
@@ -6421,7 +6447,28 @@ fn call_generic_positional(
         if !is_ref {
             reads.push((i, crate::walk::free_names(&[], e)));
         }
-        let hint = generic_arg_hint(ctx, def, &subst, hint_self, i, e);
+        let mut hint = generic_arg_hint(ctx, def, &subst, hint_self, i, e);
+        // A slot several bounds of the trait type differently: an
+        // unsuffixed literal takes the one it fits (spec 3.1.3).
+        if let (HirTy::Unknown, Some(HirTy::Param(p))) = (&hint, hint_self) {
+            let choices = super::bounds::slot_choices(ctx, def, *p, i);
+            if !choices.is_empty() {
+                match pick_literal_impl(ctx, e, &choices) {
+                    Ok(Some(k)) => hint = choices[k].clone(),
+                    Ok(None) => {}
+                    Err(fits) => {
+                        return ctx.error_expr(
+                            span,
+                            format!(
+                                "`{callee}` on `{}`: the literal fits several of its bounds \
+                                 ({fits}); add a suffix or `as` (spec 3.1.3)",
+                                ctx.ty_name(&HirTy::Param(*p))
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         // An untyped literal for a still-open `T` waits for the other
         // arguments: `range(0, n)` with `n: i64` binds `T = i64`.
         // ... only when a sibling argument of the same bare `T` can bind
@@ -7257,6 +7304,19 @@ fn qpath_call(
         check_method_visible(ctx, fid, method);
         let sig = ctx.sig_by_id(fid);
         return call_sig(ctx, &sig, &display, recv, rest, span);
+    }
+    // `<T as Tr<A>>::m(x)` on a type parameter: the bound `Tr<A>`; the
+    // written arguments are the bound template's trait parameters.
+    if let (HirTy::Param(_), Some(info), Some(seg)) =
+        (&t, ctx.env.trait_of(&key), q.trait_path.segments.last())
+    {
+        let written = super::resolve::trait_args(&seg.generics, |a| ctx.resolve_ast_ty(a)).0;
+        let names = info.generics.params.iter().map(|gp| match gp {
+            rokc_ast::GenericParam::Type { name, .. }
+            | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
+        });
+        let bound: HashMap<String, HirTy> = names.zip(written).collect();
+        ctx.explicit_generics.extend(bound);
     }
     let call = call_impl_method(ctx, &t, method, Some(&key), recv, rest, &display, span);
     ctx.explicit_recv = None;
@@ -9414,11 +9474,9 @@ fn param_op(
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
     let t = ctx.ty_name(&lhs.ty);
-    let bound = super::bounds::traits_of(ctx, p)
-        .into_iter()
-        .find(|r| r.path == op_trait);
-    let gm = super::bounds::bound_method(ctx, p, method, Some(op_trait));
-    let (Some(bound), Some(gm)) = (bound, gm) else {
+    let bounds = super::bounds::of_trait(ctx, p, op_trait);
+    let gm = super::bounds::bound_methods(ctx, p, method, Some(op_trait));
+    let (false, [gm]) = (bounds.is_empty(), gm.as_slice()) else {
         return ctx.error_expr(
             span,
             format!(
@@ -9429,10 +9487,51 @@ fn param_op(
     };
     let mut args = vec![lhs];
     if let Some(r) = rhs {
-        let want = bound.args.first().cloned().unwrap_or(HirTy::Unknown);
-        let r = match lit_rhs {
-            Some(e) if is_untyped_literal(e) => lower_expected(ctx, e, want.clone()),
-            _ => r,
+        // The bound whose `Rhs` is the right operand's type, else the
+        // one an unsuffixed literal takes (spec 3.1.3).
+        let rhs_of = |b: &TraitRef| b.args.first().cloned().unwrap_or(HirTy::Unknown);
+        let params: Vec<HirTy> = bounds.iter().map(rhs_of).collect();
+        let lit = lit_rhs.filter(|e| is_untyped_literal(e));
+        let want = if params.contains(&r.ty) || bounds.len() == 1 {
+            params
+                .iter()
+                .find(|w| **w == r.ty)
+                .unwrap_or(&params[0])
+                .clone()
+        } else {
+            match lit.map(|e| pick_literal_impl(ctx, e, &params)) {
+                Some(Ok(Some(i))) => params[i].clone(),
+                Some(Err(fits)) => {
+                    return ctx.error_expr(
+                        span,
+                        format!(
+                            "operator `{sym}` on `{t}`: the literal fits several `{}` bounds \
+                             ({fits}); add a suffix or `as` (spec 3.1.3)",
+                            leaf_name(op_trait)
+                        ),
+                    );
+                }
+                _ => {
+                    let all: Vec<String> = bounds
+                        .iter()
+                        .map(|b| format!("`{}`", b.render(leaf_name(op_trait), |t| ctx.ty_name(t))))
+                        .collect();
+                    return ctx.error_expr(
+                        span,
+                        format!(
+                            "operator `{sym}` on `{t}` needs a bound `{}<{}>`, but `{t}` has {} \
+                             (spec 3.1.3)",
+                            leaf_name(op_trait),
+                            ctx.ty_name(&r.ty),
+                            all.join(" and ")
+                        ),
+                    );
+                }
+            }
+        };
+        let r = match lit {
+            Some(e) => lower_expected(ctx, e, want.clone()),
+            None => r,
         };
         args.push(coerce(ctx, &want, r, &|| {
             format!("the right operand of `{sym}`")
@@ -9570,23 +9669,37 @@ pub(super) fn self_path_segs(ctx: &LowerCtx<'_>, p: &AstPath) -> Vec<String> {
 }
 
 /// The impls (with their substitution for `ty`) that give `ty` an
-/// associated const `name`, from one of `traits` when given.
+/// associated const `name`, from one of `traits` when given, with the
+/// trait arguments of `wants` (`<T as Tr<A>>::N`, `T::N` under
+/// `T: Tr<A>`).
 pub(super) fn assoc_const_hits<'e>(
     ctx: &LowerCtx<'e>,
     ty: &HirTy,
     name: &str,
     traits: Option<&[String]>,
+    wants: &[TraitRef],
 ) -> Vec<(&'e Impl, HashMap<String, HirTy>)> {
     let env: &'e Env<'e> = ctx.env;
     env.impls
         .with_const(name)
         .filter(|imp| traits.is_none_or(|ks| ks.contains(&imp.trait_key)))
         .filter_map(|imp| {
-            let subst = match &imp.concrete {
-                Some((t, _)) => (t == ty).then(HashMap::new)?,
-                None => ctx.generic_impl_subst(imp, ty, 0)?,
+            let (subst, have) = if let Some((t, r)) = &imp.concrete {
+                (
+                    (t == ty).then(HashMap::new)?,
+                    r.as_ref().map(|r| r.args.clone()).unwrap_or_default(),
+                )
+            } else {
+                let subst = ctx.generic_impl_subst(imp, ty, 0)?;
+                let mut rcx = LowerCtx::new(ctx.env, &subst, None, ctx.here());
+                rcx.current_module.clone_from(&imp.module);
+                let have = super::resolve::trait_args(&imp.trait_args, |t| rcx.resolve_ast_ty(t)).0;
+                (subst, have)
             };
-            Some((imp, subst))
+            let mut of = wants.iter().filter(|w| w.path == imp.trait_key).peekable();
+            let fits =
+                of.peek().is_none() || of.any(|w| w.args.iter().zip(&have).all(|(w, h)| w == h));
+            fits.then_some((imp, subst))
         })
         .collect()
 }
@@ -9596,12 +9709,13 @@ fn lower_assoc_const(
     ty: &HirTy,
     name: &str,
     traits: Option<&[String]>,
+    wants: &[TraitRef],
 ) -> Option<HirExpr> {
     if let HirTy::Param(p) = ty {
-        return super::bounds::assoc_const(ctx, *p, name, traits);
+        return super::bounds::assoc_const(ctx, *p, name, traits, wants);
     }
     let env = ctx.env;
-    let mut hits = assoc_const_hits(ctx, ty, name, traits);
+    let mut hits = assoc_const_hits(ctx, ty, name, traits, wants);
     // An inherent const shadows the trait ones (`i8::BITS`).
     if hits.len() > 1 && traits.is_none() && hits.iter().any(|(s, _)| s.trait_key.is_empty()) {
         hits.retain(|(s, _)| s.trait_key.is_empty());
@@ -9713,7 +9827,14 @@ fn lower_qpath_value(
             ),
         );
     };
-    if let Some(v) = lower_assoc_const(ctx, &t, &q.item, Some(&[key])) {
+    let want = super::resolve::trait_ref(
+        &ctx.env.names,
+        &q.trait_path,
+        &ctx.current_module,
+        ctx.here(),
+        |t| ctx.resolve_ast_ty(t),
+    );
+    if let Some(v) = lower_assoc_const(ctx, &t, &q.item, Some(&[key]), &[want]) {
         return v;
     }
     if let Some(v) = super::method_value::method_path_value(ctx, &expr.kind, span) {
@@ -9756,7 +9877,7 @@ fn assoc_const_path(ctx: &mut LowerCtx<'_>, path: &AstPath) -> Option<HirExpr> {
                 || matches!(crate::ty::resolve_ty(&owner), HirTy::Prim(_)))
         {
             let ty = ctx.resolve_ast_ty(&owner);
-            if let Some(v) = lower_assoc_const(ctx, &ty, &name.name, None) {
+            if let Some(v) = lower_assoc_const(ctx, &ty, &name.name, None, &[]) {
                 return Some(v);
             }
         }
@@ -9773,9 +9894,10 @@ fn assoc_const_path(ctx: &mut LowerCtx<'_>, path: &AstPath) -> Option<HirExpr> {
         };
         // A type parameter reads the const of a trait it is bounded by.
         let bounds = ctx.ty_bounds.get(&owner.name).cloned();
+        let wants = ctx.bound_wants(&owner.name);
         if let Some(v) = ty
             .filter(|_| owner.generics.is_empty())
-            .and_then(|t| lower_assoc_const(ctx, &t, &name.name, bounds.as_deref()))
+            .and_then(|t| lower_assoc_const(ctx, &t, &name.name, bounds.as_deref(), &wants))
         {
             return Some(v);
         }

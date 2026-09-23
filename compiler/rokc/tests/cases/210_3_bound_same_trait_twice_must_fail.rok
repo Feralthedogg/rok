@@ -1,0 +1,35 @@
+// spec: refs-lang §2.8.3 §2.8.3a §2.10.3 §3.1.3 §4.9.6
+// expect-error: `T::Output` is ambiguous: the bounds `Add<i32>` and `Add<f64>` of `T` both give it — name the bound (`<T as Add<i32>>::Output`)
+// expect-error: operator `+` on `T`: the literal fits several `Add` bounds (`i64`, `u8`); add a suffix or `as`
+// expect-error: operator `+` on `T` needs a bound `Add<str>`, but `T` has `Add<i32>` and `Add<f64>`
+// expect-error: `make` on `T` is ambiguous: the arguments do not choose between its bounds `Tag<i32>` and `Tag<bool>` — name one (`<T as Tag<i32>>::make(..)`)
+// expect-error: `T::ID` is ambiguous: the bounds `Tag<i32>` and `Tag<bool>` of `T` both give it — name the bound (`<T as Tag<i32>>::ID`)
+// expect-error: `T::from` on `T`: the literal fits several of its bounds (`i64`, `u8`); add a suffix or `as`
+// expect-error: `tag` on `T` needs a bound `Tag<str>`, but `T` has `Tag<i32>` and `Tag<bool>`
+// expect-error: method `go` on `T` is ambiguous: traits `Fast`, `Slow` all provide it
+
+// Two bounds of one trait that the call does not tell apart: a bare
+// associated item (2.8.3, 2.8.3a), a literal several bounds fit (3.1.3
+// step 3), a method whose arguments bind no trait parameter (4.9.6),
+// an argument no bound takes. Two bound traits with one method name
+// are ambiguous too (4.9.6).
+use rok::core::ops::Add;
+
+trait Tag<K> {
+    const ID: u32;
+    fn make(self) -> K;
+    fn tag(self, k: K) -> i32;
+}
+trait Fast { fn go(self) -> i32; }
+trait Slow { fn go(self) -> i32; }
+
+fn proj<T: Add<i32> + Add<f64>>(x: T) -> T::Output { x + 1 }
+fn lit<T: Add<i64> + Add<u8>>(x: T) { let _ = x + 1; }
+fn nomatch<T: Add<i32> + Add<f64>>(x: T) { let _ = x + "s"; }
+fn pick<T: Tag<i32> + Tag<bool>>(x: T) { let _ = x.make(); }
+fn id<T: Tag<i32> + Tag<bool>>() -> u32 { T::ID }
+fn from<T: From<i64> + From<u8>>() -> T { T::from(1) }
+fn arg<T: Tag<i32> + Tag<bool>>(x: T) -> i32 { x.tag("s") }
+fn two<T: Fast + Slow>(x: T) -> i32 { x.go() }
+
+fn main() {}

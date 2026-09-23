@@ -6,7 +6,7 @@
 //! plus its offset. Defined in per-target assembly below because stable `no_std`
 //! Rust cannot define exported TLS symbols (`#[thread_local]` is
 //! unstable). The runtime reaches its own thread's block through a
-//! hidden accessor, `rokr_tls_addr`; another thread's slot through the
+//! hidden accessor, `rok_tls_addr`; another thread's slot through the
 //! address its owner published in the thread registry
 //! (`rokr_gc::world`).
 //!
@@ -33,17 +33,17 @@ pub const MUTATOR_PARKED: u8 = 2;
 
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(0);
 
-/// The block `rok_tls` and its accessor `rokr_tls_addr`.
+/// The block `rok_tls` and its accessor `rok_tls_addr`.
 #[cfg(not(target_family = "wasm"))]
 macro_rules! tls_block {
     () => {
         #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@macho),
-            ".private_extern _rokr_tls_addr\n",
-            ".globl _rokr_tls_addr\n",
+            ".private_extern _rok_tls_addr\n",
+            ".globl _rok_tls_addr\n",
             ".p2align 2\n",
-            "_rokr_tls_addr:\n",
+            "_rok_tls_addr:\n",
             "adrp x0, _rok_tls@TLVPPAGE\n",
             "ldr x0, [x0, _rok_tls@TLVPPAGEOFF]\n",
             "ldr x16, [x0]\n",
@@ -53,19 +53,19 @@ macro_rules! tls_block {
         #[cfg(all(target_vendor = "apple", target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@macho),
-            ".private_extern _rokr_tls_addr\n",
-            ".globl _rokr_tls_addr\n",
-            "_rokr_tls_addr:\n",
+            ".private_extern _rok_tls_addr\n",
+            ".globl _rok_tls_addr\n",
+            "_rok_tls_addr:\n",
             "mov rdi, qword ptr [rip + _rok_tls@TLVP]\n",
             "jmp qword ptr [rdi]\n",
         ), size = const SIZE);
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@elf "@"),
-            ".globl rokr_tls_addr\n",
-            ".hidden rokr_tls_addr\n",
-            ".type rokr_tls_addr,@function\n",
-            "rokr_tls_addr:\n",
+            ".globl rok_tls_addr\n",
+            ".hidden rok_tls_addr\n",
+            ".type rok_tls_addr,@function\n",
+            "rok_tls_addr:\n",
             "mov rax, qword ptr fs:[0]\n",
             "add rax, qword ptr [rip + rok_tls@GOTTPOFF]\n",
             "ret\n",
@@ -73,10 +73,10 @@ macro_rules! tls_block {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@elf "@"),
-            ".globl rokr_tls_addr\n",
-            ".hidden rokr_tls_addr\n",
-            ".type rokr_tls_addr,%function\n",
-            "rokr_tls_addr:\n",
+            ".globl rok_tls_addr\n",
+            ".hidden rok_tls_addr\n",
+            ".type rok_tls_addr,%function\n",
+            "rok_tls_addr:\n",
             "mrs x0, tpidr_el0\n",
             "add x0, x0, :tprel_hi12:rok_tls\n",
             "add x0, x0, :tprel_lo12_nc:rok_tls\n",
@@ -85,10 +85,10 @@ macro_rules! tls_block {
         #[cfg(all(target_os = "linux", target_arch = "x86"))]
         core::arch::global_asm!(concat!(
             tls_block!(@elf "@"),
-            ".globl rokr_tls_addr\n",
-            ".hidden rokr_tls_addr\n",
-            ".type rokr_tls_addr,@function\n",
-            "rokr_tls_addr:\n",
+            ".globl rok_tls_addr\n",
+            ".hidden rok_tls_addr\n",
+            ".type rok_tls_addr,@function\n",
+            "rok_tls_addr:\n",
             "mov eax, dword ptr gs:[0]\n",
             "lea eax, [eax + rok_tls@NTPOFF]\n",
             "ret\n",
@@ -96,11 +96,11 @@ macro_rules! tls_block {
         #[cfg(all(target_os = "linux", target_arch = "arm"))]
         core::arch::global_asm!(concat!(
             tls_block!(@elf "%"),
-            ".globl rokr_tls_addr\n",
-            ".hidden rokr_tls_addr\n",
-            ".type rokr_tls_addr,%function\n",
+            ".globl rok_tls_addr\n",
+            ".hidden rok_tls_addr\n",
+            ".type rok_tls_addr,%function\n",
             ".p2align 2\n",
-            "rokr_tls_addr:\n",
+            "rok_tls_addr:\n",
             "mrc p15, 0, r0, c13, c0, 3\n",
             "ldr r1, 1f\n",
             "add r0, r0, r1\n",
@@ -110,9 +110,9 @@ macro_rules! tls_block {
         #[cfg(all(windows, target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@coff ""),
-            ".globl rokr_tls_addr\n",
+            ".globl rok_tls_addr\n",
             ".p2align 4\n",
-            "rokr_tls_addr:\n",
+            "rok_tls_addr:\n",
             "mov eax, dword ptr [rip + _tls_index]\n",
             "mov rcx, qword ptr gs:[0x58]\n",
             "mov rcx, qword ptr [rcx + 8*rax]\n",
@@ -122,9 +122,9 @@ macro_rules! tls_block {
         #[cfg(all(windows, target_arch = "aarch64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@coff ""),
-            ".globl rokr_tls_addr\n",
+            ".globl rok_tls_addr\n",
             ".p2align 2\n",
-            "rokr_tls_addr:\n",
+            "rok_tls_addr:\n",
             "adrp x8, _tls_index\n",
             "ldr w8, [x8, :lo12:_tls_index]\n",
             "ldr x9, [x18, #0x58]\n",
@@ -137,9 +137,9 @@ macro_rules! tls_block {
         #[cfg(all(windows, target_arch = "x86"))]
         core::arch::global_asm!(concat!(
             tls_block!(@coff "_"),
-            ".globl _rokr_tls_addr\n",
+            ".globl _rok_tls_addr\n",
             ".p2align 4\n",
-            "_rokr_tls_addr:\n",
+            "_rok_tls_addr:\n",
             "mov eax, dword ptr [__tls_index]\n",
             "mov ecx, dword ptr fs:[0x2c]\n",
             "mov ecx, dword ptr [ecx + 4*eax]\n",
@@ -209,11 +209,11 @@ compile_error!("rokr: no `rok_tls` definition for this target");
 #[cfg(not(rok_solo))]
 fn block() -> *mut u8 {
     unsafe extern "C" {
-        fn rokr_tls_addr() -> *mut u8;
+        fn rok_tls_addr() -> *mut u8;
     }
     // SAFETY: the accessor takes no arguments and only returns the
     // address of this thread's block.
-    unsafe { rokr_tls_addr() }
+    unsafe { rok_tls_addr() }
 }
 
 /// One thread: the block is a plain global (what LLVM makes of compiled
