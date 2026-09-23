@@ -46,6 +46,24 @@ impl Iterator for Decoder<'_> {
     }
 }
 
+/// The length of the incomplete sequence `s` ends with (a lead byte
+/// and fewer continuation bytes than it needs; 0: none).
+pub fn incomplete_tail(s: &[u8]) -> usize {
+    for k in 1..=s.len().min(3) {
+        let b = s[s.len() - k];
+        if b & 0xC0 != 0x80 {
+            let need = match b {
+                0xC2..0xE0 => 2,
+                0xE0..0xF0 => 3,
+                0xF0..0xF5 => 4,
+                _ => 0,
+            };
+            return if need > k { k } else { 0 };
+        }
+    }
+    0
+}
+
 /// Code points of UTF-16 units; a lone surrogate comes back as itself.
 pub struct Utf16<'a> {
     pub s: &'a [u16],
@@ -285,5 +303,19 @@ mod tests {
         assert_eq!(w.as_slice(), [0x61, 0xFFFD, 0x62, 0xFFFD]);
         // An overlong encoding is not a character.
         assert_eq!(wide(b"\xC0\x80").as_slice(), [0xFFFD, 0xFFFD]);
+    }
+
+    #[test]
+    fn incomplete_tail_is_a_cut_sequence() {
+        assert_eq!(incomplete_tail(b""), 0);
+        assert_eq!(incomplete_tail(b"ab"), 0);
+        assert_eq!(incomplete_tail(b"a\xC3"), 1);
+        assert_eq!(incomplete_tail(b"a\xC3\xA9"), 0);
+        assert_eq!(incomplete_tail(b"\xE2\x82"), 2);
+        assert_eq!(incomplete_tail(b"\xF0\x9F\x98"), 3);
+        assert_eq!(incomplete_tail(b"\xF0\x9F\x98\x80"), 0);
+        // Not a lead byte, or continuation bytes alone.
+        assert_eq!(incomplete_tail(b"\xFF"), 0);
+        assert_eq!(incomplete_tail(b"\x80\x80"), 0);
     }
 }

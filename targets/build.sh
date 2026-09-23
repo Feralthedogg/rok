@@ -4,8 +4,7 @@
 #
 #   librokr.a            the runtime, by cargo for that target
 #                        (Windows: rokr.lib; rokc carries the rest);
-#                        ELF / Mach-O: localized
-#                        (runtime/rokr/localize.sh)
+#                        localized (runtime/rokr/localize.sh)
 #   Linux, -musl:        crt1.o crti.o crtn.o libc.a: musl, the copy the
 #                        pinned Rust toolchain ships for the target; empty
 #                        libm.a, libpthread.a, .. as musl installs them
@@ -329,7 +328,7 @@ for t in ${*:-$TARGETS}; do
 	built=${CARGO_TARGET_DIR:-target}/$rust/release/$rt
 	case $t in
 	# Localized, as the host's lib/librokr.a (dist.sh).
-	*-linux-* | *-apple-*) runtime/rokr/localize.sh "$built" "$dir/$rt" ;;
+	*-linux-* | *-apple-* | *-windows-*) runtime/rokr/localize.sh "$built" "$dir/$rt" ;;
 	*) cp "$built" "$dir/" ;;
 	esac
 	case $t in

@@ -14,7 +14,7 @@
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::ptr;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 use crate::win::{self, BOOL, DWORD, HANDLE};
 pub use crate::wtf8::*;
@@ -63,13 +63,46 @@ pub fn write_handle(h: HANDLE, mut bytes: &[u8]) -> i32 {
     0
 }
 
+/// The incomplete UTF-8 sequence the last console write to fd 1 / 2
+/// ended with, finished by the next one: its length, then its bytes.
+static CARRY: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+
+fn carry(to: &AtomicU32, tail: &[u8]) {
+    let mut v = [0u8; 4];
+    v[0] = tail.len() as u8;
+    v[1..=tail.len()].copy_from_slice(tail);
+    to.store(u32::from_le_bytes(v), Ordering::Relaxed);
+}
+
 /// UTF-8 `bytes` to the console `h` as UTF-16 (invalid sequences show
-/// as U+FFFD; a character split across two calls shows as two).
-fn write_console(h: HANDLE, bytes: &[u8]) -> i32 {
+/// as U+FFFD). With `held`, a character split across two writes is
+/// written whole by the second.
+fn write_console(h: HANDLE, mut bytes: &[u8], held: Option<&AtomicU32>) -> i32 {
     let mut buf = [0u16; 1024];
+    let mut n = 0;
+    if let Some(held) = held {
+        let was = held.swap(0, Ordering::Relaxed).to_le_bytes();
+        let k = usize::from(was[0]);
+        if k > 0 {
+            let mut head = [0u8; 7];
+            let more = bytes.len().min(4);
+            head[..k].copy_from_slice(&was[1..=k]);
+            head[k..k + more].copy_from_slice(&bytes[..more]);
+            let head = &head[..k + more];
+            if incomplete_tail(head) == head.len() {
+                carry(held, head);
+                return 0;
+            }
+            let mut d = Decoder { s: head, i: 0 };
+            n = d.next().map_or(0, |c| encode_utf16(c, &mut buf));
+            bytes = &bytes[d.i - k..];
+        }
+        let cut = bytes.len() - incomplete_tail(bytes);
+        carry(held, &bytes[cut..]);
+        bytes = &bytes[..cut];
+    }
     let mut d = Decoder { s: bytes, i: 0 };
     loop {
-        let mut n = 0;
         while n + 2 <= buf.len() {
             let Some(c) = d.next() else { break };
             n += encode_utf16(c, &mut buf[n..]);
@@ -95,6 +128,7 @@ fn write_console(h: HANDLE, bytes: &[u8]) -> i32 {
             }
             at += done as usize;
         }
+        n = 0;
     }
 }
 
@@ -102,9 +136,13 @@ fn write_console(h: HANDLE, bytes: &[u8]) -> i32 {
 pub fn write_all(fd: i32, parts: &[&[u8]]) -> i32 {
     let h = handle(fd);
     let console = is_console(h);
+    let held = match fd {
+        1 | 2 => Some(&CARRY[fd as usize - 1]),
+        _ => None,
+    };
     for p in parts {
         let r = if console {
-            write_console(h, p)
+            write_console(h, p, held)
         } else {
             write_handle(h, p)
         };

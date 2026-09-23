@@ -26,9 +26,19 @@ fn main() {
         // lack the loader's __stack_chk_guard (aarch64; distributions'
         // compilers protect the stack by default).
         ("linux", "aarch64" | "x86_64") => &["-fPIC", "-fno-stack-protector"],
-        // No MSVC CRT or headers.
-        ("windows", "aarch64") => &["--target=aarch64-pc-windows-msvc", "-ffreestanding"],
-        ("windows", "x86_64") => &["--target=x86_64-pc-windows-msvc", "-ffreestanding"],
+        // No MSVC CRT or headers. Unwind tables, which -ffreestanding
+        // drops: a cell's fault unwinds through the host's frames to its
+        // top-level filter.
+        ("windows", "aarch64") => &[
+            "--target=aarch64-pc-windows-msvc",
+            "-ffreestanding",
+            "-fasynchronous-unwind-tables",
+        ],
+        ("windows", "x86_64") => &[
+            "--target=x86_64-pc-windows-msvc",
+            "-ffreestanding",
+            "-fasynchronous-unwind-tables",
+        ],
         _ => {
             std::fs::write(&out, []).unwrap();
             return;

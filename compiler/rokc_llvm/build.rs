@@ -233,7 +233,8 @@ fn macho_exportable(archive: &Path) -> std::collections::HashSet<String> {
 /// loaded so far leave undefined) and of the whole [`EXPORTED_LIBS`].
 /// Weak definitions (template instances, COMDATs) stay internal: a
 /// plugin has its own, and dyld would bind each use of an exported one
-/// at launch. Mach-O takes one name per line (`-exported_symbols_list`),
+/// at launch; but MSVC's of the whole libraries and explicit `TypeID`s are
+/// exported. Mach-O takes one name per line (`-exported_symbols_list`),
 /// ELF a dynamic list, PE a module definition file.
 fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: bool) {
     use std::collections::{HashMap, HashSet};
@@ -278,7 +279,7 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
     }
     let apple = env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple");
     let mut syms: Vec<(String, bool)> = Vec::new();
-    for (a, (path, exported, _)) in archives.iter().enumerate() {
+    for (a, (path, exported, whole)) in archives.iter().enumerate() {
         if !exported || !(0..all[a].len()).any(|m| loaded.contains(&(a, m))) {
             continue;
         }
@@ -286,13 +287,24 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
         // definitions as others: -m spells them out.
         let strong: Option<HashSet<String>> = apple.then(|| macho_exportable(path));
         for (m, member) in all[a].iter().enumerate() {
-            if loaded.contains(&(a, m)) {
-                syms.extend(
-                    (member.defs.iter())
-                        .filter(|d| strong.as_ref().is_none_or(|s| s.contains(*d)))
-                        .map(|d| (d.clone(), member.data.contains(d))),
-                );
+            if !loaded.contains(&(a, m)) {
+                continue;
             }
+            // MSVC makes an explicit template instantiation a COMDAT like
+            // any inline function, and clang-cl an explicit TypeID's
+            // `id`: a plugin's `extern template` use of one
+            // (`SmallVectorBase<uint32_t>::grow_pod`) and its TypeIDs
+            // (rok/mlir_typeid.h) bind to rokc's. So the COMDATs of the
+            // whole libraries and the TypeIDs are exported too.
+            let weak = member
+                .weak
+                .iter()
+                .filter(|w| msvc && (*whole || w.starts_with("?id@?$TypeIDResolver@")));
+            syms.extend(
+                (member.defs.iter().chain(weak))
+                    .filter(|d| strong.as_ref().is_none_or(|s| s.contains(*d)))
+                    .map(|d| (d.clone(), member.data.contains(d))),
+            );
         }
     }
     syms.sort();
@@ -314,8 +326,9 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
 /// (`target/<profile>/mlir-plugin-dev`; dist.sh ships it as the
 /// `rok-mlir-dev` archive, docs/mlir-plugins.md): `include/` holds the
 /// prefix's LLVM and MLIR headers, `mlir/Support/TypeID.h` including
-/// `rok/mlir_typeid.h` (`plugin/`) before its first explicit `TypeID`, and
-/// rokc's link puts its import library in `lib/` (MSVC).
+/// `rok/mlir_typeid.h` (`plugin/`) before its first explicit `TypeID` and
+/// the plugin entry points declared `LLVM_ALWAYS_EXPORT`, and rokc's link
+/// puts its import library in `lib/` (MSVC).
 fn plugin_dev(prefix: &Path, out: &Path) -> PathBuf {
     let dev = out.ancestors().nth(3).unwrap().join("mlir-plugin-dev");
     let inc = dev.join("include");
@@ -330,25 +343,42 @@ fn plugin_dev(prefix: &Path, out: &Path) -> PathBuf {
         std::fs::write(&stamp, &from).unwrap();
     }
     std::fs::create_dir_all(dev.join("lib")).unwrap();
-    let typeid = prefix.join("include/mlir/Support/TypeID.h");
-    let text = std::fs::read_to_string(&typeid).unwrap();
     let first = "\nMLIR_DECLARE_EXPLICIT_SELF_OWNING_TYPE_ID(void)";
-    assert!(
-        text.matches(first).count() == 1,
-        "{} has no single `{}` line to hook",
-        typeid.display(),
-        &first[1..]
-    );
-    let hooked = text.replacen(
-        first,
-        &format!("\n#include \"rok/mlir_typeid.h\"{first}"),
-        1,
-    );
-    std::fs::write(inc.join("mlir/Support/TypeID.h"), hooked).unwrap();
+    let typeid = format!("\n#include \"rok/mlir_typeid.h\"{first}");
+    hook(prefix, &inc, "mlir/Support/TypeID.h", first, &typeid);
+    // The entry points declared exported, as plugins define them (MSVC
+    // refuses a `dllexport` definition of a plain declaration).
+    for (h, f) in [
+        ("DialectPlugin.h", "mlirGetDialectPluginInfo"),
+        ("PassPlugin.h", "mlirGetPassPluginInfo"),
+    ] {
+        let decl = format!("LLVM_ATTRIBUTE_WEAK\n{f}();");
+        let exported = format!("LLVM_ATTRIBUTE_WEAK LLVM_ALWAYS_EXPORT\n{f}();");
+        hook(
+            prefix,
+            &inc,
+            &format!("mlir/Tools/Plugins/{h}"),
+            &decl,
+            &exported,
+        );
+    }
     std::fs::create_dir_all(inc.join("rok")).unwrap();
     std::fs::copy("plugin/mlir_typeid.h", inc.join("rok/mlir_typeid.h")).unwrap();
     println!("cargo:rerun-if-changed=plugin/mlir_typeid.h");
     dev
+}
+
+/// The prefix's header `rel` into `inc` with its one `needle` replaced.
+fn hook(prefix: &Path, inc: &Path, rel: &str, needle: &str, with: &str) {
+    let from = prefix.join("include").join(rel);
+    let text = std::fs::read_to_string(&from).unwrap();
+    assert!(
+        text.matches(needle).count() == 1,
+        "{} has no single `{}` to hook",
+        from.display(),
+        needle.trim()
+    );
+    std::fs::write(inc.join(rel), text.replacen(needle, with, 1)).unwrap();
 }
 
 fn copy_tree(from: &Path, to: &Path) {

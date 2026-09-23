@@ -10,6 +10,7 @@
 # ELF (any host): the pinned LLVM's ld.lld -r (ROK_LLVM_PREFIX, else
 # llvm/build.sh's), then llvm-objcopy and llvm-ar from rustup's
 # llvm-tools component. Mach-O (macOS hosts): the system cc -r (ld64).
+# COFF (any host): llvm-nm, llvm-objcopy and llvm-ar.
 #
 # Usage: runtime/rokr/localize.sh <in.a> <out.a>   (or <in.lib> <out.lib>)
 set -eu
@@ -18,16 +19,6 @@ in=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 out=$2
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-
-case $in in
-  *.lib)
-    # COFF has no relocatable link (lld-link has no -r): fat LTO's one
-    # object is the localization. compiler_builtins' members stay as
-    # rustc leaves them in any MSVC staticlib.
-    cp "$in" "$out"
-    exit 0
-    ;;
-esac
 
 case $(uname -s) in MINGW* | MSYS* | CYGWIN*) exe=.exe ;; *) exe="" ;; esac
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -39,7 +30,25 @@ lld=${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}/bin/ld.lld$exe
 mkdir "$tmp/x"
 (cd "$tmp/x" && "$bin/llvm-ar$exe" x "$in")
 first=$(ls "$tmp"/x/*.o | head -n 1)
-case $(od -An -c -N4 "$first" | tr -d ' ') in
+case $in in *.lib) magic=COFF ;; *) magic=$(od -An -c -N4 "$first" | tr -d ' ') ;; esac
+case $magic in
+  COFF)
+    # No relocatable link (lld-link has no -r), and llvm-objcopy cannot
+    # make a COFF symbol local. Fat LTO leaves rokr's Rust code one
+    # object defining only `rok*` globals; every other global definition
+    # (compiler_builtins' members, which rustc keeps out of LTO) becomes
+    # `rokr.<name>` in every member, references included, so it never
+    # meets another staticlib's. The intrinsics are weak externals
+    # already and keep their names.
+    "$bin/llvm-nm$exe" --defined-only --extern-only "$tmp"/x/*.o |
+      awk '$2 ~ /^[TDRB]$/ && $3 !~ /^rok/ { print $3, "rokr." $3 }' | sort -u >"$tmp/names"
+    for o in "$tmp"/x/*.o; do
+      "$bin/llvm-objcopy$exe" --redefine-syms="$tmp/names" "$o"
+    done
+    rm -f "$out"
+    "$bin/llvm-ar$exe" rcs --format=coff "$out" "$tmp"/x/*.o
+    exit 0
+    ;;
   177ELF)
     "$lld" -r --whole-archive "$in" -o "$tmp/rokr.o"
     # compiler_builtins' intrinsics stay global for the C library

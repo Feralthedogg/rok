@@ -265,7 +265,8 @@ declare i32 @main()
 /// them (its headers define them inline over `__stdio_common_v*printf`),
 /// so C variadic calls (spec 8.6.10) reach these, which do the same. A
 /// Windows `va_list` is a pointer on every arch. Options as the headers'
-/// defaults.
+/// defaults. Selectany COMDATs, as a C object's inline copies are: the
+/// link keeps one.
 fn stdio_ir(t: &rokc_llvm::Target) -> String {
     let n = format!("i{}", t.pointer_width);
     // (signature, setup, call) per function; `%va` is the va_list.
@@ -306,9 +307,11 @@ declare void @llvm.va_end.p0(ptr)
 "
     );
     for (sig, setup, call) in fns {
+        let name = &sig[..sig.find('(').unwrap()];
         s += &format!(
             "
-define i32 @{sig} {{
+${name} = comdat any
+define weak_odr i32 @{sig} comdat {{
   %ap = alloca ptr
   call void @llvm.va_start.p0(ptr %ap)
   %va = load ptr, ptr %ap

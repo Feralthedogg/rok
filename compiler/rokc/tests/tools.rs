@@ -210,6 +210,41 @@ fn repl_loads_and_uses_a_library() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A static library's `dllimport` call (through `__imp_<name>`) reaches
+/// the DLL function.
+#[test]
+#[cfg(windows)]
+// spec: §9.7.10
+fn repl_static_library_calls_a_dll_import() {
+    let Some(env) = setup() else { return };
+    let rokr = env.rokr.display().to_string();
+    let dir = scratch("repl_imp");
+    common::put(
+        dir.join("imp.c"),
+        "__declspec(dllimport) unsigned long GetCurrentProcessId(void);\n\
+         int imp_pid(void) { return GetCurrentProcessId() != 0; }\n",
+    )
+    .unwrap();
+    for (exe, args) in [
+        ("clang", &["-c", "imp.c", "-o", "imp.o"][..]),
+        ("lib", &["/nologo", "/OUT:imp.lib", "imp.o"]),
+    ] {
+        let out = Command::new(exe)
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{exe}: {}", text(&out.stderr));
+    }
+    let lib_dir = dir.display().to_string();
+    let out = piped(
+        ROKC,
+        &["repl", "--rokr", &rokr, "-L", &lib_dir, "-l", "static=imp"],
+        "extern \"C\" { fn imp_pid() -> i32; }\nunsafe { imp_pid() }\n",
+    );
+    assert_eq!(text(&out.stdout), "i32: 1\n", "{}", text(&out.stderr));
+}
+
 /// A cell runs once, in one process: its side effects
 /// do not repeat, its bindings / items stay, and a cell that dies
 /// leaves the session as it was.
@@ -657,17 +692,18 @@ let m = Mutex::new(5); let rw = RwLock::new(6); let once = Once::new();
 thread::spawn(|| { using g = m.lock() { using r = rw.read() { once.call_once(|| { IN.store(1); while GO.load() == 0 { thread::sleep(Duration::ms(5)); } }); } } });
 while IN.load() == 0 { thread::sleep(Duration::ms(5)); }
 panic(\"holder gone\");
+GO.store(1);
 using g = m.lock() { g.get() }
 using w = rw.write() { w.get() }
-GO.store(1);
 once.call_once(|| { println(\"ran again\"); });
 ";
     let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    // The holder sits in `call_once` until `GO`, however slow the cells
-    // are. Windows keeps it (back where it was: waiting), and it goes
-    // on to finish the `Once`; a fork host's copy has no such thread.
+    // The holder sits in `call_once`, holding both locks, until `GO`,
+    // however slow the cells are. Windows keeps it (back where it was:
+    // waiting): it finishes the `Once` and lets the locks go; a fork
+    // host's copy has no such thread, and its locks are released.
     let again = if cfg!(windows) { "" } else { "ran again\n" };
     assert_eq!(
         stdout,

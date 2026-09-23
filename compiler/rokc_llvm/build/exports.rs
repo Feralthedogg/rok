@@ -119,6 +119,9 @@ pub fn coff_object(d: &[u8]) -> Option<Member> {
                 && comdat(s as usize)
                 && selection.get(&s) != Some(&IMAGE_COMDAT_SELECT_NODUPLICATES) =>
             {
+                if ty >> 4 != IMAGE_SYM_DTYPE_FUNCTION {
+                    m.data.push(name.clone());
+                }
                 m.weak.push(name);
             }
             s if s > 0 => {

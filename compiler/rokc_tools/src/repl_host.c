@@ -1083,7 +1083,12 @@ static int link_object(struct obj *o) {
             int64_t sym = -1;
             if (s.class == SYM_EXTERNAL || s.class == SYM_WEAK) {
                 sym = i;
-                v = sym_value(o, i, coff_name(o, s.name, 0, name), tls);
+                const char *n = coff_name(o, s.name, 0, name);
+                // `__imp_<name>` nothing defines (a `dllimport` reference):
+                // the import address slot, here one of this object's
+                // slots holding `<name>`.
+                void *imp = !tls && !o->addr[i] && !strncmp(n, "__imp_", 6) && !resolve(n, 0) ? resolve(n + 6, 0) : NULL;
+                v = imp ? (uint64_t)(uintptr_t)slot(o, sym, (uint64_t)(uintptr_t)imp) : sym_value(o, i, n, tls);
                 if (!v) {
                     ok = 0;
                     break;
@@ -1388,7 +1393,8 @@ unsigned char *rok_tls_addr(void);
 // a quiet moment (`quiesce`) and every other thread suspended, the
 // session's writable memory is copied (private and image
 // read / write pages: the GC heap, malloc heaps, statics, thread-local
-// blocks, runtime and loader state), and so are the other threads'
+// blocks, runtime and loader state; and writable image sections sealed
+// read-only, `sealed_part`), and so are the other threads'
 // registers and stacks. When the cell fails, the threads started since
 // are terminated, the copy is put back, memory committed since is
 // decommitted (or released with its allocation when that is new), and
@@ -1453,6 +1459,7 @@ enum {
     MEM_PRIVATE = 0x20000,
     MEM_IMAGE = 0x1000000,
     PAGE_NOACCESS = 1,
+    PAGE_READONLY = 2,
     PAGE_READWRITE = 4,
     PAGE_WRITECOPY = 8,
     PAGE_GUARD = 0x100,
@@ -1644,6 +1651,30 @@ static int saved(const MEMORY_BASIC_INFORMATION *m) {
            (p == PAGE_READWRITE || p == PAGE_WRITECOPY) && !(m->protect & PAGE_GUARD) && !excluded(m->alloc);
 }
 
+// Image memory read-only now in a section its file marks writable:
+// ntdll's `.mrdata`, unprotected only while written, holds list heads
+// (the dynamic function tables', the loader's) whose nodes are heap
+// memory, so it is saved with the heap. The part of region `m` in the
+// image's section `k`, if that is one.
+static int sealed_part(const MEMORY_BASIC_INFORMATION *m, uint32_t k, char **lo, char **hi) {
+    const unsigned char *img = (const unsigned char *)m->alloc;
+    uint32_t pe, vsize, va, flags;
+    uint16_t nsect, optsize;
+    memcpy(&pe, img + 0x3c, 4);
+    memcpy(&nsect, img + pe + 6, 2);
+    memcpy(&optsize, img + pe + 20, 2);
+    if (k >= nsect) return 0;
+    const unsigned char *s = img + pe + 24 + optsize + 40 * (size_t)k;
+    memcpy(&vsize, s + 8, 4);
+    memcpy(&va, s + 12, 4);
+    memcpy(&flags, s + 36, 4);
+    if (!(flags & 0x80000000u)) return 0; // IMAGE_SCN_MEM_WRITE
+    char *a = (char *)img + va, *b = a + (((size_t)vsize + PAGE - 1) & ~(size_t)(PAGE - 1));
+    *lo = a > m->base ? a : m->base;
+    *hi = b < m->base + m->size ? b : m->base + m->size;
+    return *lo < *hi;
+}
+
 static struct shadow *shadow_of(const char *alloc) {
     for (size_t i = 0; i < book->nshadows; i++)
         if (book->shadows[i].alloc == alloc) return &book->shadows[i];
@@ -1749,7 +1780,18 @@ static int checkpoint(void) {
     for (char *a = NULL; ok && VirtualQuery(a, &m, sizeof m) == sizeof m; a = m.base + m.size) {
         if (m.state == MEM_FREE) continue;
         if (n == book->cap) ok = 0;
-        else {
+        else if (m.state == MEM_COMMIT && m.type == MEM_IMAGE && (m.protect & 0xff) == PAGE_READONLY) {
+            char *lo, *hi;
+            for (uint32_t k = 0; ok && k < 96; k++) {
+                if (!sealed_part(&m, k, &lo, &hi)) continue;
+                if (n == book->cap) ok = 0;
+                else {
+                    book->regions[n++] =
+                        (struct region){lo, m.alloc, (size_t)(hi - lo), total, m.state, m.type, m.protect, 0};
+                    total += (size_t)(hi - lo);
+                }
+            }
+        } else {
             int keep = saved(&m);
             int watched = keep && m.type == MEM_PRIVATE && dirty_pages(m.base, PAGE, 0) >= 0;
             book->regions[n++] = (struct region){
@@ -1812,8 +1854,10 @@ static void put_back(const struct region *r, int all) {
         if (!VirtualAlloc(r->base, r->size, MEM_COMMIT, PAGE_READWRITE)) lost();
         all = 1;
     }
-    DWORD old;
-    if (!VirtualProtect(r->base, r->size, r->protect, &old)) lost();
+    DWORD old, p = r->protect & 0xff;
+    // A sealed section is written unprotected, then sealed again.
+    int sealed = p != PAGE_READWRITE && p != PAGE_WRITECOPY;
+    if (!VirtualProtect(r->base, r->size, sealed ? PAGE_WRITECOPY : r->protect, &old)) lost();
     const char *from = r->watched ? shadow_of(r->alloc)->copy + (r->base - r->alloc) : book->copy + r->copy;
     for (size_t off = 0; r->watched && !all && off < r->size; off += (size_t)DIRTY * PAGE) {
         size_t len = r->size - off < (size_t)DIRTY * PAGE ? r->size - off : (size_t)DIRTY * PAGE;
@@ -1829,6 +1873,7 @@ static void put_back(const struct region *r, int all) {
     for (size_t off = 0; (!r->watched || all) && off < r->size; off += PAGE)
         if (memcmp(r->base + off, from + off, PAGE)) memcpy(r->base + off, from + off, PAGE);
     if (r->watched) ResetWriteWatch(r->base, r->size);
+    if (sealed && !VirtualProtect(r->base, r->size, r->protect, &old)) lost();
 }
 
 // Private memory committed since the checkpoint: decommitted, or
