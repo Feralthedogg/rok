@@ -55,10 +55,15 @@ On a 10-core Apple Silicon machine: about 50 minutes; 700 MB installed.
 `build.sh` optimizes LLVM with `rok.profdata.xz`, an IR profile
 (sparse, xz) of rokc's own `-O2` builds, whenever the C++ compiler can
 read it: it tries (`-fprofile-instr-use` on an empty unit) and says when
-it builds without. Its function names are Itanium-mangled, so it serves
-macOS (Xcode's clang) and Linux (a clang at least as new as the
-profile's indexed format: version 12 now, written by Xcode's
-llvm-profdata) alike. gcc reads no clang profile: a Linux build with gcc
+it builds without. It merges a macOS (arm64) and a Linux (x86_64)
+training run: the two compile LLVM differently (libc++ / libstdc++,
+host `#if`s), so a third of the functions profiled on one host have
+another control-flow hash, or do not exist, on the other. Records are
+keyed by name and hash, so each host's clang uses its own run's; a
+function both share gets the sum. Names are Itanium-mangled: the one
+file serves macOS (Xcode's clang) and Linux (a clang at least as new as
+the profile's indexed format: version 12 now, written by Xcode's
+llvm-profdata). gcc reads no clang profile: a Linux build with gcc
 (the default `c++` on most distributions) has no PGO; `CXX=clang++
 CC=clang` gives it. Nothing extra is fetched either way.
 
@@ -69,18 +74,36 @@ profile. That profile is not in the repository yet: `train-pgo.ps1`
 makes it on a Windows host (below), and until then Windows builds have
 no PGO.
 
-`llvm/train-pgo.sh` regenerates `rok.profdata.xz` (macOS, Xcode's
+`llvm/train-pgo.sh [profile...]` trains on the host (macOS, Xcode's
 clang; or Linux, clang and its llvm-profdata): an instrumented LLVM
 (`ROK_LLVM_INSTRUMENT=1 build.sh`), a release rokc against it, linked
 with the profile runtime, then three quarters of
 `compiler/rokc/tests/cases` built with it at `-O2` (a third of them as
 Linux objects of the other architecture, so both main back ends are
-profiled).
+profiled). It keeps the host's profile as
+`$ROK_LLVM_CACHE/rok-<os>.profdata` and writes `rok.profdata.xz` from
+it merged with the profiles given. Regenerating takes both hosts, Linux
+first, so that the merge runs with Xcode's llvm-profdata, whose format
+every reader of the profile accepts:
+
+```sh
+# Linux x86_64 (NixOS: in nix-shell), from the same commit:
+targets/build.sh x86_64-unknown-linux-gnu
+llvm/train-pgo.sh        # → ~/.cache/rok/rok-linux.profdata
+# macOS arm64, with that file copied over:
+llvm/train-pgo.sh rok-linux.profdata
+```
+
+On the reference machines (bench/ built at `-O2`, instructions):
+against a profile of the host alone, the merged one costs 0.1% on Linux
+and 0.5% on macOS, where the other host's alone costs 2.8% and 0.9%;
+the merged file is 3 MB.
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other
 Windows architecture) into `rok-msvc.profdata.tar.xz`. `train-pgo.sh`
 peaks at ~5 GB of scratch space and takes about 35 minutes on a 10-core
-Apple Silicon machine. Regenerate after a change of the pinned LLVM or
+Apple Silicon machine (55 on a 16-thread x86_64 laptop with
+`ROK_LLVM_JOBS=12`). Regenerate after a change of the pinned LLVM or
 a large change of what rokc asks LLVM to do; a stale profile still
 builds, with less benefit.
 

@@ -1,27 +1,29 @@
 #!/bin/sh
 # Regenerates llvm/rok.profdata.xz, the profile build.sh optimizes LLVM
-# with.
+# with: this host's training run merged with the given profiles of the
+# other Unix hosts.
 #
-#   llvm/train-pgo.sh [workdir]
+#   llvm/train-pgo.sh [profile...]
 #
 # Builds an instrumented LLVM (build.sh with ROK_LLVM_INSTRUMENT=1) and a
 # release rokc against it, then has that rokc build three quarters of
 # compiler/rokc/tests/cases at -O2: two of three for the host (linked),
 # the third as Linux objects of the other architecture (x86_64 on an
 # arm64 host, aarch64 on an x86_64 one), so both main back ends are warm.
-# The rest of the cases and bench/ are left to measure the result.
+# The rest of the cases and bench/ are left to measure the result. The
+# host's profile is kept as $ROK_LLVM_CACHE/rok-<os>.profdata, to pass to
+# the run on the other host.
 # macOS with Xcode's command line tools, or Linux with clang, its
 # llvm-profdata and targets/build.sh's C library for the host (RUSTFLAGS,
-# e.g. the nix shell's run path, is kept); workdir (default
-# $ROK_LLVM_CACHE/pgo) peaks at ~5 GB and is deleted afterwards; about
-# 35 minutes on 10 cores.
+# e.g. the nix shell's run path, is kept); $ROK_LLVM_CACHE/pgo peaks at
+# ~5 GB and is deleted afterwards; about 35 minutes on 10 cores.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cache=${ROK_LLVM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok}
-work=${1:-$cache/pgo}
+work=$cache/pgo
 prof=$work/profiles
-jobs=$(getconf _NPROCESSORS_ONLN)
+jobs=${ROK_LLVM_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 case $(uname -m) in
 x86_64) other=aarch64-unknown-linux-gnu ;;
 *) other=x86_64-unknown-linux-gnu ;;
@@ -61,10 +63,15 @@ done
 wait
 
 # Sparse: functions the corpus never ran get no profile (optimized as
-# without PGO) rather than a cold one.
+# without PGO) rather than a cold one. Records are keyed by name and
+# control-flow hash, so each host's clang finds its own among the merged.
 profdata=llvm-profdata
 [ "$(uname -s)" != Darwin ] || profdata="xcrun llvm-profdata"
-$profdata merge --sparse -o "$work/rok.profdata" "$prof"/*.profraw
+own=$cache/rok-$(uname -s | tr A-Z a-z).profdata
+$profdata merge --sparse -o "$own" "$prof"/*.profraw
+rm -rf "$work"
+mkdir -p "$work"
+$profdata merge --sparse -o "$work/rok.profdata" "$own" "$@"
 xz -9e <"$work/rok.profdata" >"$root/llvm/rok.profdata.xz"
 rm -rf "$work"
-ls -l "$root/llvm/rok.profdata.xz"
+ls -l "$own" "$root/llvm/rok.profdata.xz"
