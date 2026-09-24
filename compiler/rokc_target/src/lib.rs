@@ -56,6 +56,8 @@ named_enum! {
         /// The WebAssembly C ABI (clang's): a one-scalar aggregate as that
         /// scalar, others by reference / `sret`.
         Wasm32,
+        /// RISC-V LP64D: the hardware floating-point convention.
+        Riscv64,
         /// Aggregates cannot cross the C boundary.
         Other,
     }

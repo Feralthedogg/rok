@@ -86,6 +86,11 @@ signed char rok_neg8(signed char c);
 unsigned short rok_dbl16(unsigned short u);
 int call_narrow(void) { return rok_neg8(-7) * 100000 + rok_dbl16(40000); }
 char cid(char c) { return c; }
+typedef struct { float x; double y; } FD;
+typedef struct { float f; int i; } FI;
+FD fd_mul(FD v, int k) { FD r = { v.x * k, v.y * k }; return r; }
+FI fi_inc(FI v) { v.f += 1; v.i += 1; return v; }
+int ult(unsigned a, unsigned b) { return a < b; }
 ";
 
 const ROK_SIDE: &str = r#"
@@ -96,6 +101,8 @@ struct Small { a: i8; b: i16; }
 struct Mix { a: i64; b: f64; }
 struct I3 { a: i32; b: i32; c: i32; }
 struct DT { q: i32; r: i32; }
+struct FD { x: f32; y: f64; }
+struct FI { f: f32; i: i32; }
 
 extern "C" {
     fn v3_scale(v: V3, k: f32) -> V3;
@@ -124,6 +131,9 @@ extern "C" {
     fn neg8(c: i8) -> i8;
     fn call_narrow() -> i32;
     fn cid(c: c_char) -> c_char;
+    fn fd_mul(v: FD, k: i32) -> FD;
+    fn fi_inc(v: FI) -> FI;
+    fn ult(a: u32, b: u32) -> i32;
 }
 
 // C calls these (spec 5.9.10): aggregates the C way both ways.
@@ -181,6 +191,10 @@ fn main() {
     println(f"{w.x} {w.y} {w.z} {rb.a}{rb.b}{rb.c} {rh.a}{rh.b}{rh.c} {ks.a} {ks.b} {unsafe { cb_big2(h) }}");
     println(f"{unsafe { neg8(5) }} {unsafe { call_narrow() }}");
     println(f"{unsafe { cid(c'A') } as i32}");
+    let fd = unsafe { fd_mul(FD { x: 1.5, y: 2.25 }, -2) };
+    let fi = unsafe { fi_inc(FI { f: 0.5, i: -8 }) };
+    let big: u32 = 4000000000;
+    println(f"{fd.x} {fd.y} {fi.f} {fi.i} {unsafe { ult(5, big) }}{unsafe { ult(big, 5) }}");
 }
 "#;
 
@@ -1498,7 +1512,7 @@ fn c_abi_matches_clang() {
     ok(&run);
     assert_eq!(
         text(&run.stdout),
-        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n-5 714464\n65\n"
+        "2 4 6\n10.5\n5 10 15 30\n-2 301\n42 2.5\n6\n45\n-434465\n82\n0.75\n21\n18 321 10 5 -4 -5\n987\n2 4 6 321 654 -1 -2 321\n-5 714464\n65\n-3 -4.5 1.5 -7 10\n"
     );
 
     // The other targets' lowering, as LLVM IR declarations (what clang
@@ -1584,6 +1598,65 @@ fn c_abi_matches_clang() {
         "declare signext i8 @neg8(i8 signext)",
     ] {
         assert!(arm.contains(want), "armv7 lacks `{want}`:\n{arm}");
+    }
+    // RISC-V LP64D: float structs as their fields (LLVM splits a
+    // first-class struct as clang expands it), 32-bit integers
+    // sign-extended, `u32` too; C `char` is unsigned.
+    let rv = decls("riscv64gc-unknown-linux-gnu");
+    for want in [
+        "declare { float, double } @fd_mul({ float, double }, i32 signext)",
+        "declare { float, i32 } @fi_inc({ float, i32 })",
+        "declare { i64, double } @mix_twice({ i64, double })",
+        "declare [2 x i64] @v3_scale([2 x i64], float)",
+        "declare double @d4_sum(ptr)",
+        "declare void @big_make(ptr sret({ i64, i64, i64 }) align 8, i64)",
+        "declare i64 @small_inc(i64)",
+        "declare signext i32 @i3_sum([2 x i64])",
+        "declare signext i32 @sx(i8 signext, i16 zeroext)",
+        "declare signext i32 @ult(i32 signext, i32 signext)",
+        "declare zeroext i8 @cid(i8 zeroext)",
+        "declare i64 @vsum(i32 signext, ...)",
+    ] {
+        assert!(rv.contains(want), "riscv64 lacks `{want}`:\n{rv}");
+    }
+}
+
+/// A by-address aggregate (spec 8.6.6) is copied with its alignment:
+/// copies of unknown alignment become byte loads and stores where
+/// unaligned accesses are slow (RISC-V without fast misaligned access).
+#[test]
+fn by_address_copies_keep_their_alignment() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("aligned_copies");
+    let src = dir.join("main.rok");
+    fs::write(
+        &src,
+        "fn twice(a: [i64; 10]) -> [i64; 10] {\n    let b = a;\n    for i in 0usize..10 { b[i] = a[i] * 2; }\n    b\n}\n\
+         fn main() -> i32 { twice([1i64; 10])[3] as i32 - 2 }\n",
+    )
+    .unwrap();
+    let ll = dir.join("main.ll");
+    ok(&build(
+        &env,
+        &src,
+        &[
+            "--emit=llvmir",
+            "--target=riscv64gc-unknown-linux-gnu",
+            "-o",
+            ll.to_str().unwrap(),
+        ],
+    ));
+    let ir = fs::read_to_string(ll).unwrap();
+    let copies: Vec<&str> = ir
+        .lines()
+        .filter(|l| l.contains("@llvm.memcpy") && l.contains("i64 80,"))
+        .collect();
+    assert!(!copies.is_empty(), "no 80-byte copy:\n{ir}");
+    for c in copies {
+        assert!(
+            c.contains("(ptr align 8 %") && c.contains(", ptr align 8 %"),
+            "unaligned copy `{c}`"
+        );
     }
 }
 

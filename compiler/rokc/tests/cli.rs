@@ -1285,12 +1285,17 @@ fn cross_targets_link_from_the_sysroot() {
     let out = rokc(
         None,
         &dir,
-        &["build", "h.rok", "--target", "riscv64gc-unknown-linux-gnu"],
+        &[
+            "build",
+            "h.rok",
+            "--target",
+            "powerpc64le-unknown-linux-gnu",
+        ],
     );
     assert_exit(&out, 1);
     let err = text(&out.stderr);
     assert!(
-        err.contains("no runtime for riscv64gc-unknown-linux-gnu"),
+        err.contains("no runtime for powerpc64le-unknown-linux-gnu"),
         "{err}"
     );
 
@@ -1316,6 +1321,7 @@ fn cross_targets_link_from_the_sysroot() {
         "x86_64-apple-darwin",
         "i686-unknown-linux-gnu",
         "armv7-unknown-linux-gnueabihf",
+        "riscv64gc-unknown-linux-gnu",
         "i686-pc-windows-msvc",
         "wasm32-wasi",
         "wasm32-wasi-threads",
@@ -1521,6 +1527,7 @@ fn check_linux_elf(spec: &TargetSpec, b: &[u8]) {
         "x86_64" => 62,
         "aarch64" => 183,
         "x86" => 3,
+        "riscv64" => 243,
         _ => 40,
     };
     let class = if spec.pointer_width == 64 { 2 } else { 1 };
@@ -1529,6 +1536,10 @@ fn check_linux_elf(spec: &TargetSpec, b: &[u8]) {
     assert_eq!(&b[..4], b"\x7fELF", "{t}");
     assert_eq!(b[4], class, "{t}: ELF class");
     assert_eq!(u16::from_le_bytes([b[18], b[19]]), machine, "{t}");
+    if spec.arch == "riscv64" {
+        // RVC, the double-float ABI (LP64D).
+        assert_eq!(b[48], 0x5, "{t}: e_flags");
+    }
     let ty = u16::from_le_bytes([b[16], b[17]]);
     if spec.dynamic_linking {
         assert_eq!(ty, 3, "{t}: a PIE");

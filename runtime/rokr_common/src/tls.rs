@@ -13,7 +13,7 @@
 //! Targets: Mach-O `arm64` / `x86_64` (`__thread_vars`: the block's
 //! descriptor), ELF `x86_64`
 //! (initial-exec) / `aarch64` / `x86` (`%gs`) / `arm` (`TPIDRURO`, what
-//! `__aeabi_read_tp` reads on Linux) (local-exec: the runtime is always
+//! `__aeabi_read_tp` reads on Linux) / `riscv64` (`tp`) (local-exec: the runtime is always
 //! linked into the executable), COFF `x86_64` / `aarch64` / `x86`
 //! (`.tls$`, through `_tls_index` and the TEB's TLS array; rokc's
 //! startup object defines `_tls_index` and the TLS directory). wasm32
@@ -107,6 +107,18 @@ macro_rules! tls_block {
             "bx lr\n",
             "1: .long rok_tls(TPOFF)\n",
         ), size = const SIZE);
+        #[cfg(all(target_os = "linux", target_arch = "riscv64"))]
+        core::arch::global_asm!(concat!(
+            tls_block!(@elf "@"),
+            ".globl rok_tls_addr\n",
+            ".hidden rok_tls_addr\n",
+            ".type rok_tls_addr,@function\n",
+            "rok_tls_addr:\n",
+            "lui a0, %tprel_hi(rok_tls)\n",
+            "add a0, a0, tp, %tprel_add(rok_tls)\n",
+            "addi a0, a0, %tprel_lo(rok_tls)\n",
+            "ret\n",
+        ), size = const SIZE);
         #[cfg(all(windows, target_arch = "x86_64"))]
         core::arch::global_asm!(concat!(
             tls_block!(@coff ""),
@@ -199,7 +211,7 @@ const SIZE: usize = tls_abi::SIZE.offset(size_of::<usize>() as u32) as usize;
         any(target_os = "linux", windows),
         any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86")
     ),
-    all(target_os = "linux", target_arch = "arm")
+    all(target_os = "linux", any(target_arch = "arm", target_arch = "riscv64"))
 )))]
 compile_error!("rokr: no `rok_tls` definition for this target");
 

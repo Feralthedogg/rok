@@ -351,9 +351,11 @@ pub fn spec(name: &str) -> Option<TargetSpec> {
         // Spec 0.6.2: no guarantee.
         "riscv64gc-unknown-linux-gnu" => TargetSpec {
             llvm_target: s("riscv64-unknown-linux-gnu"),
+            c_abi: CAbi::Riscv64,
             data_layout: s("e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"),
             cpu: s("generic-rv64"),
             features: s("+m,+a,+f,+d,+c"),
+            stack_probes: StackProbes::Inline,
             ..linux_gnu(
                 name,
                 "riscv64",

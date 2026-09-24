@@ -13,8 +13,8 @@ guide are at [rok-lang.org](https://rok-lang.org).
   2.36: executables need glibc 2.34 or later) in `lib/rok/targets/<triple>/`, so `--target <linux triple>` works
   from any host, and so does the other macOS arch. Set `ROK_CC` to link with a C compiler driver instead.
 - Code generation: rok's native backend builds `-O0` for arm64 and x86_64; every other target (the 32-bit
-  `i686-unknown-linux-gnu`, `i686-pc-windows-msvc`, `armv7-unknown-linux-gnueabihf`) and every optimized build
-  goes through LLVM.
+  `i686-unknown-linux-gnu`, `i686-pc-windows-msvc`, `armv7-unknown-linux-gnueabihf`;
+  `riscv64gc-unknown-linux-gnu`) and every optimized build goes through LLVM.
 - The REPL and the Jupyter kernel run on macOS and Linux (arm64, x86_64).
 - Building from source needs Rust (`rust-toolchain.toml`; no external crates are used), and for anything above
   `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see

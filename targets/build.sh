@@ -13,8 +13,9 @@
 #                        libanl.a, and stub
 #                        libc.so / libm.so (sonames .so.6), made by
 #                        glibc_stubs.py from glibc 2.36 (Debian 12 amd64 /
-#                        arm64 / i386 / armhf; the packages are checked
-#                        against pinned SHA-256s). Executables need
+#                        arm64 / i386 / armhf; riscv64, which Debian 12
+#                        lacks, from debian-ports' 2.36-9; the packages
+#                        are checked against pinned SHA-256s). Executables need
 #                        glibc >= 2.34 (the 32-bit runtimes call its
 #                        time64 symbols, .cargo/config.toml).
 #   wasm32-*:            crt1-command.o (the browser's: crt1-reactor.o;
@@ -55,8 +56,8 @@ set -eu
 TARGETS="x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu
 aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl
 x86_64-pc-windows-msvc aarch64-pc-windows-msvc i686-unknown-linux-gnu
-i686-pc-windows-msvc armv7-unknown-linux-gnueabihf wasm32-wasi
-wasm32-wasi-threads wasm32-unknown-unknown"
+i686-pc-windows-msvc armv7-unknown-linux-gnueabihf riscv64gc-unknown-linux-gnu
+wasm32-wasi wasm32-wasi-threads wasm32-unknown-unknown"
 GLIBC=2.36-9+deb12u14
 GLIBC_URL=https://snapshot.debian.org/archive/debian/20260504T025922Z/pool/main/g/glibc
 LINUX=6.1.159-1
@@ -74,7 +75,15 @@ libc6-dev_armhf ca9486dc7f2dfb25c61c0c93d561c01f8abdf9866bd4c157f0ccd518295bbbb7
 linux-libc-dev_amd64 117349f98e0d9c4522bf1b8f33c6239ab9c4c5904c56f6379be3eb790a97e7dc
 linux-libc-dev_arm64 6da0f62a7a63524364bc0f4da96d11181cc15010051ff2f4c0dbd4a0ca5e085c
 linux-libc-dev_i386 72e870c8b56344008990a7939edd44f71ae728152b5473c0fcc95a191a04d05f
-linux-libc-dev_armhf 536d83afebd9a89e35dd104a4f3529b34833fd5fe279c4df18f2c6e9174f0e47"
+linux-libc-dev_armhf 536d83afebd9a89e35dd104a4f3529b34833fd5fe279c4df18f2c6e9174f0e47
+libc6_riscv64 fd7b16d34b67f9ca97dd048636c229fa0a0e2dbcc927ade3731885f33284910f
+libc6-dev_riscv64 293cde3b863a8502d461aa232ff5e28fb1821384e7380b855e9f892d05b5e2c3
+linux-libc-dev_riscv64 52234ad2798c2e58f0aebadf925d4c51d07fbf525e7721a36780c12abd4d250b"
+# riscv64, not in Debian 12: debian-ports' glibc 2.36-9 (bookworm's base
+# release) and linux 6.1.20, from one snapshot.
+PORTS_GLIBC=2.36-9
+PORTS_LINUX=6.1.20-2
+PORTS_URL=https://snapshot.debian.org/archive/debian-ports/20230414T140955Z/pool-riscv64/main
 MUSL=1.2.5
 MUSL_SHA256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
 # The wasi-libc of wasi-sdk 25, whose libc.a the pinned Rust ships for
@@ -164,8 +173,10 @@ component_ld() {
 deb() {
 	into=$1 pkg=$2 darch=$3
 	[ -f "$into/.$pkg" ] && return
-	case $pkg in
-	linux-*) version=$LINUX url=$LINUX_URL ;;
+	case $darch,$pkg in
+	riscv64,linux-*) version=$PORTS_LINUX url=$PORTS_URL/l/linux ;;
+	riscv64,*) version=$PORTS_GLIBC url=$PORTS_URL/g/glibc ;;
+	*,linux-*) version=$LINUX url=$LINUX_URL ;;
 	*) version=$GLIBC url=$GLIBC_URL ;;
 	esac
 	name=${pkg}_${version}_$darch.deb
@@ -182,8 +193,17 @@ debian() {
 	aarch64) deb=arm64 multi=aarch64-linux-gnu ;;
 	i686) deb=i386 multi=i386-linux-gnu ;;
 	armv7) deb=armhf multi=arm-linux-gnueabihf ;;
+	riscv64gc) deb=riscv64 multi=riscv64-linux-gnu ;;
 	esac
 	root=$cache/glibc-$GLIBC/$deb
+}
+
+# Target $1 as clang names it (LLVM has no `riscv64gc` arch).
+clang_target() {
+	case $1 in
+	riscv64gc-*) echo "riscv64-${1#*-}" ;;
+	*) echo "$1" ;;
+	esac
 }
 
 # compiler-rt's profile runtime for $1 into $2: its sources from the
@@ -229,7 +249,7 @@ profile() {
 		deb "$root" linux-libc-dev "$deb"
 		# Named, not --sysroot: a wrapping driver (nix's) adds
 		# -nostdlibinc, which drops a sysroot's include directories.
-		flags="--target=$t -nostdlibinc -isystem $root/usr/include/$multi -isystem $root/usr/include $unix"
+		flags="--target=$(clang_target "$t") -nostdlibinc -isystem $root/usr/include/$multi -isystem $root/usr/include $unix"
 		case $arch in
 		armv7) flags="$flags -mfloat-abi=hard -mfpu=neon" ;;
 		esac
@@ -368,7 +388,7 @@ for t in ${*:-$TARGETS}; do
 		mkdir -p "$work"
 		for lib in c m; do
 			python3 "$here/glibc_stubs.py" "$root/lib/$multi/lib$lib.so.6" "$work/$lib.s" "$work/$lib.map"
-			"$cc" --target="$t" -c "$work/$lib.s" -o "$work/$lib.o"
+			"$cc" --target="$(clang_target "$t")" -c "$work/$lib.s" -o "$work/$lib.o"
 			"$lld" -shared -soname "lib$lib.so.6" --version-script "$work/$lib.map" -o "$dir/lib$lib.so" "$work/$lib.o"
 		done
 		rm -rf "$work"

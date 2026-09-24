@@ -33,6 +33,12 @@
 //!   scalar, others as a pointer to a caller copy (clang marks it `byval`:
 //!   the same machine code, but -O2 builds passed a stale slot as a
 //!   `byval` runtime argument) / `sret`.
+//! - RISC-V LP64D: a struct of one float, two floats, or a float and an
+//!   integer of at most 8 bytes (flattened) goes in `fa` / `a` registers
+//!   as `f32` / `f64` / `{t1, t2}` while enough of both are left; other
+//!   aggregates up to 16 bytes as `i64` / `[2 x i64]` (`i128` when
+//!   16-aligned), split between the last `a` register and the stack as
+//!   LLVM splits them; bigger ones by reference / `sret`.
 //!
 //! Other targets reject aggregates across the C boundary.
 
@@ -211,6 +217,7 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
                 .collect();
             (ret, args)
         }
+        CAbi::Riscv64 => riscv(params, ret, target),
         CAbi::Other => {
             if params.iter().chain([ret]).any(is_aggregate) {
                 return None;
@@ -242,7 +249,10 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 /// (i386: consecutive stack slots; AAPCS: core registers then the
 /// stack, a struct may straddle them), but a by-value result comes back
 /// in memory (or, on Windows x86, in `edx:eax`): such a signature is
-/// classified. No runtime runs on the other targets.
+/// classified. On RISC-V a pair is C's 16-byte integer struct both ways:
+/// `a` registers, the last one and the stack when one is left (where LLVM
+/// splits it too), a result in `a0` / `a1`. No runtime runs on the other
+/// targets.
 #[must_use]
 pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<FnAbi> {
     let by_value = |t: &MirTy| is_aggregate(t) || *t == MirTy::Prim(PrimTy::Str);
@@ -257,7 +267,7 @@ pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<Fn
         CAbi::X86_64SysV => 6,
         CAbi::X86_64Win | CAbi::Wasm32 => 0,
         CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf if by_value(ret) => 0,
-        CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf => u32::MAX,
+        CAbi::X86SysV | CAbi::X86Win | CAbi::ArmHf | CAbi::Riscv64 => u32::MAX,
         CAbi::Other => return None,
     };
     let words: u32 = params
@@ -428,6 +438,112 @@ fn aapcs32_ret(ty: &MirTy, target: &Target) -> RetAbi {
         2 => RetAbi::Coerce("i16".to_owned()),
         3 | 4 => RetAbi::Coerce("i32".to_owned()),
         _ => RetAbi::Sret,
+    }
+}
+
+fn riscv(params: &[MirTy], ret: &MirTy, target: &Target) -> (RetAbi, Vec<ArgAbi>) {
+    let mut gprs = 8;
+    let mut fprs = 8;
+    let ret = match riscv_arg(ret, target, &mut 2, &mut 2) {
+        ArgAbi::Direct => RetAbi::Direct,
+        ArgAbi::Coerce(c) => RetAbi::Coerce(c),
+        ArgAbi::Indirect { .. } => {
+            gprs -= 1;
+            RetAbi::Sret
+        }
+    };
+    let args = params
+        .iter()
+        .map(|p| riscv_arg(p, target, &mut gprs, &mut fprs))
+        .collect();
+    (ret, args)
+}
+
+/// One RISC-V LP64D argument (or, with two of each register, a result),
+/// taking the registers it uses from `gprs` / `fprs` as clang counts them.
+fn riscv_arg(ty: &MirTy, target: &Target, gprs: &mut u32, fprs: &mut u32) -> ArgAbi {
+    let (size, align) = target.size_align(ty);
+    if !is_aggregate(ty) {
+        match ty {
+            MirTy::Unit => {}
+            MirTy::Prim(PrimTy::F32 | PrimTy::F64) if *fprs > 0 => *fprs -= 1,
+            // C sees `str` as a `char*`.
+            MirTy::Prim(PrimTy::Str) => *gprs = gprs.saturating_sub(1),
+            _ => *gprs = gprs.saturating_sub(size.div_ceil(8)),
+        }
+        return ArgAbi::Direct;
+    }
+    if size == 0 {
+        return ArgAbi::Direct;
+    }
+    if let Some((c, ints, floats)) = riscv_fp(ty, target) {
+        if ints <= *gprs && floats <= *fprs {
+            *gprs -= ints;
+            *fprs -= floats;
+            return ArgAbi::Coerce(c);
+        }
+    }
+    match size {
+        1..=8 => {
+            *gprs = gprs.saturating_sub(1);
+            ArgAbi::Coerce("i64".to_owned())
+        }
+        9..=16 => {
+            *gprs = gprs.saturating_sub(2);
+            let c = if align == 16 {
+                "i128"
+            } else {
+                "!llvm.array<2 x i64>"
+            };
+            ArgAbi::Coerce(c.to_owned())
+        }
+        _ => {
+            *gprs = gprs.saturating_sub(1);
+            ArgAbi::Indirect { byval: false }
+        }
+    }
+}
+
+/// A struct the floating-point convention passes as its fields: one float,
+/// two floats, or a float and an integer of at most 8 bytes, after
+/// flattening nested structs and arrays (a union is never one). Its MLIR
+/// type and the integer and float registers it takes.
+fn riscv_fp(ty: &MirTy, target: &Target) -> Option<(String, u32, u32)> {
+    fn has_union(ty: &MirTy) -> bool {
+        match ty {
+            MirTy::Union(..) => true,
+            MirTy::Tuple(ps) | MirTy::Struct(_, ps) => ps.iter().any(has_union),
+            MirTy::Array(e, _) => has_union(e),
+            _ => false,
+        }
+    }
+    if has_union(ty) {
+        return None;
+    }
+    let mut ls = Vec::new();
+    leaves(ty, 0, target, &mut ls);
+    let name = |&(_, size, leaf): &(u32, u32, Leaf)| match leaf {
+        Leaf::F32 => "f32".to_owned(),
+        Leaf::F64 => "f64".to_owned(),
+        Leaf::Int => format!("i{}", size * 8),
+    };
+    let floats = u32::try_from(ls.iter().filter(|l| l.2 != Leaf::Int).count()).ok()?;
+    match ls[..] {
+        [one] if one.2 != Leaf::Int => Some((name(&one), 0, 1)),
+        [a, b] if floats > 0 && a.1 <= 8 && b.1 <= 8 => {
+            // Each field where the coerced struct puts it: naturally
+            // aligned, or packed right after the first.
+            let fields = format!("{}, {}", name(&a), name(&b));
+            let c = if b.0 == (a.0 + a.1).next_multiple_of(b.1) && a.0 == 0 {
+                format!("!llvm.struct<({fields})>")
+            } else if b.0 == a.0 + a.1 && a.0 == 0 {
+                format!("!llvm.struct<packed ({fields})>")
+            } else {
+                return None;
+            };
+            Some((c, 2 - floats, floats))
+        }
+        _ => None,
     }
 }
 
@@ -700,6 +816,55 @@ mod tests {
         assert_eq!(rok.ret, RetAbi::Sret);
         // Arguments alone split as C lays them out.
         assert!(classify_rok(&t, &[s.clone(), s], &MirTy::Unit).is_none());
+    }
+
+    /// RISC-V LP64D: float structs in `fa` / `a` registers while both
+    /// are left, integer ones as `i64` / `[2 x i64]`, bigger ones by
+    /// reference; `sret` takes `a0`.
+    #[test]
+    fn riscv_lp64d() {
+        let t = on("riscv64gc-unknown-linux-gnu");
+        let c = |ps: &[MirTy], r: &MirTy| classify(&t, ps, r, false).unwrap();
+        let co = |s: &str| ArgAbi::Coerce(s.into());
+        let a = c(
+            &[
+                st(&[F32, F64]),
+                st(&[I32, F32]),
+                st(&[F64]),
+                st(&[F32, F32, F32]),
+                st(&[I64, I64, I64]),
+            ],
+            &st(&[F64, I64]),
+        );
+        assert_eq!(a.ret, RetAbi::Coerce("!llvm.struct<(f64, i64)>".into()));
+        assert_eq!(
+            a.args,
+            [
+                co("!llvm.struct<(f32, f64)>"),
+                co("!llvm.struct<(i32, f32)>"),
+                co("f64"),
+                co("!llvm.array<2 x i64>"),
+                ArgAbi::Indirect { byval: false },
+            ]
+        );
+        // Two integers, or a union, are not a float struct.
+        assert_eq!(c(&[st(&[I32, I32])], &MirTy::Unit).args[0], co("i64"));
+        assert_eq!(
+            c(&[MirTy::Union(Vec::new(), 1)], &MirTy::Unit).args[0],
+            co("i64")
+        );
+        // Eight floats take every `fa`: the struct goes in `a` registers.
+        let mut ps = vec![MirTy::Prim(F64); 8];
+        ps.push(st(&[F32, F32]));
+        assert_eq!(c(&ps, &MirTy::Unit).args[8], co("i64"));
+        // An `sret` result takes `a0`: seven integers then leave one
+        // register, too few for the float struct's integer half.
+        let mut ps = vec![MirTy::Prim(I64); 7];
+        ps.push(st(&[F32, I32]));
+        assert_eq!(c(&ps, &MirTy::Unit).args[7], co("!llvm.struct<(f32, i32)>"));
+        assert_eq!(c(&ps, &st(&[I64; 3])).args[7], co("i64"));
+        let s = MirTy::Prim(PrimTy::Str);
+        assert!(classify_rok(&t, &[s.clone(), s.clone()], &s).is_none());
     }
 
     /// A runtime `str` on Windows x64 is a 16-byte C struct: by

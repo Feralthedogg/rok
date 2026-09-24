@@ -2497,7 +2497,8 @@ impl<'a> FnEmit<'a> {
                 // A copy of the caller's value, taken before anything
                 // runs, slot to slot (see `Statement::Assign`).
                 if let Some(slot) = self.slot_names[p.0 as usize].clone() {
-                    self.emit_memcpy(&slot, &arg, &local_ty);
+                    let a = self.target.size_align(&local_ty).1;
+                    self.emit_memcpy(&slot, &arg, &local_ty, a);
                     continue;
                 }
                 let v = self.fresh_value();
@@ -2904,15 +2905,21 @@ impl<'a> FnEmit<'a> {
         rok_by_ref(ty, self.target)
     }
 
-    fn emit_memcpy(&mut self, dst: &str, src: &str, ty: &MirTy) {
+    /// Copy the `ty` at `src` (aligned to `src_align`) to `dst`. Both
+    /// addresses are otherwise aligned as the type, as its loads and
+    /// stores assume: an unknown alignment makes the copy bytewise where
+    /// unaligned accesses are slow (RISC-V).
+    fn emit_memcpy(&mut self, dst: &str, src: &str, ty: &MirTy, src_align: u32) {
         let pw = self.pw;
-        let size = self.target.size_align(ty).0;
+        let (size, align) = self.target.size_align(ty);
         let n = self.fresh_value();
         let _ = write!(
             self.body,
             "    {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
-    \"llvm.intr.memcpy\"({dst}, {src}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, !llvm.ptr, i{pw}) -> ()
-"
+    \"llvm.intr.memcpy\"({dst}, {src}, {n}) <{{arg_attrs = [{}, {}, {{}}], isVolatile = false}}> : (!llvm.ptr, !llvm.ptr, i{pw}) -> ()
+",
+            align_attr(align),
+            align_attr(src_align)
         );
     }
 
@@ -2921,14 +2928,15 @@ impl<'a> FnEmit<'a> {
         let z = self.fresh_value();
         if self.in_memory(ty) {
             let pw = self.pw;
-            let size = self.target.size_align(ty).0;
+            let (size, align) = self.target.size_align(ty);
             let n = self.fresh_value();
             let _ = write!(
                 self.body,
                 "    {z} = llvm.mlir.constant(0 : i8) : i8
     {n} = llvm.mlir.constant({size} : i{pw}) : i{pw}
-    \"llvm.intr.memset\"({dst}, {z}, {n}) <{{isVolatile = false}}> : (!llvm.ptr, i8, i{pw}) -> ()
-"
+    \"llvm.intr.memset\"({dst}, {z}, {n}) <{{arg_attrs = [{}, {{}}, {{}}], isVolatile = false}}> : (!llvm.ptr, i8, i{pw}) -> ()
+",
+                align_attr(align)
             );
             return;
         }
@@ -2952,7 +2960,7 @@ impl<'a> FnEmit<'a> {
             return false;
         };
         if src != dst {
-            self.emit_memcpy(dst, &src, ty);
+            self.emit_memcpy(dst, &src, ty, self.target.size_align(ty).1);
         }
         true
     }
@@ -3059,7 +3067,7 @@ impl<'a> FnEmit<'a> {
     fn assign_in_memory(&mut self, slot: &str, ty: &MirTy, r: &RValue) -> bool {
         if let Some(src) = self.rvalue_addr(r, ty) {
             if src != slot {
-                self.emit_memcpy(slot, &src, ty);
+                self.emit_memcpy(slot, &src, ty, self.target.size_align(ty).1);
             }
             return true;
         }
@@ -3355,7 +3363,8 @@ impl<'a> FnEmit<'a> {
                     self.body,
                     "    {src} = llvm.mlir.addressof @{sym} : !llvm.ptr"
                 );
-                self.emit_memcpy(&slot, &src, &ty);
+                // Interned bytes are unaligned.
+                self.emit_memcpy(&slot, &src, &ty, 1);
                 return;
             }
         }
@@ -5516,6 +5525,15 @@ fn mlir_type(ty: &MirTy, target: &Target) -> String {
     }
 }
 
+/// `{llvm.align = N}` of a pointer argument (`{}`: unknown).
+fn align_attr(align: u32) -> String {
+    if align > 1 {
+        format!("{{llvm.align = {align} : i64}}")
+    } else {
+        "{}".to_owned()
+    }
+}
+
 /// The alignment attribute of a stack slot of `ty`: an explicit layout
 /// is a packed LLVM struct, whose own alignment is 1.
 fn slot_align(ty: &MirTy, target: &Target) -> String {
@@ -5667,7 +5685,8 @@ fn c_signature(
 /// (by the callee) where the platform ABI has it, as clang marks it:
 /// `x86_64` System V, Apple arm64 and the other targets extend `i8` /
 /// `i16` / `bool` (`c_char` signed), Windows x64 only `bool`, AAPCS64
-/// elsewhere nothing (the upper bits are unspecified).
+/// elsewhere nothing (the upper bits are unspecified); RISC-V LP64D
+/// also sign-extends 32-bit integers, `u32` too.
 fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
     let narrow = match target.c_abi {
         CAbi::Aarch64 => matches!(target.os.as_str(), "macos" | "ios"),
@@ -5677,12 +5696,18 @@ fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
         | CAbi::X86Win
         | CAbi::ArmHf
         | CAbi::Wasm32
+        | CAbi::Riscv64
         | CAbi::Other => true,
     };
     match ty {
-        // C's `char` is unsigned on 32-bit ARM Linux (rok's `c_char` is
-        // signed: the same bits).
-        MirTy::Prim(PrimTy::CChar) if target.c_abi == CAbi::ArmHf => " {llvm.zeroext}",
+        // C's `char` is unsigned on 32-bit ARM and RISC-V Linux (rok's
+        // `c_char` is signed: the same bits).
+        MirTy::Prim(PrimTy::CChar) if matches!(target.c_abi, CAbi::ArmHf | CAbi::Riscv64) => {
+            " {llvm.zeroext}"
+        }
+        MirTy::Prim(PrimTy::I32 | PrimTy::U32 | PrimTy::Char) if target.c_abi == CAbi::Riscv64 => {
+            " {llvm.signext}"
+        }
         MirTy::Prim(PrimTy::I8 | PrimTy::I16 | PrimTy::CChar) if narrow => " {llvm.signext}",
         MirTy::Prim(PrimTy::U8 | PrimTy::U16) if narrow => " {llvm.zeroext}",
         MirTy::Prim(PrimTy::Bool) if narrow || target.c_abi == CAbi::X86_64Win => " {llvm.zeroext}",
