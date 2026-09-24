@@ -2,20 +2,30 @@
 //! handing a value to another owner (`Mutex::new(xs)`, `tx.send(xs)`,
 //! `Handoff::new(xs)`) leaves `xs` pointing at the object the new owner
 //! shares with other threads, and a handle taken out of a guard
-//! (`g.get()`, or given to it by `g.set(v)`) is unprotected once the
-//! guard's `using` block ends. Using either afterwards races.
+//! (`g.get()`, given to it by `g.set(v)`, or reached by the closure of
+//! `g.update(f)`) is unprotected once the guard's `using` block ends.
+//! Using either afterwards races.
 //!
-//! A forward flow over each body's structured HIR: a local is "gone"
-//! on some path from the hand-off (or the guard's `drop`) on, a use of
-//! a gone local is a finding, and assigning the local again re-arms
-//! it. Joins are unions (a use on any path counts); loops run to a
-//! fixpoint. Values whose type is `Sync` (numbers, `str`, `Mutex`,
+//! A forward flow over each body's structured HIR. What is tracked is a
+//! place: a local and a field path into it (`s`, `s.items`, `t.0`). A
+//! place is "gone" on some path from the hand-off (or the guard's
+//! `drop`) on, and a use of a gone place, of a place inside it, or of
+//! one containing it is a finding. Aliases are edges between places:
+//! a copy (`let ys = xs;`, `s.items = xs`, a struct or tuple literal
+//! field) makes two places the same object, and containment (a closure
+//! capturing `xs`, a list literal of it, a `match` binding of its
+//! scrutinee) puts one object inside another. A place going away takes
+//! every place aliased to it along. Assigning a place re-arms it and
+//! drops its edges. Joins are unions (a use on any path counts); loops
+//! run to a fixpoint. Uses of a `Sync` type (numbers, `str`, `Mutex`,
 //! `Sender`, ...) are exempt: sharing them is safe.
-// Only the local itself is tracked: a second handle copied out of it
-// before the hand-off (`let ys = xs;`) is not. Captures of a spawned
-// `+ Send` closure / future need no rule: they must already be `Sync`.
+// Values flowing through calls (`let ys = id(xs)`) are not followed. A
+// copy `t = s` whose field `t.f` is assigned later still ties all of
+// `t` to `s`. Captures of a spawned `+ Send` closure / future need no
+// rule: they must already be `Sync`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use rokc_diagnostic::Span;
 use rokc_ir_common::{FunctionId, LocalId};
@@ -44,8 +54,8 @@ const HANDOFFS: &[(&str, usize, &str)] = &[
     ("rok::core::marker::Handoff__new", 0, "Handoff::new"),
 ];
 
-/// Lock guards: `get` returns, and `set` stores, a handle the lock
-/// protects until `drop`.
+/// Lock guards: `get` returns, `set` stores, and `update`'s closure
+/// does both with a handle the lock protects until `drop`.
 const GUARDS: &[&str] = &[
     "rok::core::sync::MutexGuard",
     "rok::core::sync::RwLockReadGuard",
@@ -63,6 +73,7 @@ enum Op {
     Handoff(usize, &'static str),
     Get,
     Set,
+    Update,
     Drop,
 }
 
@@ -80,12 +91,35 @@ fn op_of(name: &str, guard: bool) -> Option<Op> {
     match path.rsplit('_').next()? {
         "get" => Some(Op::Get),
         "set" => Some(Op::Set),
+        "update" => Some(Op::Update),
         "drop" => Some(Op::Drop),
         _ => None,
     }
 }
 
-/// Why a local is gone.
+/// Marks a tuple index in a place path (struct fields are bare).
+const TUPLE: u32 = 1 << 31;
+/// Longest field path followed (alias chains cannot grow past it).
+const MAX_DEPTH: usize = 16;
+
+/// A local and a field path into it.
+type Place = (LocalId, Vec<u32>);
+
+/// `a` is `b` or a place inside it.
+fn within(a: &Place, b: &Place) -> bool {
+    a.0 == b.0 && a.1.starts_with(&b.1)
+}
+
+/// One of `a`, `b` is inside the other: they share memory.
+fn overlap(a: &Place, b: &Place) -> bool {
+    within(a, b) || within(b, a)
+}
+
+fn extend(p: &Place, rest: &[u32]) -> Place {
+    (p.0, [&p.1[..], rest].concat())
+}
+
+/// Why a place is gone.
 #[derive(Clone, Copy, PartialEq)]
 enum Gone {
     /// Handed over at this call.
@@ -94,11 +128,27 @@ enum Gone {
     Guard(Span, LocalId),
 }
 
+/// An alias: `Same` places are one object; `In(outer, inner)` holds
+/// `inner` somewhere inside `outer`.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Edge {
+    Same(Place, Place),
+    In(Place, Place),
+}
+
+impl Edge {
+    fn touches(&self, p: &Place) -> bool {
+        let (Self::Same(a, b) | Self::In(a, b)) = self;
+        within(a, p) || within(b, p)
+    }
+}
+
 #[derive(Clone, Default, PartialEq)]
 struct St {
-    gone: BTreeMap<LocalId, Gone>,
-    /// Guard local -> the locals holding what it protects.
-    tied: BTreeMap<LocalId, BTreeMap<LocalId, Span>>,
+    gone: BTreeMap<Place, Gone>,
+    /// Guard local -> the places holding what it protects.
+    tied: BTreeMap<LocalId, BTreeMap<Place, Span>>,
+    edges: BTreeSet<Edge>,
 }
 
 /// `None`: unreachable.
@@ -114,9 +164,89 @@ fn join(a: Option<St>, b: Option<St>) -> Option<St> {
                     t.entry(l).or_insert(s);
                 }
             }
+            a.edges.extend(b.edges);
             Some(a)
         }
         (a, b) => a.or(b),
+    }
+}
+
+/// Where a value flows when stored at a place `P`: `(Some(sub), q)`
+/// makes `P ++ sub` the same object as `q`, `(None, q)` puts `q`
+/// inside `P`.
+type Flow = (Option<Vec<u32>>, Place);
+
+/// The place `e` reads as is (`x`, `x.f.0`, `x` wrapped into a sum
+/// slot or cast).
+fn place(e: &HirExpr) -> Option<Place> {
+    match &e.kind {
+        HirExprKind::Local(l) => Some((*l, Vec::new())),
+        HirExprKind::FieldRead {
+            target,
+            field_index,
+            ..
+        } => place(target).map(|p| extend(&p, &[*field_index])),
+        HirExprKind::TupleField { target, index, .. } => {
+            place(target).map(|p| extend(&p, &[index | TUPLE]))
+        }
+        HirExprKind::SumWrap { value: Some(x), .. } | HirExprKind::Cast { operand: x, .. } => {
+            place(x)
+        }
+        HirExprKind::Block(b) if b.stmts.is_empty() => place(b.trailing.as_ref()?),
+        _ => None,
+    }
+}
+
+/// The places whose objects `e`'s value carries.
+fn flows(e: &HirExpr, out: &mut Vec<Flow>) {
+    if let Some(p) = place(e) {
+        out.push((Some(Vec::new()), p));
+        return;
+    }
+    let field = |i: u32, x: &HirExpr, out: &mut Vec<Flow>| {
+        let mut v = Vec::new();
+        flows(x, &mut v);
+        out.extend(
+            v.into_iter()
+                .map(|(sub, q)| (sub.map(|s| [&[i][..], &s].concat()), q)),
+        );
+    };
+    let inside = |x: &HirExpr, out: &mut Vec<Flow>| {
+        let mut v = Vec::new();
+        flows(x, &mut v);
+        out.extend(v.into_iter().map(|(_, q)| (None, q)));
+    };
+    match &e.kind {
+        HirExprKind::StructInit { fields, .. } => {
+            for (i, x) in fields.iter().enumerate() {
+                field(i as u32, x, out);
+            }
+        }
+        HirExprKind::Tuple { fields } => {
+            for (i, x) in fields.iter().enumerate() {
+                field(i as u32 | TUPLE, x, out);
+            }
+        }
+        HirExprKind::WithField {
+            target,
+            field_index,
+            value,
+            ..
+        } => {
+            flows(target, out);
+            field(*field_index, value, out);
+        }
+        HirExprKind::ClosureValue { env: x, .. } | HirExprKind::SumWrap { value: Some(x), .. } => {
+            inside(x, out);
+        }
+        HirExprKind::ArrayInit { elements: xs, .. }
+        | HirExprKind::EnumVariantInit { args: xs, .. } => xs.iter().for_each(|x| inside(x, out)),
+        HirExprKind::Block(b) => {
+            if let Some(t) = &b.trailing {
+                flows(t, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -128,14 +258,15 @@ struct Frame<'h> {
 }
 
 struct Walk<'a, 'h> {
+    env: &'a Env<'a>,
     ops: &'a HashMap<FunctionId, Op>,
     f: &'h HirFunction,
-    /// Locals whose type is not `Sync` (the only ones tracked).
-    tracked: HashSet<LocalId>,
+    /// A value of this type is not `Sync` (the only ones reported).
+    tracked: &'a dyn Fn(&HirTy) -> bool,
     cur: Option<St>,
     frames: Vec<Frame<'h>>,
     hits: &'a mut Vec<LintHit>,
-    reported: HashSet<(LocalId, u32, u32)>,
+    reported: HashSet<(Place, u32, u32)>,
 }
 
 pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) -> Vec<LintHit> {
@@ -164,7 +295,17 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) -> Vec<LintHit> {
     }
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
-    let mut cache: HashMap<String, bool> = HashMap::new();
+    let cache: RefCell<HashMap<String, bool>> = RefCell::default();
+    let tracked = |t: &HirTy| {
+        let key = t.stable_key();
+        if let Some(&v) = cache.borrow().get(&key) {
+            return v;
+        }
+        let v =
+            *t != HirTy::Unknown && !super::bounds::has_param(&ctx, t) && !ctx.has_trait(t, sync);
+        cache.borrow_mut().insert(key, v);
+        v
+    };
     for f in all {
         let Some(body) = &f.body else { continue };
         let mut calls = false;
@@ -175,22 +316,11 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) -> Vec<LintHit> {
         if !calls || ops.contains_key(&f.id) {
             continue;
         }
-        let tracked = f
-            .locals
-            .iter()
-            .filter(|l| {
-                *cache.entry(l.ty.stable_key()).or_insert_with(|| {
-                    l.ty != HirTy::Unknown
-                        && !super::bounds::has_param(&ctx, &l.ty)
-                        && !ctx.has_trait(&l.ty, sync)
-                })
-            })
-            .map(|l| l.id)
-            .collect();
         let mut w = Walk {
+            env,
             ops: &ops,
             f,
-            tracked,
+            tracked: &tracked,
             cur: Some(St::default()),
             frames: Vec::new(),
             hits: &mut hits,
@@ -212,17 +342,58 @@ impl<'h> Walk<'_, 'h> {
             .unwrap_or_else(|| "the value".to_owned())
     }
 
-    fn use_local(&mut self, l: LocalId, at: Span) {
-        let Some(g) = self.cur.as_ref().and_then(|s| s.gone.get(&l)).copied() else {
+    /// `e` (a place) as written: `s.items`, `t.0`.
+    fn show(&self, e: &HirExpr) -> String {
+        match &e.kind {
+            HirExprKind::Local(l) => self.name(*l),
+            HirExprKind::FieldRead {
+                target,
+                struct_id,
+                field_index,
+                ..
+            } => {
+                let structs = self.env.defs.structs.borrow();
+                let f = structs
+                    .get(struct_id.0 as usize)
+                    .and_then(|s| s.fields.get(*field_index as usize))
+                    .map_or_else(|| field_index.to_string(), |f| f.name.clone());
+                drop(structs);
+                format!("{}.{f}", self.show(target))
+            }
+            HirExprKind::TupleField { target, index, .. } => {
+                format!("{}.{index}", self.show(target))
+            }
+            HirExprKind::SumWrap { value: Some(x), .. } | HirExprKind::Cast { operand: x, .. } => {
+                self.show(x)
+            }
+            HirExprKind::Block(b) => b
+                .trailing
+                .as_ref()
+                .map_or_else(String::new, |t| self.show(t)),
+            _ => "the value".to_owned(),
+        }
+    }
+
+    /// A use of place `p`, written `e` (`None`: the whole local `p.0`).
+    fn use_place(&mut self, p: &Place, ty: &HirTy, written: Option<&HirExpr>, at: Span) {
+        let Some((gp, g)) = self.cur.as_ref().and_then(|st| {
+            st.gone
+                .iter()
+                .find(|(q, _)| overlap(p, q))
+                .map(|(q, why)| (q.clone(), *why))
+        }) else {
             return;
         };
+        if !(self.tracked)(ty) {
+            return;
+        }
         let origin = match g {
             Gone::To(s, _) | Gone::Guard(s, _) => s,
         };
-        if !self.reported.insert((l, origin.file, origin.start)) {
+        if !self.reported.insert((gp, origin.file, origin.start)) {
             return;
         }
-        let x = self.name(l);
+        let x = written.map_or_else(|| self.name(p.0), |e| self.show(e));
         let hit = match g {
             Gone::To(s, what) => LintHit {
                 lint: LINT,
@@ -251,22 +422,94 @@ impl<'h> Walk<'_, 'h> {
         self.hits.push(hit);
     }
 
-    /// `l` gets a new value.
-    fn assign(&mut self, l: LocalId) {
-        if let Some(s) = &mut self.cur {
-            s.gone.remove(&l);
-            for t in s.tied.values_mut() {
-                t.remove(&l);
+    /// `p` and every place aliased to it go away.
+    fn mark_gone(&mut self, p: Place, why: Gone) {
+        let Some(s) = &mut self.cur else { return };
+        let mut work = vec![p];
+        while let Some(q) = work.pop() {
+            if q.1.len() > MAX_DEPTH || s.gone.keys().any(|g| within(&q, g)) {
+                continue;
             }
+            for e in &s.edges {
+                match e {
+                    Edge::Same(a, b) => {
+                        for (x, y) in [(a, b), (b, a)] {
+                            if within(&q, y) {
+                                work.push(extend(x, &q.1[y.1.len()..]));
+                            } else if within(y, &q) {
+                                work.push(x.clone());
+                            }
+                        }
+                    }
+                    Edge::In(outer, inner) => {
+                        if overlap(&q, inner) {
+                            work.push(outer.clone());
+                        }
+                        if overlap(&q, outer) {
+                            work.push(inner.clone());
+                        }
+                    }
+                }
+            }
+            s.gone.retain(|g, _| !within(g, &q));
+            s.gone.insert(q, why);
         }
     }
 
-    fn tie(&mut self, guard: LocalId, l: LocalId, at: Span) {
-        if !self.tracked.contains(&l) {
-            return;
-        }
+    /// `p` gets a new value: it is ours again and aliases nothing.
+    fn assign(&mut self, p: &Place) {
         if let Some(s) = &mut self.cur {
-            s.tied.entry(guard).or_default().insert(l, at);
+            s.gone.retain(|g, _| !within(g, p));
+            for t in s.tied.values_mut() {
+                t.retain(|q, _| !within(q, p));
+            }
+            s.edges.retain(|e| !e.touches(p));
+        }
+    }
+
+    /// `p` now holds `e`'s value (`part`: a part of it).
+    fn store(&mut self, p: &Place, e: &HirExpr, part: bool) {
+        self.assign(p);
+        let mut fl = Vec::new();
+        flows(e, &mut fl);
+        if let Some(s) = &mut self.cur {
+            for (sub, q) in fl {
+                let edge = match sub {
+                    _ if part => Edge::In(q, p.clone()),
+                    Some(sub) => Edge::Same(extend(p, &sub), q),
+                    None => Edge::In(p.clone(), q),
+                };
+                if !matches!(&edge, Edge::Same(a, b) if a == b) {
+                    s.edges.insert(edge);
+                }
+            }
+        }
+        if let Some(g) = self.got_from(e) {
+            self.tie(g, p.clone(), e.span);
+        }
+    }
+
+    /// Place `p` becomes `e`. A field update of `p` itself
+    /// (`p.f = v`, lowered to `p = p with f: v`) stores into `p.f`.
+    fn assign_into(&mut self, p: Place, e: &'h HirExpr) {
+        if let HirExprKind::WithField {
+            target,
+            field_index,
+            value,
+            ..
+        } = &e.kind
+        {
+            if place(target).as_ref() == Some(&p) {
+                return self.assign_into(extend(&p, &[*field_index]), value);
+            }
+        }
+        self.expr(e);
+        self.store(&p, e, false);
+    }
+
+    fn tie(&mut self, guard: LocalId, p: Place, at: Span) {
+        if let Some(s) = &mut self.cur {
+            s.tied.entry(guard).or_default().insert(p, at);
         }
     }
 
@@ -274,7 +517,7 @@ impl<'h> Walk<'_, 'h> {
     fn got_from(&self, e: &HirExpr) -> Option<LocalId> {
         match &e.kind {
             HirExprKind::Call { callee, args } if self.ops.get(callee) == Some(&Op::Get) => {
-                local(args.first()?)
+                Some(place(args.first()?)?.0)
             }
             HirExprKind::FieldRead { target: x, .. }
             | HirExprKind::TupleField { target: x, .. }
@@ -315,21 +558,26 @@ impl<'h> Walk<'_, 'h> {
     fn stmt(&mut self, s: &'h HirStmt) {
         match s {
             HirStmt::Let { local: l, init: e } | HirStmt::Assign { local: l, value: e } => {
-                self.expr(e);
-                self.assign(*l);
-                if let Some(g) = self.got_from(e) {
-                    self.tie(g, *l, e.span);
-                }
+                self.assign_into((*l, Vec::new()), e);
             }
             HirStmt::ArrayAssign {
                 array_local,
+                path,
                 index,
                 value,
                 ..
             } => {
                 self.expr(index);
                 self.expr(value);
-                self.use_local(*array_local, index.span);
+                let ty = self
+                    .f
+                    .locals
+                    .iter()
+                    .find(|x| x.id == *array_local)
+                    .map(|x| &x.ty);
+                if let Some(ty) = ty {
+                    self.use_place(&(*array_local, path.clone()), ty, None, index.span);
+                }
             }
             HirStmt::StaticAssign { value: e, .. } | HirStmt::Expr(e) => self.expr(e),
             HirStmt::Return(e) => {
@@ -392,8 +640,17 @@ impl<'h> Walk<'_, 'h> {
         if self.cur.is_none() {
             return;
         }
+        if let Some(p) = place(e).filter(|_| {
+            matches!(
+                e.kind,
+                HirExprKind::Local(_)
+                    | HirExprKind::FieldRead { .. }
+                    | HirExprKind::TupleField { .. }
+            )
+        }) {
+            return self.use_place(&p, &e.ty, Some(e), e.span);
+        }
         match &e.kind {
-            HirExprKind::Local(l) => self.use_local(*l, e.span),
             HirExprKind::Block(b) => self.block(b),
             HirExprKind::If {
                 cond,
@@ -420,9 +677,7 @@ impl<'h> Walk<'_, 'h> {
                 for a in arms {
                     self.cur = base.clone();
                     each_binding(&a.pat, &mut |l| {
-                        if let Some(s) = &mut self.cur {
-                            s.gone.remove(&l);
-                        }
+                        self.store(&(l, Vec::new()), scrutinee, true);
                     });
                     if let Some(g) = &a.guard {
                         self.expr(g);
@@ -449,44 +704,46 @@ impl<'h> Walk<'_, 'h> {
     }
 
     fn call(&mut self, op: Option<Op>, args: &[HirExpr], at: Span) {
-        let arg = |i: usize| args.get(i).and_then(local);
+        let carried = |i: usize| {
+            let mut fl = Vec::new();
+            if let Some(a) = args.get(i) {
+                flows(a, &mut fl);
+            }
+            fl.into_iter().map(|(_, q)| q).collect::<Vec<_>>()
+        };
+        let guard = args.first().and_then(place).map(|p| p.0);
         match op {
             Some(Op::Handoff(i, what)) => {
-                let l = arg(i).filter(|l| self.tracked.contains(l));
-                if let (Some(l), Some(s)) = (l, &mut self.cur) {
-                    s.gone.insert(l, Gone::To(at, what));
+                for q in carried(i) {
+                    self.mark_gone(q, Gone::To(at, what));
                 }
             }
             // The lock now guards the new value, not what `get` returned.
             Some(Op::Set) => {
-                let Some(g) = arg(0) else { return };
+                let Some(g) = guard else { return };
                 if let Some(s) = &mut self.cur {
                     s.tied.remove(&g);
                 }
-                if let Some(l) = arg(1) {
-                    self.tie(g, l, at);
+                for q in carried(1) {
+                    self.tie(g, q, at);
+                }
+            }
+            // The closure's captures may receive the guarded value or
+            // hand theirs to the lock.
+            Some(Op::Update) => {
+                let Some(g) = guard else { return };
+                for q in carried(1) {
+                    self.tie(g, q, at);
                 }
             }
             Some(Op::Drop) => {
-                let (Some(g), Some(s)) = (arg(0), &mut self.cur) else {
-                    return;
-                };
-                for (l, span) in s.tied.remove(&g).unwrap_or_default() {
-                    s.gone.insert(l, Gone::Guard(span, g));
+                let Some(g) = guard else { return };
+                let tied = self.cur.as_mut().and_then(|s| s.tied.remove(&g));
+                for (q, span) in tied.unwrap_or_default() {
+                    self.mark_gone(q, Gone::Guard(span, g));
                 }
             }
             Some(Op::Get) | None => {}
         }
-    }
-}
-
-/// The local `e` passes as is (`x`, or `x` wrapped into a sum slot).
-fn local(e: &HirExpr) -> Option<LocalId> {
-    match &e.kind {
-        HirExprKind::Local(l) => Some(*l),
-        HirExprKind::SumWrap { value: Some(x), .. } | HirExprKind::Cast { operand: x, .. } => {
-            local(x)
-        }
-        _ => None,
     }
 }

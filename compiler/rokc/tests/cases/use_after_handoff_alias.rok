@@ -1,0 +1,132 @@
+// expect-exit: 0
+// expect-stdout: 1 1 1 2 1 1 3 0 5 4 2 1 1
+// expect-lint: 30:5 `ys` is used after it was handed over to `Mutex::new`
+// expect-lint: 38:5 `xs` is used after it was handed over to `Mutex::new`
+// expect-lint: 46:5 `s.items` is used after it was handed over to `Mutex::new`
+// expect-lint: 53:5 `xs` is used after it was handed over to `Mutex::new`
+// expect-lint: 60:5 `ys` is used after it was handed over to `Mutex::new`
+// expect-lint: 67:5 `f` is used after it was handed over to `Mutex::new`
+// expect-lint: 76:5 `keep` is used after guard `g` released its lock
+// expect-lint: 84:5 `mine` is used after guard `g` released its lock
+// spec: std 213-marker §2.13.9 / std 216-sync §2.16.3
+
+// No move semantics: every handle to the object a new owner took
+// shares it, not just the local that was passed. A copy made before
+// the hand-off, a field passed on its own (`Mutex::new(s.items)`), a
+// handle reached through a struct, and a closure capturing it are all
+// gone afterwards (lint `use_after_handoff`). So are the captures of a
+// guard's `update` closure once the guard's `using` block ends: they
+// may hold the guarded value, or have handed theirs to the lock.
+
+struct Bag {
+    items: List<i32>;
+    n: i64;
+}
+
+fn copied() -> i64 {
+    let xs: List<i32> = [1];
+    let ys = xs;
+    let _m = Mutex::new(xs);
+    ys.len() as i64
+}
+
+// The copy is handed over; the original shares it.
+fn copy_handed() -> i64 {
+    let xs: List<i32> = [1];
+    let ys = xs;
+    let _m = Mutex::new(ys);
+    xs.len() as i64
+}
+
+// A `Sync` field of the same struct is fine.
+fn field() -> i64 {
+    let s = Bag { items: [1], n: 1 };
+    let _m = Mutex::new(s.items);
+    let k = s.n;
+    s.items.len() as i64 + k - 1
+}
+
+fn through_struct() -> i64 {
+    let xs: List<i32> = [1, 2];
+    let s = Bag { items: xs, n: 0 };
+    let _m = Mutex::new(s);
+    xs.len() as i64
+}
+
+fn field_of_handed() -> i64 {
+    let s = Bag { items: [1], n: 0 };
+    let ys = s.items;
+    let _m = Mutex::new(s);
+    ys.len() as i64
+}
+
+fn captured() -> i64 {
+    let xs: List<i32> = [1];
+    let f = || xs.len() as i64;
+    let _m = Mutex::new(xs);
+    f()
+}
+
+fn update_keeps(m: Mutex<List<i32>>) -> i64 {
+    let keep: List<List<i32>> = [];
+    using g = m.lock() {
+        g.update(|v| { keep.push(v); v });
+        keep[0].push(3);
+    }
+    keep[0].len() as i64
+}
+
+fn update_gives(m: Mutex<List<i32>>) -> i64 {
+    let mine: List<i32> = [];
+    using g = m.lock() {
+        g.update(|_| mine);
+    }
+    mine.len() as i64
+}
+
+// Assigning a field re-arms that field.
+fn field_reassigned() -> i64 {
+    let s = Bag { items: [1], n: 0 };
+    let _m = Mutex::new(s.items);
+    s.items = [1, 2, 3, 4, 5];
+    s.items.len() as i64
+}
+
+// The copy got a new value before the hand-off: it shares nothing.
+fn copy_reassigned() -> i64 {
+    let xs: List<i32> = [1];
+    let ys = xs;
+    ys = [1, 2, 3, 4];
+    let _m = Mutex::new(xs);
+    ys.len() as i64
+}
+
+fn update_sync(m: Mutex<List<i32>>) -> i64 {
+    let n = 2i64;
+    using g = m.lock() {
+        g.update(|v| { v.push(n as i32); v });
+    }
+    n
+}
+
+fn cloned_copy() -> i64 {
+    let xs: List<i32> = [1];
+    let ys = xs.clone();
+    let _m = Mutex::new(xs);
+    ys.len() as i64
+}
+
+#[allow(use_after_handoff)]
+fn allowed() -> i64 {
+    let xs: List<i32> = [1];
+    let ys = xs;
+    let _m = Mutex::new(xs);
+    ys.len() as i64
+}
+
+fn main() {
+    let a = f"{copied()} {copy_handed()} {field()} {through_struct()} {field_of_handed()}";
+    let b = f"{captured()} {update_keeps(Mutex::new([1, 2]))} {update_gives(Mutex::new([7]))}";
+    let c = f"{field_reassigned()} {copy_reassigned()} {update_sync(Mutex::new([]))}";
+    println(f"{a} {b} {c} {cloned_copy()} {allowed()}");
+}
