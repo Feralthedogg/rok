@@ -90,10 +90,8 @@ fn in_archive(f: &FnDef) -> bool {
     f.generics.params.is_empty()
         && !f.is_async
         && !f.is_generator
-        && !f
-            .attrs
-            .iter()
-            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_FN_ATTR])
+        && !rokc_ast::inline_wanted(&f.attrs)
+        && !f.attrs.iter().any(|a| a.path == [rokc_ast::EXTERN_FN_ATTR])
 }
 
 /// A body small enough to copy into a program for inlining
@@ -1186,7 +1184,7 @@ fn collect<'a>(
                     at: here,
                 };
                 let sig = sig_of(fn_def, id, sc);
-                fn_table.insert(fn_def.name.clone(), sig);
+                fn_table.insert(fn_def.name.clone(), std::sync::Arc::new(sig));
                 decls.push(MethodOrFn::Fn(fn_def));
                 lib_decl.push(!package_of(&module).is_empty());
             }
@@ -1259,7 +1257,10 @@ fn collect<'a>(
                         module: "",
                         at: here,
                     };
-                    fn_table.insert(fn_def.name.clone(), sig_of(fn_def, id, sc));
+                    fn_table.insert(
+                        fn_def.name.clone(),
+                        std::sync::Arc::new(sig_of(fn_def, id, sc)),
+                    );
                     if rok_abi {
                         rok_externs.insert(id);
                         if quiet {
@@ -1702,7 +1703,7 @@ fn collect<'a>(
                 // A trait impl's generic method (`fn from_iter<I>` of
                 // `impl FromIterator<char> for str`): as visible as the trait.
                 slot.push(GenericMethod {
-                    def,
+                    def: std::sync::Arc::new(def),
                     self_ty: impl_def.self_ty.clone(),
                     info: MethodInfo {
                         module: module.clone(),
@@ -1767,7 +1768,7 @@ fn collect<'a>(
             };
             let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
             let sig = sig_of(m, id, sc);
-            fn_table.insert(key.clone(), sig);
+            fn_table.insert(key.clone(), std::sync::Arc::new(sig));
             if let Some(i) = intrinsic_of(m, &module, &mut pre_diags) {
                 intrinsics.insert(id, i);
             }
@@ -1887,7 +1888,7 @@ fn collect<'a>(
                             );
                         }
                         slot.push(GenericMethod {
-                            def,
+                            def: std::sync::Arc::new(def),
                             self_ty: impl_def.self_ty.clone(),
                             info: MethodInfo {
                                 module: trait_module.clone(),
@@ -1951,7 +1952,7 @@ fn collect<'a>(
                     at: here,
                 };
                 let sig = sig_of(&tm, id, tsc);
-                fn_table.insert(key.clone(), sig);
+                fn_table.insert(key.clone(), std::sync::Arc::new(sig));
                 if let Some(t) = target.clone() {
                     method_table
                         .entry((t, tm.name.clone()))
@@ -2669,10 +2670,13 @@ fn check_tiers(
 }
 
 /// Put each declaration's signature in `fn_table` (aliases included).
-fn install_sigs(fn_table: &mut HashMap<String, FnSig>, sigs: &HashMap<FunctionId, FnSig>) {
+fn install_sigs(
+    fn_table: &mut HashMap<String, std::sync::Arc<FnSig>>,
+    sigs: &HashMap<FunctionId, FnSig>,
+) {
     for sig in fn_table.values_mut() {
         if let Some(s) = sigs.get(&sig.id) {
-            sig.clone_from(s);
+            *sig = std::sync::Arc::new(s.clone());
         }
     }
 }
@@ -4019,7 +4023,7 @@ fn generic_trait_impl(
             .cloned()
             .collect();
         GenericMethod {
-            def,
+            def: std::sync::Arc::new(def),
             self_ty: impl_def.self_ty.clone(),
             info: MethodInfo {
                 module: def_module.to_owned(),
@@ -6926,7 +6930,7 @@ pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
 /// took that name (spec 4.9.6 picks one at the call site). `None`: the
 /// same trait / inherent impl defines it twice.
 fn method_key(
-    fn_table: &HashMap<String, FnSig>,
+    fn_table: &HashMap<String, std::sync::Arc<FnSig>>,
     method_info: &HashMap<FunctionId, MethodInfo>,
     target: &HirTy,
     leaf: &str,

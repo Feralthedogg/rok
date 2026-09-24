@@ -442,6 +442,39 @@ g()
     );
 }
 
+/// The library is collected (or its stage read back) once per session:
+/// later cells take the stage the first one kept, whatever their text.
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+// spec: §9.2.16 §9.7.1
+fn repl_collects_the_library_once() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let out = piped_env(
+        ROKC,
+        &["repl", "--rokr", &rokr],
+        "let a = 1;\na + 1\nlet b = a * 3;\nb\n",
+        &[("ROK_TIME_PASSES", "1")],
+    );
+    let stderr = text(&out.stderr);
+    assert_eq!(text(&out.stdout), "i32: 2\ni32: 3\n", "stderr: {stderr}");
+    // Looked up in the store by the first cell only.
+    let reads = stderr
+        .lines()
+        .filter(|l| l.ends_with("hir library read"))
+        .count();
+    assert_eq!(reads, 1, "{stderr}");
+}
+
 /// `repl <path>`: the program runs in the session, which goes on with its
 /// bindings and items. A failure keeps the bindings made before the
 /// cell (the stretch ending at a top-level `let`) that failed; panic

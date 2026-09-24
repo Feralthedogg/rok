@@ -7,7 +7,7 @@ mod coro;
 mod entry;
 mod harness;
 mod incr;
-pub use incr::Reuse;
+pub use incr::{LIBRARY_STAGES, Reuse};
 pub mod native;
 pub mod rokhir;
 mod toolchain;
@@ -76,6 +76,10 @@ pub struct CompilerConfig {
     /// Keep every parsed file's AST in `CompiledProject::sources`
     /// (`rokc lint` / `rokc doc`).
     pub keep_ast: bool,
+    /// With `keep_ast`: a library stage may stand for the library's
+    /// files, its items in `CompiledProject::library` (a check's lints
+    /// and tools read items; `rokc doc` reads files).
+    pub library_items: bool,
     /// The input is a lone file outside any package (spec 4.16.8): it is
     /// the anonymous package's `main.rok` and cannot have `mod foo;`.
     pub anonymous: bool,
@@ -405,6 +409,9 @@ pub struct CompiledProject {
     pub tests: Vec<String>,
     /// Parsed files, when `CompilerConfig::keep_ast`.
     pub sources: Vec<SourceFile>,
+    /// The library's items when a library stage stood for its files
+    /// (`CompilerConfig::library_items`).
+    pub library: Option<&'static rokc_ast::Program>,
     /// The source files read from disk (`#[path]` ones outside the
     /// package too).
     pub files: Vec<PathBuf>,
@@ -687,6 +694,7 @@ fn compile_unit_in(
             sub_dir.map(Path::to_path_buf),
         )],
         files,
+        incr::current().as_deref().map(|i| &i.parse),
     );
     prepass_tree(path, sub_dir, &[], &mut pre, &mut metas, &mut user);
     for (sub, mut d) in user {
@@ -773,7 +781,7 @@ fn compile_unit_in(
         config.test,
         config.bench,
     );
-    let stage_key = ((config.cache_library || incr.is_some()) && !config.keep_ast && lib.is_none())
+    let stage_key = ((!config.keep_ast || config.library_items) && lib.is_none())
         .then(|| library_key(&flags, &roots, &root_dir_kw, &metas, &ext, &prec, files));
     let kept_parts = stage_key.and_then(|k| kept_library(k, incr.as_deref(), &ids));
     if kept_parts.is_some() && !verify {
@@ -1025,6 +1033,11 @@ fn compile_unit_in(
     if let (Some(k), false) = (library, kept) {
         keep_library(k, parts, files);
     }
+    let library_items =
+        library.and_then(|k| rokc_hir::with_library(k, rokc_hir::LibraryStage::items));
+    if library_items.is_some() {
+        sources.retain(|f| f.package.is_empty());
+    }
     if let Some(i) = incr::current() {
         i.bodies_reused(hir.reuse.replayed, hir.reuse.lowered);
     }
@@ -1077,6 +1090,7 @@ fn compile_unit_in(
         warnings: diags.into_iter().filter(|d| !d.is_error()).collect(),
         tests,
         sources,
+        library: library_items,
         files: READ.with(std::cell::RefCell::take),
         reuse: None,
     })
@@ -1165,13 +1179,20 @@ fn build_prec_table(
     metas: &mut PrePass,
     sources: &mut SourceMap,
 ) -> PrecTable {
+    // The library's summaries are kept apart from a package's: every
+    // build of the toolchain shares them (a lone file's too).
+    let store = incr::library_prepass();
     let mut files = prepass_parse(
         roots
             .iter()
             .map(|(_, root)| (root.clone(), None, root.parent().map(Path::to_path_buf)))
             .collect(),
         sources,
+        store.as_ref(),
     );
+    if let Some(s) = &store {
+        s.save(incr::PARSE);
+    }
     let mut table = PrecTable::new();
     for (pkg, root) in roots {
         let mut tables = Vec::new();
@@ -1199,6 +1220,7 @@ type PreFiles = std::collections::HashMap<PathBuf, (u32, Prepassed)>;
 fn prepass_parse(
     roots: Vec<(PathBuf, Option<String>, Option<PathBuf>)>,
     sources: &mut SourceMap,
+    store: Option<&incr::Store>,
 ) -> PreFiles {
     let mut files = std::collections::HashMap::new();
     let mut seen = std::collections::HashSet::new();
@@ -1213,13 +1235,12 @@ fn prepass_parse(
                 Some((path, sub_dir, source, id))
             })
             .collect();
-        let incr = incr::current();
-        let ids = incr.is_some().then(|| incr::Ids::of(sources));
+        let ids = store.is_some().then(|| incr::Ids::of(sources));
         let parsed: Vec<Prepassed> = std::thread::scope(|s| {
             let mut parses = Vec::new();
             for (path, _, source, id) in &jobs {
-                let incr = incr.as_deref().zip(ids.as_ref());
-                parses.push(s.spawn(move || prepass_file(path, source, *id, incr)));
+                let store = store.zip(ids.as_ref());
+                parses.push(s.spawn(move || prepass_file(path, source, *id, store)));
             }
             parses
                 .into_iter()
@@ -1236,16 +1257,16 @@ fn prepass_parse(
 }
 
 /// One pre-pass file `id`: lexed without extension operators and parsed
-/// (or its summary from the incremental store).
+/// (or its summary from `store`).
 fn prepass_file(
     path: &Path,
     source: &str,
     id: u32,
-    incr: Option<(&incr::Incr, &incr::Ids)>,
+    store: Option<(&incr::Store, &incr::Ids)>,
 ) -> Prepassed {
     let file = path.display().to_string();
     let k = incr::key(&[b"pre", file.as_bytes(), source.as_bytes()]);
-    if let Some(sum) = incr.and_then(|(i, ids)| i.parse.get::<Summary>(k, ids)) {
+    if let Some(sum) = store.and_then(|(s, ids)| s.get::<Summary>(k, ids)) {
         return Prepassed {
             source: source.to_owned(),
             sum,
@@ -1255,8 +1276,8 @@ fn prepass_file(
     let (program, sum) = plain_parse(&file, source, id, |tokens, program, quiet| {
         Summary::of(tokens, program, quiet, &file, source)
     });
-    if let Some((i, ids)) = incr {
-        i.parse.put(k, &sum, ids);
+    if let Some((s, ids)) = store {
+        s.put(k, &sum, ids);
     }
     Prepassed {
         source: source.to_owned(),
@@ -1992,9 +2013,8 @@ fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<Li
     let parts = if let Some(p) = here {
         p
     } else {
-        let i = incr?;
         let (parts, stage) = rokc_diagnostic::time("hir library read", || {
-            i.library_get(k, ids, |d| {
+            incr::library_get(k, ids, |d| {
                 Some((
                     <LibParts as rokc_core::codec::Codec>::dec(d)?,
                     rokc_hir::LibraryStage::dec(d)?,
@@ -2015,26 +2035,26 @@ fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<Li
 /// Keep the library stage of key `k` HIR collected (with `parts`) for
 /// the next compile: in this process, and in the store.
 fn keep_library(k: u64, parts: LibParts, files: &SourceMap) {
-    if let Some(i) = incr::current() {
-        let ids = incr::Ids::of(files);
-        rokc_diagnostic::time("hir library write", || {
-            rokc_hir::with_library(k, |s| {
-                i.library_put(k, &ids, |e| {
-                    rokc_core::codec::Codec::enc(&parts, e);
-                    s.enc(e)
-                });
+    let ids = incr::Ids::of(files);
+    rokc_diagnostic::time("hir library write", || {
+        rokc_hir::with_library(k, |s| {
+            incr::library_put(k, &ids, |e| {
+                rokc_core::codec::Codec::enc(&parts, e);
+                s.enc(e)
             });
         });
-    }
+    });
     *LIB_PARTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, parts));
 }
 
 /// The key of the library's collected stage: the build's flags, each
-/// library package's parse tables, the operators, every file outside
-/// the user package (id, path, text, what it includes) and the source
+/// library package's parse tables, the operators, every file of a
+/// library package (id, path, text, what it includes) and the source
 /// files under the library's directories (a module's file or folder).
+/// Files of no package (a REPL cell's `<repl>`) are views of the user's
+/// text.
 fn library_key(
     flags: &str,
     roots: &[LibRoot],
@@ -2053,7 +2073,7 @@ fn library_key(
     let mut ops: Vec<String> = prec.entries().map(|e| format!("{e:?}")).collect();
     ops.sort();
     add(ops.join(";").as_bytes());
-    let lib_file = |p: &Path| package_of(&pkgs, p).is_none_or(|(i, _)| i != 0);
+    let lib_file = |p: &Path| package_of(&pkgs, p).is_some_and(|(i, _)| i != 0);
     for (i, (path, text)) in files.files().iter().enumerate() {
         if lib_file(Path::new(path)) {
             add(&i.to_le_bytes());

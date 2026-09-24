@@ -256,10 +256,8 @@ fn cut(f: &FnDef) -> bool {
         && f.generics.params.is_empty()
         && !f.is_async
         && !f.is_generator
-        && !f
-            .attrs
-            .iter()
-            .any(|a| a.name() == "inline" || a.path == [rokc_ast::EXTERN_FN_ATTR])
+        && !rokc_ast::inline_wanted(&f.attrs)
+        && !f.attrs.iter().any(|a| a.path == [rokc_ast::EXTERN_FN_ATTR])
 }
 
 fn cut_spans(items: &[Item], out: &mut Vec<(rokc_diagnostic::Span, rokc_diagnostic::Span)>) {

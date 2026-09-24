@@ -491,8 +491,56 @@ fn front_end_reuses_parses_and_bodies() {
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
 }
 
+/// 902.16: `rokc check` takes the library's collected stage from the
+/// toolchain's cache too, and its lints read the library's items from
+/// it: a dependency's `#[must_use]` holds and a library trait's import
+/// is no unused one, as when the library was parsed.
+// spec: §9.1.2 §9.2.16
+#[test]
+fn check_takes_the_library_stage() {
+    let Some(_) = setup() else { return };
+    let dir = scratch("check-stage");
+    put(
+        dir.join("dep/src/lib.rok"),
+        "#[must_use]\npub fn token() -> i64 {\n    7\n}\n\npub trait Mark {}\n\n\
+         pub fn plain() -> i64 {\n    1\n}\n",
+    )
+    .unwrap();
+    put(
+        dir.join("app/src/main.rok"),
+        "use dep::Mark;\nuse dep::plain;\nuse rok::core::ops::Add;\n\n\
+         fn main() {\n    dep::token();\n}\n",
+    )
+    .unwrap();
+    let check = || {
+        let out = Command::new(ROKC)
+            .current_dir(&dir)
+            .env("ROK_HOME", workspace())
+            .env("ROK_TIME_PASSES", "1")
+            .args(["check", "app", "--extern", "dep=dep"])
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        let err = text(&out.stderr);
+        let lints: Vec<&str> = err.lines().filter(|l| l.starts_with("warning")).collect();
+        assert_eq!(
+            lints,
+            [
+                "warning[E503]: unused import `dep::plain`",
+                "warning[E503]: unused result of `token`, which is `#[must_use]`",
+            ],
+            "{err}"
+        );
+        err.contains("hir library write")
+    };
+    // Collected and kept, then taken.
+    assert!(check());
+    assert!(!check());
+}
+
 /// 902.16: what collecting the library's items made (the toolchain's
-/// library and the prebuilt dependencies) is kept across processes. An
+/// library and the prebuilt dependencies) is kept across processes, in
+/// the toolchain's cache (`rok-cache/library/`). An
 /// edit in the package (a body, a signature, a `const`, a trait impl)
 /// takes it; an edit of a dependency's item the package uses collects
 /// again; a corrupt store is a miss and is written anew. Each build's
@@ -587,26 +635,30 @@ fn library_stage_persists_across_builds() {
     assert_eq!(build(), (false, "3 28 8 0\n".to_owned()));
     edit(") + 2", ") + 3");
     assert_eq!(build(), (true, "4 28 8 0\n".to_owned()));
-    // A corrupt store: a miss, written anew.
-    let mut stages = Vec::new();
-    let mut todo = vec![dir.join("app")];
-    while let Some(d) = todo.pop() {
-        for e in fs::read_dir(&d).unwrap().flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                todo.push(p);
-            } else if p
-                .file_name()
+    // A corrupt store: a miss, written anew. The stages are the
+    // toolchain's (beside a repository build of rokc); this one's name
+    // the dependency's files.
+    let stages_dir = Path::new(ROKC).parent().unwrap().join("rok-cache/library");
+    let dep_dir = fs::canonicalize(dir.join("dep"))
+        .unwrap()
+        .display()
+        .to_string();
+    let stages: Vec<PathBuf> = fs::read_dir(&stages_dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with("library-"))
-            {
-                stages.push(p);
-            }
-        }
-    }
+                && fs::read(p)
+                    .is_ok_and(|b| b.windows(dep_dir.len()).any(|w| w == dep_dir.as_bytes()))
+        })
+        .collect();
     assert!(
         !stages.is_empty(),
-        "no library stage under {}",
-        dir.display()
+        "no library stage of {} under {}",
+        dir.display(),
+        stages_dir.display()
     );
     for p in &stages {
         let mut bytes = fs::read(p).unwrap();

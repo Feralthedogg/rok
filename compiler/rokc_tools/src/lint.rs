@@ -220,7 +220,7 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
         .iter()
         .filter(|f| f.package.is_empty())
         .collect();
-    let mut cx = Cx::new(&result.sources, texts);
+    let mut cx = Cx::new(&result.sources, result.library, texts);
     let mut regions = Vec::new();
     for f in &user {
         regions.extend(file_regions(f, &user, &mut out));
@@ -519,12 +519,17 @@ fn each_fn(items: &[Item], visit: &mut dyn FnMut(&FnDef)) {
     }
 }
 
+/// The last segment of a (library stage's qualified) item name.
+fn leaf(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
 /// Trait names declared in `items`.
 fn collect_traits(items: &[Item], out: &mut HashSet<String>) {
     for i in items {
         match i {
             Item::Trait(t) => {
-                out.insert(t.name.clone());
+                out.insert(leaf(&t.name).to_owned());
             }
             Item::Mod(m) => collect_traits(m.items.as_deref().unwrap_or(&[]), out),
             _ => {}
@@ -532,22 +537,22 @@ fn collect_traits(items: &[Item], out: &mut HashSet<String>) {
     }
 }
 
-/// Every function of `files` (impl / trait methods too), by short name:
+/// Every function of `items` (impl / trait methods too), by short name:
 /// the message of the `attr` attribute, for names no function without it
 /// shares.
-fn marked_fns(files: &[SourceFile], attr: &str) -> HashMap<String, String> {
+fn marked_fns(items: &[&[Item]], attr: &str) -> HashMap<String, String> {
     let mut marked: HashMap<String, String> = HashMap::new();
     let mut plain: HashSet<String> = HashSet::new();
     let mut visit = |f: &FnDef| match attr_msg(&f.attrs, attr) {
         Some(m) => {
-            marked.insert(f.name.clone(), m);
+            marked.insert(leaf(&f.name).to_owned(), m);
         }
         None => {
-            plain.insert(f.name.clone());
+            plain.insert(leaf(&f.name).to_owned());
         }
     };
-    for f in files {
-        each_fn(&f.items, &mut visit);
+    for i in items {
+        each_fn(i, &mut visit);
     }
     marked.retain(|n, _| !plain.contains(n));
     marked
@@ -642,10 +647,21 @@ const fn key(s: Span) -> (u32, u32) {
 }
 
 impl<'a> Cx<'a> {
-    fn new(all: &[SourceFile], texts: &'a [(String, String)]) -> Self {
+    /// `all`: the parsed files; `library`: the items of the library
+    /// files `all` leaves out.
+    fn new(
+        all: &[SourceFile],
+        library: Option<&rokc_ast::Program>,
+        texts: &'a [(String, String)],
+    ) -> Self {
+        let all: Vec<&[Item]> = all
+            .iter()
+            .map(|f| f.items.as_slice())
+            .chain(library.map(|p| p.items.as_slice()))
+            .collect();
         let mut traits = HashSet::new();
-        for f in all {
-            collect_traits(&f.items, &mut traits);
+        for items in &all {
+            collect_traits(items, &mut traits);
         }
         Self {
             texts,
@@ -658,8 +674,8 @@ impl<'a> Cx<'a> {
             all_names: HashSet::new(),
             casts: HashSet::new(),
             clones: HashSet::new(),
-            must_use: marked_fns(all, "must_use"),
-            deprecated: marked_fns(all, "deprecated"),
+            must_use: marked_fns(&all, "must_use"),
+            deprecated: marked_fns(&all, "deprecated"),
             traits,
         }
     }

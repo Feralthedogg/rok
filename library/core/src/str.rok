@@ -340,6 +340,9 @@ fn space_at(s: str, pos: usize) -> usize {
     space_at_wide(s, pos, b)
 }
 
+// Out of line: inlined, it makes `space_at` too big to inline into the
+// iterators' loops.
+#[inline(never)]
 fn space_at_wide(s: str, pos: usize, b: u8) -> usize {
     if b < 0xC0u8 { return 0usize; }
     let it = CharsIter { s: s, pos: pos };

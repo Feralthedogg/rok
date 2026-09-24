@@ -551,7 +551,7 @@ pub(super) fn templates(
             out.insert(
                 (key.clone(), m.clone()),
                 GenericMethod {
-                    def,
+                    def: std::sync::Arc::new(def),
                     self_ty,
                     info: MethodInfo {
                         module: module.clone(),
@@ -655,7 +655,7 @@ pub(super) fn check_all(
                 .generic()
                 .flat_map(|gi| gi.methods.values())
                 .chain(env.generic_methods.values().flatten())
-                .map(|gm| (&gm.def, SelfOf::Impl(&gm.self_ty))),
+                .map(|gm| (&*gm.def, SelfOf::Impl(&gm.self_ty))),
         )
         .filter(|(f, _)| f.body.is_some() && !implicit(f) && !defaults.contains(&f.span))
         .map(|(f, s)| (f, module_of(&f.name), s))

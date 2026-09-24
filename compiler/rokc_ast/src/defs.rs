@@ -41,6 +41,18 @@ pub fn extern_fn_abi(attrs: &[crate::Attribute]) -> Option<&str> {
     })
 }
 
+/// Whether `attrs` ask for inlining (`#[inline]`, `#[inline(always)]`;
+/// not `#[inline(never)]`): a prebuilt package's function so marked is
+/// copied into its users rather than kept in its `.a` alone.
+#[must_use]
+pub fn inline_wanted(attrs: &[crate::Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.name() == "inline"
+            && !matches!(&a.body, crate::AttrBody::Args(xs)
+                if matches!(xs.as_slice(), [crate::AttrArg::Word(w)] if w == "never"))
+    })
+}
+
 /// Marker attribute of a nested `fn` statement (spec 4.10).
 ///
 /// The fn is lifted to a module item named by the attribute's string

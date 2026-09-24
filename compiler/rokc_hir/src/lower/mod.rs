@@ -807,7 +807,8 @@ struct MethodInfo {
 /// named `Base__method` in the impl's module.
 #[derive(Clone)]
 struct GenericMethod {
-    def: FnDef,
+    /// Shared: the tables of a kept library stage are cloned per compile.
+    def: std::sync::Arc<FnDef>,
     /// The impl target (`Box<T>`): the type of `self` and of `Self`.
     self_ty: Ty,
     info: MethodInfo,
@@ -1135,7 +1136,8 @@ impl std::ops::DerefMut for EnvIn<'_, '_> {
 /// What collecting the items makes (`Env`'s tables).
 #[derive(Clone)]
 struct Tables<'a> {
-    fn_table: HashMap<String, FnSig>,
+    /// Shared: the tables of a kept library stage are cloned per compile.
+    fn_table: HashMap<String, std::sync::Arc<FnSig>>,
     /// `fn_table` and `generic_fns` keys by last segment (both are
     /// complete before any body is lowered).
     fn_leaves: std::cell::OnceCell<Leaves>,
@@ -1267,7 +1269,7 @@ impl FnSet {
 impl<'a> Env<'a> {
     fn sig(&self, key: &str) -> Option<&FnSig> {
         incr::read(|| incr::Read::Sig(key.to_owned()));
-        self.fn_table.get(key)
+        self.fn_table.get(key).map(|s| &**s)
     }
 
     fn generic_fn(&self, key: &str) -> Option<&'a FnDef> {

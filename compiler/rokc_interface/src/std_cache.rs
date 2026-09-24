@@ -193,7 +193,9 @@ fn prune(root: &Path, toolchain: &str, family: &str, sources: &str) {
     for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let p = e.path();
-        if name.starts_with('.') {
+        // Scratch folders, and the library's collected stages (swept
+        // on their own).
+        if name.starts_with('.') || name == rokc_driver::LIBRARY_STAGES {
             continue;
         }
         let used = last_use(&p);

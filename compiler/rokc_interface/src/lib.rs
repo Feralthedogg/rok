@@ -83,6 +83,12 @@ impl Session {
         self.config.keep_ast = on;
     }
 
+    /// With `set_keep_ast`: a kept library stage may stand for the
+    /// library's files (`CompileResult::library`).
+    pub const fn set_library_items(&mut self, on: bool) {
+        self.config.library_items = on;
+    }
+
     /// Build the library package as prebuilt dependency `name`
     /// (`archive` then also writes `<name>.rokhir`, spec 904).
     pub fn set_lib_name(&mut self, name: Option<String>) {
@@ -162,6 +168,7 @@ impl Session {
                 warnings: p.warnings,
                 tests: p.tests,
                 sources: p.sources,
+                library: p.library,
                 files: p.files,
                 source_map,
                 reuse: p.reuse,
@@ -172,6 +179,7 @@ impl Session {
                 warnings: Vec::new(),
                 tests: Vec::new(),
                 sources: Vec::new(),
+                library: None,
                 files: Vec::new(),
                 source_map,
                 reuse: None,
@@ -189,6 +197,9 @@ pub struct CompileResult {
     pub tests: Vec<String>,
     /// Parsed files of a `set_keep_ast` build (user package first).
     pub sources: Vec<SourceFile>,
+    /// The library's items when a library stage stood for its files
+    /// (`set_library_items`).
+    pub library: Option<&'static rokc_ast::Program>,
     /// The source files read from disk.
     pub files: Vec<PathBuf>,
     /// The compile's source files by span id: what its diagnostics and

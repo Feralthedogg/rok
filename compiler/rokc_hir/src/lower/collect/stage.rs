@@ -12,8 +12,8 @@ use rokc_core::codec::{Codec, Dec, Enc};
 use rokc_core::{codec_enum, codec_struct};
 
 use super::super::{
-    ClosureSink, Impl, Impls, InstanceWarns, MethodOrFn, MethodTarget, ShapeHandler, Tables,
-    TypeDefs, TypeNames,
+    ClosureSink, GenericMethod, Impl, Impls, InstanceWarns, MethodOrFn, MethodTarget, ShapeHandler,
+    Tables, TypeDefs, TypeNames,
 };
 use super::{Collected, Intrinsic};
 use crate::lower::{AstEnumDef, AstStructDef, Expr, FnDef, Item, Program, Ty};
@@ -26,23 +26,157 @@ pub struct LibraryStage {
 }
 
 impl LibraryStage {
+    /// The library's items (spans by this compile's file ids).
+    #[must_use]
+    pub const fn items(&self) -> &'static Program {
+        self.lib
+    }
+
     /// Write the stage; `false` when something it borrows is not in the
     /// library's items (nothing to read back then).
     #[must_use]
     pub fn enc(&self, e: &mut Enc) -> bool {
         let at = Locs::of(self.lib);
-        self.lib.enc(e);
+        enc_items(&self.lib.items, e);
+        enc_blob(&self.c.t.impls, e);
+        enc_blob(&self.c.t.generic_methods, e);
         self.type_names.enc(e);
         enc_collected(&self.c, &at, e).is_some()
     }
 
     /// The stage written by `enc`; its items live as long as the process.
+    /// The items (in groups) and the tables that hold no borrows decode
+    /// in parallel.
     pub fn dec(d: &mut Dec<'_>) -> Option<Self> {
-        let lib: &'static Program = Box::leak(Box::new(Program::dec(d)?));
+        let groups = item_groups(d)?;
+        let (impls, methods) = (d.bytes()?, d.bytes()?);
+        let files = d.files;
+        let (items, impls, methods) = std::thread::scope(|s| {
+            let impls = spawn(s, move || dec_blob::<Impls>(impls, files));
+            let methods = spawn(s, move || dec_blob::<GenericMethods>(methods, files));
+            let items = dec_items(s, groups, files);
+            (items, join(impls), join(methods))
+        });
+        let lib: &'static Program = Box::leak(Box::new(Program {
+            items: items?,
+            ..Program::default()
+        }));
         let type_names = Codec::dec(d)?;
-        let c = dec_collected(lib, d)?;
+        let mut c = dec_collected(lib, d)?;
+        c.t.impls = impls?;
+        c.t.generic_methods = methods?;
         Some(Self { c, lib, type_names })
     }
+}
+
+type GenericMethods = HashMap<(String, String), Vec<GenericMethod>>;
+
+/// The stack of a decoding thread: the parse threads' (items nest as
+/// deep as they parsed).
+const STACK: usize = 1 << 30;
+
+type Job<'s, T> = Option<std::thread::ScopedJoinHandle<'s, Option<T>>>;
+
+fn spawn<'s, T: Send + 's>(
+    s: &'s std::thread::Scope<'s, '_>,
+    f: impl FnOnce() -> Option<T> + Send + 's,
+) -> Job<'s, T> {
+    std::thread::Builder::new()
+        .stack_size(STACK)
+        .spawn_scoped(s, f)
+        .ok()
+}
+
+fn join<T>(j: Job<'_, T>) -> Option<T> {
+    j?.join().ok().flatten()
+}
+
+/// `v` as bytes of its own (decoded apart, `dec_blob`).
+fn enc_blob(v: &impl Codec, e: &mut Enc) {
+    let mut b = Enc::new(e.spans);
+    v.enc(&mut b);
+    merge_files(&b, e);
+    e.bytes(&b.buf);
+}
+
+fn dec_blob<T: Codec>(bytes: &[u8], files: Option<&[u32]>) -> Option<T> {
+    let mut d = Dec::new(bytes);
+    d.files = files;
+    let v = T::dec(&mut d)?;
+    d.done().then_some(v)
+}
+
+fn merge_files(from: &Enc, e: &mut Enc) {
+    for f in &from.files {
+        if !e.files.contains(f) {
+            e.files.push(*f);
+        }
+    }
+}
+
+/// Item groups of about the same size, decoded in parallel.
+const ITEM_GROUPS: usize = 16;
+
+/// The library's items (its program holds nothing else) in
+/// `ITEM_GROUPS` groups, each its item count and bytes.
+fn enc_items(items: &[Item], e: &mut Enc) {
+    let each: Vec<Enc> = items
+        .iter()
+        .map(|item| {
+            let mut ie = Enc::new(e.spans);
+            item.enc(&mut ie);
+            ie
+        })
+        .collect();
+    let total: usize = each.iter().map(|ie| ie.buf.len()).sum();
+    let per = total.div_ceil(ITEM_GROUPS).max(1);
+    let mut groups: Vec<(u64, Vec<u8>)> = Vec::new();
+    for ie in each {
+        if groups.last().is_none_or(|g| g.1.len() >= per) {
+            groups.push((0, Vec::new()));
+        }
+        let g = groups.last_mut().expect("a group");
+        g.0 += 1;
+        g.1.extend_from_slice(&ie.buf);
+        merge_files(&ie, e);
+    }
+    e.u(groups.len() as u64);
+    for (n, bytes) in &groups {
+        e.u(*n);
+        e.bytes(bytes);
+    }
+}
+
+/// The groups `enc_items` wrote: item count and bytes.
+fn item_groups<'a>(d: &mut Dec<'a>) -> Option<Vec<(usize, &'a [u8])>> {
+    let groups = usize::try_from(d.u()?).ok()?;
+    (0..groups)
+        .map(|_| Some((usize::try_from(d.u()?).ok()?, d.bytes()?)))
+        .collect()
+}
+
+/// The items of `groups`, each group on a thread of its own.
+fn dec_items<'s>(
+    s: &'s std::thread::Scope<'s, '_>,
+    groups: Vec<(usize, &'s [u8])>,
+    files: Option<&'s [u32]>,
+) -> Option<Vec<Item>> {
+    let jobs: Vec<Job<'s, Vec<Item>>> = groups
+        .into_iter()
+        .map(|(n, bytes)| {
+            spawn(s, move || {
+                let mut d = Dec::new(bytes);
+                d.files = files;
+                let items: Option<Vec<Item>> = (0..n).map(|_| Item::dec(&mut d)).collect();
+                items.filter(|_| d.done())
+            })
+        })
+        .collect();
+    let mut items = Vec::new();
+    for j in jobs {
+        items.extend(join(j)?);
+    }
+    Some(items)
 }
 
 /// What a borrowed AST node is.
@@ -354,7 +488,6 @@ fn enc_tables(t: &Tables<'_>, at: &Locs, e: &mut Enc) -> Option<()> {
     defs.defaulted_leaves.enc(e);
     t.consts.enc(e);
     enc_refs(&t.generic_fns, Kind::Fn, at, e)?;
-    t.generic_methods.enc(e);
     t.intrinsics.enc(e);
     t.generic_intrinsics.enc(e);
     t.extern_fn_ids.enc(e);
@@ -365,7 +498,6 @@ fn enc_tables(t: &Tables<'_>, at: &Locs, e: &mut Enc) -> Option<()> {
     t.sink.enc(e);
     t.item_visibility.enc(e);
     t.field_vis.enc(e);
-    t.impls.enc(e);
     t.unsafe_fns.enc(e);
     t.neg_auto.enc(e);
     t.trait_info.enc(e);
@@ -428,7 +560,6 @@ fn dec_tables(p: &'static Program, d: &mut Dec<'_>) -> Option<Tables<'static>> {
     };
     t.consts = Codec::dec(d)?;
     t.generic_fns = dec_refs(p, d)?;
-    t.generic_methods = Codec::dec(d)?;
     t.intrinsics = Codec::dec(d)?;
     t.generic_intrinsics = Codec::dec(d)?;
     t.extern_fn_ids = Codec::dec(d)?;
@@ -439,7 +570,6 @@ fn dec_tables(p: &'static Program, d: &mut Dec<'_>) -> Option<Tables<'static>> {
     t.sink = Codec::dec(d)?;
     t.item_visibility = Codec::dec(d)?;
     t.field_vis = Codec::dec(d)?;
-    t.impls = Codec::dec(d)?;
     t.unsafe_fns = Codec::dec(d)?;
     t.neg_auto = Codec::dec(d)?;
     t.trait_info = Codec::dec(d)?;

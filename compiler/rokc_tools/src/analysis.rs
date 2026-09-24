@@ -24,6 +24,7 @@ pub fn check(
     codegen: Option<&BuildOptions>,
 ) -> (CompileResult, Vec<RokDiagnostic>) {
     session.set_keep_ast(true);
+    session.set_library_items(true);
     let result = match source {
         Some(s) => session.compile_source(s, path, rokc_interface::SourceMap::new()),
         None => session.compile_file(path),
@@ -121,6 +122,8 @@ pub struct Analysis {
     /// Present when the program type-checked.
     pub hir: Option<HirModule>,
     pub sources: Vec<SourceFile>,
+    /// The items of the library files `sources` leaves out.
+    pub library: Option<&'static rokc_ast::Program>,
 }
 
 /// Check `source` as the root file `path` (no codegen), `isolate`d: an
@@ -139,6 +142,7 @@ pub fn analyze(
             source_map: r.source_map,
             hir: r.modules.into_iter().next().map(|m| m.hir),
             sources: r.sources,
+            library: r.library,
         }
     })
     .unwrap_or_else(|e| Analysis {
@@ -146,6 +150,7 @@ pub fn analyze(
         source_map: rokc_interface::SourceMap::new(),
         hir: None,
         sources: Vec::new(),
+        library: None,
     })
 }
 
@@ -162,6 +167,16 @@ impl Analysis {
     /// Path and text of a span's file.
     pub fn file(&self, span: Span) -> Option<&(String, String)> {
         self.source_map.file(span.file)
+    }
+
+    /// Item lists that may hold an item of file `file`: its parse, and
+    /// the library's items.
+    fn items_of(&self, file: u32) -> impl Iterator<Item = &[Item]> {
+        self.sources
+            .iter()
+            .filter(move |f| f.file_id == file)
+            .map(|f| f.items.as_slice())
+            .chain(self.library.map(|p| p.items.as_slice()))
     }
 
     pub(crate) fn in_file(&self, span: Span, path: &str) -> bool {
@@ -185,10 +200,8 @@ impl Analysis {
                 _ => None,
             })
         }
-        self.sources
-            .iter()
-            .filter(|f| f.file_id == span.file)
-            .find_map(|f| find(&f.items, span))
+        self.items_of(span.file)
+            .find_map(|items| find(items, span))
             .map(crate::doc::doc_text)
             .unwrap_or_default()
     }
@@ -212,10 +225,8 @@ impl Analysis {
                 _ => None,
             })
         }
-        self.sources
-            .iter()
-            .filter(|f| f.file_id == span.file)
-            .find_map(|f| find(&f.items, span, name))
+        self.items_of(span.file)
+            .find_map(|items| find(items, span, name))
             .map(crate::doc::doc_text)
             .unwrap_or_default()
     }

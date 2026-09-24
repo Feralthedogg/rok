@@ -205,9 +205,6 @@ thread_local! {
 pub struct Incr {
     pub parse: Store,
     pub bodies: Store,
-    /// Where the library's collected stages are kept, one file per key
-    /// (`library_store`): shared by the packages of an incremental root.
-    library_dir: Option<PathBuf>,
     /// Files whose parse was read from the store, and all files.
     pub parsed_reused: AtomicUsize,
     pub parsed: AtomicUsize,
@@ -249,61 +246,70 @@ impl Incr {
 /// Library stages unused this long go when another is written.
 const LIBRARY_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-impl Incr {
-    fn library_path(&self, k: u64) -> Option<PathBuf> {
-        Some(
-            self.library_dir
-                .as_ref()?
-                .join(format!("library-{k:016x}.rokcol")),
-        )
-    }
+/// The folder of `cache_dir` that keeps the library's collected stages,
+/// one file per key: shared by every build of the toolchain (a lone
+/// file's too).
+pub const LIBRARY_STAGES: &str = "library";
 
-    /// The library stage of key `k` as `read` reads it.
-    pub fn library_get<T>(
-        &self,
-        k: u64,
-        ids: &Ids,
-        read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
-    ) -> Option<T> {
-        let path = self.library_path(k)?;
-        let v = Store::open(path.clone(), LIBRARY).get_with(k, ids, read)?;
-        // Used: kept from the sweep of `library_put`.
-        if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-            let _ = f.set_modified(std::time::SystemTime::now());
-        }
-        Some(v)
-    }
+fn library_path(k: u64) -> Option<PathBuf> {
+    Some(
+        crate::cache_dir()?
+            .join(LIBRARY_STAGES)
+            .join(format!("library-{k:016x}.rokcol")),
+    )
+}
 
-    /// Keep what `write` writes as the library stage of key `k`; the
-    /// stages not used for a while go.
-    pub fn library_put(&self, k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
-        let Some(path) = self.library_path(k) else {
-            return;
-        };
-        let store = Store::new(path.clone());
-        store.put_with(k, ids, write);
-        store.save(LIBRARY);
-        let Some(Ok(dir)) = path.parent().map(std::fs::read_dir) else {
-            return;
-        };
-        for e in dir.flatten() {
-            let p = e.path();
-            let name = e.file_name();
-            let name = name.to_string_lossy();
-            let old = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > LIBRARY_KEPT);
-            if p != path && old && name.starts_with("library-") && name.ends_with(".rokcol") {
-                let _ = std::fs::remove_file(&p);
-            }
+/// The store of the pre-pass summaries of the library's files, in the
+/// stages' folder.
+pub fn library_prepass() -> Option<Store> {
+    let dir = crate::cache_dir()?.join(LIBRARY_STAGES);
+    Some(Store::open(dir.join("prepass.rokast"), PARSE))
+}
+
+/// The library stage of key `k` as `read` reads it.
+pub fn library_get<T>(
+    k: u64,
+    ids: &Ids,
+    read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
+) -> Option<T> {
+    let path = library_path(k)?;
+    let v = Store::open(path.clone(), LIBRARY).get_with(k, ids, read)?;
+    // Used: kept from the sweep of `library_put`.
+    if let Ok(f) = std::fs::File::options().append(true).open(&path) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+    Some(v)
+}
+
+/// Keep what `write` writes as the library stage of key `k`; the
+/// stages not used for a while go.
+pub fn library_put(k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
+    let Some(path) = library_path(k) else {
+        return;
+    };
+    let store = Store::new(path.clone());
+    store.put_with(k, ids, write);
+    store.save(LIBRARY);
+    let Some(Ok(dir)) = path.parent().map(std::fs::read_dir) else {
+        return;
+    };
+    for e in dir.flatten() {
+        let p = e.path();
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > LIBRARY_KEPT);
+        if p != path && old && name.starts_with("library-") && name.ends_with(".rokcol") {
+            let _ = std::fs::remove_file(&p);
         }
     }
 }
 
-const PARSE: &str = "ROKAST";
+pub const PARSE: &str = "ROKAST";
 const BODIES: &str = "ROKBODY";
 const LIBRARY: &str = "ROKCOL";
 
@@ -312,7 +318,6 @@ impl Incr {
         Self {
             parse: Store::open(dir.join("parse.rokast"), PARSE),
             bodies: Store::open(dir.join("bodies.rokbody"), BODIES),
-            library_dir: dir.parent().and_then(Path::parent).map(Path::to_path_buf),
             parsed_reused: AtomicUsize::new(0),
             parsed: AtomicUsize::new(0),
             body_reuse: std::sync::Mutex::new((0, 0)),
