@@ -250,11 +250,18 @@ pub(pkg) fn read_more(out: List<u8>, want: usize, read: RegionIo, context: str) 
     n
 }
 
-/// Everything `read` (as in `read_more`) yields until it reports 0.
-pub(pkg) fn read_all(read: RegionIo, context: str) throws (IoError) -> List<u8> {
-    let out: List<u8> = List::new();
-    while (try read_more(out, 16384, read, context)) > 0 {}
-    out
+/// Everything `read` (as in `read_more`) yields until it reports 0, read
+/// into the spare room before growing. `hint`: the bytes expected (0:
+/// unknown); with one byte more of room, the read that sees the end
+/// needs no growth.
+pub(pkg) fn read_all(read: RegionIo, context: str, hint: usize) throws (IoError) -> List<u8> {
+    let out: List<u8> = List::with_capacity(if hint > 0 { hint + 1 } else { 0 });
+    loop {
+        let room = out.capacity() - out.len();
+        if (try read_more(out, if room > 0 { room } else { 16384 }, read, context)) == 0 {
+            return out;
+        }
+    }
 }
 
 /// The bytes a runtime call `get(buf, off, len)` copies into a region:
@@ -663,7 +670,7 @@ impl Reader for Stdin {
     }
 
     fn read_to_end(ref self) throws (IoError) -> List<u8> {
-        try read_all(|b: GcBuf<u8>, at: usize, n: usize| stdin_read(b, at, n, -1), "stdin")
+        try read_all(|b: GcBuf<u8>, at: usize, n: usize| stdin_read(b, at, n, -1), "stdin", 0)
     }
 
     fn read_line(ref self) throws (IoError) -> str {

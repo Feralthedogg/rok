@@ -1,13 +1,16 @@
 // expect-exit: 0
+// gc-stress: 50
 // expect-stdout:
 // sequential 200 sum 19900 reused true
+// 16 tasks 3200 calls within 16 threads true
 // concurrent 1000 sum 499500 bounded true
 // cancelled job finished true
 
 // `task::spawn_blocking` runs jobs on a persistent pool: awaited one at
-// a time they reuse a thread (a job can race the previous thread going
-// idle, so allow a few); 1000 at once stay within the pool's cap
-// (512 threads) and all complete.
+// a time they reuse one thread (it is idle again before its awaiter is
+// woken); 16 tasks awaiting jobs in a loop never need more than 16
+// threads (a job a busy thread took meanwhile starts none); 1000 at once
+// stay within the pool's cap (512 threads) and all complete.
 use rok::std::thread;
 use rok::std::time::Duration;
 
@@ -22,7 +25,26 @@ for i in 0..200 {
     sum += r.0;
     ids.insert(r.1);
 }
-println(f"sequential 200 sum {sum} reused {ids.len() <= 4}");
+println(f"sequential 200 sum {sum} reused {ids.len() == 1}");
+
+let pool_ids: Mutex<Set<u64>> = Mutex::new(Set::new());
+let ws: List<Task<i32>> = [];
+for _ in 0..16 {
+    ws.push(task::spawn(async {
+        let n = 0;
+        for _ in 0..200 {
+            let id = await task::spawn_blocking(|| tid());
+            using g = pool_ids.lock() { g.get().insert(id); }
+            n += 1;
+        }
+        n
+    }));
+}
+let calls = 0;
+for w in ws { calls += await w; }
+let used = 0usize;
+using g = pool_ids.lock() { used = g.get().len(); }
+println(f"16 tasks {calls} calls within 16 threads {used <= 16}");
 
 let jobs: List<task::Blocking<(i32, u64)>> = List::new();
 for i in 0..1000 {

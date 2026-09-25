@@ -1,0 +1,47 @@
+// expect-exit: 0
+// gc-stress: 20
+// expect-stdout:
+// 0: same true, room true
+// 1: same true, room true
+// 4096: same true, room true
+// 16384: same true, room true
+// 16385: same true, room true
+// 70000: same true, room true
+// rest 69000 same true
+// async 4096 same true
+
+// `fs::read` / `File::read_to_end` size the result from the file's size:
+// whole files of any length, read into exactly one byte more than they
+// hold; a read from mid-file gets the rest.
+
+use rok::std::fs;
+use rok::std::fs::SeekFrom;
+use rok::std::io::IoError;
+use rok::std::env;
+
+fn bytes(n: usize) -> List<u8> {
+    let b: List<u8> = List::new();
+    for i in 0..n { b.push((i % 251) as u8); }
+    b
+}
+
+fn main() throws (IoError) {
+    let base = env::temp_dir() / f"rok_fs_read_sizes_{env::pid()}";
+    try fs::create_dir_all(base);
+    for n in [0usize, 1, 4096, 16384, 16385, 70000] {
+        let p = base / f"f{n}";
+        let want = bytes(n);
+        try fs::write(p, want);
+        let got = try fs::read(p);
+        // Size 0 counts as unknown (as a /proc file reports).
+        println(f"{n}: same {got == want}, room {n == 0 || got.capacity() <= n + 1}");
+    }
+    let f = try fs::File::open(base / "f70000");
+    try f.seek(SeekFrom::Start(1000));
+    let rest = try f.read_to_end();
+    try f.close();
+    println(f"rest {rest.len()} same {rest == bytes(70000)[1000:70000].to_list()}");
+    let a = try task::block_on_try(async { try await fs::read_async(base / "f4096") });
+    println(f"async {a.len()} same {a == bytes(4096)}");
+    try fs::remove_dir_all(base);
+}

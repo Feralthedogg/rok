@@ -131,6 +131,11 @@ impl Metadata {
     pub const fn accessed(self) throws (IoError) -> SystemTime { SystemTime::from_unix(self.atime, self.atime_ns as u32) }
 }
 
+/// `fd`'s size as a read size hint (0: unknown, as a pipe's).
+fn size_hint(fd: i32, path: str) -> usize {
+    (try stat_at(-1, path, true, fd) catch _ { return 0; }).len as usize
+}
+
 /// `stat` through the runtime: `fd >= 0` → `fstat(fd)`.
 fn stat_at(dir: i32, path: str, follow: bool, fd: i32) throws (IoError) -> Metadata {
     unsafe {
@@ -211,7 +216,7 @@ impl File {
 
     pub fn read_to_end(self) throws (IoError) -> List<u8> {
         let fd = try self.live();
-        try read_all(|b: GcBuf<u8>, at: usize, n: usize| unsafe { rok_os_read(fd, b, at, n) }, self.path)
+        try read_all(|b: GcBuf<u8>, at: usize, n: usize| unsafe { rok_os_read(fd, b, at, n) }, self.path, size_hint(fd, self.path))
     }
 
     /// The rest of the file as text (`InvalidData` if not UTF-8).

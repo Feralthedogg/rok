@@ -60,6 +60,8 @@ enum Kind {
     Int {
         signed: bool,
         bits: u32,
+        /// An `i64` already: passed to the runtime as is.
+        i64: bool,
     },
     Float {
         f32: bool,
@@ -80,6 +82,7 @@ impl Kind {
 fn kind_of(ctx: &LowerCtx<'_>, ty: &HirTy) -> Kind {
     match ty {
         HirTy::Prim(p) if p.is_signed_int() || p.is_unsigned_int() => Kind::Int {
+            i64: *p == PrimTy::I64,
             signed: p.is_signed_int(),
             bits: p.bit_width(super::const_eval::pointer_width()),
         },
@@ -284,7 +287,13 @@ fn words((flags, counts): (u64, u64), at: Span) -> (Expr, Expr) {
 /// anything else through its `Display::fmt` (`Debug::fmt` for `debug`).
 fn plain_write(t: &Expr, value: Expr, kind: Kind, debug: bool, flags: Expr, counts: Expr) -> Expr {
     let at = value.span;
-    let cast = |v: Expr, to: &str| {
+    // Only a real conversion: an `i64` / `f64` cast to itself would carry
+    // the hole's span, which a user's own cast there starts with too, and
+    // `redundant_cast` would see it as one.
+    let cast = |v: Expr, to: &str, already: bool| {
+        if already {
+            return v;
+        }
         mk(
             ExprKind::Cast(
                 Box::new(v),
@@ -299,13 +308,13 @@ fn plain_write(t: &Expr, value: Expr, kind: Kind, debug: bool, flags: Expr, coun
     let flag = |b: bool| int_lit(usize::from(b), at);
     let fmt = |f: &str, args: Vec<Expr>| call(&["rok", "core", "fmt", f], args, at);
     match (kind, debug) {
-        (Kind::Int { signed, bits }, _) => rt(
+        (Kind::Int { signed, bits, i64 }, _) => rt(
             "rok_fmt_int",
             vec![
                 t.clone(),
                 flags,
                 counts,
-                cast(value, "i64"),
+                cast(value, "i64", i64),
                 flag(signed),
                 int_lit(bits as usize, at),
             ],
@@ -313,7 +322,13 @@ fn plain_write(t: &Expr, value: Expr, kind: Kind, debug: bool, flags: Expr, coun
         ),
         (Kind::Float { f32 }, _) => rt(
             "rok_fmt_f64",
-            vec![t.clone(), flags, counts, cast(value, "f64"), flag(f32)],
+            vec![
+                t.clone(),
+                flags,
+                counts,
+                cast(value, "f64", !f32),
+                flag(f32),
+            ],
             at,
         ),
         (Kind::Big, _) => fmt("fstr_num", vec![t.clone(), value, flags, counts]),
@@ -323,7 +338,11 @@ fn plain_write(t: &Expr, value: Expr, kind: Kind, debug: bool, flags: Expr, coun
             vec![t.clone(), value, int_lit(usize::from(b'"'), at)],
             at,
         ),
-        (Kind::Char, false) => rt("rok_fmt_char", vec![t.clone(), cast(value, "u32")], at),
+        (Kind::Char, false) => rt(
+            "rok_fmt_char",
+            vec![t.clone(), cast(value, "u32", false)],
+            at,
+        ),
         (_, true) => fmt("fstr_debug", vec![t.clone(), value]),
         (_, false) => fmt("fstr_display", vec![t.clone(), value]),
     }

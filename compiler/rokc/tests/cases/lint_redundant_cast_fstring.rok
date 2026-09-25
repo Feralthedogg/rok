@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-lint: 19:44 casting to the same type `f64`
+// expect-lint: 19:72 casting to the same type `i64`
+// expect-lint: 21:13 casting to the same type `f64`
+// spec: §6.2.9
+// expect-stdout:
+// 5 5 3
+// 5 5
+
+// `redundant_cast` in f-string holes: a hole that is itself a cast to
+// `i64` / `f64` (`{(x as f64 / s) as i64}`) is a real conversion, not a
+// cast to the same type, in a hole as outside one; a redundant cast in a
+// hole still is one.
+
+fn main() {
+    let total = 10usize;
+    let s = 2.0;
+    let v = 3i64;
+    println(f"{(total as f64 / s) as i64} {(total as f64 / s) as f64} {v as i64}");
+    let w = (total as f64 / s) as i64;
+    let x = (total as f64 / s) as f64;
+    println(f"{w} {x}");
+}
