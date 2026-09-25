@@ -2492,3 +2492,35 @@ fn stone_features_round_trip() {
         "stone `num` 1.0.0: the index's features differ from its rok.rokon's at commit",
     );
 }
+
+/// A closed stdout ends `rok` quietly (`rok help | head`): killed by
+/// SIGPIPE (Windows: exit 1), not an internal error (101).
+#[test]
+// spec: §9.10.1
+fn closed_output_ends_rok_quietly() {
+    // A pipe whose reader has exited: `rok version` never reads stdin.
+    let mut reader = Command::new(ROK)
+        .arg("version")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pipe = reader.stdin.take().unwrap();
+    assert!(reader.wait().unwrap().success());
+    let out = Command::new(ROK)
+        .arg("help")
+        .stdout(pipe)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    #[cfg(unix)]
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&out.status),
+        Some(13),
+        "{stderr}"
+    );
+    #[cfg(not(unix))]
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(stderr, "");
+}

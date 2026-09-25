@@ -576,6 +576,7 @@ fn main() {
     // Spec 901.6: an internal error (rokc panic) exits 101.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        rokc_interface::end_if_output_closed(info);
         default_hook(info);
         eprintln!("rokc: internal compiler error");
         process::exit(101);

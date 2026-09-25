@@ -75,7 +75,8 @@ pub fn isolate<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Res
     HOOK.call_once(|| {
         let fatal = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            if CALLER.with(std::cell::Cell::get) {
+            // A closed stdout / stderr ends rokc, not just the compile.
+            if CALLER.with(std::cell::Cell::get) || rokc_diagnostic::output_closed(info) {
                 return fatal(info);
             }
             let fail = lock(&FAIL).take();

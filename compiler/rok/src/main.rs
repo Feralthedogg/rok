@@ -4,6 +4,7 @@
 fn main() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        rokc_diagnostic::end_if_output_closed(info);
         default_hook(info);
         eprintln!("rok: internal error");
         std::process::exit(101);

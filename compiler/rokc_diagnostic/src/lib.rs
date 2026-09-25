@@ -595,6 +595,55 @@ pub fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
     (r, text)
 }
 
+/// From a panic hook: end the process quietly if `output_closed`.
+///
+/// As a C program does: killed by SIGPIPE (Windows: exit 1), saying
+/// nothing. Other pipes and sockets keep reporting `EPIPE`, so SIGPIPE
+/// stays ignored until now.
+pub fn end_if_output_closed(info: &std::panic::PanicHookInfo<'_>) {
+    if !output_closed(info) {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        const SIGPIPE: i32 = 13;
+        unsafe extern "C" {
+            fn signal(sig: i32, handler: usize) -> usize;
+            fn raise(sig: i32) -> i32;
+        }
+        // SAFETY: SIG_DFL (0) for SIGPIPE, then raise it on this thread.
+        unsafe {
+            signal(SIGPIPE, 0);
+            raise(SIGPIPE);
+        }
+    }
+    std::process::exit(1);
+}
+
+/// Whether a panic is std's `print!` / `eprint!` failing on a stdout
+/// or stderr whose reader is gone (`rokc .. | head`): no compiler error.
+#[must_use]
+pub fn output_closed(info: &std::panic::PanicHookInfo<'_>) -> bool {
+    let p = info.payload();
+    let msg = p
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| p.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    // "failed printing to stdout: Broken pipe (os error 32)"
+    msg.strip_prefix("failed printing to std")
+        .and_then(|m| {
+            m.rsplit_once("(os error ")?
+                .1
+                .strip_suffix(')')?
+                .parse()
+                .ok()
+        })
+        .is_some_and(|code| {
+            std::io::Error::from_raw_os_error(code).kind() == std::io::ErrorKind::BrokenPipe
+        })
+}
+
 /// Print text from `render` where `report` would.
 pub fn print_rendered(text: &str) {
     if report_style() == STYLE_JSON {

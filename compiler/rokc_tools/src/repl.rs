@@ -1163,20 +1163,26 @@ impl Repl {
             at,
         };
         let mut regions = Vec::new();
-        if let Some(off) = src
-            .rfind(self.input.as_str())
-            .filter(|_| !self.input.is_empty())
-        {
-            let len = self.input.len();
+        // An expression cell is built as `{stmts}let VALUE = ({last});`,
+        // so its two parts are found apart: `last` at the end, `stmts`
+        // before it.
+        let (stmts, last) = split_last(&self.input);
+        let last_off = src.rfind(last).filter(|_| !last.is_empty());
+        let stmts_off = last_off
+            .and_then(|o| src[..o].rfind(stmts))
+            .filter(|_| !stmts.is_empty());
+        for (off, part, at) in [(stmts_off, stmts, 0), (last_off, last, stmts.len())] {
+            let Some(off) = off else { continue };
+            let len = part.len();
             regions.push(match program.and_then(|p| Some((p, p.cell?))) {
-                Some((p, at)) => shown(map, p, off, len, at),
+                Some((p, cell)) => shown(map, p, off, len, cell + at),
                 None => Region {
                     off,
                     len,
                     file: map.add(REPL_FILE.to_owned(), self.input.clone()),
                     path: REPL_FILE.to_owned(),
                     text: Arc::from(self.input.as_str()),
-                    at: 0,
+                    at,
                 },
             });
         }
@@ -1379,7 +1385,8 @@ fn line_col(src: &str, off: usize) -> (u32, u32) {
 fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> RokDiagnostic {
     let mut d = d.clone();
     // `None`: the span is in the wrapper. One that opens just before a
-    // region (the `(` around an expression cell) starts at it.
+    // region (the `(` around an expression cell) or ends at one starts
+    // at it, unless a region holds it.
     let map = |s: Span| -> Option<Span> {
         if s.file != session {
             return Some(s);
@@ -1387,7 +1394,12 @@ fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> 
         let (start, end) = (s.start as usize, (s.end as usize).max(s.start as usize));
         let r = regions
             .iter()
-            .find(|r| start + 1 >= r.off && start <= r.off + r.len)?;
+            .find(|r| (r.off..r.off + r.len).contains(&start))
+            .or_else(|| {
+                regions
+                    .iter()
+                    .find(|r| start + 1 >= r.off && start <= r.off + r.len)
+            })?;
         let shown = |b: usize| r.at + b.saturating_sub(r.off).min(r.len);
         let (start, end) = (shown(start), shown(end));
         let (line, col) = line_col(&r.text, start);

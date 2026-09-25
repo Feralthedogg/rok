@@ -1025,6 +1025,135 @@ fn check_reads_stdin() {
     );
 }
 
+/// How rokc ended once its stdout (`out`) or stderr lost its reader
+/// before `input` reached its stdin.
+fn closed_output(args: &[&str], out: bool, input: &str) -> std::process::ExitStatus {
+    let mut child = Command::new(ROKC)
+        .args(args)
+        .env("ROK_HOME", workspace())
+        .stdin(Stdio::piped())
+        .stdout(if out { Stdio::piped() } else { Stdio::null() })
+        .stderr(if out { Stdio::null() } else { Stdio::piped() })
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    // rokc may be gone before it read everything.
+    drop(child.stdin.take().unwrap().write_all(input.as_bytes()));
+    child.wait().unwrap()
+}
+
+/// Whether `status` is how a program ends writing to a closed pipe:
+/// killed by SIGPIPE (Windows: exit 1), not a panic or abort.
+fn ended_by_closed_pipe(status: std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(&status) == Some(13)
+    }
+    #[cfg(not(unix))]
+    {
+        status.code() == Some(1)
+    }
+}
+
+/// A closed stdout / stderr ends rokc quietly (`rokc .. | head`), not
+/// as an internal error (101) or an abort in the panic hook.
+#[test]
+// spec: §9.1.6 §9.1.9
+fn closed_output_ends_rokc_quietly() {
+    let errors = "let x: i32 = true;\n".repeat(2000);
+    let st = closed_output(&["check", "-"], false, &errors);
+    assert!(ended_by_closed_pipe(st), "check, stderr closed: {st}");
+    let st = closed_output(&["--message-format=json", "check", "-"], true, &errors);
+    assert!(ended_by_closed_pipe(st), "check json, stdout closed: {st}");
+}
+
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+// spec: §9.1.6 §9.7.5
+fn repl_closed_output_ends_quietly() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let args = ["repl", "--rokr", &rokr];
+    let st = closed_output(&args, false, "let a = 1; let b: str = 2;\n");
+    assert!(ended_by_closed_pipe(st), "stderr closed: {st}");
+    let st = closed_output(&args, true, "1 + 2\n");
+    assert!(ended_by_closed_pipe(st), "stdout closed: {st}");
+}
+
+/// Errors in a cell point into its text: in each statement of a cell
+/// of several (its last one wrapped as the cell's value), after a
+/// failed cell, after a redefinition, past non-ASCII text, on a later
+/// line of the cell.
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+// spec: §9.1.8 §9.7.5 §9.7.7
+fn repl_errors_point_into_the_cell() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+let a = 1; let b: str = 2;
+let é = \"é\"; let w = 3; w + true
+fn f() -> i64 { 1 }
+fn f() -> str { \"x\" }
+let p = (1 +
+  2); println(p); f() + p
+a + 1
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(text(&out.stdout), "", "{stderr}");
+    assert_eq!(
+        stderr,
+        "\
+error[E200]: mismatched types: `let b` expects `str`, found `i32`
+  --> <repl>:1:12
+   |
+ 1 | let a = 1; let b: str = 2;
+   |            ^^^
+error[E200]: operator `+` cannot be applied to `i32` and `bool`
+  --> <repl>:1:25
+   |
+ 1 | let é = \"é\"; let w = 3; w + true
+   |                         ^^^^^^^^
+error[E200]: mismatched types: argument `s` of `rok::core::print::println` expects `str`, found `i32`
+  --> <repl>:2:15
+   |
+ 2 |   2); println(p); f() + p
+   |               ^
+error[E200]: mismatched types: the right operand of `+` expects `str`, found `i32`
+  --> <repl>:2:19
+   |
+ 2 |   2); println(p); f() + p
+   |                   ^^^^^^^
+error[E100]: cannot find value `a` in this scope
+  --> <repl>:1:1
+   |
+ 1 | a + 1
+   | ^
+"
+    );
+}
+
 /// `rokc jupyter` driven by a hand-written ZMTP client (no Jupyter
 /// needed): heartbeat, `kernel_info`, cells that bind, show, print and
 /// panic, completion, and `shutdown`. Every message must be signed.
