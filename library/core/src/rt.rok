@@ -4,6 +4,7 @@
 // declares its own few. The compiler intrinsics are `pub(pkg)`: `core`
 // only.
 
+use rok::bare::ptr::{ConstPtr, Ptr};
 use rok::core::collections::raw::GcBuf;
 use rok::core::sync::AtomicOrdering;
 use rok::core::future::Waker;
@@ -82,6 +83,13 @@ extern "rok" {
     fn rok_oom() -> !;
     // The allocator's slow path codegen calls (8.5.1): a GC object.
     fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;
+    // Only codegen calls these (8.5.1, 8.5.12): declared so that a
+    // program's own declaration must match what codegen calls.
+    fn rok_gc_wb_slow(obj: Ptr<u8>);
+    fn rok_gc_register_type(type_id: u32, scan_table: ConstPtr<u8>);
+    fn rok_gc_add_root(word: ConstPtr<usize>);
+    fn rok_static_init_begin(state: Ptr<u8>, at: ConstPtr<u8>, at_len: usize) -> i32;
+    fn rok_static_init_end(state: Ptr<u8>);
     // A secret buffer of that many zeroed bytes (`crypto::Secret`).
     fn rok_gc_secret_new(len: usize) -> GcBuf<u32>;
     // An error out of a throwing `main` (spec 4.16.4): its description

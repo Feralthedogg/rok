@@ -79,6 +79,9 @@ $extra = @()
 $pgo = Join-Path $PSScriptRoot 'rok-msvc.profdata.tar.xz'
 if ($env:ROK_LLVM_INSTRUMENT) {
     $extra = @('-DLLVM_BUILD_INSTRUMENTED=IR')
+    # Value-profile nodes all from malloc, as in build.sh.
+    $env:CFLAGS = "$env:CFLAGS -mllvm -vp-static-alloc=false".Trim()
+    $env:CXXFLAGS = "$env:CXXFLAGS -mllvm -vp-static-alloc=false".Trim()
 } elseif (Test-Path $pgo) {
     Push-Location $work
     try { Run cmake -E tar xf $pgo } finally { Pop-Location }

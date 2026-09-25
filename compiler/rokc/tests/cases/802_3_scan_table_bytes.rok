@@ -10,11 +10,11 @@
 // type id of its own (8.2.13) makes the collector trace (and, under
 // gc-stress, move) the object its STRONG_REF slot names.
 use rok::bare::mem::transmute_unchecked;
-use rok::bare::ptr::addr_of;
+use rok::bare::ptr::{addr_of, ConstPtr};
 
 extern "C" {
     fn rok_gc_collect();
-    fn rok_gc_register_type(type_id: u32, table: usize);
+    fn rok_gc_register_type(type_id: u32, scan_table: ConstPtr<u8>);
     fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;
 }
 

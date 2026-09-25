@@ -201,9 +201,10 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
         "rok_str_cstr_done" => format!("({s}, !llvm.ptr)"),
         "rok_str_cmp" => format!("({s}, {s}) -> i32"),
         "rok_gc_alloc_slow" => format!("(i{pw}, i{pw}, i32) -> !llvm.ptr"),
-        "rok_gc_register_type" => "(i32, !llvm.ptr)".to_owned(),
-        "rok_gc_wb_slow" | "rok_gc_add_root" | "rok_static_init_end" => "(!llvm.ptr)".to_owned(),
-        "rok_static_init_begin" => format!("(!llvm.ptr, !llvm.ptr, i{pw}) -> i32"),
+        "rok_static_init_begin" => format!("({}) -> i32", codegen_params(name, pw)?.join(", ")),
+        "rok_gc_register_type" | "rok_gc_wb_slow" | "rok_gc_add_root" | "rok_static_init_end" => {
+            format!("({})", codegen_params(name, pw)?.join(", "))
+        }
         "rok_runtime_yield"
         | "rok_init_once"
         | "rok_runtime_init"
@@ -221,6 +222,21 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
         "func.func private @{name}{sig}{}",
         runtime_fn_attrs(name)
     ))
+}
+
+/// The parameters, as codegen passes them, of the runtime symbols only
+/// codegen calls whose spec 8.5 types (`Ptr<u8>`, `ConstPtr<u8>`) are not
+/// these. A program's own declaration of one (its types checked against
+/// `rok::core::rt`) is declared and called with them: its arguments
+/// cross as these types, as codegen's own calls of it do.
+fn codegen_params(name: &str, pw: u32) -> Option<Vec<String>> {
+    let p = || "!llvm.ptr".to_owned();
+    Some(match name {
+        "rok_gc_register_type" => vec!["i32".to_owned(), p()],
+        "rok_gc_wb_slow" | "rok_gc_add_root" | "rok_static_init_end" => vec![p()],
+        "rok_static_init_begin" => vec![p(), p(), format!("i{pw}")],
+        _ => return None,
+    })
 }
 
 /// Runtime functions that write no GC object memory but references (a
@@ -472,7 +488,27 @@ impl Emitter {
         let mut fns: HashMap<FunctionId, FnSig> = HashMap::new();
         let mut c_entries: Vec<(FunctionId, FnAbi)> = Vec::new();
         for &f in &view {
+            let own = codegen_params(&f.name, self.target.pointer_width)
+                .filter(|_| f.facts.linkage == Linkage::Extern)
+                .map(|ps| FnAbi {
+                    ret: RetAbi::Direct,
+                    args: ps
+                        .into_iter()
+                        .zip(&f.param_tys)
+                        .map(|(c, p)| {
+                            if c_type(p, &self.target) == c {
+                                ArgAbi::Direct
+                            } else {
+                                ArgAbi::Coerce(c)
+                            }
+                        })
+                        .collect(),
+                    variadic: false,
+                    rok: f.facts.abi == Abi::Rok,
+                    stdcall: false,
+                });
             let c = match f.facts.abi {
+                _ if own.is_some() => own,
                 Abi::C { variadic, system } => {
                     let mut errs = Vec::new();
                     let abi = Self::classify(

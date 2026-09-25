@@ -173,6 +173,41 @@ fn repl_reports_input_ending_inside_a_cell() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
 }
 
+/// A cell of several statements runs them all and shows its last
+/// one's value (907.7): a statement or a `let` first does not make it a
+/// statement cell, a block statement last does not make it an
+/// expression to wrap.
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+// spec: §9.7.1 §9.7.7 §9.7.8
+fn repl_cell_value_is_its_last_statement() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let input = "\
+println(\"x\"); while true { break; }
+let a = 1; a + 1
+println(\"y\"); let b = a + 2;
+b
+";
+    let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert_eq!(
+        text(&out.stdout),
+        "x\ni32: 2\ny\ni32: 3\n",
+        "stderr: {stderr}"
+    );
+}
+
 /// `repl <lib>` (901.2): the library is loaded and its items
 /// are in scope from the first cell, also after `:reset`.
 #[test]

@@ -65,6 +65,13 @@ extra=
 here=$(cd "$(dirname "$0")" && pwd)
 if [ -n "${ROK_LLVM_INSTRUMENT-}" ]; then
 	extra="-DLLVM_BUILD_INSTRUMENTED=IR"
+	# Value-profile nodes all from malloc. With the static pool, the
+	# profile runtime takes a pool node, and if another thread wins the
+	# site and some function has meanwhile switched the runtime to
+	# malloc'd nodes, it frees the pool node: an abort under MLIR's
+	# parallel verifier.
+	vp="-Xclang -mllvm -Xclang -vp-static-alloc=false"
+	export CFLAGS="${CFLAGS:+$CFLAGS }$vp" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$vp"
 else
 	xz -dc "$here/rok.profdata.xz" >"$work/rok.profdata"
 	# clang reads the profile even for an empty unit.

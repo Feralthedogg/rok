@@ -1,0 +1,26 @@
+// spec: refs-lang §8.5.1 §8.2.13
+// rokc-arg: --mlir-pass canonicalize
+// expect-exit: 0
+// expect-stdout:
+// [1, 2] registered
+// [3]
+
+// A program that declares `rok_gc_register_type` itself, compiled as one
+// MLIR module (`--mlir-pass`): its declaration and the registration
+// codegen emits for the program's own GC types are one function.
+use rok::bare::mem::transmute_unchecked;
+use rok::bare::ptr::{addr_of, ConstPtr};
+
+extern "C" {
+    fn rok_gc_register_type(type_id: u32, scan_table: ConstPtr<u8>);
+}
+
+// No references: version 1, no entries.
+static TABLE: [u32; 2] = [16u32, 1u32];
+
+fn main() {
+    let xs: List<i64> = [1, 2];
+    unsafe { rok_gc_register_type(0x10000u32 + 40001u32, transmute_unchecked(addr_of(TABLE))); }
+    println(f"{xs:?} registered");
+    println(f"{[3]:?}");
+}

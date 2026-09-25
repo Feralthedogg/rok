@@ -470,12 +470,16 @@ impl Repl {
     #[allow(clippy::result_unit_err)]
     pub fn eval(&mut self, cell: &str) -> Result<Option<String>, ()> {
         cell.clone_into(&mut self.input);
-        match classify(cell) {
-            Cell::Item(key) => self.item(cell, key).then_some(None).ok_or(()),
+        if let Cell::Item(key) = classify(cell) {
+            return self.item(cell, key).then_some(None).ok_or(());
+        }
+        // The cell's value is its last top-level statement's (907.7).
+        let (stmts, last) = split_last(cell);
+        match classify(last) {
             // A statement (a `let` too) shows nothing (907.1).
-            Cell::Let | Cell::Stmt => self.run_once(cell, None),
+            Cell::Item(_) | Cell::Let | Cell::Stmt => self.run_once(cell, None),
             Cell::Expr => {
-                let r = self.run_once(&format!("let {VALUE} = ({cell});"), Some(VALUE));
+                let r = self.run_once(&format!("{stmts}let {VALUE} = ({last});"), Some(VALUE));
                 if r.is_err() && self.diverged.take() {
                     return self.run_once(&format!("{cell};"), None);
                 }
@@ -1587,6 +1591,13 @@ fn classify(cell: &str) -> Cell {
     }
 }
 
+/// `cell` split before its last top-level element.
+fn split_last(cell: &str) -> (&str, &str) {
+    let (tokens, _) = rokc_lexer::Lexer::new(cell, REPL_FILE).lex_all();
+    let tops = rokc_parser::parse_program(&tokens, REPL_FILE).0.tops;
+    cell.split_at(tops.last().map_or(0, |t| t.0 as usize))
+}
+
 /// Byte index of the bracket closing the one at `open`.
 fn matching(s: &str, open: usize) -> Option<usize> {
     let mut depth = 0i32;
@@ -1646,7 +1657,7 @@ pub(crate) fn incomplete(src: &str) -> bool {
     in_str
         || depth > 0
         || (dangling && !t.is_empty())
-        || (t.starts_with("let ") && !t.ends_with(';') && !t.ends_with('}'))
+        || (split_last(t).1.starts_with("let ") && !t.ends_with(';') && !t.ends_with('}'))
         // Attributes wait for their item.
         || (t.starts_with("#[") && t.lines().all(|l| l.trim_start().starts_with("#[")))
 }
@@ -1708,5 +1719,17 @@ mod tests {
         assert!(incomplete("let s = \"a\n"));
         assert!(!incomplete("let x =\n42i32;\n"));
         assert!(!incomplete("f(\"(\")\n"));
+    }
+
+    #[test]
+    fn several_statements_end_at_the_last() {
+        assert!(incomplete("f(); let x = 1\n"));
+        assert!(!incomplete("let a = 1; a + 1\n"));
+        assert!(!incomplete("println(\"x\"); while true { break; }\n"));
+        assert_eq!(
+            split_last("println(\"x\"); while true { break; }").1,
+            "while true { break; }"
+        );
+        assert_eq!(split_last("let a = 1; a + 1").1, "a + 1");
     }
 }
