@@ -1,12 +1,12 @@
 //! `int` limb kernels (`library/core/src/num/bigint.rok`) over
 //! `GcBuf<u32>` limbs (little-endian, base 2^32), computed on machine
 //! words: multiplication (schoolbook, Karatsuba, Toom-3, three-prime
-//! NTT, squaring variants, products by an operand transformed once),
-//! Knuth D division, single-limb division, Lehmer gcd, add / sub /
-//! shifts and the base case of decimal output. The library
-//! does the rest (signs, recursive division, radix conversion,
-//! allocation). None of these allocate, so no collection runs while
-//! they hold the buffers: scratch space comes from the caller.
+//! NTT, squaring variants, products by an operand transformed once,
+//! products mod B^n - 1), Knuth D division, single-limb division,
+//! Lehmer and half-gcd, add / sub / shifts and the base case of decimal
+//! output. The library does the rest (signs, recursive division, radix
+//! conversion, allocation). None of these allocate: scratch space comes from the
+//! caller. The long ones run parked ([`parked`]).
 
 // Knuth's names (q, r, u, v, m, n) read better than long ones here.
 #![allow(clippy::many_single_char_names)]
@@ -54,6 +54,24 @@ const NTT_LO: usize = if NTT < NTT_SQR { NTT } else { NTT_SQR };
 
 // `scratch_bound` relies on these (see there).
 const _: () = assert!(KARA >= 18 && KARA_SQR >= KARA && TOOM3 >= KARA && TOOM3_SQR >= KARA_SQR);
+
+/// `u32` limbs of work from which a kernel runs parked.
+const PARK: usize = 2048;
+
+/// `f()`, parked when `work` reaches `PARK` limbs: like a blocking
+/// runtime call (804 §8.4.10), so a collection on another thread does
+/// not wait for it. A kernel touches no GC object but the buffers it
+/// was passed: the caller's frame keeps them alive (these calls are
+/// safepoints) and a collection never moves what a root reaches.
+fn parked<R>(work: usize, f: impl FnOnce() -> R) -> R {
+    if work < PARK {
+        return f();
+    }
+    rokr_gc::world::enter_native();
+    let r = f();
+    rokr_gc::world::leave_native();
+    r
+}
 
 /// The first `n` limbs of the `GcBuf<u32>` at `buf`.
 ///
@@ -553,7 +571,8 @@ impl<const P: u32> Mont<P> {
         ((t + m as u64 * P as u64) >> 32) as u32
     }
 
-    /// [0, 2k P) to [0, k P) (`k` = 1, 2): wraps unless `x >= k P`.
+    /// [0, 2k P) to [0, k P) (`k` = 1, 2, 4; `4 P < 2^32`): wraps unless
+    /// `x >= k P`.
     #[inline]
     const fn fold<const K: u32>(x: u32) -> u32 {
         let y = x.wrapping_sub(K * P);
@@ -703,27 +722,66 @@ impl<const P: u32> Mont<P> {
 const G: [u32; 3] = [3, 11, 3];
 
 /// The `u32` limbs of `res` (three residue vectors of `n`, in [0, 2p),
-/// each times its `s`) put back together (Garner: x = r1 + p1 (t2 + p2
-/// t3)) and carried into `out`.
-fn garner(out: &mut [u32], res: &[u32], n: usize, s: [u32; 3]) {
-    let (r1, rest) = res.split_at(n);
-    let (r2, r3) = rest.split_at(n);
+/// each times its `s`) put back together (Garner: x = x1 + p1 t2 + p1
+/// p2 t3) and carried into `out`; the carry out of its top. `signed`:
+/// coefficients past p1 p2 p3 / 2 are negative, `out` is then two's
+/// complement and the carry its sign. `res` is overwritten.
+fn garner(out: &mut [u32], res: &mut [u32], n: usize, s: [u32; 3], signed: bool) -> i128 {
+    let (r1, rest) = res.split_at_mut(n);
+    let (r2, r3) = rest.split_at_mut(n);
     let (p1, p2, p3) = (u64::from(P1), u64::from(P2), u64::from(P3));
     let i12 = const { pow_mod(P1 as u64, P2 as u64 - 2, P2 as u64) };
     let i123 = const { pow_mod(P1 as u64 * P2 as u64 % P3 as u64, P3 as u64 - 2, P3 as u64) };
-    let mut carry = 0u128;
+    // t2 = (x2 - x1) i12, t3 = (x3 - x1 - p1 t2) i123 as Montgomery
+    // products, the scales folded into the constants.
+    let c2a = (u64::from(s[1]) * i12 % p2) as u32;
+    let c2b = Mont::<P2>::to_mont(i12);
+    let c3a = (u64::from(s[2]) * i123 % p3) as u32;
+    let c3b = Mont::<P3>::to_mont(i123);
+    let c3c = Mont::<P3>::to_mont(p1 % p3 * i123 % p3);
+    let len = out.len();
+    for ((a, b), c) in r1[..len].iter_mut().zip(&mut r2[..len]).zip(&mut r3[..len]) {
+        let x1 = Mont::<P1>::fold::<1>(Mont::<P1>::mul(*a, s[0]));
+        let u2 = Mont::<P2>::mul(*b, c2a) + 2 * P2 - Mont::<P2>::mul(x1, c2b);
+        let t2 = Mont::<P2>::fold::<1>(Mont::<P2>::fold::<2>(u2));
+        let u3 =
+            Mont::<P3>::mul(*c, c3a) + 4 * P3 - Mont::<P3>::mul(x1, c3b) - Mont::<P3>::mul(t2, c3c);
+        let t3 = Mont::<P3>::fold::<1>(Mont::<P3>::fold::<2>(Mont::<P3>::fold::<4>(u3)));
+        (*a, *b, *c) = (x1, t2, t3);
+    }
+    let pp = u128::from(p1 * p2) * u128::from(p3);
+    let mut carry = 0i128;
     for (i, o) in out.iter_mut().enumerate() {
-        let x1 = u64::from(Mont::<P1>::fold::<1>(Mont::<P1>::mul(r1[i], s[0])));
-        let x2 = u64::from(Mont::<P2>::fold::<1>(Mont::<P2>::mul(r2[i], s[1])));
-        let x3 = u64::from(Mont::<P3>::fold::<1>(Mont::<P3>::mul(r3[i], s[2])));
-        let t2 = (x2 + p2 - x1 % p2) % p2 * i12 % p2;
-        let x12 = x1 + p1 * t2;
-        let t3 = (x3 + p3 - x12 % p3) % p3 * i123 % p3;
-        let v = carry + x12 as u128 + (p1 * p2) as u128 * t3 as u128;
+        let x12 = u64::from(r1[i]) + p1 * u64::from(r2[i]);
+        let x = x12 as u128 + (p1 * p2) as u128 * u128::from(r3[i]);
+        let x = if signed && x > pp / 2 {
+            x as i128 - pp as i128
+        } else {
+            x as i128
+        };
+        let v = carry + x;
         *o = v as u32;
         carry = v >> 32;
     }
-    debug_assert!(carry == 0);
+    carry
+}
+
+/// `r += c` mod `B^r.len() - 1` (`B = 2^32`; a carry off the top comes
+/// back in at the bottom), with `B^r.len() - 1` itself made 0.
+fn wrap_in(r: &mut [u32], mut c: u128) {
+    while c != 0 {
+        for x in r.iter_mut() {
+            let v = u128::from(*x) + c;
+            *x = v as u32;
+            c = v >> 32;
+            if c == 0 {
+                break;
+            }
+        }
+    }
+    if r.iter().all(|&x| x == u32::MAX) {
+        r.fill(0);
+    }
 }
 
 /// Root tables for transforms up to length `n`: per prime `rt` then
@@ -819,6 +877,91 @@ fn convolve<const P: u32>(
     Mont::<P>::inverse(f, irt);
 }
 
+/// A product sum `x[a] x[b] + x[c] x[d]` (`-` when `neg`).
+type Term = (usize, usize, usize, usize, bool);
+
+/// `out[k] = terms[k]` over operands `x` (`u32` digits): each operand
+/// transformed once per prime (length `n`, at least the longest
+/// result), the sums taken pointwise; the signs of the results (a
+/// negative one is left as two's complement). `t` holds `(x.len() + 3
+/// terms.len() + 2) n` `u32`s.
+fn ntt_dot(
+    out: &mut [&mut [u32]],
+    x: &[&[u32]],
+    terms: &[Term],
+    n: usize,
+    t: &mut [u32],
+) -> [bool; 4] {
+    let (f, t) = t.split_at_mut(x.len() * n);
+    let (res, t) = t.split_at_mut(3 * terms.len() * n);
+    let (rt, irt) = t[..2 * n].split_at_mut(n);
+    dot_prime::<P1>(G[0], f, res, 0, rt, irt, x, terms, n);
+    dot_prime::<P2>(G[1], f, res, 1, rt, irt, x, terms, n);
+    dot_prime::<P3>(G[2], f, res, 2, rt, irt, x, terms, n);
+    let s = [
+        Mont::<P1>::scale(n),
+        Mont::<P2>::scale(n),
+        Mont::<P3>::scale(n),
+    ];
+    let mut neg = [false; 4];
+    for (k, (o, r)) in out.iter_mut().zip(res.chunks_exact_mut(3 * n)).enumerate() {
+        let c = garner(o, r, n, s, terms[k].4);
+        debug_assert!(c == 0 || c == -1);
+        neg[k] = c < 0;
+    }
+    neg
+}
+
+/// `ntt_dot` modulo `P`: residues `which` of each term in `res`.
+#[allow(clippy::too_many_arguments)]
+fn dot_prime<const P: u32>(
+    g: u32,
+    f: &mut [u32],
+    res: &mut [u32],
+    which: usize,
+    rt: &mut [u32],
+    irt: &mut [u32],
+    x: &[&[u32]],
+    terms: &[Term],
+    n: usize,
+) {
+    Mont::<P>::roots(g, n, rt, irt);
+    for (fi, xi) in f.chunks_exact_mut(n).zip(x) {
+        Mont::<P>::load(fi, xi);
+        Mont::<P>::forward(fi, rt);
+    }
+    for (k, &(a, b, c, d, minus)) in terms.iter().enumerate() {
+        let o = &mut res[(3 * k + which) * n..(3 * k + which + 1) * n];
+        let fi = |i: usize| &f[i * n..(i + 1) * n];
+        let (fa, fb, fc, fd) = (fi(a), fi(b), fi(c), fi(d));
+        for ((v, (&xa, &xb)), (&xc, &xd)) in
+            o.iter_mut().zip(fa.iter().zip(fb)).zip(fc.iter().zip(fd))
+        {
+            let u = Mont::<P>::mul(xa, xb);
+            let w = Mont::<P>::mul(xc, xd);
+            *v = Mont::<P>::fold::<2>(if minus { u + 2 * P - w } else { u + w });
+        }
+        Mont::<P>::inverse(o, irt);
+    }
+}
+
+/// The transform length `ntt_dot` takes for results of `total` limbs
+/// from operands of at least `lo`, or none.
+const fn dot_len(lo: usize, total: usize) -> Option<usize> {
+    let n = (total * PER).next_power_of_two();
+    if lo >= NTT / 2 && n <= NTT_MAX {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// `L`s as `u32` digits, mutable.
+fn digits32_mut(a: &mut [L]) -> &mut [u32] {
+    // SAFETY: as in `digits32`.
+    unsafe { slice::from_raw_parts_mut(a.as_mut_ptr().cast::<u32>(), a.len() * PER) }
+}
+
 /// `r = a * b` by the NTT (`b` empty squares `a`), scratch `t`: one
 /// prime at a time.
 fn ntt_mul(r: &mut [L], a: &[L], b: &[L], t: &mut [L]) {
@@ -842,7 +985,8 @@ fn ntt_mul(r: &mut [L], a: &[L], b: &[L], t: &mut [L]) {
         Mont::<P2>::scale(n),
         Mont::<P3>::scale(n),
     ];
-    garner(out, res, n, s);
+    let c = garner(out, res, n, s, false);
+    debug_assert!(c == 0);
 }
 
 /// The transform length `rok_nat_mul` takes for an `an` × `bn` product
@@ -864,7 +1008,8 @@ pub const extern "C" fn rok_nat_ntt_len(an: usize, bn: usize) -> usize {
 pub unsafe extern "C" fn rok_nat_ntt_roots(w: *mut u8, n: usize) {
     assert!(n.is_power_of_two() && n <= NTT_MAX);
     // SAFETY: caller contract.
-    ntt_roots(unsafe { limbs(w, 6 * n) }, n);
+    let w = unsafe { limbs(w, 6 * n) };
+    parked(n, || ntt_roots(w, n));
 }
 
 /// `f[0..3 n]` = the transforms of `b[0..bn]` for products of up to `n`
@@ -885,11 +1030,13 @@ pub unsafe extern "C" fn rok_nat_ntt_prep(
     assert!(n.is_power_of_two() && bn <= n && n <= wn);
     // SAFETY: caller contract; `b` and `w` only read.
     let (f, b, w) = unsafe { (limbs(f, 3 * n), &*limbs(b, bn), &*limbs(w, 6 * wn)) };
-    ntt_forward(f, n, b, w, wn);
+    parked(n, || ntt_forward(f, n, b, w, wn));
 }
 
-/// `r[0..an + bn] = a * b` for `b` prepared in `f` (`rok_nat_ntt_prep`,
-/// length `n >= an + bn`, roots `w` of `wn`); `t` holds `3 n` limbs.
+/// `r = a * b mod (B^n - 1)` in `min(an + bn, n)` limbs (`B = 2^32`;
+/// the exact product when `an + bn <= n`) for `b` prepared in `f`
+/// (`rok_nat_ntt_prep`, length `n >= an, bn`, roots `w` of `wn`); `t`
+/// holds `3 n` limbs.
 ///
 /// # Safety
 /// Live `GcBuf<u32>`s of at least those lengths; `r` and `t` distinct
@@ -906,20 +1053,121 @@ pub unsafe extern "C" fn rok_nat_ntt_mul(
     wn: usize,
     t: *mut u8,
 ) {
-    assert!(an + bn <= n && n <= wn);
+    assert!(an <= n && bn <= n && n <= wn);
+    let wrap = an + bn > n;
     // SAFETY: caller contract; `a`, `f` and `w` only read.
     let (r, a, f, w, t) = unsafe {
         (
-            limbs(r, an + bn),
+            limbs(r, if wrap { n } else { an + bn }),
             &*limbs(a, an),
             &*limbs(f, 3 * n),
             &*limbs(w, 6 * wn),
             limbs(t, 3 * n),
         )
     };
-    ntt_forward(t, n, a, w, wn);
-    let s = ntt_finish(t, n, f, w, wn);
-    garner(r, t, n, s);
+    parked(n, || {
+        ntt_forward(t, n, a, w, wn);
+        let s = ntt_finish(t, n, f, w, wn);
+        let c = garner(r, t, n, s, false);
+        if wrap {
+            wrap_in(r, c as u128);
+        }
+        debug_assert!(wrap || c == 0);
+    });
+}
+
+/// Whether `rok_nat_mulmod` takes an `an` × `bn` product mod `B^m - 1`
+/// as one cyclic transform of length `m`.
+const fn wrap_ntt(an: usize, bn: usize, m: usize) -> bool {
+    let lo = if an < bn { an } else { bn };
+    m.is_power_of_two() && m <= NTT_MAX && an <= m && bn <= m && packed(lo) >= NTT / 2
+}
+
+/// The modulus length `m >= n` (`B^m - 1`) `rok_nat_mulmod` serves best
+/// for an `an` × `bn` product: a transform length, or `n` itself.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_nat_mulmod_len(an: usize, bn: usize, n: usize) -> usize {
+    let m = n.next_power_of_two();
+    if wrap_ntt(an, bn, m) { m } else { n }
+}
+
+/// `u32` limbs of scratch `rok_nat_mulmod` needs.
+#[unsafe(no_mangle)]
+pub const extern "C" fn rok_nat_mulmod_scratch(an: usize, bn: usize, m: usize) -> usize {
+    if wrap_ntt(an, bn, m) {
+        6 * m
+    } else {
+        packed(an + bn) * PER + rok_nat_mul_scratch(an, bn)
+    }
+}
+
+/// `r[0..m] = a * b mod (B^m - 1)` (`B = 2^32`): a cyclic convolution
+/// when `m` is from `rok_nat_mulmod_len`, else the product folded; `t`
+/// holds `rok_nat_mulmod_scratch(an, bn, m)` limbs. `a` and `b` may be
+/// the same buffer (`an == bn` squares).
+///
+/// # Safety
+/// Live `GcBuf<u32>`s of at least those lengths; `r` and `t` distinct
+/// from each other and from `a` / `b`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_nat_mulmod(
+    r: *mut u8,
+    a: *mut u8,
+    an: usize,
+    b: *mut u8,
+    bn: usize,
+    m: usize,
+    t: *mut u8,
+) {
+    let square = a == b && an == bn;
+    let tn = rok_nat_mulmod_scratch(an, bn, m);
+    // SAFETY: caller contract; `a` / `b` only read; `t` is 8-aligned.
+    let (a, b, r, t) = unsafe { (&*limbs(a, an), &*limbs(b, bn), limbs(r, m), limbs(t, tn)) };
+    parked(an + bn, || {
+        if wrap_ntt(an, bn, m) {
+            let (res, rest) = t.split_at_mut(3 * m);
+            let (fb, rest) = rest.split_at_mut(m);
+            let (rt, irt) = rest.split_at_mut(m);
+            let db = if square { &[][..] } else { b };
+            let (r1, rest) = res.split_at_mut(m);
+            let (r2, r3) = rest.split_at_mut(m);
+            convolve::<P1>(G[0], r1, fb, rt, irt, a, db);
+            convolve::<P2>(G[1], r2, fb, rt, irt, a, db);
+            convolve::<P3>(G[2], r3, fb, rt, irt, a, db);
+            let s = [
+                Mont::<P1>::scale(m),
+                Mont::<P2>::scale(m),
+                Mont::<P3>::scale(m),
+            ];
+            let c = garner(r, res, m, s, false);
+            wrap_in(r, c as u128);
+        } else {
+            let (p, t) = t.split_at_mut(packed(an + bn) * PER);
+            let p = &mut p[..an + bn];
+            // SAFETY: `t` starts on an `L` boundary.
+            let t = unsafe { slice::from_raw_parts_mut(t.as_mut_ptr().cast::<L>(), t.len() / PER) };
+            nat_mul(p, a, b, square, t);
+            r.fill(0);
+            for chunk in p.chunks(m) {
+                let mut c = 0u64;
+                for (x, &v) in r.iter_mut().zip(chunk) {
+                    let s = u64::from(*x) + u64::from(v) + c;
+                    *x = s as u32;
+                    c = s >> 32;
+                }
+                for x in &mut r[chunk.len()..] {
+                    if c == 0 {
+                        break;
+                    }
+                    let s = u64::from(*x) + c;
+                    *x = s as u32;
+                    c = s >> 32;
+                }
+                wrap_in(r, u128::from(c));
+            }
+            wrap_in(r, 0);
+        }
+    });
 }
 
 // `PER` consecutive `u32` limbs are one `L` in memory.
@@ -966,12 +1214,18 @@ pub unsafe extern "C" fn rok_nat_mul(
     t: *mut u8,
 ) {
     let square = a == b && an == bn;
-    let (na, nb) = (packed(an), packed(bn));
     let tn = rok_nat_mul_scratch(an, bn) / PER;
     // SAFETY: caller contract; `a` / `b` only read; elements are 8-aligned.
     let (a, b, r) = unsafe { (&*limbs(a, an), &*limbs(b, bn), limbs(r, an + bn)) };
     // SAFETY: as above; `t` is its own buffer of `tn * PER` limbs.
     let t = unsafe { slice::from_raw_parts_mut(t.add(HEADER_SIZE).cast::<L>(), tn) };
+    parked(an + bn, || nat_mul(r, a, b, square, t));
+}
+
+/// `r = a * b` (`a` squared when `square`) on packed copies in `t`
+/// (`rok_nat_mul_scratch` `u32`s).
+fn nat_mul(r: &mut [u32], a: &[u32], b: &[u32], square: bool, t: &mut [L]) {
+    let (na, nb) = (packed(a.len()), packed(b.len()));
     let (pa, t) = t.split_at_mut(na);
     let (pb, t) = t.split_at_mut(nb);
     let (pr, t) = t.split_at_mut(na + nb);
@@ -1225,16 +1479,18 @@ pub unsafe extern "C" fn rok_nat_divmod(
     let (u, t) = t.split_at_mut(na + 1);
     let (v, t) = t.split_at_mut(nb);
     let qs = &mut t[..=na - nb];
-    pack(&mut u[..na], a);
-    u[na] = 0;
-    pack(v, b);
-    let s = v[nb - 1].leading_zeros();
-    shl_in(v, s);
-    u[na] = shl_in(&mut u[..na], s);
-    knuth_d(qs, u, v);
-    shr_in(&mut u[..nb], s);
-    unpack(q, qs);
-    unpack(r, &u[..nb]);
+    parked(an, || {
+        pack(&mut u[..na], a);
+        u[na] = 0;
+        pack(v, b);
+        let s = v[nb - 1].leading_zeros();
+        shl_in(v, s);
+        u[na] = shl_in(&mut u[..na], s);
+        knuth_d(qs, u, v);
+        shr_in(&mut u[..nb], s);
+        unpack(q, qs);
+        unpack(r, &u[..nb]);
+    });
 }
 
 /// gcd of two words (binary).
@@ -1269,11 +1525,25 @@ const LEHMER: u32 = LB - 2;
 /// consecutive remainders of Euclid's sequence; `b == 0` when not even
 /// the first quotient is certain. `a`, `b` (and `c`, `d`) have opposite
 /// signs. Two limbs of precision give quotients until the cofactors
-/// reach about one limb, where the bound stops them.
-fn lehmer(x: &[L], y: &[L]) -> (SL, SL, SL, SL) {
+/// reach about one limb, where the bound stops them. With `s > 0` no
+/// remainder may fall below B^s: a remainder `r` of window value `w`
+/// (the window `2^sh` apart from `x`) has `|r - w 2^sh| < 2^LEHMER
+/// 2^sh` (its cofactors' bound), so `w` must reach `2^LEHMER + B^s /
+/// 2^sh`.
+fn lehmer(x: &[L], y: &[L], s: usize) -> (SL, SL, SL, SL) {
     const CAP: SW = 1 << LEHMER;
     let n = x.len();
     let z = x[n - 1].leading_zeros();
+    let floor: SW = if s == 0 {
+        0
+    } else {
+        let sh = (n as i64) * i64::from(LB) - i64::from(z) - 2 * i64::from(LB) + 2;
+        let e = (s as i64) * i64::from(LB) - sh;
+        if e >= 2 * i64::from(LB) - 2 {
+            return (1, 0, 0, 1);
+        }
+        CAP + if e <= 0 { 1 } else { 1 << e }
+    };
     let top = |v: &[L]| {
         let hi = (((v[n - 1] as W) << LB) | v[n - 2] as W) << z;
         let lo = if n > 2 && z > 0 {
@@ -1298,9 +1568,13 @@ fn lehmer(x: &[L], y: &[L]) -> (SL, SL, SL, SL) {
         let (Some(nc), Some(nd)) = (next(a, c), next(b, d)) else {
             break;
         };
+        let r = xh - q * yh;
+        if r < floor {
+            break;
+        }
         (a, c) = (c, nc);
         (b, d) = (d, nd);
-        (xh, yh) = (yh, xh - q * yh);
+        (xh, yh) = (yh, r);
     }
     (a as SL, b as SL, c as SL, d as SL)
 }
@@ -1343,27 +1617,408 @@ fn gcd_lehmer<'a>(mut x: &'a mut [L], mut y: &'a mut [L], t: &mut [L]) -> (&'a [
             x[0] = gcd_word(x[0], y[0]);
             return (x, 1);
         }
-        let f = lehmer(&x[..n], &y[..n]);
+        let f = lehmer(&x[..n], &y[..n], 0);
         if f.1 != 0 {
             lehmer_apply(&mut x[..n], &mut y[..n], f);
             n = significant(&x[..n]);
             continue;
         }
         // x = x mod y, then swap.
-        let (u, rest) = t.split_at_mut(n + 1);
-        let (v, rest) = rest.split_at_mut(yn);
-        let q = &mut rest[..=n - yn];
-        let sh = y[yn - 1].leading_zeros();
-        v.copy_from_slice(&y[..yn]);
-        shl_in(v, sh);
-        u[..n].copy_from_slice(&x[..n]);
-        u[n] = shl_in(&mut u[..n], sh);
-        knuth_d(q, u, v);
-        shr_in(&mut u[..yn], sh);
-        x[..yn].copy_from_slice(&u[..yn]);
-        x[yn..n].fill(0);
+        let (q, t) = t.split_at_mut(n - yn + 1);
+        divrem(q, &mut x[..n], &y[..yn], t);
         core::mem::swap(&mut x, &mut y);
         n = yn;
+    }
+}
+
+/// `q = x / y`, `x = x % y` (`x.len() >= y.len()`, `y`'s top limb
+/// nonzero; `q` of `x.len() - y.len() + 1`); `t` of `x.len() + y.len() +
+/// 1` limbs.
+fn divrem(q: &mut [L], x: &mut [L], y: &[L], t: &mut [L]) {
+    let (n, yn) = (x.len(), y.len());
+    let (u, rest) = t.split_at_mut(n + 1);
+    let v = &mut rest[..yn];
+    let sh = y[yn - 1].leading_zeros();
+    v.copy_from_slice(y);
+    shl_in(v, sh);
+    u[..n].copy_from_slice(x);
+    u[n] = shl_in(&mut u[..n], sh);
+    knuth_d(q, u, v);
+    shr_in(&mut u[..yn], sh);
+    x[..yn].copy_from_slice(&u[..yn]);
+    x[yn..].fill(0);
+}
+
+/// Limbs from which `hgcd` recurses, and from which `gcd` reduces by it.
+const HGCD: usize = 100;
+const GCD_DC: usize = 1200;
+
+/// A 2x2 matrix of non-negative entries, determinant -1 when `neg`
+/// (else 1): the cofactors of an `hgcd` reduction, the original pair
+/// being `M` times the current one. Entries are zero-extended to their
+/// common capacity.
+struct Mat<'a> {
+    e: [&'a mut [L]; 4],
+    /// Entries are zero from limb `len` on.
+    len: usize,
+    neg: bool,
+}
+
+impl<'a> Mat<'a> {
+    /// The identity with entries of `cap` limbs, carved from `t`.
+    fn new(t: &'a mut [L], cap: usize) -> (Self, &'a mut [L]) {
+        let (e0, t) = t.split_at_mut(cap);
+        let (e1, t) = t.split_at_mut(cap);
+        let (e2, t) = t.split_at_mut(cap);
+        let (e3, t) = t.split_at_mut(cap);
+        for e in [&mut *e0, &mut *e1, &mut *e2, &mut *e3] {
+            e.fill(0);
+        }
+        e0[0] = 1;
+        e3[0] = 1;
+        let e = [e0, e1, e2, e3];
+        (
+            Mat {
+                e,
+                len: 1,
+                neg: false,
+            },
+            t,
+        )
+    }
+
+    /// Entry `i` up to `len`.
+    fn at(&self, i: usize) -> &[L] {
+        &self.e[i][..self.len]
+    }
+
+    /// `len` lowered past zero top limbs.
+    fn trim(&mut self) {
+        while self.len > 1 && self.e.iter().all(|e| e[self.len - 1] == 0) {
+            self.len -= 1;
+        }
+    }
+
+    /// Row `r`'s two entries, `w` limbs of them.
+    fn row(&mut self, r: usize, w: usize) -> (&mut [L], &mut [L]) {
+        let (lo, hi) = self.e.split_at_mut(2 * r + 1);
+        (&mut lo[2 * r][..w], &mut hi[0][..w])
+    }
+
+    /// `M = M [[c0, c1], [c2, c3]]` for single limbs `c` below
+    /// 2^LEHMER (determinant -1 when `neg`).
+    fn mul1(&mut self, c: [L; 4], neg: bool) {
+        let w = (self.len + 1).min(self.e[0].len());
+        for r in 0..2 {
+            let (x, y) = self.row(r, w);
+            let (mut cx, mut cy) = (0 as W, 0 as W);
+            for (u, v) in x.iter_mut().zip(y.iter_mut()) {
+                let (p, q) = (*u as W, *v as W);
+                // < 2 (2^LB - 1) 2^LEHMER + carry < 2^2LB.
+                cx += p * c[0] as W + q * c[2] as W;
+                cy += p * c[1] as W + q * c[3] as W;
+                *u = cx as L;
+                *v = cy as L;
+                cx >>= LB;
+                cy >>= LB;
+            }
+            debug_assert!(cx == 0 && cy == 0);
+        }
+        self.len = w;
+        self.trim();
+        self.neg ^= neg;
+    }
+
+    /// `M = M [[q, 1], [1, 0]]` (one Euclid step of quotient `q`).
+    fn mul_q(&mut self, q: &[L], t: &mut [L]) {
+        let cap = self.e[0].len();
+        let w = (significant(q) + self.len + 1).min(cap);
+        let (p, t) = t.split_at_mut(significant(q) + self.len + 1);
+        for r in 0..2 {
+            let (x, y) = self.row(r, w);
+            mul_into(p, q, x, t);
+            add_in(p, y);
+            y.copy_from_slice(x);
+            debug_assert!(significant(p) <= w);
+            x.copy_from_slice(&p[..w]);
+        }
+        self.len = w;
+        self.trim();
+        self.neg = !self.neg;
+    }
+
+    /// Columns swapped (`M [[0, 1], [1, 0]]`).
+    fn swap_cols(&mut self) {
+        let w = self.len;
+        for r in 0..2 {
+            let (x, y) = self.row(r, w);
+            x.swap_with_slice(y);
+        }
+        self.neg = !self.neg;
+    }
+
+    /// `M = M N`.
+    fn mul(&mut self, n: &Mat<'_>, t: &mut [L]) {
+        // A sum of two products: one limb past them.
+        let k = self.len + n.len + 1;
+        let w = k.min(self.e[0].len());
+        let (p0, t) = t.split_at_mut(k);
+        let (p1, t) = t.split_at_mut(k);
+        let (p2, t) = t.split_at_mut(k);
+        let (p3, t) = t.split_at_mut(k);
+        let len = self.len;
+        if let Some(nt) = dot_len(len.min(n.len), k) {
+            // One transform per entry: row r of M N is (x n0 + y n2, x
+            // n1 + y n3) for M's row (x, y).
+            let x: [&[u32]; 8] = [
+                digits32(self.at(0)),
+                digits32(self.at(1)),
+                digits32(self.at(2)),
+                digits32(self.at(3)),
+                digits32(n.at(0)),
+                digits32(n.at(1)),
+                digits32(n.at(2)),
+                digits32(n.at(3)),
+            ];
+            let terms = [
+                (0, 4, 1, 6, false),
+                (0, 5, 1, 7, false),
+                (2, 4, 3, 6, false),
+                (2, 5, 3, 7, false),
+            ];
+            let mut out = [
+                digits32_mut(p0),
+                digits32_mut(p1),
+                digits32_mut(p2),
+                digits32_mut(p3),
+            ];
+            ntt_dot(&mut out, &x, &terms, nt, digits32_mut(t));
+            for (i, q) in [&*p0, &*p1, &*p2, &*p3].into_iter().enumerate() {
+                debug_assert!(significant(q) <= w);
+                self.e[i][..w].copy_from_slice(&q[..w]);
+            }
+        } else {
+            for r in 0..2 {
+                let (x, y) = self.row(r, w);
+                mul_into(p0, &x[..len], n.at(0), t);
+                mul_into(p1, &y[..len], n.at(2), t);
+                mul_into(p2, &x[..len], n.at(1), t);
+                mul_into(p3, &y[..len], n.at(3), t);
+                let c = add_in(p0, p1) | add_in(p2, p3);
+                debug_assert!(!c && significant(p0) <= w && significant(p2) <= w);
+                x.copy_from_slice(&p0[..w]);
+                y.copy_from_slice(&p2[..w]);
+            }
+        }
+        self.len = w;
+        self.trim();
+        self.neg ^= n.neg;
+    }
+}
+
+/// `r = a b` zero-extended (`r` of at least their significant limbs).
+fn mul_into(r: &mut [L], a: &[L], b: &[L], t: &mut [L]) {
+    let (an, bn) = (significant(a), significant(b));
+    if an == 0 || bn == 0 {
+        r.fill(0);
+        return;
+    }
+    let (lo, hi) = r.split_at_mut(an + bn);
+    mul(lo, &a[..an], &b[..bn], t);
+    hi.fill(0);
+}
+
+/// `x < y` (same length).
+fn less(x: &[L], y: &[L]) -> bool {
+    x.iter().rev().cmp(y.iter().rev()) == core::cmp::Ordering::Less
+}
+
+/// `(a, b) = M^-1 (a, b)` for `a = α B^p + a_lo`, `b = β B^p + b_lo`
+/// where `(α, β)` already is `M^-1` of the old high parts, ordered so
+/// that `a >= b` (`M`'s columns swap when needed). With `M^-1 = det
+/// [[m11, -m01], [-m10, m00]]`: `a = α B^p + det (m11 a_lo - m01
+/// b_lo)`, the same for `b`. Both stay positive when α, β are at least
+/// B^s and the entries below B^(k - s) for high parts of `k <= 2s`
+/// limbs (what `hgcd` leaves): the low terms are below B^(k - s + p).
+fn adjust(a: &mut [L], b: &mut [L], p: usize, m: &mut Mat<'_>, t: &mut [L]) {
+    let w = p + m.len;
+    let (u, t) = t.split_at_mut(w);
+    let (v, t) = t.split_at_mut(w);
+    let (x, t) = t.split_at_mut(w);
+    let (y, t) = t.split_at_mut(w);
+    // (U, V) = (m11 a_lo - m01 b_lo, m00 b_lo - m10 a_lo), as magnitudes
+    // in `u` and `x` with their signs.
+    let signs = if let Some(nt) = dot_len(m.len.min(p), w) {
+        let ops: [&[u32]; 6] = [
+            digits32(&a[..p]),
+            digits32(&b[..p]),
+            digits32(m.at(0)),
+            digits32(m.at(1)),
+            digits32(m.at(2)),
+            digits32(m.at(3)),
+        ];
+        let terms = [(5, 0, 3, 1, true), (2, 1, 4, 0, true)];
+        let mut out = [digits32_mut(u), digits32_mut(x)];
+        let neg = ntt_dot(&mut out, &ops, &terms, nt, digits32_mut(t));
+        for (d, &ng) in [&mut *u, &mut *x].into_iter().zip(&neg) {
+            if ng {
+                neg_in(d);
+            }
+        }
+        [neg[0], neg[1]]
+    } else {
+        mul_into(u, m.at(3), &a[..p], t);
+        mul_into(y, m.at(2), &a[..p], t);
+        mul_into(v, m.at(1), &b[..p], t);
+        mul_into(x, m.at(0), &b[..p], t);
+        let mut signs = [false; 2];
+        for ((pos, neg), sg) in [(&mut *u, &mut *v), (&mut *x, &mut *y)]
+            .into_iter()
+            .zip(&mut signs)
+        {
+            *sg = less(pos, neg);
+            if *sg {
+                sub_in(neg, pos);
+                pos.copy_from_slice(neg);
+            } else {
+                sub_in(pos, neg);
+            }
+        }
+        signs
+    };
+    a[..p].fill(0);
+    b[..p].fill(0);
+    for ((r, d), sg) in [(&mut *a, &*u), (&mut *b, &*x)].into_iter().zip(signs) {
+        // r += det (U or V).
+        let minus = sg != m.neg;
+        let dn = significant(d);
+        let o = if minus {
+            sub_in(r, &d[..dn])
+        } else {
+            add_in(r, &d[..dn])
+        };
+        debug_assert!(!o);
+    }
+    if less(a, b) {
+        a.swap_with_slice(b);
+        m.swap_cols();
+    }
+}
+
+/// One reduction of `a >= b` keeping both at least B^s, into `M`: a
+/// Lehmer step, else one Euclid step; whether there was one.
+fn hgcd_step(a: &mut [L], b: &mut [L], s: usize, m: &mut Mat<'_>, t: &mut [L]) -> bool {
+    let n = significant(a);
+    let bn = significant(b);
+    if bn <= s {
+        return false;
+    }
+    let f = lehmer(&a[..n], &b[..n], s);
+    if f.1 != 0 {
+        lehmer_apply(&mut a[..n], &mut b[..n], f);
+        // M (a', b') with (a', b') = E (a, b): M E^-1, E^-1 = det E [[d,
+        // -b], [-c, a]] (no negative entries).
+        let (ca, cb, cc, cd) = f;
+        let det = SW::from(ca) * SW::from(cd) - SW::from(cb) * SW::from(cc);
+        let u = |v: SL| v.unsigned_abs() as L;
+        m.mul1([u(cd), u(cb), u(cc), u(ca)], det < 0);
+        return true;
+    }
+    // (a, b) = (b, a mod b) unless that falls below B^s.
+    let (q, t) = t.split_at_mut(n - bn + 1);
+    let (r, t) = t.split_at_mut(n);
+    r.copy_from_slice(&a[..n]);
+    divrem(q, r, &b[..bn], t);
+    if significant(r) <= s {
+        return false;
+    }
+    m.mul_q(q, t);
+    a[..n].copy_from_slice(&b[..n]);
+    b[..n].copy_from_slice(r);
+    true
+}
+
+/// Half gcd (Möller, "On Schönhage's algorithm and subquadratic integer
+/// gcd computation", 2008): reduces `a >= b` (`n` significant limbs) by
+/// Euclid steps while both stay at least B^s, `s = n/2 + 1`, into `M`
+/// (the identity on entry, entries of at least `n - s + 1` limbs);
+/// whether it did. From `HGCD` limbs on, the top half first reduces
+/// itself recursively and its matrix is applied to the rest
+/// (`adjust`), then the top of what is left once more, so the steps
+/// in between and at the end are few.
+fn hgcd(a: &mut [L], b: &mut [L], m: &mut Mat<'_>, t: &mut [L]) -> bool {
+    let n = significant(a);
+    let s = n / 2 + 1;
+    if significant(b) <= s {
+        return false;
+    }
+    let mut done = false;
+    if n >= HGCD {
+        let p = n / 2;
+        if hgcd(&mut a[p..n], &mut b[p..n], m, t) {
+            adjust(&mut a[..n], &mut b[..n], p, m, t);
+            done = true;
+        }
+        while significant(a) > 3 * n / 4 + 1 {
+            if !hgcd_step(a, b, s, m, t) {
+                return done;
+            }
+            done = true;
+        }
+        let k = significant(a);
+        if k > s + 2 {
+            // The top `2 (k - s) - 1` limbs, whose own floor lands at
+            // about B^(s + 1) for the whole.
+            let p = 2 * s - k + 1;
+            let (mut m1, t) = Mat::new(t, (k - p) / 2 + 3);
+            if hgcd(&mut a[p..k], &mut b[p..k], &mut m1, t) {
+                adjust(&mut a[..k], &mut b[..k], p, &mut m1, t);
+                m.mul(&m1, t);
+                done = true;
+            }
+        }
+    }
+    while hgcd_step(a, b, s, m, t) {
+        done = true;
+    }
+    done
+}
+
+/// Scratch `L`s `hgcd` may use for `n` limbs: at each level what
+/// `hgcd_step`, `adjust` and `Mat::mul` take (their temporaries plus a
+/// product's scratch, or `ntt_dot`'s: at most 44 `L`s per result limb),
+/// and the second half's matrix.
+const fn hgcd_scratch(n: usize) -> usize {
+    let own = 48 * n + 64 + scratch_bound(n, n);
+    if n < HGCD {
+        return own;
+    }
+    let first = hgcd_scratch(n - n / 2);
+    let inner = hgcd_scratch(n / 2);
+    let second = 4 * (n / 4 + 4) + if inner > own { inner } else { own };
+    let r = if first > own { first } else { own };
+    if second > r { second } else { r }
+}
+
+/// `x, y` (`x >= y`, zero-extended alike) reduced by `hgcd` on their top
+/// third until below `GCD_DC` limbs (one Euclid step when it finds
+/// nothing); the gcd is unchanged.
+fn gcd_dc(x: &mut [L], y: &mut [L], t: &mut [L]) {
+    loop {
+        let n = significant(x);
+        let yn = significant(y);
+        if n < GCD_DC || yn == 0 {
+            return;
+        }
+        let p = 2 * n / 3;
+        let (mut m, t) = Mat::new(t, (n - p) / 2 + 3);
+        if hgcd(&mut x[p..n], &mut y[p..n], &mut m, t) {
+            adjust(&mut x[..n], &mut y[..n], p, &mut m, t);
+        } else {
+            let (q, t) = t.split_at_mut(n - yn + 1);
+            divrem(q, &mut x[..n], &y[..yn], t);
+            x.swap_with_slice(y);
+        }
     }
 }
 
@@ -1371,11 +2026,21 @@ fn gcd_lehmer<'a>(mut x: &'a mut [L], mut y: &'a mut [L], t: &mut [L]) -> (&'a [
 #[unsafe(no_mangle)]
 pub const extern "C" fn rok_nat_gcd_scratch(an: usize, bn: usize) -> usize {
     let m = packed(if an > bn { an } else { bn });
-    (5 * m + 1) * PER
+    let dc = if m < GCD_DC {
+        0
+    } else {
+        let (h, a) = (
+            hgcd_scratch(m - 2 * m / 3),
+            32 * m + 64 + scratch_bound(m, m),
+        );
+        4 * (m / 6 + 4) + if h > a { h } else { a }
+    };
+    (2 * m + if dc > 3 * m + 1 { dc } else { 3 * m + 1 }) * PER
 }
 
 /// `r = gcd(a, b)` (`an >= bn >= 1`, `a >= b`, both without leading
-/// zero limbs); its limbs (at most `bn`). `t` holds
+/// zero limbs): half-gcd reductions down to `GCD_DC` limbs, then
+/// Lehmer; its limbs (at most `bn`). `t` holds
 /// `rok_nat_gcd_scratch(an, bn)` limbs.
 ///
 /// # Safety
@@ -1398,15 +2063,18 @@ pub unsafe extern "C" fn rok_nat_gcd(
     let t = unsafe { slice::from_raw_parts_mut(t.add(HEADER_SIZE).cast::<L>(), tn) };
     let (x, t) = t.split_at_mut(m);
     let (y, t) = t.split_at_mut(m);
-    pack(x, a);
-    y.fill(0);
-    pack(&mut y[..packed(bn)], b);
-    let (g, gn) = gcd_lehmer(x, y, t);
-    // SAFETY: as in `digits32`.
-    let g32 = unsafe { slice::from_raw_parts(g.as_ptr().cast::<u32>(), gn * PER) };
-    let k = g32.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1);
-    r[..k].copy_from_slice(&g32[..k]);
-    k
+    parked(an, || {
+        pack(x, a);
+        y.fill(0);
+        pack(&mut y[..packed(bn)], b);
+        gcd_dc(x, y, t);
+        let (g, gn) = gcd_lehmer(x, y, t);
+        // SAFETY: as in `digits32`.
+        let g32 = unsafe { slice::from_raw_parts(g.as_ptr().cast::<u32>(), gn * PER) };
+        let k = g32.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1);
+        r[..k].copy_from_slice(&g32[..k]);
+        k
+    })
 }
 
 /// `r[0..an] = a + b` (`an >= bn`); the carry.
@@ -1660,7 +2328,7 @@ mod tests {
             ntt_forward(&mut t, n, &a, &w, wn);
             let s = ntt_finish(&mut t, n, &f, &w, wn);
             let mut got = vec![0u32; an + bn];
-            garner(&mut got, &t, n, s);
+            garner(&mut got, &mut t, n, s, false);
             // Schoolbook on u32 digits.
             let mut want = vec![0u32; an + bn];
             for (i, &x) in a.iter().enumerate() {
@@ -1673,6 +2341,146 @@ mod tests {
                 want[i + bn] = c as u32;
             }
             assert_eq!(got, want, "{an} x {bn} in {n}");
+        }
+    }
+
+    /// `a * b mod (B^m - 1)` (`u32` digits) by schoolbook and folding.
+    fn mulmod_ref(a: &[u32], b: &[u32], m: usize) -> Vec<u32> {
+        let mut p = vec![0u32; a.len() + b.len()];
+        for (i, &x) in a.iter().enumerate() {
+            let mut c = 0u64;
+            for (j, &y) in b.iter().enumerate() {
+                let v = u64::from(x) * u64::from(y) + u64::from(p[i + j]) + c;
+                p[i + j] = v as u32;
+                c = v >> 32;
+            }
+            p[i + b.len()] = c as u32;
+        }
+        let mut r = vec![0u32; m];
+        for chunk in p.chunks(m) {
+            let mut c = 0u128;
+            for (x, &v) in r.iter_mut().zip(chunk) {
+                let s = u128::from(*x) + u128::from(v) + c;
+                *x = s as u32;
+                c = s >> 32;
+            }
+            for x in &mut r[chunk.len()..] {
+                let s = u128::from(*x) + c;
+                *x = s as u32;
+                c = s >> 32;
+            }
+            wrap_in(&mut r, c);
+        }
+        wrap_in(&mut r, 0);
+        r
+    }
+
+    #[test]
+    fn mulmod_matches_folded_product() {
+        let mut seed = 0x3C6E_F372_FE94_F82Bu64;
+        let big = NTT * PER;
+        for &(an, bn, n) in &[
+            (1usize, 1usize, 1usize),
+            (3, 2, 3),
+            (40, 30, 50),
+            (200, 150, 202),
+            (big, big, big + 2),
+            (big + 5, big - 9, big),
+            (2 * big, big, 2 * big + 1),
+            (4096, 4096, 4096),
+            (4096, 4000, 4096),
+            (4096, 1, 4096),
+        ] {
+            let m = rok_nat_mulmod_len(an, bn, n);
+            assert!(m >= n);
+            for square in [false, true] {
+                if square && an != bn {
+                    continue;
+                }
+                let a = digits32(&rand_limbs(&mut seed, an.div_ceil(PER)))[..an].to_vec();
+                let b = if square {
+                    a.clone()
+                } else {
+                    digits32(&rand_limbs(&mut seed, bn.div_ceil(PER)))[..bn].to_vec()
+                };
+                let (mut ab, mut bb, mut r) = (buf(&a, an), buf(&b, bn), buf(&[], m));
+                let mut t = buf(&[], rok_nat_mulmod_scratch(an, bn, m));
+                let bp = if square {
+                    ab.as_mut_ptr()
+                } else {
+                    bb.as_mut_ptr()
+                };
+                // SAFETY: test buffers sized above.
+                unsafe {
+                    rok_nat_mulmod(
+                        r.as_mut_ptr().cast(),
+                        ab.as_mut_ptr().cast(),
+                        an,
+                        bp.cast(),
+                        bn,
+                        m,
+                        t.as_mut_ptr().cast(),
+                    );
+                }
+                assert_eq!(
+                    read(&mut r, m),
+                    mulmod_ref(&a, &b, m),
+                    "{an} x {bn} mod {m}"
+                );
+            }
+        }
+        // All ones squared: B^m - 1 = 0 comes out as 0.
+        let m = 1 << 12;
+        let a = vec![u32::MAX; m];
+        assert_eq!(rok_nat_mulmod_len(m, m, m), m);
+        let (mut ab, mut r) = (buf(&a, m), buf(&[], m));
+        let mut t = buf(&[], rok_nat_mulmod_scratch(m, m, m));
+        // SAFETY: as above.
+        unsafe {
+            let p = ab.as_mut_ptr().cast();
+            rok_nat_mulmod(r.as_mut_ptr().cast(), p, m, p, m, m, t.as_mut_ptr().cast());
+        }
+        assert!(read(&mut r, m).iter().all(|&x| x == 0));
+    }
+
+    #[test]
+    fn ntt_prepared_wraps() {
+        let mut seed = 0x1B87_3593_8BD5_4F2Fu64;
+        let n = 1 << 12;
+        let mut w = vec![0u32; 6 * n];
+        ntt_roots(&mut w, n);
+        for &(an, bn) in &[(n, n), (3000, n), (n, 1500), (2100, 2100)] {
+            let a = digits32(&rand_limbs(&mut seed, an.div_ceil(PER)))[..an].to_vec();
+            let b = digits32(&rand_limbs(&mut seed, bn.div_ceil(PER)))[..bn].to_vec();
+            let (mut fb, mut bb) = (buf(&[], 3 * n), buf(&b, bn));
+            let (mut ab, mut wb) = (buf(&a, an), buf(&w, 6 * n));
+            let rn = n.min(an + bn);
+            let (mut r, mut t) = (buf(&[], rn), buf(&[], 3 * n));
+            // SAFETY: test buffers sized above.
+            unsafe {
+                rok_nat_ntt_prep(
+                    fb.as_mut_ptr().cast(),
+                    bb.as_mut_ptr().cast(),
+                    bn,
+                    n,
+                    wb.as_mut_ptr().cast(),
+                    n,
+                );
+                rok_nat_ntt_mul(
+                    r.as_mut_ptr().cast(),
+                    ab.as_mut_ptr().cast(),
+                    an,
+                    fb.as_mut_ptr().cast(),
+                    bn,
+                    n,
+                    wb.as_mut_ptr().cast(),
+                    n,
+                    t.as_mut_ptr().cast(),
+                );
+            }
+            let mut want = mulmod_ref(&a, &b, n);
+            want.truncate(rn);
+            assert_eq!(read(&mut r, rn), want, "{an} x {bn} mod {n}");
         }
     }
 
@@ -1713,6 +2521,103 @@ mod tests {
                 got.resize(want.len().max(gn), 0);
                 want.resize(got.len(), 0);
                 assert_eq!(got, want, "{n} {m} {gl}");
+            }
+        }
+    }
+
+    /// `gcd(a, b)` (`a >= b`) through `rok_nat_gcd`'s path and through
+    /// Lehmer alone.
+    fn gcd_both(a: &[L], b: &[L]) -> (Vec<L>, Vec<L>) {
+        let w = a.len();
+        let run = |dc: bool| {
+            let (mut x, mut y) = (a.to_vec(), b.to_vec());
+            y.resize(w, 0);
+            let mut t = vec![0; rok_nat_gcd_scratch(w * PER, w * PER) / PER];
+            if dc {
+                gcd_dc(&mut x, &mut y, &mut t);
+            }
+            let (g, gn) = gcd_lehmer(&mut x, &mut y, &mut t);
+            g[..gn].to_vec()
+        };
+        (run(true), run(false))
+    }
+
+    #[test]
+    fn hgcd_matches_lehmer() {
+        let mut seed = 0x6A09_E667_F3BC_C909u64;
+        for &(n, m, gl) in &[
+            (GCD_DC, GCD_DC, 1),
+            (GCD_DC + 7, GCD_DC - 3, 40),
+            (GCD_DC + 2 * HGCD + 5, GCD_DC + 2 * HGCD, 3),
+            (2000, 1999, 600),
+            (2500, 2500, 1),
+            (3000, GCD_DC, 700),
+            (5000, 5000, 9),
+        ] {
+            // Shared factor g; all-ones limbs now and then.
+            let g = rand_limbs(&mut seed, gl);
+            let (ca, cb) = (rand_limbs(&mut seed, n - gl), rand_limbs(&mut seed, m - gl));
+            let mut a = vec![0; n];
+            let mut b = vec![0; m];
+            mul(&mut a, &ca, &g, &mut vec![0; scratch_bound(n, gl)]);
+            mul(&mut b, &cb, &g, &mut vec![0; scratch_bound(m, gl)]);
+            let (a, b) = if gcd_ref_less(&a, &b) { (b, a) } else { (a, b) };
+            let (got, want) = gcd_both(&a, &b);
+            assert_eq!(got, want, "{n} {m} {gl}");
+            assert!(want.len() >= gl.min(2) || gl == 1);
+        }
+        // Consecutive Fibonacci numbers: every quotient 1.
+        let n = 2 * GCD_DC;
+        let (mut x, mut y) = (vec![0 as L; n], vec![0 as L; n]);
+        y[0] = 1;
+        while x[n - 1] >> (LB - 2) == 0 {
+            add_in(&mut x, &y);
+            core::mem::swap(&mut x, &mut y);
+        }
+        let (got, want) = gcd_both(&y, &x);
+        assert_eq!((got.as_slice(), want.as_slice()), (&[1][..], &[1][..]));
+        // a = b q + 1 with a huge quotient, and b | a.
+        let b = rand_limbs(&mut seed, GCD_DC + 50);
+        let q = rand_limbs(&mut seed, 2 * GCD_DC);
+        let mut a = vec![0; b.len() + q.len()];
+        mul(
+            &mut a,
+            &q,
+            &b,
+            &mut vec![0; scratch_bound(q.len(), b.len())],
+        );
+        let (got, want) = gcd_both(&a, &b);
+        assert_eq!(got, want);
+        add_in(&mut a, &[1]);
+        let (got, want) = gcd_both(&a, &b);
+        assert_eq!(got, want);
+    }
+
+    /// M N for entries all B^k - 1: each a sum of two full products,
+    /// 2 (B^k - 1)^2, one limb past them (both product paths).
+    #[test]
+    fn mat_mul_carries() {
+        for k in [3, NTT / 2 + 1] {
+            let cap = 2 * k + 2;
+            let mut ones = vec![L::MAX; k];
+            ones.resize(cap, 0);
+            let (mut sm, mut sn) = (vec![0; 4 * cap], vec![0; 4 * cap]);
+            let (mut m, _) = Mat::new(&mut sm, cap);
+            let (mut n, _) = Mat::new(&mut sn, cap);
+            for e in m.e.iter_mut().chain(n.e.iter_mut()) {
+                e.copy_from_slice(&ones);
+            }
+            (m.len, n.len) = (k, k);
+            let mut t = vec![0; 64 * cap + scratch_bound(cap, cap)];
+            m.mul(&n, &mut t);
+            // 2 (B^k - 1)^2 = B^2k + (B^k - 4) B^k + 2.
+            let mut want = vec![0 as L; cap];
+            want[0] = 2;
+            want[k] = L::MAX - 3;
+            want[k + 1..2 * k].fill(L::MAX);
+            want[2 * k] = 1;
+            for e in &m.e {
+                assert_eq!(&e[..], &want[..], "k {k}");
             }
         }
     }

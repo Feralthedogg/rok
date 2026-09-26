@@ -1,0 +1,106 @@
+// expect-exit: 0
+// expect-stdout:
+// d 3000 3000 0 true 1868048362640934770 1456895087051990386 1356594377570929481
+// d 3000 3000 1 true 1791366519907563523 1993273198586846365 253315350254755833
+// d 3000 3000 2 true 2158704903974339071 1257251160133826177 630675516722545535
+// d 3000 3000 3 true 1789523006251200802 1857393989689070476 875659820305832996
+// d 3001 7000 0 true 1733767823396285508 368595232894192254 1554913457775978703
+// d 3001 7000 1 true 1842820891021674898 1930496232032781007 2088827039995315389
+// d 3001 7000 2 true 303225160925650689 1024317486477945707 279446650607714022
+// d 3001 7000 3 true 50377666686050441 606509585684213588 2248546411073575760
+// d 6000 3100 0 true 1407137998767047107 225809920088776572 1108925574766700595
+// d 6000 3100 1 true 768507435353320230 1462508898117581958 1812098361559132039
+// d 6000 3100 2 true 1139023463225246195 1010856332519303533 1024975070055518981
+// d 6000 3100 3 true 1610122145740074825 1535521699158991115 41226221054924947
+// d 4096 4097 0 true 1605374955982701288 997741855004071483 1246065622466504788
+// d 4096 4097 1 true 227867407696379320 118566494560688379 108062333154203781
+// d 4096 4097 2 true 1939001749417316070 1443463414043927311 914472077054396528
+// d 4096 4097 3 true 859385150867986072 359227558255769882 955017897083191925
+// s 4000 0 true 38531 5667217084849699041 true 908105687883470625
+// s 4000 1 true 36000 7825593717271312896 true 1258720419845795376
+// s 4000 2 true 36001 14231663484072315953 true 1258720419845795377
+// s 30000 0 true 288988 6061485786637187845 true 1823262531139583004
+// s 30000 1 true 270000 2471022888558310144 true 1406244503366136398
+// s 30000 2 true 270001 15321415251453065777 true 1406244503366136399
+// g 2400 2400 1 20286900678 35
+// g 2600 2500 1300 1802431773730479417 41600
+// g 9000 6000 500 1521305655631681838 16000
+// fib 1 12345 83309
+
+// stdlib spec 2.1.2: `int` past the subquadratic cut-offs. Barrett
+// (mu) division by divisors and quotients of 3000 limbs and up, its
+// remainders from products mod B^n - 1, with divisors of every shape
+// (random, B^n - 1, a power of two, 2^k + 1); radix conversion whose
+// Barrett reciprocals come from the next power's; half-gcd above 2400
+// limbs (shared factors, consecutive Fibonacci numbers); Newton isqrt
+// on such divisions. Results are reduced mod 2^61 - 1 or hashed;
+// expected values computed by Python.
+
+fn gen(seed: u64, limbs: usize) -> int {
+    let x: int = 0;
+    let s = seed;
+    for _ in 0..limbs {
+        s = s.wrapping_mul(6364136223846793005u64).wrapping_add(1442695040888963407u64);
+        let v = if s % 7u64 == 0u64 { 0xFFFF_FFFFu64 } else if s % 11u64 == 0u64 { 0u64 } else { s >> 32u64 };
+        x = (x << 32u32) + int::from(v);
+    }
+    x
+}
+
+fn hstr(t: str) -> u64 {
+    let b = t.as_bytes();
+    let h = 0u64;
+    for i in 0..b.len() { h = h.wrapping_mul(31u64).wrapping_add(b[i] as u64); }
+    h
+}
+
+fn divisor(kind: usize, n: usize) -> int {
+    let one: int = 1;
+    let r = gen((n * 7) as u64, n);
+    if kind == 0 { return r | (one << ((32 * n - 1) as u32)); }
+    if kind == 1 { return (one << ((32 * n) as u32)) - one; }
+    if kind == 2 { return one << ((32 * n - 1) as u32); }
+    (one << ((32 * n - 1) as u32)) + one
+}
+
+fn main() {
+    let md: int = 2305843009213693951;
+    let one: int = 1;
+    for (n, qn) in [(3000usize, 3000usize), (3001usize, 7000usize), (6000usize, 3100usize), (4096usize, 4097usize)] {
+        for kind in 0usize..4usize {
+            let b = divisor(kind, n);
+            let a = gen((n + qn + kind) as u64, qn) * b + (b - one);
+            let (q, r) = a.div_rem(b);
+            let c = gen((n * 3 + kind) as u64, n + qn);
+            let (q2, r2) = c.div_rem(b);
+            let ok = q * b + r == a && r == b - one && q2 * b + r2 == c && !r2.is_negative() && r2 < b;
+            println(f"d {n} {qn} {kind} {ok} {q %% md} {q2 %% md} {r2 %% md}");
+        }
+    }
+    let ten: int = 10;
+    for n in [4000usize, 30000usize] {
+        let xs = [gen(n as u64, n), ten.pow((n * 9) as u32) - one, ten.pow((n * 9) as u32)];
+        for xi in 0..3 {
+            let t = f"{xs[xi]}";
+            let back = try! t.parse::<int>();
+            let s = xs[xi].isqrt();
+            let sq = s * s <= xs[xi] && (s + one) * (s + one) > xs[xi];
+            println(f"s {n} {xi} {back == xs[xi]} {t.len()} {hstr(t)} {sq} {s %% md}");
+        }
+    }
+    for (n, m, gl) in [(2400usize, 2400usize, 1usize), (2600usize, 2500usize, 1300usize), (9000usize, 6000usize, 500usize)] {
+        let g = gen((n * 5 + gl) as u64, gl);
+        let a = gen((n * 11) as u64, n - gl) * g;
+        let b = gen((m * 13 + 1) as u64, m - gl) * g;
+        let d = a.gcd(b);
+        println(f"g {n} {m} {gl} {d %% md} {d.bit_length()}");
+    }
+    let f0: int = 0;
+    let f1: int = 1;
+    for _ in 0..120000 {
+        let t = f0 + f1;
+        f0 = f1;
+        f1 = t;
+    }
+    println(f"fib {f1.gcd(f0)} {(f1 * int::from(12345)).gcd(f0 * int::from(12345))} {f1.bit_length()}");
+}

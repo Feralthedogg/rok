@@ -12,14 +12,17 @@
 // Values are immutable: a limb buffer is never written once it sits in
 // an `Int`, so copies share it (spec 2.13.3: `int` is `Copy`).
 //
-// Algorithms: add / sub / shifts / products / Knuth D / Lehmer gcd are
-// runtime kernels (`rokr/src/bignum.rs`: 64-bit limbs on 64-bit targets,
-// schoolbook, Karatsuba, Toom-3, three-prime NTT). Here: Burnikel-Ziegler
-// division above `BZ` limbs; divide-and-conquer radix conversion over
-// the powers chunk^(2^i) both ways, output dividing by Newton / Barrett
-// reciprocals of the powers. A fixed operand multiplied many times (a divisor half, a power,
-// a reciprocal) keeps its NTT transforms. Square-and-multiply `pow` /
-// `modpow`, Newton `isqrt`.
+// Algorithms: add / sub / shifts / products (also mod B^n - 1) / Knuth D
+// / gcd (half-gcd, Lehmer) are runtime kernels (`rokr/src/bignum.rs`:
+// 64-bit limbs on 64-bit targets, schoolbook, Karatsuba, Toom-3,
+// three-prime NTT). Here: Burnikel-Ziegler division above `BZ` limbs,
+// Barrett (mu) division above `MU`; divide-and-conquer radix conversion
+// over the powers chunk^(2^i) both ways, output dividing by Barrett
+// reciprocals of the powers. A remainder known to be small comes from a
+// product mod B^m - 1 (Newton steps, Barrett). A fixed operand
+// multiplied many times (a divisor half, a power, a reciprocal) keeps
+// its NTT transforms. Square-and-multiply `pow` / `modpow`, Newton
+// `isqrt`.
 
 use rok::core::collections::raw::{GcBuf, buf_new};
 
@@ -28,6 +31,7 @@ use rok::core::collections::raw::{GcBuf, buf_new};
 /// conversion is quadratic; power limbs from which output divides by a
 /// reciprocal. Measured on aarch64.
 const BZ: usize = 60;
+const MU: usize = 3000;
 const STR_SMALL: usize = 40;
 const PARSE_SMALL: usize = 400;
 const BARRETT: usize = 200;
@@ -198,6 +202,10 @@ impl IntMag {
             let s = b.d[b.n - 1].leading_zeros() as u64;
             let bs = b.shl(s);
             let a = self.shl(s);
+            if bs.n >= MU && a.n >= bs.n + MU {
+                let (q, r) = a.divmod_mu(bs);
+                return (q, r.shr(s));
+            }
             let n = bs.n;
             let (plan, w, wn) = bz_plan(bs);
             let k = (a.n + n - 1) / n;
@@ -215,6 +223,82 @@ impl IntMag {
                 r = rd;
             }
             (IntMag::trim(q, k * n), r.shr(s))
+        }
+    }
+
+    /// `(self / b, self % b)` for `b` of `n` limbs with its top bit set,
+    /// `self.n > n` (Barrett): the dividend in base B^k digits from the
+    /// top, `k` the quotient's limbs up to `n`. Each digit of the
+    /// quotient is estimated from the top `dl = min(k + 1, n)` limbs of
+    /// the divisor (`d`; off by 1 at most) by `inv = floor(B^(dl+k) /
+    /// d)` (2 short at most); the remainder, a few `b` either way, comes
+    /// from `q b` mod B^m - 1.
+    fn divmod_mu(self, b: IntMag) -> (IntMag, IntMag) {
+        unsafe {
+            let n = b.n;
+            let qn = self.n - n;
+            let nb = (qn + n - 1) / n;
+            let c = mu_cost(qn, n, nb);
+            let j = nb + 1;
+            while j <= nb + 4 {
+                let cj = mu_cost(qn, n, j);
+                if cj < c {
+                    c = cj;
+                    nb = j;
+                }
+                j += 1;
+            }
+            let k = (qn + nb - 1) / nb;
+            let dl = if k + 1 < n { k + 1 } else { n };
+            let inv = b.slice(n - dl, n).recip_approx().shr(((dl - k) as u64) * 32u64);
+            let m = rok_nat_mulmod_len(k + 1, n, n + 2);
+            // Every digit multiplies by `inv` and `b`: their transforms.
+            let len = rok_nat_ntt_len(k + 1, k + 1);
+            let wn = if len > m { len } else { m };
+            let w: GcBuf<u32> = buf_new(if len > 0 { 6 * wn } else { 0 });
+            let invf: GcBuf<u32> = buf_new(if len > 0 { 3 * len } else { 0 });
+            let bf: GcBuf<u32> = buf_new(if len > 0 { 3 * m } else { 0 });
+            if len > 0 {
+                rok_nat_ntt_roots(w, wn);
+                rok_nat_ntt_prep(invf, inv.d, inv.n, len, w, wn);
+                rok_nat_ntt_prep(bf, b.d, b.n, m, w, wn);
+            }
+            let one = IntMag::from_u64(1u64);
+            let q: GcBuf<u32> = buf_new(k * nb + 1);
+            let r = self.slice(k * nb, self.n);
+            if r.cmp3(b) >= 0 {
+                q[k * nb] = 1u32;
+                r = r.minus(b);
+            }
+            let i = nb;
+            while i > 0 {
+                i -= 1;
+                let y = IntMag::join(r, self.slice(i * k, i * k + k), k);
+                // floor(floor(y / B^(n - dl)) / B^(dl - 1) * inv / B^(k + 1)).
+                let qe = y.slice(n - 1, y.n).times_prep(inv, invf, len, w, wn).slice(k + 1, 2 * k + 3);
+                let qb = if len > 0 { qe.times_prep(b, bf, m, w, wn) } else { qe.mulmod(b, m) };
+                let (neg, rr) = y.fold(m).wrap_sub(qb, m);
+                while neg {
+                    qe = qe.minus(one);
+                    if rr.cmp3(b) <= 0 {
+                        neg = false;
+                        rr = b.minus(rr);
+                    } else {
+                        rr = rr.minus(b);
+                    }
+                }
+                while rr.cmp3(b) >= 0 {
+                    qe = qe.plus(one);
+                    rr = rr.minus(b);
+                }
+                let j = 0usize;
+                while j < qe.n {
+                    q[i * k + j] = qe.d[j];
+                    j += 1;
+                }
+                r = rr;
+            }
+            (IntMag::trim(q, k * nb + 1), r)
         }
     }
 
@@ -253,27 +337,48 @@ impl IntMag {
         (q, t.minus(p))
     }
 
-    /// floor(B^2n / self), `n = self.n`: `recip_approx` made exact.
+    /// floor(B^2n / self), `n = self.n`: `recip_approx` made exact. The
+    /// residue D = B^2n - x self is a few `self` at most, so it comes
+    /// from a product mod B^m - 1 (`m >= n + 2`).
     fn recip(self) -> IntMag {
         let one = IntMag::from_u64(1u64);
-        let b2n = one.shl((self.n as u64) * 64u64);
+        let n = self.n;
         let x = self.recip_approx();
-        let px = x.times(self);
-        while px.cmp3(b2n) > 0 {
+        let m = unsafe { rok_nat_mulmod_len(x.n, n, n + 2) };
+        let (neg, d) = IntMag::wrap_pow(2 * n, m).wrap_sub(x.mulmod(self, m), m);
+        while neg {
             x = x.minus(one);
-            px = px.minus(self);
+            if d.cmp3(self) <= 0 {
+                neg = false;
+                d = self.minus(d);
+            } else {
+                d = d.minus(self);
+            }
         }
-        while b2n.minus(px).cmp3(self) >= 0 {
+        while d.cmp3(self) >= 0 {
             x = x.plus(one);
-            px = px.plus(self);
+            d = d.minus(self);
         }
         x
+    }
+
+    /// floor(B^2n / self) or up to 2 less (`n = self.n`) from `up`, the
+    /// next power (`up.p = self^2` of `N` limbs, `up.inv` at most 2 below
+    /// floor(B^2N / up.p)): B^2n / self = self B^2N / up.p / B^e, `e = 2N
+    /// - 2n`; `up.inv` without its low `e - n - 2` limbs changes that by
+    /// less than 1.
+    fn recip_from(self, up: Pow) -> IntMag {
+        let e = 2 * up.p.n - 2 * self.n;
+        let j = e - self.n - 2;
+        self.times(up.inv.slice(j, up.inv.n)).shr(((e - j) as u64) * 32u64)
     }
 
     /// floor(B^2n / self) within a few units (`n = self.n`): one Newton
     /// step from the reciprocal of the top `h = n/2 + 2` limbs. With
     /// X = R_h B^(n-h), B^2n - self X = B^(n-h) E for E = B^(n+h) -
-    /// self R_h, so X' = X + R_h E / B^2h; the error squares.
+    /// self R_h, so X' = X + R_h E / B^2h; the error squares. |E| is a
+    /// few B^n at most, so it comes from a product mod B^m - 1 (`m >=
+    /// n + 2`), and E below B^(h-1) changes R_h E / B^2h by less than 1.
     fn recip_approx(self) -> IntMag {
         let n = self.n;
         let one = IntMag::from_u64(1u64);
@@ -284,23 +389,74 @@ impl IntMag {
         let h = n / 2 + 2;
         let rh = self.slice(n - h, n).recip_approx();
         let x = rh.shl(((n - h) as u64) * 32u64);
-        let px = self.times(rh);
-        let bnh = one.shl(((n + h) as u64) * 32u64);
-        let sh = ((2 * h) as u64) * 32u64;
-        if px.cmp3(bnh) <= 0 {
-            x.plus(rh.times(bnh.minus(px)).shr(sh))
-        } else {
-            x.minus(rh.times(px.minus(bnh)).shr(sh)).minus(one)
+        let m = unsafe { rok_nat_mulmod_len(n, rh.n, n + 2) };
+        if unsafe { rok_nat_ntt_len(h + 1, h + 1) } == 0 {
+            let (neg, e) = IntMag::wrap_pow(n + h, m).wrap_sub(self.mulmod(rh, m), m);
+            let c = rh.times(e.slice(h - 1, e.n)).shr(((h + 1) as u64) * 32u64);
+            return if neg { x.minus(c).minus(one) } else { x.plus(c) };
+        }
+        // Both products take `rh`: its transform once (length m).
+        unsafe {
+            let w: GcBuf<u32> = buf_new(6 * m);
+            rok_nat_ntt_roots(w, m);
+            let f: GcBuf<u32> = buf_new(3 * m);
+            rok_nat_ntt_prep(f, rh.d, rh.n, m, w, m);
+            let p = self.times_prep(rh, f, m, w, m).fold(m);
+            let (neg, e) = IntMag::wrap_pow(n + h, m).wrap_sub(p, m);
+            let et = e.slice(h - 1, e.n);
+            let c = (if et.n + rh.n <= m { et.times_prep(rh, f, m, w, m) } else { rh.times(et) }).shr(((h + 1) as u64) * 32u64);
+            if neg { x.minus(c).minus(one) } else { x.plus(c) }
         }
     }
 
+    /// `self * b mod (B^m - 1)` (`m` from `rok_nat_mulmod_len`).
+    fn mulmod(self, b: IntMag, m: usize) -> IntMag {
+        unsafe {
+            if self.n == 0 || b.n == 0 { return IntMag::zero(); }
+            let r: GcBuf<u32> = buf_new(m);
+            let t: GcBuf<u32> = buf_new(rok_nat_mulmod_scratch(self.n, b.n, m));
+            rok_nat_mulmod(r, self.d, self.n, b.d, b.n, m, t);
+            IntMag::trim(r, m)
+        }
+    }
+
+    /// `self mod (B^m - 1)`.
+    fn fold(self, m: usize) -> IntMag {
+        unsafe {
+            let x = self;
+            while x.n > m { x = x.low(m).plus(x.slice(m, x.n)); }
+            if x.n < m { return x; }
+            let i = 0usize;
+            while i < m {
+                if x.d[i] != 0xFFFF_FFFFu32 { return x; }
+                i += 1;
+            }
+            IntMag::zero()
+        }
+    }
+
+    /// B^e mod (B^m - 1).
+    const fn wrap_pow(e: usize, m: usize) -> IntMag {
+        IntMag::from_u64(1u64).shl(((e % m) as u64) * 32u64)
+    }
+
+    /// The `v = self - y (mod B^m - 1)` of least magnitude, as its sign
+    /// and magnitude (`self`, `y` below B^m - 1).
+    const fn wrap_sub(self, y: IntMag, m: usize) -> (bool, IntMag) {
+        let neg = self.cmp3(y) < 0;
+        let d = if neg { y.minus(self) } else { self.minus(y) };
+        // Past B^m / 2: the other way round.
+        if d.bits() >= (m as u64) * 32u64 { return (!neg, IntMag::ones(m).minus(d)); }
+        (neg, d)
+    }
+
     /// `self * v` for `f` the transforms of `v` (`rok_nat_ntt_prep` for
-    /// products up to `len` limbs, roots `w` of `wn`); `len == 0` is a
-    /// plain product.
+    /// length `len`, roots `w` of `wn`), mod B^len - 1 past `len` limbs;
+    /// `len == 0` is a plain product.
     fn times_prep(self, v: IntMag, f: GcBuf<u32>, len: usize, w: GcBuf<u32>, wn: usize) -> IntMag {
         unsafe {
             if len == 0 || self.n == 0 || v.n == 0 { return self.times(v); }
-            let n = self.n + v.n;
+            let n = if self.n + v.n > len { len } else { self.n + v.n };
             let r: GcBuf<u32> = buf_new(n);
             let t: GcBuf<u32> = buf_new(3 * len);
             rok_nat_ntt_mul(r, self.d, self.n, f, v.n, len, w, wn, t);
@@ -308,14 +464,16 @@ impl IntMag {
         }
     }
 
-    /// `(self / p, self % p)` for `self < B^2n` (`n = p.n`), by `d.inv =
-    /// p.recip()` (Barrett: the estimate is at most 2 short).
+    /// `(self / p, self % p)` for `self < B^2n` (`n = p.n`), by `d.inv`,
+    /// floor(B^2n / p) or up to 2 less (Barrett: the estimate is at most
+    /// 4 short, so the remainder, below 5p, comes from `q p` mod B^m - 1).
     fn barrett(self, d: Pow, w: GcBuf<u32>, wn: usize) -> (IntMag, IntMag) {
         let p = d.p;
         let n = p.n;
         let t = self.slice(n - 1, self.n).times_prep(d.inv, d.invf, d.len, w, wn);
         let q = t.slice(n + 1, t.n);
-        let r = self.minus(q.times_prep(p, d.pf, d.len, w, wn));
+        let qp = if d.len > 0 { q.times_prep(p, d.pf, d.m, w, wn) } else { q.mulmod(p, d.m) };
+        let (_, r) = self.fold(d.m).wrap_sub(qp, d.m);
         while r.cmp3(p) >= 0 {
             q = q.plus(IntMag::from_u64(1u64));
             r = r.minus(p);
@@ -340,6 +498,27 @@ impl IntMag {
             (IntMag::trim(q, m), IntMag::trim(r, b.n))
         }
     }
+}
+
+/// The transforms `divmod_mu` takes with `nb` digits for a quotient of
+/// `qn` limbs by `n` (cycles about `t log t` for each of length `t`):
+/// the reciprocal (about 15 of length P, the digit's), the two
+/// prepared operands, and per digit the inverse and a forward transform
+/// of the quotient product (length L) and of the remainder's (m).
+fn mu_cost(qn: usize, n: usize, nb: usize) -> u64 {
+    let k = (qn + nb - 1) / nb;
+    let lp = pow2_log(k + 2);
+    let ll = pow2_log(2 * k + 2);
+    let lm = pow2_log(n + 2);
+    let t = |l: u64| (l << l);
+    15u64 * t(lp) + t(ll) + t(lm) + (nb as u64) * 2u64 * (t(ll) + t(lm))
+}
+
+/// log2 of the smallest power of two at least `x`.
+const fn pow2_log(x: usize) -> u64 {
+    let l = 0u64;
+    while (1usize << (l as usize)) < x { l += 1u64; }
+    l
 }
 
 /// One level of a Burnikel-Ziegler division by `b` (`n` limbs, top bit
@@ -398,15 +577,16 @@ fn bz_plan(b: IntMag) -> (List<BzLevel>, GcBuf<u32>, usize) {
 }
 
 /// A power chunk^(2^i) of the radix conversion with what dividing by it
-/// takes: its reciprocal (`inv.n == 0`: plain division) and the
-/// transforms of both for products up to `len` limbs (`len == 0`: plain
-/// products).
+/// takes: its reciprocal (`inv.n == 0`: plain division), the transforms
+/// of the reciprocal for products up to `len` limbs and of the power
+/// for products mod B^m - 1 (`len == 0`: plain products).
 struct Pow {
     p: IntMag;
     inv: IntMag;
     pf: GcBuf<u32>;
     invf: GcBuf<u32>;
     len: usize;
+    m: usize;
 }
 
 /// The powers of a radix conversion: `pw[i]` = chunk^(2^i), `k` of
@@ -426,18 +606,21 @@ fn str_levels(radix: u32, m: IntMag) -> PowTable {
         let none_buf: GcBuf<u32> = buf_new(0);
         let (chunk, _) = radix_chunk(radix);
         let pw: List<Pow> = List::new();
-        pw.push(Pow { p: IntMag::from_u64(chunk as u64), inv: IntMag::zero(), pf: none_buf, invf: none_buf, len: 0 });
+        pw.push(Pow { p: IntMag::from_u64(chunk as u64), inv: IntMag::zero(), pf: none_buf, invf: none_buf, len: 0, m: 0 });
         while m.n > STR_SMALL && pw[pw.len() - 1].p.bits() * 2u64 <= m.bits() + 1u64 {
             let p = pw[pw.len() - 1].p;
-            pw.push(Pow { p: p.times(p), inv: IntMag::zero(), pf: none_buf, invf: none_buf, len: 0 });
+            pw.push(Pow { p: p.times(p), inv: IntMag::zero(), pf: none_buf, invf: none_buf, len: 0, m: 0 });
         }
         let k = pw.len();
         let wn = 0usize;
-        for i in 0..k - 1 {
+        let i = k - 1;
+        while i > 0 {
+            i -= 1;
             let d = pw[i];
             if d.p.n >= BARRETT {
-                d.inv = d.p.recip();
+                d.inv = if i + 2 < k && pw[i + 1].inv.n > 0 { d.p.recip_from(pw[i + 1]) } else { d.p.recip() };
                 d.len = rok_nat_ntt_len(d.p.n + 1, d.p.n + 1);
+                d.m = rok_nat_mulmod_len(d.p.n + 1, d.p.n, d.p.n + 2);
                 if d.len > wn { wn = d.len; }
                 pw[i] = d;
             }
@@ -447,8 +630,8 @@ fn str_levels(radix: u32, m: IntMag) -> PowTable {
         for i in 0..k - 1 {
             let d = pw[i];
             if d.len > 0 {
-                d.pf = buf_new(3 * d.len);
-                rok_nat_ntt_prep(d.pf, d.p.d, d.p.n, d.len, w, wn);
+                d.pf = buf_new(3 * d.m);
+                rok_nat_ntt_prep(d.pf, d.p.d, d.p.n, d.m, w, wn);
                 d.invf = buf_new(3 * d.len);
                 rok_nat_ntt_prep(d.invf, d.inv.d, d.inv.n, d.len, w, wn);
                 pw[i] = d;
@@ -730,8 +913,9 @@ impl Int {
     }
 
     /// The greatest common divisor, never negative (`gcd(0, 0) == 0`).
-    /// Lehmer's algorithm (a runtime kernel) after one division that
-    /// brings the operands to about the same length.
+    /// A runtime kernel (half-gcd reductions, then Lehmer's algorithm)
+    /// after one division that brings the operands to about the same
+    /// length.
     pub fn gcd(self, other: Int) -> Int {
         unsafe {
             if self.big is none && other.big is none {

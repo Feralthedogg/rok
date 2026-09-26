@@ -182,6 +182,15 @@ extern "rok" {
     fn rok_net_sendfile(sock: i32, file: i32, offset: i64, count: usize) -> isize;
     fn rok_net_splice(sock: i32, file: i32, count: usize) -> isize;
     fn rok_net_send_zerocopy(fd: i32, buf: GcBuf<u8>, off: usize, len: usize) -> isize;
+    // `int` kernels that may run long: they run parked (804 §8.4.10) on
+    // the buffers this frame keeps alive.
+    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>);
+    fn rok_nat_mulmod(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, m: usize, t: GcBuf<u32>);
+    fn rok_nat_divmod(q: GcBuf<u32>, r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>);
+    fn rok_nat_ntt_roots(w: GcBuf<u32>, n: usize);
+    fn rok_nat_ntt_prep(f: GcBuf<u32>, b: GcBuf<u32>, bn: usize, n: usize, w: GcBuf<u32>, wn: usize);
+    fn rok_nat_ntt_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, f: GcBuf<u32>, bn: usize, n: usize, w: GcBuf<u32>, wn: usize, t: GcBuf<u32>);
+    fn rok_nat_gcd(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>) -> usize;
 }
 
 // Neither allocates nor blocks: a call is no safepoint (804). The
@@ -210,21 +219,17 @@ extern "rok" {
     fn rok_buf_utf8_error(buf: GcBuf<u8>, off: usize, len: usize) -> isize;
     fn rok_fmt_finish(t: str) -> str;
     fn rok_nat_mul_scratch(an: usize, bn: usize) -> usize;
-    fn rok_nat_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>);
     fn rok_nat_divmod_small(q: GcBuf<u32>, a: GcBuf<u32>, n: usize, v: u32) -> u32;
     fn rok_nat_divmod_scratch(an: usize, bn: usize) -> usize;
-    fn rok_nat_divmod(q: GcBuf<u32>, r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>);
     fn rok_nat_put_digits(out: GcBuf<u8>, end: usize, a: GcBuf<u32>, n: usize, width: usize, radix: u32) -> usize;
     fn rok_nat_add(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize) -> u32;
     fn rok_nat_sub(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize);
     fn rok_nat_shl(r: GcBuf<u32>, off: usize, a: GcBuf<u32>, n: usize, s: u32);
     fn rok_nat_shr(r: GcBuf<u32>, a: GcBuf<u32>, n: usize, s: u64);
     fn rok_nat_ntt_len(an: usize, bn: usize) -> usize;
-    fn rok_nat_ntt_roots(w: GcBuf<u32>, n: usize);
-    fn rok_nat_ntt_prep(f: GcBuf<u32>, b: GcBuf<u32>, bn: usize, n: usize, w: GcBuf<u32>, wn: usize);
-    fn rok_nat_ntt_mul(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, f: GcBuf<u32>, bn: usize, n: usize, w: GcBuf<u32>, wn: usize, t: GcBuf<u32>);
+    fn rok_nat_mulmod_len(an: usize, bn: usize, n: usize) -> usize;
+    fn rok_nat_mulmod_scratch(an: usize, bn: usize, m: usize) -> usize;
     fn rok_nat_gcd_scratch(an: usize, bn: usize) -> usize;
-    fn rok_nat_gcd(r: GcBuf<u32>, a: GcBuf<u32>, an: usize, b: GcBuf<u32>, bn: usize, t: GcBuf<u32>) -> usize;
     fn rok_os_errno_kind(code: i32) -> i32;
     fn rok_os_getpid() -> u32;
     fn rok_os_getppid() -> u32;
