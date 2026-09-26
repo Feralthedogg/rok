@@ -243,7 +243,8 @@ impl Incr {
     }
 }
 
-/// Library stages unused this long go when another is written.
+/// Library stages and pre-pass stores unused this long go when another
+/// is written.
 const LIBRARY_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 /// The folder of `cache_dir` that keeps the library's collected stages,
@@ -259,37 +260,35 @@ fn library_path(k: u64) -> Option<PathBuf> {
     )
 }
 
-/// The store of the pre-pass summaries of the library's files, in the
-/// stages' folder.
-pub fn library_prepass() -> Option<Store> {
+/// The store of the pre-pass summaries of the library's files from
+/// `roots` (one file per set of roots: a build of other roots keeps
+/// other entries), in the stages' folder.
+pub fn library_prepass(roots: &str) -> Option<Store> {
+    let k = key(&[roots.as_bytes()]);
     let dir = crate::cache_dir()?.join(LIBRARY_STAGES);
-    Some(Store::open(dir.join("prepass.rokast"), PARSE))
+    Some(Store::open(
+        dir.join(format!("prepass-{k:016x}.rokast")),
+        PARSE,
+    ))
 }
 
-/// The library stage of key `k` as `read` reads it.
-pub fn library_get<T>(
-    k: u64,
-    ids: &Ids,
-    read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
-) -> Option<T> {
-    let path = library_path(k)?;
-    let v = Store::open(path.clone(), LIBRARY).get_with(k, ids, read)?;
-    // Used: kept from the sweep of `library_put`.
-    if let Ok(f) = std::fs::File::options().append(true).open(&path) {
+/// Write back pre-pass store `s` of `library_prepass`, marked used.
+pub fn library_prepass_save(s: &Store) {
+    s.save(PARSE);
+    used(&s.path);
+    sweep(&s.path);
+}
+
+/// Mark the file at `path` used: kept from `sweep`.
+fn used(path: &Path) {
+    if let Ok(f) = std::fs::File::options().append(true).open(path) {
         let _ = f.set_modified(std::time::SystemTime::now());
     }
-    Some(v)
 }
 
-/// Keep what `write` writes as the library stage of key `k`; the
-/// stages not used for a while go.
-pub fn library_put(k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
-    let Some(path) = library_path(k) else {
-        return;
-    };
-    let store = Store::new(path.clone());
-    store.put_with(k, ids, write);
-    store.save(LIBRARY);
+/// Remove the stages and pre-pass stores beside `path` unused for a
+/// while.
+fn sweep(path: &Path) {
     let Some(Ok(dir)) = path.parent().map(std::fs::read_dir) else {
         return;
     };
@@ -303,10 +302,36 @@ pub fn library_put(k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > LIBRARY_KEPT);
-        if p != path && old && name.starts_with("library-") && name.ends_with(".rokcol") {
+        let ours = (name.starts_with("library-") && name.ends_with(".rokcol"))
+            || (name.starts_with("prepass-") && name.ends_with(".rokast"));
+        if p != path && old && ours {
             let _ = std::fs::remove_file(&p);
         }
     }
+}
+
+/// The library stage of key `k` as `read` reads it.
+pub fn library_get<T>(
+    k: u64,
+    ids: &Ids,
+    read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
+) -> Option<T> {
+    let path = library_path(k)?;
+    let v = Store::open(path.clone(), LIBRARY).get_with(k, ids, read)?;
+    used(&path);
+    Some(v)
+}
+
+/// Keep what `write` writes as the library stage of key `k`; the
+/// stages not used for a while go.
+pub fn library_put(k: u64, ids: &Ids, write: impl FnOnce(&mut Enc) -> bool) {
+    let Some(path) = library_path(k) else {
+        return;
+    };
+    let store = Store::new(path.clone());
+    store.put_with(k, ids, write);
+    store.save(LIBRARY);
+    sweep(&path);
 }
 
 pub const PARSE: &str = "ROKAST";

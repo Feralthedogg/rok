@@ -461,7 +461,18 @@ fn front_end_reuses_parses_and_bodies() {
     assert_eq!((n.0, n.1, n.3), (files - 1, files, bodies), "{n:?}");
     assert!(n.2 + 2 >= bodies && n.2 < bodies, "{n:?}");
     assert_eq!((w, out), (clean(), "1 5 g\n".to_owned()));
-    // Nothing changed: everything is taken.
+    // Nothing changed: everything is taken, though a build of other
+    // library roots ran between (its pre-pass summaries are its own).
+    put(dir.join("bare.rok"), "fn main() {}\n").unwrap();
+    let core = workspace().join("library/core/src/lib.rok");
+    let out = Command::new(ROKC)
+        .current_dir(&dir)
+        .env("ROK_HOME", workspace())
+        .args(["check", "bare.rok", "--bootstrap"])
+        .arg(&core)
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
     let (n, w, _) = build();
     assert_eq!(n, (files, files, bodies, bodies));
     assert_eq!(w, warnings);

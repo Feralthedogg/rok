@@ -1181,7 +1181,7 @@ fn build_prec_table(
 ) -> PrecTable {
     // The library's summaries are kept apart from a package's: every
     // build of the toolchain shares them (a lone file's too).
-    let store = incr::library_prepass();
+    let store = incr::library_prepass(&format!("{roots:?}"));
     let mut files = prepass_parse(
         roots
             .iter()
@@ -1191,7 +1191,7 @@ fn build_prec_table(
         store.as_ref(),
     );
     if let Some(s) = &store {
-        s.save(incr::PARSE);
+        incr::library_prepass_save(s);
     }
     let mut table = PrecTable::new();
     for (pkg, root) in roots {
