@@ -25,6 +25,11 @@ pub struct Enc {
     /// Ids go to `ids` only, not into `buf` (a fingerprint that names
     /// them otherwise).
     pub no_ids: bool,
+    /// `Lazy` values go with their fingerprint and length, for a reader
+    /// that keeps the bytes (`Dec::keep`).
+    pub lazy: bool,
+    /// The bytes of the `lazy` values written (read only when used).
+    pub lazy_bytes: usize,
 }
 
 impl Enc {
@@ -38,6 +43,8 @@ impl Enc {
             foreign: Vec::new(),
             ids: None,
             no_ids: false,
+            lazy: false,
+            lazy_bytes: 0,
         }
     }
 
@@ -96,6 +103,16 @@ pub struct Dec<'a> {
     pos: usize,
     pub files: Option<&'a [u32]>,
     pub ids: Option<IdMap<'a>>,
+    /// Set when `buf` lies in `Keep::buf` (written with `Enc::lazy`):
+    /// `Lazy` values are read when first used.
+    pub keep: Option<Keep>,
+}
+
+/// The bytes a decode keeps for its `Lazy` values, and its `files`.
+#[derive(Clone)]
+pub struct Keep {
+    pub buf: std::sync::Arc<[u8]>,
+    pub files: Option<std::sync::Arc<[u32]>>,
 }
 
 impl<'a> Dec<'a> {
@@ -106,7 +123,16 @@ impl<'a> Dec<'a> {
             pos: 0,
             files: None,
             ids: None,
+            keep: None,
         }
+    }
+
+    /// The next `n` bytes as they are.
+    pub fn raw(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let b = self.buf.get(self.pos..end)?;
+        self.pos = end;
+        Some(b)
     }
 
     /// The bytes not read yet.
@@ -339,6 +365,135 @@ impl<T: Codec> Codec for Option<T> {
     }
 }
 
+/// A value read from its encoding when first used (`Dec::keep`), else
+/// at once. Its position-free encoding is its fingerprint.
+pub struct Lazy<T> {
+    value: std::sync::OnceLock<T>,
+    /// Where its encoding lies in `Keep::buf`, until read.
+    src: Option<(Keep, usize, usize)>,
+    fp: std::sync::OnceLock<u64>,
+}
+
+impl<T> Lazy<T> {
+    pub fn new(v: T) -> Self {
+        Self {
+            value: std::sync::OnceLock::from(v),
+            src: None,
+            fp: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl<T: Codec> Lazy<T> {
+    fn get(&self) -> &T {
+        self.value.get_or_init(|| {
+            let (keep, a, b) = self.src.as_ref().expect("a lazy value has a source");
+            let mut d = Dec::new(&keep.buf[*a..*b]);
+            d.files = keep.files.as_deref();
+            d.keep = Some(keep.clone());
+            // Its bytes were framed when the entry was read: a failure is
+            // a corrupt store.
+            T::dec(&mut d)
+                .filter(|_| d.done())
+                .expect("a kept value reads back; remove the cache's `library` folder")
+        })
+    }
+
+    /// The value, read if not yet.
+    pub fn into_inner(self) -> T {
+        self.get();
+        self.value.into_inner().expect("read above")
+    }
+
+    /// A hash of its position-free encoding.
+    pub fn fingerprint(&self) -> u64 {
+        *self.fp.get_or_init(|| {
+            let mut e = Enc::new(false);
+            self.get().enc(&mut e);
+            crate::hash::fast(&e.buf)
+        })
+    }
+}
+
+impl<T: Codec> std::ops::Deref for Lazy<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.get()
+    }
+}
+
+impl<T: Codec> std::ops::DerefMut for Lazy<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        self.get();
+        self.src = None;
+        self.fp = std::sync::OnceLock::new();
+        self.value.get_mut().expect("read above")
+    }
+}
+
+impl<T: Clone> Clone for Lazy<T> {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            src: if self.value.get().is_some() {
+                None
+            } else {
+                self.src.clone()
+            },
+            fp: self.fp.clone(),
+        }
+    }
+}
+
+impl<T: Codec + std::fmt::Debug> std::fmt::Debug for Lazy<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.get().fmt(f)
+    }
+}
+
+impl<T: Codec> From<T> for Lazy<T> {
+    fn from(v: T) -> Self {
+        Self::new(v)
+    }
+}
+
+impl<T: Codec> Codec for Lazy<T> {
+    fn enc(&self, e: &mut Enc) {
+        if !e.spans {
+            e.buf.extend_from_slice(&self.fingerprint().to_le_bytes());
+            return;
+        }
+        if !e.lazy {
+            self.get().enc(e);
+            return;
+        }
+        e.buf.extend_from_slice(&self.fingerprint().to_le_bytes());
+        let at = e.buf.len();
+        e.buf.extend_from_slice(&[0; 4]);
+        self.get().enc(e);
+        let n = u32::try_from(e.buf.len() - at - 4).expect("a lazy value under 4 GiB");
+        e.buf[at..at + 4].copy_from_slice(&n.to_le_bytes());
+        e.lazy_bytes += n as usize;
+    }
+    fn dec(d: &mut Dec<'_>) -> Option<Self> {
+        let Some(keep) = d.keep.clone() else {
+            return T::dec(d).map(Self::new);
+        };
+        let fp = u64::from_le_bytes(d.raw(8)?.try_into().ok()?);
+        let n = u32::from_le_bytes(d.raw(4)?.try_into().ok()?) as usize;
+        let b = d.raw(n)?;
+        let a = (b.as_ptr() as usize).checked_sub(keep.buf.as_ptr() as usize)?;
+        if a + n > keep.buf.len() {
+            return None;
+        }
+        Some(Self {
+            value: std::sync::OnceLock::new(),
+            src: Some((keep, a, a + n)),
+            fp: std::sync::OnceLock::from(fp),
+        })
+    }
+}
+
 impl<T: Codec> Codec for Box<T> {
     fn enc(&self, e: &mut Enc) {
         (**self).enc(e);
@@ -564,5 +719,44 @@ mod tests {
             Some((i128::MIN, i64::MIN, u64::MAX))
         );
         assert_eq!(P::dec(&mut Dec::new(&enc.buf[..3])), None);
+    }
+
+    #[test]
+    fn lazy_values_read_when_used() {
+        let value = || (Lazy::new("body".to_owned()), 7u32);
+        let enc = |x: &(Lazy<String>, u32), spans: bool| {
+            let mut out = Enc::new(spans);
+            x.enc(&mut out);
+            out.buf
+        };
+        // Without `lazy` the encoding is the value's own.
+        let mut own = Enc::new(true);
+        ("body".to_owned(), 7u32).enc(&mut own);
+        assert_eq!(enc(&value(), true), own.buf);
+        let mut framed = Enc::new(true);
+        framed.lazy = true;
+        value().enc(&mut framed);
+        let buf: std::sync::Arc<[u8]> = framed.buf.into();
+        let keep = Keep {
+            buf: buf.clone(),
+            files: None,
+        };
+        let mut dec = Dec::new(&buf);
+        dec.keep = Some(keep.clone());
+        let (lazy, n) = <(Lazy<String>, u32)>::dec(&mut dec).unwrap();
+        assert!(dec.done());
+        assert_eq!(n, 7);
+        assert!(lazy.value.get().is_none());
+        // The fingerprint is kept, not read.
+        assert_eq!(enc(&(lazy.clone(), 7), false), enc(&value(), false));
+        assert!(lazy.value.get().is_none());
+        assert_eq!(*lazy, "body");
+        let mut changed = lazy;
+        changed.push('!');
+        assert_ne!(enc(&(changed, 7), false), enc(&value(), false));
+        // A frame that runs past the bytes is a miss.
+        let mut cut = Dec::new(&buf[..buf.len() - 2]);
+        cut.keep = Some(keep);
+        assert!(<(Lazy<String>, u32)>::dec(&mut cut).is_none());
     }
 }

@@ -45,10 +45,6 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         with_reprs.reprs = std::sync::Arc::new(reprs);
     }
     let target = &with_reprs;
-    let mut ret_tys: HashMap<FunctionId, MirTy> = HashMap::new();
-    for f in &module.functions {
-        ret_tys.insert(f.id, lower_ty(&f.ret_ty, module, target));
-    }
     let statics: Vec<MirStaticDef> = module
         .statics
         .iter()
@@ -81,13 +77,21 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             .map(|f| f.id)
             .collect(),
     };
-    // The stubs no lowered body reaches are not code.
+    // The stubs no lowered body reaches are not code, nor what the roots
+    // do not reach.
     let unlowered: std::collections::HashSet<FunctionId> =
         module.unlowered.iter().copied().collect();
+    let reached = module.roots.as_ref().map(|r| reached(module, r));
     let lowered: Vec<&HirFunction> = module
         .functions
         .iter()
-        .filter(|f| !unlowered.contains(&f.id))
+        .filter(|f| {
+            !unlowered.contains(&f.id) && reached.as_ref().is_none_or(|r| r.contains(&f.id))
+        })
+        .collect();
+    let ret_tys: HashMap<FunctionId, MirTy> = lowered
+        .iter()
+        .map(|f| (f.id, lower_ty(&f.ret_ty, module, target)))
         .collect();
     let mut functions: Vec<MirFunction> = lowered
         .iter()
@@ -308,6 +312,33 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
         };
         functions.push(w);
     }
+}
+
+/// The functions `roots` reach through the HIR's calls, `fn` values,
+/// closures and coroutines: a superset of what `retain_reachable` keeps.
+fn reached(module: &HirModule, roots: &[FunctionId]) -> HashSet<FunctionId> {
+    let index: HashMap<FunctionId, &HirFunction> =
+        module.functions.iter().map(|f| (f.id, f)).collect();
+    let mut live = HashSet::new();
+    let mut work = roots.to_vec();
+    while let Some(id) = work.pop() {
+        if !live.insert(id) {
+            continue;
+        }
+        let Some(body) = index.get(&id).and_then(|f| f.body.as_ref()) else {
+            continue;
+        };
+        rokc_hir::each_block(body, &mut |e| {
+            if let HirExprKind::Call { callee: id, .. }
+            | HirExprKind::FnRef(id)
+            | HirExprKind::ClosureValue { fn_id: id, .. }
+            | HirExprKind::CoroNew { body_fn: id, .. } = &e.kind
+            {
+                work.push(*id);
+            }
+        });
+    }
+    live
 }
 
 /// Keep the functions `roots` reach through calls and `fn` values.

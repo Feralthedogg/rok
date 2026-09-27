@@ -320,6 +320,9 @@ pub fn check_use_targets(
     reexports: &[ReExport],
 ) -> Vec<RokDiagnostic> {
     use rokc_ast::{ExternItem, ImplItem, Item};
+    if raw.is_empty() {
+        return Vec::new();
+    }
     let mut known: HashSet<String> = HashSet::new();
     for item in items {
         match *item {

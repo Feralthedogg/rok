@@ -18,10 +18,11 @@
 //! answer now. Otherwise the body is lowered and the unit made anew: a
 //! miss is always safe.
 //!
-//! A body is plain when nothing else is derived from it: not generic,
-//! not `const`, its return type written (or `()`), not a trait's
-//! default. A lowering that reports an error or touches state beyond
-//! what it logs makes no unit.
+//! A body is plain when it is lowered once as itself: not generic, not
+//! `const`, not a trait's default. An inferred return type is derived
+//! from the body, so such a body stays in the interface (`interface_key`)
+//! while its unit records the type it gave. A lowering that reports an
+//! error or touches state beyond what it logs makes no unit.
 
 use std::collections::{HashMap, HashSet};
 
@@ -529,8 +530,15 @@ pub(super) struct Incr<'a> {
     global: u64,
     /// Per declaration: plain (see the module doc).
     plain: Vec<bool>,
+    /// The kept library stage's key and the declarations it made (the
+    /// first ones): theirs are named by it.
+    library: Option<(u64, usize)>,
     /// Fingerprints of the reads answered so far (by encoding).
     answers: std::cell::RefCell<HashMap<Vec<u8>, Option<u64>>>,
+    /// Fingerprints of the impls by index (`Impls::all`), once taken.
+    impl_fps: std::cell::RefCell<HashMap<usize, Option<u64>>>,
+    /// The generic impls by method, and every impl by associated const.
+    impls_by: std::cell::OnceCell<[HashMap<String, Vec<usize>>; 2]>,
     /// `fn_table` keys by `stable_name`, where it differs (`None`: two).
     raw_keys: std::cell::OnceCell<HashMap<String, Option<String>>>,
     /// Per file: each line's end and the hash of the text up to it.
@@ -651,14 +659,22 @@ impl<'a> Incr<'a> {
         programs: &[&Program],
         raw_uses: &[(String, rokc_core::Visibility, rokc_ast::UseTree)],
         input: &crate::HirInput,
+        lib_decls: usize,
     ) -> Self {
         let plain: Vec<bool> = (0..env.decls.len()).map(|i| is_plain(env, i)).collect();
+        // An inferred return is part of the interface (callers and
+        // generic bodies read it): its body stays in the key.
         let bodies: HashSet<(&str, Span)> = env
             .decls
             .iter()
             .zip(&plain)
-            .filter(|(_, p)| **p)
-            .map(|(d, _)| (d.def().name.as_str(), d.def().span))
+            .enumerate()
+            .filter(|(i, (_, p))| {
+                **p && !env
+                    .infer_ret
+                    .contains(&FunctionId(u32::try_from(*i).unwrap_or(u32::MAX)))
+            })
+            .map(|(_, (d, _))| (d.def().name.as_str(), d.def().span))
             .collect();
         let interface = interface_key(env, &bodies, programs, raw_uses, input);
         Self {
@@ -666,7 +682,10 @@ impl<'a> Incr<'a> {
             interface,
             global: global_key(env, input),
             plain,
+            library: input.library.map(|k| (k, lib_decls)),
             answers: std::cell::RefCell::new(HashMap::new()),
+            impl_fps: std::cell::RefCell::new(HashMap::new()),
+            impls_by: std::cell::OnceCell::new(),
             raw_keys: std::cell::OnceCell::new(),
             lines: std::cell::RefCell::new(HashMap::new()),
             names: std::cell::RefCell::new(Names::default()),
@@ -740,7 +759,14 @@ impl<'a> Incr<'a> {
         }
         let def = env.decls[i].def();
         let mut e = Enc::new(true);
-        def.enc(&mut e);
+        match self.library {
+            // The stage's key names its declarations.
+            Some((k, n)) if i < n => {
+                e.u(k);
+                e.u(i as u64);
+            }
+            _ => def.enc(&mut e),
+        }
         let path = env.sources.path(def.span.file).unwrap_or_default();
         let id = FunctionId(u32::try_from(i).unwrap_or(u32::MAX));
         let name = env
@@ -1440,6 +1466,51 @@ fn leaf_keys(l: &super::Leaves, leaf: &str) -> Vec<String> {
 }
 
 impl Incr<'_> {
+    /// The fingerprint of impl `i`, taken once per build.
+    fn impl_fp(&self, env: &Env<'_>, i: usize) -> Option<u64> {
+        if let Some(h) = self.impl_fps.borrow().get(&i) {
+            return *h;
+        }
+        let mut f = Fp::new();
+        fp_impl(&mut f, &env.impls.all[i]);
+        let mut names = self.names.borrow_mut();
+        names.update(env);
+        let h = f.finish(&names);
+        drop(names);
+        self.impl_fps.borrow_mut().insert(i, h);
+        h
+    }
+
+    /// The fingerprints of impls `at`, in source order.
+    fn impls_fp(&self, env: &Env<'_>, f: &mut Fp, at: &[usize]) -> Option<()> {
+        for &i in at {
+            f.add(&self.impl_fp(env, i)?);
+        }
+        Some(())
+    }
+
+    /// The impls by method (generic ones) or by associated const.
+    fn impls_by(&self, env: &Env<'_>, consts: bool, name: &str) -> &[usize] {
+        let by = self.impls_by.get_or_init(|| {
+            let mut by: [HashMap<String, Vec<usize>>; 2] = Default::default();
+            for (i, im) in env.impls.all.iter().enumerate() {
+                if im.is_generic() {
+                    for m in im.methods.keys() {
+                        by[0].entry(m.clone()).or_default().push(i);
+                    }
+                }
+                for (c, ..) in &im.consts {
+                    let at = by[1].entry(c.clone()).or_default();
+                    if at.last() != Some(&i) {
+                        at.push(i);
+                    }
+                }
+            }
+            by
+        });
+        by[usize::from(consts)].get(name).map_or(&[], Vec::as_slice)
+    }
+
     /// The fingerprint of what `r` reads now (`None`: not readable).
     fn answer(&self, env: &Env<'_>, r: &Read) -> Option<u64> {
         let mut e = Enc::new(true);
@@ -1545,13 +1616,17 @@ impl Incr<'_> {
                 f.add(&env.consts.get(k).cloned());
             }
             Read::ConstLeaf(k) => {
-                f.add(&leaf_keys(&super::leaves(env.consts.keys()), k));
+                let mut v = env.value_leaf(false, k);
+                v.sort();
+                f.add(&v);
             }
             Read::Static(k) => {
                 f.add(&env.statics.get(k).cloned());
             }
             Read::StaticLeaf(k) => {
-                f.add(&leaf_keys(&super::leaves(env.statics.keys()), k));
+                let mut v = env.value_leaf(true, k);
+                v.sort();
+                f.add(&v);
             }
             Read::MutStatic(k) => {
                 f.add(&env.mut_statics.contains(k));
@@ -1585,31 +1660,20 @@ impl Incr<'_> {
                 f.debug(&env.names.uses.get(m));
             }
             Read::GenericImpls => {
-                for i in env.impls.iter().filter(|i| i.is_generic()) {
-                    fp_impl(&mut f, i);
+                for (i, _) in env.impls.iter().enumerate().filter(|(_, i)| i.is_generic()) {
+                    f.add(&self.impl_fp(env, i)?);
                 }
             }
             Read::GenericImplsOf(k) => {
-                for i in env
-                    .impls
-                    .all
-                    .iter()
-                    .filter(|i| i.is_generic() && i.trait_key == *k)
-                {
-                    fp_impl(&mut f, i);
+                for &i in env.impls.generic_of.get(k).into_iter().flatten() {
+                    f.add(&self.impl_fp(env, i)?);
                 }
             }
             Read::GenericImplsWith(m) => {
-                let with = |i: &&super::Impl| i.is_generic() && i.methods.contains_key(m);
-                for i in env.impls.iter().filter(with) {
-                    fp_impl(&mut f, i);
-                }
+                self.impls_fp(env, &mut f, self.impls_by(env, false, m))?;
             }
             Read::ImplConsts(n) => {
-                let with = |i: &&super::Impl| i.consts.iter().any(|(c, ..)| c == n);
-                for i in env.impls.iter().filter(with) {
-                    fp_impl(&mut f, i);
-                }
+                self.impls_fp(env, &mut f, self.impls_by(env, true, n))?;
             }
             Read::ImplsOn(ty) => {
                 let refs: Vec<&crate::TraitRef> = env.impls.refs_on(ty).collect();
@@ -1960,7 +2024,6 @@ fn answers(env: &Env<'_>, ids: &Ids, l: &Lookup) -> bool {
 
 /// Declaration `i` is plain (see the module doc).
 fn is_plain(env: &Env<'_>, i: usize) -> bool {
-    let id = FunctionId(u32::try_from(i).unwrap_or(u32::MAX));
     let (def, borrowed) = match &env.decls[i] {
         MethodOrFn::Fn(f) => (*f, true),
         MethodOrFn::Method { fn_def, subst, .. } => (
@@ -1971,7 +2034,6 @@ fn is_plain(env: &Env<'_>, i: usize) -> bool {
     borrowed
         && def.body.is_some()
         && def.generics.params.is_empty()
-        && !env.infer_ret.contains(&id)
         && !def
             .attrs
             .iter()
@@ -2044,6 +2106,15 @@ fn interface_key(
             e.buf.push(0);
             f.enc(e);
         }
+    };
+    // A kept library stage's items (the first program's) are those of its
+    // key.
+    let programs = match input.library {
+        Some(k) => {
+            e.u(k);
+            &programs[1..]
+        }
+        None => programs,
     };
     let items = programs.iter().flat_map(|p| &p.items);
     e.u(items.clone().count() as u64);

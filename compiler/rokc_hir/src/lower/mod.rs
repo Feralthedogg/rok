@@ -856,12 +856,24 @@ struct Impls {
     by_target: HashMap<MethodTarget, Vec<usize>>,
     /// Concrete trait impls by trait key, in resolution order.
     by_trait: HashMap<String, Vec<usize>>,
+    /// Generic impls by trait key (`""`: inherent), in source order.
+    generic_of: HashMap<String, Vec<usize>>,
 }
 
 impl Impls {
     /// Every impl, in source order.
     fn iter(&self) -> impl Iterator<Item = &Impl> {
         self.all.iter().map(|i| &**i)
+    }
+
+    fn push(&mut self, i: Impl) {
+        if i.is_generic() {
+            self.generic_of
+                .entry(i.trait_key.clone())
+                .or_default()
+                .push(self.all.len());
+        }
+        self.all.push(std::sync::Arc::new(i));
     }
 
     /// Concrete impl `i`'s target and trait ref, once resolved.
@@ -886,8 +898,11 @@ impl Impls {
             Pick::Trait(key) => {
                 incr::read(|| incr::Read::GenericImplsOf(key.to_owned()));
                 Box::new(
-                    self.iter()
-                        .filter(move |i| i.is_generic() && i.trait_key == key),
+                    self.generic_of
+                        .get(key)
+                        .map_or(&[][..], Vec::as_slice)
+                        .iter()
+                        .map(|&i| &*self.all[i]),
                 )
             }
             Pick::Method(m) => {
@@ -937,6 +952,22 @@ impl Impls {
             .into_iter()
             .flatten()
             .filter_map(|&i| Some(&self.all[i].concrete.as_ref()?.0))
+    }
+}
+
+/// The types `auto_trait` is inside of, outermost first, and the
+/// outermost one a `true` below assumed (`usize::MAX`: none).
+struct AutoSeen {
+    open: Vec<HirTy>,
+    low: usize,
+}
+
+impl Default for AutoSeen {
+    fn default() -> Self {
+        Self {
+            open: Vec::new(),
+            low: usize::MAX,
+        }
     }
 }
 
@@ -1205,7 +1236,7 @@ struct Tables<'a> {
     neg_auto: std::collections::HashSet<(String, String)>,
     /// `auto_trait` answers by type and trait, while the program no
     /// longer changes (`send_check`); `None` otherwise.
-    auto_memo: std::cell::RefCell<Option<HashMap<String, bool>>>,
+    auto_memo: std::cell::RefCell<Option<HashMap<String, HashMap<HirTy, bool>>>>,
     /// Trait key → declared methods + supertraits (`any Tr` calls).
     trait_info: HashMap<String, TraitInfo>,
     /// Module-level `static` items by name → declared type.
@@ -1385,6 +1416,25 @@ impl<'a> Env<'a> {
     fn trait_of(&self, key: &str) -> Option<&TraitInfo> {
         incr::read(|| incr::Read::TraitInfo(key.to_owned()));
         self.trait_info.get(key)
+    }
+
+    /// The keys of the statics (else consts) whose last segment is `leaf`.
+    fn value_leaf(&self, statics: bool, leaf: &str) -> Vec<String> {
+        let (index, len) = if statics {
+            (&self.static_leaves, self.statics.len())
+        } else {
+            (&self.const_leaves, self.consts.len())
+        };
+        let mut index = index.borrow_mut();
+        if index.0 != len {
+            let keys = if statics {
+                leaves(self.statics.keys())
+            } else {
+                leaves(self.consts.keys())
+            };
+            *index = (len, keys);
+        }
+        index.1.get(leaf).cloned().unwrap_or_default()
     }
 
     /// `impl !key for base {}`.
@@ -3053,7 +3103,7 @@ impl<'a> LowerCtx<'a> {
             return true;
         }
         if self.env.names.auto_traits.contains(trait_key) {
-            return self.auto_trait(ty, trait_key, depth, &mut Vec::new());
+            return self.auto_trait(ty, trait_key, depth, &mut AutoSeen::default());
         }
         // A sum has the structural traits its variants have (`none`
         // has them all); `expr::sum_structural_call` dispatches them.
@@ -3086,30 +3136,32 @@ impl<'a> LowerCtx<'a> {
     /// opts in, `impl !Tr` opts out; otherwise every component must
     /// have it. Primitives and `str` do. A recursive type assumes it
     /// for itself (`seen`).
-    fn auto_trait(&self, ty: &HirTy, key: &str, depth: u32, seen: &mut Vec<HirTy>) -> bool {
-        let memo = self
+    fn auto_trait(&self, ty: &HirTy, key: &str, depth: u32, seen: &mut AutoSeen) -> bool {
+        let memo = self.env.auto_memo.borrow().is_some();
+        if let Some(&v) = self
             .env
             .auto_memo
             .borrow()
-            .is_some()
-            .then(|| format!("{key}|{ty:?}"));
-        if let Some(m) = &memo {
-            if let Some(&v) = self.env.auto_memo.borrow().as_ref().and_then(|t| t.get(m)) {
-                return v;
-            }
+            .as_ref()
+            .and_then(|t| t.get(key)?.get(ty))
+        {
+            return v;
         }
-        let outer = seen.is_empty();
+        let at = seen.open.len();
+        let low = std::mem::replace(&mut seen.low, usize::MAX);
         let ok = self.auto_trait_inner(ty, key, depth, seen);
-        // A `true` found inside a recursive type assumed what encloses it.
-        if let Some(m) = memo.filter(|_| outer || !ok) {
+        // A `true` that assumed an enclosing type holds only inside it.
+        let assumed = seen.low < at;
+        seen.low = seen.low.min(low);
+        if memo && (!ok || !assumed) {
             if let Some(t) = self.env.auto_memo.borrow_mut().as_mut() {
-                t.insert(m, ok);
+                t.entry(key.to_owned()).or_default().insert(ty.clone(), ok);
             }
         }
         ok
     }
 
-    fn auto_trait_inner(&self, ty: &HirTy, key: &str, depth: u32, seen: &mut Vec<HirTy>) -> bool {
+    fn auto_trait_inner(&self, ty: &HirTy, key: &str, depth: u32, seen: &mut AutoSeen) -> bool {
         if self.has_impl(ty, &TraitRef::plain(key), depth) {
             return true;
         }
@@ -3124,10 +3176,11 @@ impl<'a> LowerCtx<'a> {
                 return false;
             }
         }
-        if seen.contains(ty) {
+        if let Some(i) = seen.open.iter().position(|t| t == ty) {
+            seen.low = seen.low.min(i);
             return true;
         }
-        seen.push(ty.clone());
+        seen.open.push(ty.clone());
         let mut rec = |t: &HirTy| self.auto_trait(t, key, depth, seen);
         let ok = match ty {
             HirTy::Tuple(ts) | HirTy::Sum(ts) => ts.iter().all(&mut rec),
@@ -3138,7 +3191,8 @@ impl<'a> LowerCtx<'a> {
             // `GcBuf<X>`, so `X: Sync` — spec 4.6.9).
             HirTy::Closure { env, .. } => {
                 let sync = self.lang("sync_trait");
-                rec(env) && (key == sync || self.auto_trait(env, sync, depth, &mut Vec::new()))
+                rec(env)
+                    && (key == sync || self.auto_trait(env, sync, depth, &mut AutoSeen::default()))
             }
             HirTy::Throws { ok, err } => rec(ok) && rec(err),
             HirTy::Struct(id) => {
@@ -3178,7 +3232,7 @@ impl<'a> LowerCtx<'a> {
             // Only through its bounds (`has_impl`).
             HirTy::Param(_) => false,
         };
-        seen.pop();
+        seen.open.pop();
         ok
     }
 
@@ -3188,7 +3242,7 @@ impl<'a> LowerCtx<'a> {
     /// `List<i64>` (collections are not `Sync`; ..)".
     fn auto_trait_cause(&self, ty: &HirTy, key: &str, depth: u32) -> String {
         let tr = leaf_name(key);
-        let lacks = |t: &HirTy| !self.auto_trait(t, key, 0, &mut Vec::new());
+        let lacks = |t: &HirTy| !self.auto_trait(t, key, 0, &mut AutoSeen::default());
         let step = |what: String, t: &HirTy| {
             format!(
                 " because {what} has type `{}`{}",
@@ -3258,7 +3312,7 @@ impl<'a> LowerCtx<'a> {
             };
             let key = keys
                 .iter()
-                .find(|k| !self.auto_trait(&f.ty, k, 0, &mut Vec::new()))?;
+                .find(|k| !self.auto_trait(&f.ty, k, 0, &mut AutoSeen::default()))?;
             let name = self.locals.get(local.0 as usize)?.name.clone()?;
             // A `[ref x]` capture is a cell of `x`'s type.
             let shown = match &f.ty {
@@ -3640,21 +3694,7 @@ impl<'a> LowerCtx<'a> {
                     incr::Read::ConstLeaf(leaf.to_owned())
                 }
             });
-            let (index, len) = if statics {
-                (&env.static_leaves, env.statics.len())
-            } else {
-                (&env.const_leaves, env.consts.len())
-            };
-            let mut index = index.borrow_mut();
-            if index.0 != len {
-                let keys = if statics {
-                    leaves(env.statics.keys())
-                } else {
-                    leaves(env.consts.keys())
-                };
-                *index = (len, keys);
-            }
-            index.1.get(leaf).cloned().unwrap_or_default()
+            env.value_leaf(statics, leaf)
         };
         let visible = |k: &str| {
             let vis = self.env.item_vis(k);

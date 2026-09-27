@@ -782,7 +782,7 @@ pub fn type_name(enum_: bool, id: u32) -> Option<String> {
 /// A trait as a bound names it or an impl provides it, `Get<i32, Item =
 /// u8>` (spec 2.8, 2.10): the trait's full path, its positional
 /// arguments and its associated-type bindings (sorted by name).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TraitRef {
     pub path: String,
     pub args: Vec<HirTy>,
@@ -834,7 +834,7 @@ impl TraitRef {
 }
 
 /// What a `fn` type promises beyond its signature.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FnBounds {
     /// `+ Send + Sync`: sorted auto-trait keys.
     pub auto: Vec<String>,
@@ -847,7 +847,7 @@ pub struct FnBounds {
     pub stdcall: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HirTy {
     /// Not yet inferred.
     Unknown,

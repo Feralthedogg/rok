@@ -910,6 +910,7 @@ fn compile_unit_in(
             diags: d.clone(),
             native,
             no_implicit: NO_IMPLICIT.with(|n| n.borrow()[lib_no_implicit..].to_vec()),
+            hashes: Vec::new(),
         }
     });
     if kept && !verify {
@@ -1030,9 +1031,21 @@ fn compile_unit_in(
         }
     });
     diags.append(&mut hir.diagnostics);
-    if let (Some(k), false) = (library, kept) {
+    // The library's files are the stage's: so are their hashes.
+    let lib_hashes = if let (Some(k), false) = (library, kept) {
+        let mut parts = parts;
+        parts.hashes = package_hashes(&root_dir, &roots, files, &[])
+            .into_iter()
+            .filter(|(p, _)| !p.is_empty())
+            .collect();
+        let hashes = parts.hashes.clone();
         keep_library(k, parts, files);
-    }
+        hashes
+    } else if kept {
+        parts.hashes
+    } else {
+        Vec::new()
+    };
     let library_items =
         library.and_then(|k| rokc_hir::with_library(k, rokc_hir::LibraryStage::items));
     if library_items.is_some() {
@@ -1046,7 +1059,7 @@ fn compile_unit_in(
         return Err(diags);
     }
     let mut mir = rokc_diagnostic::time("mir", || rokc_mir::lower(&hir, &config.target));
-    mir.link.packages = package_hashes(&root_dir, &roots, files);
+    mir.link.packages = package_hashes(&root_dir, &roots, files, &lib_hashes);
     for p in prebuilt {
         // The standard library's hash is one per tier: `pkg=hash;..`.
         let hashes: Vec<(&str, &str)> = if p.rokhir.name == STD_PKG {
@@ -1108,11 +1121,12 @@ pub fn relower(m: &mut CompiledModule) {
 /// of its source files in path order — `rok::<tier>` for each library
 /// root, `""` for the user package. A file belongs to the package whose
 /// directory is its closest ancestor. Longest prefix first (mangling
-/// picks the first match).
+/// picks the first match). `known`: hashes of packages already taken.
 fn package_hashes(
     user_dir: &Path,
     roots: &[LibRoot],
     sources: &SourceMap,
+    known: &[(String, String)],
 ) -> Vec<(String, String)> {
     let mut pkgs: Vec<(String, PathBuf)> = roots
         .iter()
@@ -1120,26 +1134,33 @@ fn package_hashes(
         .collect();
     pkgs.push((String::new(), user_dir.to_path_buf()));
     let files = sources.files();
+    // The closest package directory owns a file.
+    let owner = |p: &Path| {
+        pkgs.iter()
+            .filter(|(_, d)| p.starts_with(d))
+            .max_by_key(|(_, d)| d.components().count())
+            .map(|(_, d)| d)
+    };
     let mut out: Vec<(String, String)> = pkgs
         .iter()
         .map(|(prefix, dir)| {
+            if let Some(k) = known.iter().find(|(p, _)| p == prefix) {
+                return k.clone();
+            }
             let mut mine: Vec<(String, &str)> = files
                 .iter()
-                .filter_map(|(path, text)| {
+                .filter(|(path, _)| {
                     let p = Path::new(path);
-                    // The closest package directory owns the file.
-                    let owner = pkgs
-                        .iter()
-                        .filter(|(_, d)| p.starts_with(d))
-                        .max_by_key(|(_, d)| d.components().count())?;
-                    (owner.1 == *dir).then(|| {
-                        let rel = p.strip_prefix(dir).unwrap_or(p);
-                        let rel: Vec<String> = rel
-                            .components()
-                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                            .collect();
-                        (rel.join("/"), text.as_str())
-                    })
+                    p.starts_with(dir) && owner(p) == Some(dir)
+                })
+                .map(|(path, text)| {
+                    let p = Path::new(path);
+                    let rel = p.strip_prefix(dir).unwrap_or(p);
+                    let rel: Vec<String> = rel
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect();
+                    (rel.join("/"), text.as_str())
                 })
                 .collect();
             (prefix.clone(), hash_package(&mut mine))
@@ -1217,6 +1238,54 @@ type PreFiles = std::collections::HashMap<PathBuf, (u32, Prepassed)>;
 /// the file's, directory of its submodules), by path. Breadth first:
 /// each level's files are read and registered in order (file ids stay
 /// deterministic), then lexed and parsed in parallel.
+/// `job` of each index below `n`, on a thread per core (each `stack`
+/// bytes deep); `None` for an index no thread got to.
+pub(crate) fn on_cores<T: Send>(
+    n: usize,
+    stack: usize,
+    job: impl Fn(usize) -> T + Sync,
+) -> std::io::Result<Vec<Option<T>>> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let results: Vec<std::sync::Mutex<Option<T>>> =
+        (0..n).map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..cores.min(n) {
+            std::thread::Builder::new()
+                .stack_size(stack)
+                .spawn_scoped(s, || {
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break;
+                        }
+                        let r = job(i);
+                        *results[i]
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r);
+                    }
+                })?;
+        }
+        Ok::<(), std::io::Error>(())
+    })?;
+    Ok(results
+        .into_iter()
+        .map(|r| {
+            r.into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+        .collect())
+}
+
+/// `on_cores`, each job run (or the compile stops).
+fn on_cores_all<T: Send>(n: usize, stack: usize, job: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    on_cores(n, stack, job)
+        .expect("start a worker thread")
+        .into_iter()
+        .map(|r| r.expect("a worker ran every job"))
+        .collect()
+}
+
 fn prepass_parse(
     roots: Vec<(PathBuf, Option<String>, Option<PathBuf>)>,
     sources: &mut SourceMap,
@@ -1236,16 +1305,9 @@ fn prepass_parse(
             })
             .collect();
         let ids = store.is_some().then(|| incr::Ids::of(sources));
-        let parsed: Vec<Prepassed> = std::thread::scope(|s| {
-            let mut parses = Vec::new();
-            for (path, _, source, id) in &jobs {
-                let store = store.zip(ids.as_ref());
-                parses.push(s.spawn(move || prepass_file(path, source, *id, store)));
-            }
-            parses
-                .into_iter()
-                .map(|p| p.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-                .collect()
+        let parsed: Vec<Prepassed> = on_cores_all(jobs.len(), 2 << 20, |i| {
+            let (path, _, source, id) = &jobs[i];
+            prepass_file(path, source, *id, store.zip(ids.as_ref()))
         });
         level = Vec::new();
         for ((path, sub_dir, _, id), file) in jobs.into_iter().zip(parsed) {
@@ -1790,31 +1852,30 @@ fn real_parse(
         .into_iter()
         .map(|(d, _)| d)
         .collect();
-    let parsed: Vec<(PathBuf, Parsed)> = std::thread::scope(|s| {
-        let dirs = &dirs;
-        let mut jobs = Vec::new();
-        for (path, (file_id, pre)) in files {
-            let job = std::thread::Builder::new().stack_size(AST_STACK);
-            let job = job.spawn_scoped(s, move || {
-                let (pkg, _) = dirs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, d)| path.starts_with(d))
-                    .max_by_key(|(_, d)| d.components().count())?;
-                let metas = metas.get(pkg)?;
-                let includes = included(&path, &pre.sum.includes);
-                let (program, diags) =
-                    cached_parse(&path, file_id, pre, &includes, incr, ext, metas);
-                let mut parsed = settle(&path, file_id, program, diags, metas, keep);
-                parsed.includes = includes.into_iter().map(|(p, _)| p).collect();
-                Some((path, parsed))
-            });
-            jobs.push(job.expect("spawn a parse thread"));
-        }
-        jobs.into_iter()
-            .filter_map(|j| j.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
-            .collect()
-    });
+    let files: Vec<std::sync::Mutex<Option<_>>> = files
+        .into_iter()
+        .map(|f| std::sync::Mutex::new(Some(f)))
+        .collect();
+    let parsed: Vec<(PathBuf, Parsed)> = on_cores_all(files.len(), AST_STACK, |i| {
+        let (path, (file_id, pre)) = files[i]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()?;
+        let (pkg, _) = dirs
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| path.starts_with(d))
+            .max_by_key(|(_, d)| d.components().count())?;
+        let metas = metas.get(pkg)?;
+        let includes = included(&path, &pre.sum.includes);
+        let (program, diags) = cached_parse(&path, file_id, pre, &includes, incr, ext, metas);
+        let mut parsed = settle(&path, file_id, program, diags, metas, keep);
+        parsed.includes = includes.into_iter().map(|(p, _)| p).collect();
+        Some((path, parsed))
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     READ.with(|r| {
         let mut r = r.borrow_mut();
         r.extend(parsed.iter().flat_map(|(_, p)| p.includes.iter().cloned()));
@@ -1986,13 +2047,16 @@ struct LibParts {
     native: NativeLibs,
     /// Its modules without the implicit `use rok::core::**;`.
     no_implicit: Vec<String>,
+    /// Each library package's hash (`package_hashes`).
+    hashes: Vec<(String, String)>,
 }
 
 rokc_core::codec_struct!(LibParts {
     uses,
     diags,
     native,
-    no_implicit
+    no_implicit,
+    hashes
 });
 
 /// The parts of the library stage kept in this process, by key.

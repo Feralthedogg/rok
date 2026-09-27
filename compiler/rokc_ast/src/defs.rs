@@ -16,7 +16,9 @@ pub struct FnDef {
     pub generics: Generics,
     pub params: Vec<Param>,
     pub ret_ty: Option<Ty>,
-    pub body: Option<Block>,
+    /// Read when first used where a decode keeps its bytes (a library
+    /// stage's items).
+    pub body: Option<rokc_core::codec::Lazy<Block>>,
     pub is_async: bool,
     pub is_generator: bool,
     /// `unsafe fn` (spec 4.15.1): callers need an unsafe scope.

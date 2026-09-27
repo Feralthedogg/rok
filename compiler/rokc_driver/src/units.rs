@@ -178,37 +178,10 @@ fn in_parallel<T: Send>(
     n: usize,
     job: impl Fn(usize) -> Result<T, RokDiagnostic> + Sync,
 ) -> Result<Vec<T>, RokDiagnostic> {
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let cores = std::thread::available_parallelism().map_or(1, usize::from);
-    let results: Vec<std::sync::Mutex<Option<Result<T, RokDiagnostic>>>> =
-        (0..n).map(|_| std::sync::Mutex::new(None)).collect();
-    std::thread::scope(|s| {
-        for _ in 0..cores.min(n) {
-            std::thread::Builder::new()
-                .stack_size(256 << 20)
-                .spawn_scoped(s, || {
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        if i >= n {
-                            break;
-                        }
-                        let r = job(i);
-                        *results[i]
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r);
-                    }
-                })
-                .map_err(|e| err(format!("cannot start a codegen thread: {e}")))?;
-        }
-        Ok::<(), RokDiagnostic>(())
-    })?;
-    results
+    crate::on_cores(n, 256 << 20, job)
+        .map_err(|e| err(format!("cannot start a codegen thread: {e}")))?
         .into_iter()
-        .map(|r| {
-            r.into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .unwrap_or_else(|| Err(err("a codegen thread failed".to_owned())))
-        })
+        .map(|r| r.unwrap_or_else(|| Err(err("a codegen thread failed".to_owned()))))
         .collect()
 }
 

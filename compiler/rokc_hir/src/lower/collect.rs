@@ -185,15 +185,18 @@ fn add_lazy_static_inits(program: &mut Program) {
                         ret_ty: Some(s.ty.clone()),
                         // `return v;` (not a trailing `v`): the return type
                         // is the expected type that infers `Atomic::new(0)`.
-                        body: Some(rokc_ast::Block {
-                            stmts: vec![rokc_ast::Stmt {
-                                kind: rokc_ast::StmtKind::Return(Some(v.clone())),
+                        body: Some(
+                            rokc_ast::Block {
+                                stmts: vec![rokc_ast::Stmt {
+                                    kind: rokc_ast::StmtKind::Return(Some(v.clone())),
+                                    span: s.span,
+                                }],
+                                trailing: None,
                                 span: s.span,
-                            }],
-                            trailing: None,
-                            span: s.span,
-                            label: None,
-                        }),
+                                label: None,
+                            }
+                            .into(),
+                        ),
                         is_async: false,
                         is_generator: false,
                         is_unsafe: false,
@@ -1434,7 +1437,7 @@ fn collect<'a>(
             *seen += 1;
             let mut gi = generic_trait_impl(impl_def, trait_key, td, &module, &tag, &mut pre_diags);
             gi.consts = consts;
-            impls.all.push(std::sync::Arc::new(gi));
+            impls.push(gi);
             continue;
         }
         // Inherent methods of a generic impl (and generic methods of a
@@ -1472,7 +1475,7 @@ fn collect<'a>(
             generic_base,
             at: impls.all.len(),
         });
-        impls.all.push(std::sync::Arc::new(Impl {
+        impls.push(Impl {
             trait_key: trait_name.unwrap_or_default(),
             trait_args: impl_def
                 .trait_path
@@ -1488,7 +1491,7 @@ fn collect<'a>(
             methods: HashMap::new(),
             consts,
             concrete: None,
-        }));
+        });
     }
 
     // Install `pub use` re-exports as fn / static table aliases (types go
@@ -2342,7 +2345,8 @@ fn finish<'a>(
     rokc_diagnostic::time("hir consts", || super::const_eval::check_user_consts(&env));
     let incr = input.bodies.as_ref().map(|b| {
         rokc_diagnostic::time("hir interface", || {
-            super::incr::Incr::new(&env, &*b.0, &programs, raw_uses, input)
+            let lib_decls = lib_decl.iter().take_while(|&&l| l).count();
+            super::incr::Incr::new(&env, &*b.0, &programs, raw_uses, input, lib_decls)
         })
     });
     // Spec 2.10.9: the package's own generic bodies (a dependency's when
@@ -2362,23 +2366,33 @@ fn finish<'a>(
     });
     let reuse = incr.map(|i| i.reuse.get()).unwrap_or_default();
     rokc_diagnostic::time("hir const fns", || {
-        let extras = env.sink.extras.borrow().clone();
-        let origin = env.sink.fn_origin.borrow().clone();
+        let origin = env.sink.fn_origin.borrow();
         let user_const = |f: &&HirFunction| match origin.get(&f.id) {
             Some(&(is_const, std)) => is_const && !std,
             None => env.decls.get(f.id.0 as usize).is_some_and(|d| {
-                let module = match d {
-                    MethodOrFn::Fn(f) => fn_module(&env, f),
-                    MethodOrFn::Method { module, .. } => module.clone(),
-                };
                 d.def()
                     .attrs
                     .iter()
                     .any(|a| a.path == [rokc_ast::CONST_FN_ATTR])
-                    && package_of(&module).is_empty()
+                    && package_of(&match d {
+                        MethodOrFn::Fn(f) => fn_module(&env, f),
+                        MethodOrFn::Method { module, .. } => module.clone(),
+                    })
+                    .is_empty()
             }),
         };
-        let fns: Vec<&HirFunction> = functions.iter().chain(&extras).filter(user_const).collect();
+        // Checking may lower more bodies (into `extras`): a copy of the
+        // ones it checks.
+        let extras: Vec<HirFunction> = env
+            .sink
+            .extras
+            .borrow()
+            .iter()
+            .filter(user_const)
+            .cloned()
+            .collect();
+        let fns: Vec<&HirFunction> = functions.iter().filter(user_const).chain(&extras).collect();
+        drop(origin);
         super::const_eval::check_const_fns(&env, &fns);
     });
 
@@ -2564,6 +2578,9 @@ fn finish<'a>(
 /// Diagnostics name a nested fn (spec 4.10) as written: its lifted
 /// name `outer/inner` (`/2` .. for a repeated name) reads `inner`.
 fn show_nested_fn_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiagnostic]) {
+    if diags.is_empty() {
+        return;
+    }
     let mut lifted: Vec<(&str, &str)> = program
         .items
         .iter()
@@ -5336,14 +5353,16 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
     let impls = &env.impls;
-    for gi in impls.generic() {
+    let mine: Vec<bool> = impls.iter().map(|i| own(&i.module)).collect();
+    for (g, gi) in impls.iter().enumerate().filter(|(_, i)| i.is_generic()) {
         ctx.at.set(gi.self_ty.span);
         let concrete = impls.by_trait.get(&gi.trait_key).into_iter().flatten();
-        for ci in concrete.map(|&i| &impls.all[i]) {
+        for &c in concrete {
+            let ci = &impls.all[c];
             let Some((ty, _)) = &ci.concrete else {
                 continue;
             };
-            if !own(&gi.module) && !own(&ci.module) {
+            if !mine[g] && !mine[c] {
                 continue;
             }
             if ctx
@@ -5371,9 +5390,14 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
     // them (`impl<T: A> X for T` / `impl<T: B> X for T` clash even if
     // no type is `A + B` yet). Targets beyond `symbolic_overlap` fall
     // back to a witness among the types the program names.
-    let gis: Vec<&Impl> = env.impls.generic().collect();
+    let gis: Vec<(&Impl, bool)> = impls
+        .iter()
+        .zip(&mine)
+        .filter(|(i, _)| i.is_generic())
+        .map(|(i, &m)| (i, m))
+        .collect();
     let mut candidates: Option<Vec<HirTy>> = None;
-    for (i, a) in gis.iter().enumerate() {
+    for (i, &(a, a_mine)) in gis.iter().enumerate() {
         // Inherent ones (empty key) clash when they share a method name.
         let shared = |b: &Impl| {
             let mut m: Vec<&String> = a
@@ -5384,9 +5408,9 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
             m.sort();
             m.first().map(|s| (*s).clone())
         };
-        for b in gis.iter().skip(i + 1).filter(|b| {
+        for &(b, _) in gis.iter().skip(i + 1).filter(|(b, b_mine)| {
             b.trait_key == a.trait_key
-                && (own(&a.module) || own(&b.module))
+                && (a_mine || *b_mine)
                 && (!a.trait_key.is_empty() || shared(b).is_some())
         }) {
             ctx.at.set(b.self_ty.span);

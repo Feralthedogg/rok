@@ -128,7 +128,7 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
     let coro = body.map(|body| {
         let block = Block {
             label: Some(rokc_hir::FN_BLOCK_LABEL.to_owned()),
-            ..body
+            ..body.into_inner()
         };
         Expr {
             kind: match (fa, fg) {
@@ -182,7 +182,7 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
         };
         f.throws = throws;
         f.ret_ty = Some(val);
-        f.body = Some(trailing(call, span));
+        f.body = Some(trailing(call, span).into());
         return;
     }
     let module = if is_gen && !is_async {
@@ -206,7 +206,7 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
         kind: TyKind::Path(path(&["rok", "core", module, name], args, span)),
         span,
     });
-    f.body = coro.map(|c| trailing(c, span));
+    f.body = coro.map(|c| trailing(c, span).into());
 }
 
 fn trailing(e: Expr, span: Span) -> Block {

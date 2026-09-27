@@ -185,7 +185,7 @@ fn frame(
             .and_then(|x| x.name.clone())
             .unwrap_or_else(|| "a temporary".to_owned())
     };
-    let ty_of = |l: LocalId| f.locals.iter().find(|x| x.id == l).map(|x| x.ty.clone());
+    let ty_of = |l: LocalId| f.locals.iter().find(|x| x.id == l).map(|x| &x.ty);
     let lacks = |t: &HirTy, k: &str| {
         !matches!(
             t,
@@ -201,8 +201,8 @@ fn frame(
         .map(|p| p.local)
         .collect();
     let mut w = Walk {
-        non_send_local: &|l| ty_of(l).is_some_and(|t| non_send(&t)),
-        non_sync_local: &|l| ty_of(l).is_some_and(|t| non_sync(&t)),
+        non_send_local: &|l| ty_of(l).is_some_and(non_send),
+        non_sync_local: &|l| ty_of(l).is_some_and(non_sync),
         non_send_ty: &non_send,
         env_params: &env_params,
         declared: Vec::new(),
@@ -219,27 +219,27 @@ fn frame(
     let mut held: Vec<LocalId> = w.held.into_iter().collect();
     held.sort();
     // The component that makes a type not `key` (`auto_trait_cause`).
-    let cause = |t: Option<HirTy>, key: &str| {
-        t.map(|t| ctx.auto_trait_cause(&t, key, 0))
+    let cause = |t: Option<&HirTy>, key: &str| {
+        t.map(|t| ctx.auto_trait_cause(t, key, 0))
             .unwrap_or_default()
     };
     let why = w.found.map(|found| match found {
         Found::Capture(l) => format!(
             "it captures `{}: {}`, which is not `Send`{}",
             name(l),
-            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default(),
+            ty_of(l).map(|t| ctx.ty_name(t)).unwrap_or_default(),
             cause(ty_of(l), send)
         ),
         Found::Held(l) => format!(
             "it holds `{}: {}`, which is not `Send`{}, across an `await`",
             name(l),
-            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default(),
+            ty_of(l).map(|t| ctx.ty_name(t)).unwrap_or_default(),
             cause(ty_of(l), send)
         ),
         Found::Temp(t) => format!(
             "it holds a temporary `{}`, which is not `Send`{}, across an `await`",
             ctx.ty_name(&t),
-            cause(Some(t.clone()), send)
+            cause(Some(&t), send)
         ),
     });
     let why_shared = w.shared.map(|l| {
@@ -247,7 +247,7 @@ fn frame(
             "it captures `{}: {}`, which is not `Sync`{} (the spawner keeps its copy, spec \
              4.6.9)",
             name(l),
-            ty_of(l).map(|t| ctx.ty_name(&t)).unwrap_or_default(),
+            ty_of(l).map(|t| ctx.ty_name(t)).unwrap_or_default(),
             sync.map(|k| cause(ty_of(l), k)).unwrap_or_default()
         )
     });
@@ -460,8 +460,8 @@ struct Flow<'a> {
     readers: HashMap<Node, BTreeSet<FunctionId>>,
     /// Functions to walk (again): a node they read grew.
     dirty: BTreeSet<FunctionId>,
-    /// Per type (its debug form): holds nothing.
-    cut: HashMap<String, bool>,
+    /// Per type: holds nothing.
+    cut: HashMap<HirTy, bool>,
     /// Per struct / enum: may hold a `fn` value.
     holds: HashMap<(bool, u32), bool>,
     cur: FunctionId,
@@ -476,7 +476,14 @@ struct Flow<'a> {
 
 impl Flow<'_> {
     fn get(&mut self, n: &Node) -> Set {
-        self.readers.entry(n.clone()).or_default().insert(self.cur);
+        match self.readers.get_mut(n) {
+            Some(r) => {
+                r.insert(self.cur);
+            }
+            None => {
+                self.readers.insert(n.clone(), BTreeSet::from([self.cur]));
+            }
+        }
         self.nodes.get(n).cloned().unwrap_or_default()
     }
 
@@ -627,12 +634,11 @@ impl Flow<'_> {
     /// A value of `ty` holds nothing: its type cannot hold a `fn` value,
     /// or opts into `Send` by an explicit impl (not a coroutine wrapper).
     fn is_cut(&mut self, ty: &HirTy) -> bool {
-        let key = format!("{ty:?}");
-        if let Some(c) = self.cut.get(&key) {
+        if let Some(c) = self.cut.get(ty) {
             return *c;
         }
         let c = !self.may_hold(ty) || self.opted_in(ty);
-        self.cut.insert(key, c);
+        self.cut.insert(ty.clone(), c);
         c
     }
 

@@ -2802,7 +2802,7 @@ impl<'a> Parser<'a> {
             generics,
             params,
             ret_ty,
-            body,
+            body: body.map(Into::into),
             is_async,
             is_generator,
             is_unsafe,

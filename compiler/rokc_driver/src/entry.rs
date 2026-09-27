@@ -66,12 +66,15 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
         generics: Generics::default(),
         params: Vec::new(),
         ret_ty: None,
-        body: Some(Block {
-            stmts,
-            trailing: None,
-            span,
-            label: None,
-        }),
+        body: Some(
+            Block {
+                stmts,
+                trailing: None,
+                span,
+                label: None,
+            }
+            .into(),
+        ),
         // Spec 4.16.5: `await` at top level makes it `async fn main`.
         is_async,
         is_generator: false,

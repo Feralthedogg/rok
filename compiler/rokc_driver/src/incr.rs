@@ -20,7 +20,7 @@ pub fn key(parts: &[&[u8]]) -> u64 {
 pub struct Store {
     path: PathBuf,
     /// The file read at the start, and its entries (key → range).
-    data: Vec<u8>,
+    data: std::sync::Arc<[u8]>,
     index: HashMap<u64, (usize, usize)>,
     /// Entries to write back: read ones (their range) and new ones.
     kept: Mutex<Vec<(u64, Kept)>>,
@@ -36,7 +36,7 @@ impl Store {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            data: Vec::new(),
+            data: std::sync::Arc::from([]),
             index: HashMap::new(),
             kept: Mutex::new(Vec::new()),
         }
@@ -62,7 +62,7 @@ impl Store {
             let start = b.as_ptr() as usize - data.as_ptr() as usize;
             index.insert(k, (start, start + b.len()));
         }
-        s.data = data;
+        s.data = data.into();
         s.index = index;
         s
     }
@@ -80,7 +80,21 @@ impl Store {
         read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
     ) -> Option<T> {
         let &(a, b) = self.index.get(&k)?;
-        let v = read_value(&self.data[a..b], ids, read)?;
+        let v = read_value(&self.data[a..b], ids, None, read)?;
+        self.lock().push((k, Kept::Old(a, b)));
+        Some(v)
+    }
+
+    /// `get_with`, the `Lazy` values left to read when first used: the
+    /// file stays in memory while one is not.
+    pub fn get_kept<T>(
+        &self,
+        k: u64,
+        ids: &Ids,
+        read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
+    ) -> Option<T> {
+        let &(a, b) = self.index.get(&k)?;
+        let v = read_value(&self.data[a..b], ids, Some(&self.data), read)?;
         self.lock().push((k, Kept::Old(a, b)));
         Some(v)
     }
@@ -181,6 +195,7 @@ impl Ids {
 fn read_value<T>(
     bytes: &[u8],
     ids: &Ids,
+    keep: Option<&std::sync::Arc<[u8]>>,
     read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
 ) -> Option<T> {
     let mut d = Dec::new(bytes);
@@ -191,6 +206,10 @@ fn read_value<T>(
     }
     let mut d = Dec::new(&bytes[bytes.len() - d.rest()..]);
     d.files = Some(&map);
+    d.keep = keep.map(|buf| rokc_core::codec::Keep {
+        buf: buf.clone(),
+        files: Some(map.as_slice().into()),
+    });
     let v = read(&mut d)?;
     d.done().then_some(v)
 }
@@ -317,7 +336,7 @@ pub fn library_get<T>(
     read: impl FnOnce(&mut Dec<'_>) -> Option<T>,
 ) -> Option<T> {
     let path = library_path(k)?;
-    let v = Store::open(path.clone(), LIBRARY).get_with(k, ids, read)?;
+    let v = Store::open(path.clone(), LIBRARY).get_kept(k, ids, read)?;
     used(&path);
     Some(v)
 }
