@@ -3,6 +3,7 @@
 //! to LLVM IR and the code generation follow (`rokc_llvm`).
 
 pub mod abi;
+mod alias;
 mod compact;
 mod debug;
 pub mod emit;

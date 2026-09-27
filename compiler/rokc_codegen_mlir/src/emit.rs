@@ -140,6 +140,8 @@ pub struct Emitter {
     lists: std::sync::Arc<HashSet<u32>>,
     /// `reentrant_functions` of the module.
     reentrant: std::sync::Arc<HashSet<FunctionId>>,
+    /// What the `List` alias scopes rely on.
+    list_alias: std::sync::Arc<crate::alias::ListAlias>,
     /// Emit codegen unit `.1` of a plan (`crate::units`), not the module.
     pub(crate) unit: Option<(std::sync::Arc<crate::units::Core>, usize)>,
     /// The unit holds the program's glue (statics, `main`, types).
@@ -322,6 +324,7 @@ impl Emitter {
             quiet: std::sync::Arc::default(),
             lists: std::sync::Arc::default(),
             reentrant: std::sync::Arc::default(),
+            list_alias: std::sync::Arc::default(),
             unit: None,
             glue: true,
             gc_syms: BTreeSet::new(),
@@ -609,6 +612,12 @@ impl Emitter {
             self.quiet = std::sync::Arc::new(quiet_functions(module, &self.pkgs, &self.target));
             self.reentrant = std::sync::Arc::new(reentrant_functions(module));
         }
+        self.list_alias = std::sync::Arc::new(crate::alias::ListAlias::new(
+            module,
+            &self.lists,
+            &self.quiet,
+            &self.target,
+        ));
 
         self.out.push_str("module");
         let mut attrs = Vec::new();
@@ -1185,6 +1194,8 @@ impl Emitter {
         emit.quiet = self.quiet.clone();
         emit.back_edges = polled_back_edges(f, &emit.quiet, &self.pkgs, &self.target);
         emit.lists = self.lists.clone();
+        emit.list_alias = self.list_alias.clone();
+        emit.list_scopes = self.list_alias.scoped(f, &self.lists);
         emit.entry_poll = self.reentrant.contains(&f.id);
         emit.overflow_checks = self.overflow_checks;
         emit.gc_type_base = self.gc_type_base();
@@ -1706,6 +1717,12 @@ struct FnEmit<'a> {
     quiet: std::sync::Arc<HashSet<FunctionId>>,
     /// Lent `Emitter::lists`.
     lists: std::sync::Arc<HashSet<u32>>,
+    /// Lent `Emitter::list_alias`, and the locals with a `List` alias
+    /// scope (`ListAlias::scoped`).
+    list_alias: std::sync::Arc<crate::alias::ListAlias>,
+    list_scopes: Vec<u32>,
+    /// `rokc_mir::addressed`.
+    addressed: HashSet<LocalId>,
     /// In `Emitter::reentrant`: polls on entry.
     entry_poll: bool,
     /// Where the next rok call returning by address writes its result
@@ -1786,7 +1803,7 @@ pub fn stmt_safepoint(
 /// Index of the call that ends block `b` without returning (the last
 /// statement before an `Unreachable`, e.g. a panic): nothing of this
 /// frame is used after it, so it needs no roots here.
-fn noreturn_call(b: &BasicBlock) -> Option<usize> {
+pub(crate) fn noreturn_call(b: &BasicBlock) -> Option<usize> {
     if !matches!(b.terminator, Terminator::Unreachable) {
         return None;
     }
@@ -2060,6 +2077,9 @@ impl<'a> FnEmit<'a> {
             dbg_vars: Vec::new(),
             quiet: std::sync::Arc::default(),
             lists: std::sync::Arc::default(),
+            list_alias: std::sync::Arc::default(),
+            list_scopes: Vec::new(),
+            addressed: rokc_mir::addressed(f),
             entry_poll: true,
             sret_into: None,
             tls: HashMap::new(),
@@ -2398,6 +2418,62 @@ impl<'a> FnEmit<'a> {
         self.block_param_set.contains(&id.0)
     }
 
+    /// The locals built straight in the caller's result (`%arg0` of a
+    /// by-address result, 8.6.6) instead of copied there on return: the
+    /// one every return returns, or a temporary only its block's return
+    /// reads (`once`: `rokc_mir::block_local`). Not parameters (copied
+    /// in on entry), nor locals a collection can see (rooted), whose
+    /// address is taken or whose scope ends first (`StorageDead` clears
+    /// a slot): the caller's result is no root, and only it sees it.
+    fn result_locals(&self, once: &[bool]) -> HashSet<LocalId> {
+        let f = self.f;
+        if !rok_by_ref(&f.ret_ty, self.target) {
+            return HashSet::new();
+        }
+        let mut uses = vec![0u32; f.locals.len()];
+        let mut dead = self.addressed.clone();
+        for b in &f.blocks {
+            for s in &b.stmts {
+                if let Statement::StorageDead(l) = s {
+                    dead.insert(*l);
+                }
+                for u in rokc_mir::stmt_uses(s).0 {
+                    uses[u.0 as usize] += 1;
+                }
+            }
+            for u in rokc_mir::term_uses(&b.terminator) {
+                uses[u.0 as usize] += 1;
+            }
+        }
+        let returned: Vec<Option<LocalId>> = f
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.terminator {
+                Terminator::Return(Some(Operand::Copy(l))) => Some(Some(*l)),
+                Terminator::Return(_) => Some(None),
+                _ => None,
+            })
+            .collect();
+        let only = match returned.first() {
+            Some(Some(r)) if returned.iter().all(|x| *x == Some(*r)) => Some(*r),
+            _ => None,
+        };
+        let temps = returned
+            .iter()
+            .flatten()
+            .filter(|t| once[t.0 as usize] && uses[t.0 as usize] == 1);
+        only.into_iter()
+            .chain(temps.copied())
+            .filter(|l| {
+                !f.params.contains(l)
+                    && !self.is_block_param(*l)
+                    && !dead.contains(l)
+                    && f.locals[l.0 as usize].ty == f.ret_ty
+                    && (self.target.root_offsets(&f.ret_ty).is_empty() || !self.is_rooted(*l))
+            })
+            .collect()
+    }
+
     /// Whether local `id` needs a GC root (`rooted`).
     fn is_rooted(&self, id: LocalId) -> bool {
         self.rooted.as_ref().is_none_or(|r| r.contains(&id))
@@ -2461,8 +2537,13 @@ impl<'a> FnEmit<'a> {
             self.reentry = self.back_edges.values().flatten().copied().collect();
             self.reentry.retain(|h| Some(*h) != entry);
         }
+        let result = self.result_locals(&ssa);
         for local in &self.f.locals {
             if self.is_block_param(local.id) || !is_slotted(&local.ty) {
+                continue;
+            }
+            if result.contains(&local.id) {
+                self.slot_names[local.id.0 as usize] = Some("%arg0".to_owned());
                 continue;
             }
             if ssa[local.id.0 as usize]
@@ -3099,8 +3180,11 @@ impl<'a> FnEmit<'a> {
 
     /// Assign `r` to the `ty` (an array or `in_memory`) at `slot` in
     /// memory: copied from where it is read, or built in place; false
-    /// (nothing emitted) for an rvalue computed as a value.
-    fn assign_in_memory(&mut self, slot: &str, ty: &MirTy, r: &RValue) -> bool {
+    /// (nothing emitted) for an rvalue computed as a value. A callee
+    /// writes its result into the slot as it goes (`result_locals`), so
+    /// a slot a pointer may read (`seen`: its address is taken) gets the
+    /// result copied in once the call is done.
+    fn assign_in_memory(&mut self, slot: &str, ty: &MirTy, r: &RValue, seen: bool) -> bool {
         if let Some(src) = self.rvalue_addr(r, ty) {
             if src != slot {
                 self.emit_memcpy(slot, &src, ty, self.target.size_align(ty).1);
@@ -3146,9 +3230,12 @@ impl<'a> FnEmit<'a> {
             RValue::Call { callee, args, .. }
                 if self.fns[callee].c.is_none() && !self.fns[callee].runtime =>
             {
-                self.sret_into = Some(slot.to_owned());
+                let into = self.result_slot(slot, ty, seen);
                 let dst = self.fresh_value();
                 self.emit_call(&dst, *callee, args);
+                if into != slot {
+                    self.emit_memcpy(slot, &into, ty, self.target.size_align(ty).1);
+                }
                 true
             }
             RValue::CallIndirect {
@@ -3158,12 +3245,28 @@ impl<'a> FnEmit<'a> {
                 ret_ty,
                 abi: Abi::Rok,
             } => {
-                self.sret_into = Some(slot.to_owned());
+                let into = self.result_slot(slot, ty, seen);
                 self.emit_call_indirect(callee, args, arg_tys, ret_ty);
+                if into != slot {
+                    self.emit_memcpy(slot, &into, ty, self.target.size_align(ty).1);
+                }
                 true
             }
             _ => false,
         }
+    }
+
+    /// Where the next call writes its by-address result bound for `slot`
+    /// (`sret_into`): there, or a fresh slot when `seen`.
+    fn result_slot(&mut self, slot: &str, ty: &MirTy, seen: bool) -> String {
+        let into = if seen {
+            let t = mlir_type(ty, self.target);
+            self.entry_alloca(&t, self.target.size_align(ty).1.max(8))
+        } else {
+            slot.to_owned()
+        };
+        self.sret_into = Some(into.clone());
+        into
     }
 
     /// Store operand `op`, a `ty`, `off` bytes into `base`.
@@ -3203,8 +3306,9 @@ impl<'a> FnEmit<'a> {
                 // in its slot and copied slot to slot: as an LLVM value a
                 // big one takes the optimizer minutes (or crashes it).
                 if let Some(slot) = self.slot_of(*target) {
+                    let seen = self.addressed.contains(target);
                     if (matches!(ty, MirTy::Array(..)) || self.in_memory(&ty))
-                        && self.assign_in_memory(&slot, &ty, rvalue)
+                        && self.assign_in_memory(&slot, &ty, rvalue, seen)
                     {
                         return;
                     }
@@ -4541,8 +4645,12 @@ impl<'a> FnEmit<'a> {
         let (arg_vals, sret) = self.rok_call_args(args, &sig.params, &sig.ret);
         let (arg_tys, _) = rok_fn_types(&sig.params, &sig.ret, self.target);
         let (name, list, tys) = (&sig.name, arg_vals.join(", "), arg_tys.join(", "));
+        let scopes = self.call_scopes(callee, args);
         if let Some(r) = sret {
-            let _ = writeln!(self.body, "    func.call @{name}({list}) : ({tys}) -> ()");
+            let _ = writeln!(
+                self.body,
+                "    func.call @{name}({list}){scopes} : ({tys}) -> ()"
+            );
             if !into {
                 let ret = mlir_type(&sig.ret, self.target);
                 let _ = writeln!(self.body, "    {dst} = llvm.load {r} : !llvm.ptr -> {ret}");
@@ -4550,7 +4658,7 @@ impl<'a> FnEmit<'a> {
         } else if sig.ret == MirTy::Unit {
             let _ = write!(
                 self.body,
-                "    func.call @{name}({list}) : ({tys}) -> ()
+                "    func.call @{name}({list}){scopes} : ({tys}) -> ()
     {dst} = arith.constant 0 : i1
 "
             );
@@ -4558,9 +4666,38 @@ impl<'a> FnEmit<'a> {
             let ret = mlir_type(&sig.ret, self.target);
             let _ = writeln!(
                 self.body,
-                "    {dst} = func.call @{name}({list}) : ({tys}) -> {ret}"
+                "    {dst} = func.call @{name}({list}){scopes} : ({tys}) -> {ret}"
             );
         }
+    }
+
+    /// The alias scopes of a call that touches only its first
+    /// argument's list, held by a scoped local (`crate::alias`): that
+    /// local's scope, and `noalias` for the others.
+    fn call_scopes(&self, callee: FunctionId, args: &[Operand]) -> String {
+        let Some(Operand::Copy(l)) = args.first() else {
+            return String::new();
+        };
+        if !self.list_alias.confined(callee) || !self.list_scopes.contains(&l.0) {
+            return String::new();
+        }
+        let sym = &self.fns[&self.f.id].name;
+        let scope = |x: u32| {
+            format!(
+                "#llvm.alias_scope<id = \"{sym}.{x}\", domain = #llvm.alias_scope_domain<id = \"{sym}\">>"
+            )
+        };
+        let others: Vec<String> = self
+            .list_scopes
+            .iter()
+            .filter(|&&x| x != l.0)
+            .map(|&x| scope(x))
+            .collect();
+        format!(
+            " {{alias_scopes = [{}], noalias_scopes = [{}]}}",
+            scope(l.0),
+            others.join(", ")
+        )
     }
 
     /// Runtime function `name` done inline (a `str`'s length, one of its

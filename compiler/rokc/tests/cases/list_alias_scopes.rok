@@ -1,0 +1,110 @@
+// rokc-arg: -O2
+// gc-stress: 50
+// expect-exit: 0
+// expect-stdout:
+// 2 3 3 3
+// 2 3 3 3
+// 2 3 3 3
+// 2 3 3 3
+// 2 3 3 3
+// 6 7 8 9
+
+// Lists only ever taken fresh from a call get alias scopes, so their
+// loads move past stores into other such lists. Handles that share one
+// list, out of the optimizer's sight, must still see every store: each
+// loop reads `x[0]` and stores into `y`, which is `x` (no bounds check
+// before the load, which could otherwise leave the loop).
+#[inline(never)]
+fn id(xs: List<f64>) -> List<f64> {
+    xs
+}
+
+#[inline(never)]
+fn pick(ls: List<List<f64>>, k: usize) -> List<f64> {
+    ls[k]
+}
+
+fn fresh(n: usize) -> List<f64> {
+    let xs: List<f64> = [];
+    for i in 0..n {
+        xs.push(i as f64 + 1.0);
+    }
+    xs
+}
+
+#[inline(never)]
+fn bump(x: List<f64>, y: List<f64>) {
+    for i in 0..y.len() {
+        y[i] = x[0] + 1.0;
+    }
+}
+
+fn show(xs: List<f64>) -> str {
+    let s = "";
+    for i in 0..xs.len() {
+        s = if i == 0 { f"{xs[i]}" } else { f"{s} {xs[i]}" };
+    }
+    s
+}
+
+// Through a function that returns its argument.
+fn through_call(n: usize) -> str {
+    let x = fresh(n);
+    let y = id(x);
+    for i in 0..y.len() {
+        y[i] = x[0] + 1.0;
+    }
+    show(x)
+}
+
+// Through another list.
+fn through_list(n: usize) -> str {
+    let x = fresh(n);
+    let y = pick([fresh(1), x], 1);
+    for i in 0..y.len() {
+        y[i] = x[0] + 1.0;
+    }
+    show(x)
+}
+
+// A local set from two places, one of them another local.
+fn two_sources(n: usize) -> str {
+    let x = fresh(n);
+    let y = fresh(n);
+    if n > 1 {
+        y = x;
+    }
+    for i in 0..y.len() {
+        y[i] = x[0] + 1.0;
+    }
+    show(x)
+}
+
+// Both arguments one list.
+fn both_args(n: usize) -> str {
+    let x = fresh(n);
+    bump(x, x);
+    show(x)
+}
+
+// A scoped list beside one that is not.
+fn beside(n: usize) -> str {
+    let x = fresh(n);
+    let y = id(x);
+    let z = fresh(n);
+    for i in 0..y.len() {
+        y[i] = x[0] + 1.0;
+        z[i] = z[i] + 5.0;
+    }
+    f"{show(x)}\n{show(z)}"
+}
+
+fn main() -> i32 {
+    let n = id(fresh(4)).len();
+    println(through_call(n));
+    println(through_list(n));
+    println(two_sources(n));
+    println(both_args(n));
+    println(beside(n));
+    return 0;
+}

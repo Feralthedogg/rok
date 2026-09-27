@@ -28,6 +28,7 @@
 #include "llvm/ProfileData/InstrProfReader.h"
 #include "llvm/ProfileData/InstrProfWriter.h"
 #include "llvm/Support/Caching.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/ProfileData/ProfileCommon.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/FileSystem.h"
@@ -46,7 +47,6 @@
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
-#include "llvm/Transforms/Scalar/SimpleLoopUnswitch.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/LLVMDriver.h"
@@ -463,6 +463,21 @@ void inline_alloc(llvm::Module &m, llvm::TargetMachine &tm, int opt) {
   mpm.run(m, mam);
 }
 
+// Non-trivial loop unswitching, which LLVM's pipelines run only at -O3,
+// at -O2 too: a bounds check of an invariant index after a store in the
+// loop leaves the loop only by versioning it. LLVM's switch for it is
+// global (the thin link's backend pipelines take no callbacks), so each
+// optimization sets it: another running at the same time at another
+// level may see it, which changes how much that one unswitches, never
+// what its code does.
+void unswitch_nontrivial(int opt) {
+  static auto *on = static_cast<llvm::cl::opt<bool> *>(
+      llvm::cl::getRegisteredOptions().lookup("enable-nontrivial-unswitch"));
+  if (!on)
+    llvm::report_fatal_error("LLVM has no -enable-nontrivial-unswitch");
+  on->setValue(opt == 2);
+}
+
 // `m` through clang -O<n>'s pipeline, then `inline_alloc`; with `thin`,
 // through its ThinLTO pre-link pipeline instead (`rok.alloc` is inlined
 // after the part's backend pipeline), then written to `thin` as bitcode
@@ -492,20 +507,13 @@ void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o,
     pgo.emplace(o.profile_use, "", "", "", llvm::PGOOptions::IRUse,
                 has_cs_profile(o.profile_use) ? llvm::PGOOptions::CSIRUse
                                               : llvm::PGOOptions::NoCSAction);
+  unswitch_nontrivial(o.opt);
   llvm::PassBuilder pb(&tm, tuning(o.opt), pgo);
   pb.registerModuleAnalyses(mam);
   pb.registerCGSCCAnalyses(cgam);
   pb.registerFunctionAnalyses(fam);
   pb.registerLoopAnalyses(lam);
   pb.crossRegisterProxies(lam, fam, cgam, mam);
-  // Non-trivial loop unswitching, which LLVM runs only at -O3, at -O2
-  // too: a bounds check of an invariant index after a store in the loop
-  // leaves the loop only by versioning it.
-  pb.registerLateLoopOptimizationsEPCallback(
-      [](llvm::LoopPassManager &lpm, llvm::OptimizationLevel l) {
-        if (l == llvm::OptimizationLevel::O2)
-          lpm.addPass(llvm::SimpleLoopUnswitchPass(true));
-      });
   llvm::ModulePassManager mpm;
   std::string level = std::string("O") + level_name(o.opt);
   std::string pipeline = o.opt == 0 ? "default<O0>"
@@ -748,6 +756,7 @@ int thin_link(const std::vector<llvm::SmallString<0>> &parts,
   conf.Options = target_options(triple);
   conf.CGOptLevel = codegen_level(o.opt);
   conf.OptPipeline = std::string("thinlto<O") + level_name(o.opt) + ">";
+  unswitch_nontrivial(o.opt);
   conf.PTO = tuning(o.opt);
   conf.DisableVerify = true;
   conf.DiagHandler = [&](const llvm::DiagnosticInfo &d) {

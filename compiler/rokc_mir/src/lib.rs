@@ -1,6 +1,7 @@
 //! Mid-level IR. SSA basic blocks; the last representation before MLIR
 //! text emission. Looks at HIR only.
 
+mod copy_into;
 mod coro;
 #[path = "../../../runtime/rokr_common/src/gc_abi.rs"]
 pub mod gc_abi;
@@ -16,7 +17,7 @@ mod target;
 pub mod tls_abi;
 mod ty;
 
-pub use liveness::{Deaths, addressed, block_local, deaths, live_across};
+pub use liveness::{Deaths, addressed, block_local, deaths, live_across, stmt_uses, term_uses};
 pub use lower::lower;
 pub use part_store::{PartStore, part_stores};
 pub use print::print_mir;

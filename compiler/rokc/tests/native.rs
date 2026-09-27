@@ -2097,3 +2097,48 @@ fn windows_executables() {
         }
     }
 }
+
+/// Calls that touch only a `List` held by a local that only ever takes
+/// lists fresh from a call carry that local's alias scope and the other
+/// such locals' as `noalias`; a list from any other call gets none.
+#[test]
+fn list_alias_scopes() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("listscope");
+    fs::write(
+        dir.join("main.rok"),
+        r#"
+fn id(xs: List<f64>) -> List<f64> { xs }
+
+fn main() -> i32 {
+    let a: List<f64> = [1.0, 2.0];
+    let b: List<f64> = [3.0, 4.0];
+    let c = id(a);
+    b[1] = a[0] + c[1];
+    println(f"{b[1]}");
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let ll = dir.join("main.ll");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["-O2", "--emit=llvmir", "-o", ll.to_str().unwrap()],
+    ));
+    let ir = fs::read_to_string(ll).unwrap();
+    let main = ir.split("__main_(").nth(1).unwrap();
+    let main = &main[..main.find("\n}\n").unwrap()];
+    let scoped = |set: bool| {
+        main.lines()
+            .filter(|l| {
+                l.contains(" call ") && l.contains("0index_") && l.contains("0index_0set_") == set
+            })
+            .map(|l| l.contains("!alias.scope") && l.contains("!noalias"))
+            .collect::<Vec<_>>()
+    };
+    // `a[0]`, `c[1]`, `b[1]`; `b[1] = ..`.
+    assert_eq!(scoped(false), [true, false, true], "{main}");
+    assert_eq!(scoped(true), [true], "{main}");
+}

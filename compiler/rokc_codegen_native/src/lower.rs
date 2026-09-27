@@ -125,6 +125,8 @@ pub struct FnLower<'c, 'a> {
     /// The hidden result pointer's slot.
     sret: Option<Slot>,
     ret_parts: Option<Vec<Part>>,
+    /// `rokc_mir::addressed`.
+    addressed: HashSet<LocalId>,
 }
 
 const fn const_ty(c: &ConstVal) -> MirTy {
@@ -207,6 +209,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             at: f.span,
             sret: None,
             ret_parts: None,
+            addressed: rokc_mir::addressed(f),
         }
     }
 
@@ -1809,6 +1812,18 @@ impl<'c, 'a> FnLower<'c, 'a> {
                     return;
                 }
                 let dst = self.local_mem(*target);
+                // A callee may build a by-address result (8.6.6) as it
+                // goes: a local a pointer may read gets it once done.
+                if let Some(d) = dst.filter(|_| {
+                    self.addressed.contains(target)
+                        && rok_by_ref(&ty, t)
+                        && matches!(rvalue, RValue::Call { .. } | RValue::CallIndirect { .. })
+                }) {
+                    let tmp = self.tmp(&ty);
+                    self.rvalue(&ty, rvalue, Some(tmp));
+                    self.store(Val::M(tmp), &ty, d);
+                    return;
+                }
                 self.rvalue(&ty, rvalue, dst);
             }
             Statement::ArrayWrite {
