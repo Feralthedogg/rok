@@ -995,13 +995,24 @@ impl Printer {
     /// The head of `if` / `while` / `match` / `for`: a `{` in it would
     /// be taken for the body, so such a head is grouped.
     fn head(&mut self, e: &Expr) {
+        self.grouped_if(e, |s| s.contains('{'));
+    }
+
+    fn grouped(&mut self, e: &Expr) {
+        self.s("(");
+        self.expr(e);
+        self.s(")");
+    }
+
+    /// `e`, grouped when its text meets `group`.
+    fn grouped_if(&mut self, e: &Expr, group: impl Fn(&str) -> bool) {
         let mut p = Self {
             out: String::new(),
             indent: self.indent,
             lifted: self.lifted.clone(),
         };
         p.expr(e);
-        if p.out.contains('{') {
+        if group(&p.out) {
             self.s("(");
             self.s(&p.out);
             self.s(")");
@@ -1243,16 +1254,28 @@ impl Printer {
                 const LEFT: &[&str] = &[
                     "+", "-", "*", "/", "%", "%%", "&", "|", "^", "<<", ">>", "&&", "||",
                 ];
+                // A `|` after a call's `)` opens a trailing closure.
+                let pipe = op == "|";
                 match &lhs.kind {
-                    ExprKind::OpInfix { op: inner, .. }
-                        if inner == op && LEFT.contains(&op.as_str()) =>
+                    ExprKind::OpInfix {
+                        op: inner, rhs: r, ..
+                    } if inner == op
+                        && LEFT.contains(&op.as_str())
+                        && !(pipe && ends_in_call(r)) =>
                     {
                         self.expr(lhs);
                     }
+                    _ if pipe && ends_in_call(lhs) => self.grouped(lhs),
                     _ => self.operand(lhs),
                 }
                 let _ = write!(self.out, " {op} ");
-                self.operand(rhs);
+                // `f | x | {..}`: a callee, `|x|` and a `{` read as a
+                // paren-less trailing closure.
+                if pipe && atomic(rhs) {
+                    self.grouped_if(rhs, |s| s.starts_with('{'));
+                } else {
+                    self.operand(rhs);
+                }
             }
             ExprKind::OpPrefix { op, operand } => {
                 self.s(op);
@@ -1698,6 +1721,20 @@ fn is_untyped_err(t: &Ty) -> bool {
 /// A `rethrows` error parameter (`#E0`, ..).
 fn is_rethrows_err(t: &Ty) -> bool {
     ty_name(t).is_some_and(|n| n.starts_with("#E"))
+}
+
+/// An operand whose print ends in a call's `)`.
+fn ends_in_call(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Call { .. } | ExprKind::MethodCall { .. } | ExprKind::MagicLiteral(_) => {
+            atomic(e)
+        }
+        // The `?.` link itself takes no trailing closure; a later `.m()` does.
+        ExprKind::QuestionDot(_, tails) => {
+            tails.len() > 1 && matches!(tails.last(), Some(AccessTail::Method { .. }))
+        }
+        _ => false,
+    }
 }
 
 /// Needs no parentheses as an operand.

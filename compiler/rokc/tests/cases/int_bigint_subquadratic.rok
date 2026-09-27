@@ -56,8 +56,7 @@ fn hstr(t: str) -> u64 {
 
 fn divisor(kind: usize, n: usize) -> int {
     let one: int = 1;
-    let r = gen((n * 7) as u64, n);
-    if kind == 0 { return r | (one << ((32 * n - 1) as u32)); }
+    if kind == 0 { return (gen((n * 7) as u64, n)) | (one << ((32 * n - 1) as u32)); }
     if kind == 1 { return (one << ((32 * n) as u32)) - one; }
     if kind == 2 { return one << ((32 * n - 1) as u32); }
     (one << ((32 * n - 1) as u32)) + one

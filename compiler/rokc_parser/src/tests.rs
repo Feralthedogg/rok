@@ -865,24 +865,56 @@ fn printed_ast_parses_back_body() {
         let lines = text.lines().filter(|l| !l.trim_start().starts_with("//"));
         lines.collect::<Vec<_>>().join("\n")
     };
+    // Groups the print must keep: without them the text reads back as a
+    // trailing closure, a construct body or another precedence.
+    let kept = [
+        "fn f() { let a = (g(x)) | y; }",
+        "fn f() { let a = (g(x)) | y | z; }",
+        "fn f() { let a = (o.m(x)) | y; }",
+        "fn f() { let a = w | (g(x)) | y; }",
+        "fn f() { let a = (o?.m(x)) | y; }",
+        "fn f() { let a = (o?.m(x).n(y)) | z; }",
+        "fn f() { let a = (g(x) { 1 }) | y; }",
+        "fn f() { let a = (g |x| { x }) | y; }",
+        "fn f() { let a = g | x | ({ 1: 2 }); }",
+        "fn f() { let a = o.g | x | ({ 1: 2 }); }",
+        "fn f() { if (g(x)) | y { } }",
+        "fn f() { while (g(x)) | y { } }",
+        "fn f() { if a == (S { b: 1 }) { } }",
+        "fn f() { if (S { b: 1 }).ok() { } }",
+        "fn f() { match (S { b: 1 }) { _ => 0, } }",
+        "fn f() { for i in (S { b: 1 }).it() { } }",
+        "fn f() { if g(S { b: 1 }) { } }",
+        "fn f() { if (g { 1 }) { } }",
+        "fn f() { let a = (b + c) * d - (e - f); }",
+        "fn f() { let a = -(b + c) as i64 < (d as i64); }",
+        "fn f() { let a = (b || c) && !(d | e); }",
+        "fn f() { let a = (|x| x)(1) + (b..c).len(); }",
+        "fn f() { let a = (match b { _ => 1, })[0]; }",
+    ];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut all = Vec::new();
     files(&root.join("library"), &mut all);
     files(&root.join("compiler/rokc/tests/cases"), &mut all);
-    let (mut checked, mut bad) = (0, Vec::new());
+    let mut sources: Vec<(String, String)> =
+        kept.iter().map(|&s| (s.to_owned(), s.to_owned())).collect();
+    let inline = sources.len();
     for f in &all {
-        let src = std::fs::read_to_string(f).unwrap();
-        let Ok(p) = try_parse(&src) else { continue };
+        sources.push((f.display().to_string(), std::fs::read_to_string(f).unwrap()));
+    }
+    let (mut checked, mut bad) = (0, Vec::new());
+    for (k, (name, src)) in sources.iter().enumerate() {
+        let p = match try_parse(src) {
+            Ok(p) => p,
+            Err(d) if k < inline => panic!("{name}: {d}"),
+            Err(_) => continue,
+        };
         checked += 1;
         let once = print(&p);
         match try_parse(&once) {
             Ok(again) if print(&again) == once => {}
-            Ok(again) => bad.push(format!(
-                "{}: differs\n{once}\n----\n{}",
-                f.display(),
-                print(&again)
-            )),
-            Err(d) => bad.push(format!("{}: does not parse: {d}\n{once}", f.display())),
+            Ok(again) => bad.push(format!("{name}: differs\n{once}\n----\n{}", print(&again))),
+            Err(d) => bad.push(format!("{name}: does not parse: {d}\n{once}")),
         }
     }
     assert!(checked > 100, "{checked}");

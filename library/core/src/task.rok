@@ -2025,15 +2025,22 @@ pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
         let waiter: Mutex<Waker | none> = Mutex::new(none);
         // Written once on the lane, read by the awaiter after `done`.
         let cell = Handoff::new(slot);
-        let job: fn() -> (Waker | none) + Send = || -> (Waker | none) {
+        // The job returns its completion, which the lane runs once it is
+        // idle again or holds its next job: an awaiter that sees `done`
+        // before any wake (its first poll) still finds the thread there.
+        let job: fn() -> (fn() + Send) + Send = || -> (fn() + Send) {
             let slot = cell.get();
             slot[0] = f();
-            let w: Waker | none = none;
-            using g = waiter.lock() {
-                done[0] = true;
-                w = g.get();
+            || {
+                let w: Waker | none = none;
+                using g = waiter.lock() {
+                    done[0] = true;
+                    w = g.get();
+                }
+                if let k: Waker = w {
+                    k.wake();
+                }
             }
-            w
         };
         executor().blocking.submit(job);
         Blocking { slot: slot, done: done, waiter: waiter }
@@ -2057,7 +2064,7 @@ const BLOCKING_KEEP_ALIVE_NS: i64 = 10_000_000_000;
 struct BlockingPool {
     lock: Mutex<i32>;
     /// Queued jobs (under `lock`).
-    jobs: Deque<fn() -> (Waker | none) + Send>;
+    jobs: Deque<fn() -> (fn() + Send) + Send>;
     /// `[threads, coming]` (under `lock`).
     threads: GcBuf<usize>;
     /// The sleeping threads' wake words (under `lock`): a submit pops one,
@@ -2086,7 +2093,7 @@ impl BlockingPool {
         }
     }
 
-    fn submit(self, job: fn() -> (Waker | none) + Send) {
+    fn submit(self, job: fn() -> (fn() + Send) + Send) {
         unsafe {
             let spawn = false;
             let wake: GcBuf<i32> | none = none;
@@ -2196,15 +2203,18 @@ impl BlockingPool {
             if gated {
                 rok_session_enter();
             }
-            // The last job's awaiter, woken only once this thread is back on
-            // the idle list or holds its next job: the job the awaiter
+            // The last job's completion, run only once this thread is back on
+            // the idle list or holds its next job: the job its awaiter
             // submits next finds this thread instead of starting one.
-            let woken: Waker | none = none;
+            let finish: (fn() + Send) | none = none;
             loop {
-                if gated {
+                // Not with a completion pending: a session saved here would
+                // keep it only on this thread's stack, and a failed cell's
+                // restore loses the thread (its awaiter would never finish).
+                if gated && finish is none {
                     rok_session_pass();
                 }
-                let job: (fn() -> (Waker | none) + Send) | none = none;
+                let job: (fn() -> (fn() + Send) + Send) | none = none;
                 let quit = false;
                 using g = self.lock.lock() {
                     if coming {
@@ -2236,9 +2246,9 @@ impl BlockingPool {
                         }
                     }
                 }
-                if let k: Waker = woken {
-                    k.wake();
-                    woken = none;
+                if let c: fn() + Send = finish {
+                    c();
+                    finish = none;
                 }
                 if quit {
                     if gated {
@@ -2246,8 +2256,8 @@ impl BlockingPool {
                     }
                     return;
                 }
-                if let f: fn() -> (Waker | none) + Send = job {
-                    woken = f();
+                if let f: fn() -> (fn() + Send) + Send = job {
+                    finish = f();
                     idle_since = now_ns();
                     continue;
                 }
