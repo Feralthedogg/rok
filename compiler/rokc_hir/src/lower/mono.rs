@@ -1435,6 +1435,9 @@ pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) ->
     if ctx.uncaught_in_main {
         main_frame(ctx);
     }
+    if let Some(t) = &b.trailing {
+        super::expr::guard_sink(ctx, t);
+    }
     let block = lower_block(ctx, b);
     ctx.pop_expected();
     let mut block = check_fn_body(ctx, block, fn_name);

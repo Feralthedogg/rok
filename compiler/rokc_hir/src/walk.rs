@@ -364,19 +364,6 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 walk_block(v, f);
             }
         }
-        ExprKind::LetElse {
-            pat,
-            ty,
-            init,
-            else_body,
-        } => {
-            walk_expr(v, init);
-            if let Some(t) = ty {
-                walk_ty(v, t);
-            }
-            walk_block(v, else_body);
-            walk_pat(v, pat);
-        }
         ExprKind::OpInfix { lhs, rhs, .. }
         | ExprKind::NullishCoalesce(lhs, rhs)
         | ExprKind::Index(lhs, rhs) => {
@@ -459,10 +446,7 @@ pub fn walk_expr(v: &mut impl AstVisitor, e: &Expr) {
                 }
             }
         }
-        ExprKind::TryQ(inner)
-        | ExprKind::Await(inner)
-        | ExprKind::Spread(inner)
-        | ExprKind::Discard(inner) => walk_expr(v, inner),
+        ExprKind::TryQ(inner) | ExprKind::Await(inner) => walk_expr(v, inner),
         ExprKind::FString(parts) => walk_fstring(v, parts),
         ExprKind::Yield(inner) => {
             if let Some(i) = inner {
@@ -596,24 +580,67 @@ pub fn walk_ty(v: &mut impl AstVisitor, t: &Ty) {
 /// Names a closure body references but doesn't bind, in first-use
 /// order. Includes globals (the caller keeps only outer locals).
 pub fn free_names(params: &[rokc_ast::Param], body: &Expr) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (name, _) in free_places(params, body) {
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+/// Every read of a name `body` doesn't bind, with the field chain read
+/// from it (`p.a.b` → `("p", ["a", "b"])`; a bare `p` has none).
+pub fn free_places(params: &[rokc_ast::Param], body: &Expr) -> Vec<(String, Vec<String>)> {
     struct Free {
         scopes: Vec<Vec<String>>,
-        out: Vec<String>,
+        out: Vec<(String, Vec<String>)>,
+        /// Field targets already counted by the chain around them.
+        inner: Vec<*const Expr>,
+    }
+    impl Free {
+        fn free(&self, name: &str) -> bool {
+            !self.scopes.iter().any(|s| s.iter().any(|b| b == name))
+        }
+    }
+    fn root_name(e: &Expr) -> Option<&str> {
+        match &e.kind {
+            ExprKind::Path(p) => match p.segments.as_slice() {
+                [seg] => Some(seg.name.as_str()),
+                _ => None,
+            },
+            // A method body's closure captures the receiver.
+            ExprKind::SelfLower => Some("self"),
+            _ => None,
+        }
     }
     impl AstVisitor for Free {
         fn expr(&mut self, e: &Expr) {
-            let name = match &e.kind {
-                ExprKind::Path(p) => match p.segments.as_slice() {
-                    [seg] => seg.name.as_str(),
-                    _ => return,
-                },
-                // A method body's closure captures the receiver.
-                ExprKind::SelfLower => "self",
-                _ => return,
-            };
-            let bound = self.scopes.iter().any(|s| s.iter().any(|b| b == name));
-            if !bound && !self.out.iter().any(|o| o == name) {
-                self.out.push(name.to_owned());
+            if let Some(i) = self.inner.iter().position(|p| std::ptr::eq(*p, e)) {
+                self.inner.swap_remove(i);
+                if let ExprKind::Field(t, _) | ExprKind::TupleField(t, _) = &e.kind {
+                    self.inner.push(&raw const **t);
+                }
+                return;
+            }
+            let mut fields = Vec::new();
+            let mut cur = e;
+            loop {
+                let (t, f) = match &cur.kind {
+                    ExprKind::Field(t, f) => (t, f.clone()),
+                    ExprKind::TupleField(t, i) => (t, i.to_string()),
+                    _ => break,
+                };
+                fields.push(f);
+                cur = t;
+            }
+            let Some(name) = root_name(cur) else { return };
+            if let ExprKind::Field(t, _) | ExprKind::TupleField(t, _) = &e.kind {
+                self.inner.push(&raw const **t);
+            }
+            if self.free(name) {
+                fields.reverse();
+                self.out.push((name.to_owned(), fields));
             }
         }
         fn bind(&mut self, name: &str) {
@@ -631,6 +658,7 @@ pub fn free_names(params: &[rokc_ast::Param], body: &Expr) -> Vec<String> {
     let mut f = Free {
         scopes: vec![params.iter().map(|p| p.name.clone()).collect()],
         out: Vec::new(),
+        inner: Vec::new(),
     };
     walk_expr(&mut f, body);
     f.out

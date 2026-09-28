@@ -1,0 +1,80 @@
+// spec: refs-lang §4.6.2 / §2.2.6
+// expect-exit: 0
+// expect-stdout:
+// 6
+// 7
+// 10
+// 20
+// 20
+// 41
+// true
+// n 10
+// e 2
+// [9, 4]
+// none
+
+// Every binding can be a `[ref]` cell, and a cell narrows and takes
+// element stores like any variable. A narrowed cell is tested again on
+// each read, so changes made through a capture show.
+
+#[derive(Debug)]
+struct E { code: i32; }
+
+impl Display for E {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("e") }
+}
+
+impl Error for E {}
+
+fn fail() throws (E) { throw E { code: 1 }; }
+
+fn main() {
+    let v: i32 | str = 5;
+    let set = [ref v] || { v = 10; };
+    if v is i32 {
+        println(f"{v + 1}");
+        v = v + 2;
+        println(f"{v}");
+        set();
+        println(f"{v}");
+        // Inside the narrowing, `[ref v]` shares the cell itself.
+        let bump = [ref v] || { v = 20; };
+        bump();
+        println(f"{v}");
+    }
+    println(f"{v:?}");
+    let w: i32 | bool | str = 1;
+    let flip = [ref w] || { w = true; };
+    if w is (i32 | bool) {
+        if w is i32 {
+            w = w + 40;
+            println(f"{w}");
+        }
+        flip();
+        println(f"{w:?}");
+    }
+    // `if let` and `catch` binders.
+    if let n: i32 = v {
+        let g = [ref n] || { n = n / 2; };
+        g();
+        println(f"n {n}");
+    }
+    try { fail(); } catch e: E {
+        let m = [ref e] || { e = E { code: e.code + 1 }; };
+        m();
+        println(f"e {e.code}");
+    }
+    // `x[i] = v` on a cell.
+    let xs = [1, 2, 3];
+    let k = [ref xs] || { xs = [9, 9]; };
+    xs[0] = 5;
+    k();
+    xs[1] = 4;
+    println(f"{xs:?}");
+    let o: i32 | none = 3;
+    if o is i32 && o > 2 {
+        let clear = [ref o] || { o = none; };
+        clear();
+    }
+    println(f"{o:?}");
+}

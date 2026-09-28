@@ -1,0 +1,14 @@
+// spec: refs-lang §2.9.1
+// expect-error: 8:1: an inherent `impl` attaches methods to a type, and `T` is a type parameter of this `impl` (spec 2.9.1)
+// expect-error: 9:1: cannot find type `Nope` in this scope
+
+// An inherent `impl` needs a type: a bare type parameter is none, and
+// an unknown name is reported as one.
+struct W<T> { v: T; }
+impl<T> T { fn hello(self) -> i32 { 1 } }
+impl<T> Nope<T> { fn n(self) -> i32 { 3 } }
+
+fn main() {
+    let w = W { v: 1 };
+    println(f"{w.v}");
+}

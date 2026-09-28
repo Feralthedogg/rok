@@ -1709,9 +1709,12 @@ struct FnSig {
 
 /// The lock guard `ty` is, if any: a guard is released only by `using`
 /// (stdlib 2.16.3), so a plain `let` or a discarded one holds its lock
-/// forever.
+/// forever. The module defining the guards hands them over raw.
 fn lock_guard(ctx: &LowerCtx<'_>, ty: &HirTy) -> Option<&'static str> {
     let HirTy::Struct(id) = ty else { return None };
+    if ctx.current_module == "rok::core::sync" {
+        return None;
+    }
     let def = ctx.struct_def(*id);
     let name = def.name.split("__").next().unwrap_or(&def.name);
     ["MutexGuard", "RwLockReadGuard", "RwLockWriteGuard"]
@@ -2594,6 +2597,9 @@ struct LowerCtx<'a> {
     /// Narrowed rebinding (spec 2.2.6) → (original local, its type);
     /// assignments to the rebinding also store into the original.
     narrowed: HashMap<LocalId, (LocalId, HirTy)>,
+    /// Narrowing of a `[ref]` cell → the read of its rebinding: each read
+    /// tests the cell again, as a capture may have changed it.
+    cell_views: HashMap<LocalId, HirExpr>,
     /// Narrowings ended by an assignment (spec 2.2.6), in order: (name,
     /// rebinding, index of the scope it was removed from). Branches undo
     /// and rejoin them (`expr::branch_unnarrowings`).
@@ -2602,6 +2608,11 @@ struct LowerCtx<'a> {
     /// released yet (local, scope depth, binding span, binder, guard
     /// type): an error when their scope ends (stdlib 2.16.3).
     guard_lets: Vec<(LocalId, usize, Span, String, &'static str)>,
+    /// Expressions (by address) a lock guard may leave unreleased: a
+    /// binding's initializer, an assigned value, `return`, the body's
+    /// value (`expr::guard_sink`). A guard produced anywhere else is
+    /// never released; a guard variable read there is moved.
+    guard_sinks: std::collections::HashSet<usize>,
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
@@ -2673,6 +2684,7 @@ impl<'a> LowerCtx<'a> {
         }
         self.value_captured.retain(kept);
         self.narrowed.retain(|l, _| kept(l));
+        self.cell_views.retain(|l, _| kept(l));
         self.guard_lets.retain(|g| kept(&g.0));
         self.unnarrowed.retain(|u| kept(&u.1));
         let sink = &self.env.sink;
@@ -2761,8 +2773,10 @@ impl<'a> LowerCtx<'a> {
             throwing_calls: 0,
             next_synth: 0,
             narrowed: HashMap::new(),
+            cell_views: HashMap::new(),
             unnarrowed: Vec::new(),
             guard_lets: Vec::new(),
+            guard_sinks: std::collections::HashSet::new(),
             ty_bounds: HashMap::new(),
             ty_bound_args: HashMap::new(),
             coro: None,
@@ -4444,6 +4458,9 @@ impl<'a> LowerCtx<'a> {
 
     /// Read variable `id` (through its cell when `[ref]`-captured).
     fn read_local(&self, id: LocalId, span: rokc_diagnostic::Span) -> HirExpr {
+        if let Some(view) = self.cell_views.get(&id) {
+            return view.clone();
+        }
         let ty = self.local_ty(id);
         let HirTy::GcBuf(elem) = &ty else {
             return hir_local(id, &ty, span);

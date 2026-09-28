@@ -498,16 +498,9 @@ fn enc_collected(c: &Collected<'_>, at: &Locs, e: &mut Enc) -> Option<()> {
     enc_list(&c.enum_decls, Kind::Enum, at, e)?;
     enc_list(&c.struct_decls, Kind::Struct, at, e)?;
     e.u(c.static_asts.len() as u64);
-    for (ty, module, init) in &c.static_asts {
+    for (ty, module) in &c.static_asts {
         at.enc(Kind::Ty, *ty, e)?;
         module.enc(e);
-        match init {
-            None => e.u(0),
-            Some(x) => {
-                e.u(1);
-                at.enc(Kind::Expr, *x, e)?;
-            }
-        }
     }
     enc_refs(&c.trait_defs, Kind::Trait, at, e)
 }
@@ -651,12 +644,7 @@ fn dec_borrows(p: &'static Program, d: &mut Dec<'_>, c: &mut Collected<'static>)
         .map(|_| {
             let ty = Ty::read(p, d)?;
             let module = String::dec(d)?;
-            let init = match d.u()? {
-                0 => None,
-                1 => Some(Expr::read(p, d)?),
-                _ => return None,
-            };
-            Some((ty, module, init))
+            Some((ty, module))
         })
         .collect::<Option<_>>()?;
     c.trait_defs = dec_refs(p, d)?;

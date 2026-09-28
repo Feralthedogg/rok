@@ -134,6 +134,8 @@ while k < clients {
 let good = 0;
 for ok in await task::join(tasks) { if ok { good = good + 1; } }
 let rounds = await server;
-println(f"connections: {good} clients x {rounds / good} rounds ok, peak open >= 40: {peak.lock().get() >= 40}");
+let peak_n = 0;
+using g = peak.lock() { peak_n = g.get(); }
+println(f"connections: {good} clients x {rounds / good} rounds ok, peak open >= 40: {peak_n >= 40}");
 l.close();
 // spec: std 302-net §3.2.2 §3.2.6

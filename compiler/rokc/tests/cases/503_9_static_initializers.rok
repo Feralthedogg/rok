@@ -1,0 +1,21 @@
+// spec: refs-lang §5.3.9
+// expect-exit: 0
+// expect-stdout:
+// 5 -7 x 255 1000 hi none 3 1.5 true
+
+// Every initializer is a constant expression or a lazy one; constant
+// ones of any literal form are folded at compile time.
+static A: i32 = 5;
+static B: i64 = -7;
+static C: char = 'x';
+static H: u32 = 0xff;
+static U: i32 = 1_000;
+static S: str = "hi";
+static N: i32 | none = none;
+static O: i32 | none = 3;
+static F: f64 = 1.5;
+static T: bool = true;
+
+fn main() {
+    println(f"{A} {B} {C} {H} {U} {S} {N:?} {O:?} {F} {T}");
+}

@@ -3854,9 +3854,16 @@ impl<'a> Parser<'a> {
         if self.at_nested_fn() {
             return Some((self.parse_nested_fn()?, false));
         }
-        // Spec 5.3.3 / 5.4.10 / 5.9.8: module-level only.
+        // Spec 5.3.3 / 5.4.10 / 5.9.8: module-level only. A block holds
+        // only `fn` (4.10), `const` (5.2) and `use` items.
         let module_only = match self.peek() {
             TokenKind::Mod => Some("a `mod` (spec 5.4.10)"),
+            TokenKind::Struct => Some("a `struct`"),
+            TokenKind::Enum => Some("an `enum`"),
+            TokenKind::Trait => Some("a `trait`"),
+            TokenKind::Impl => Some("an `impl`"),
+            _ if self.at_union_item() => Some("a `union`"),
+            _ if self.at_kw("type") && self.at_ctx_item() => Some("a `type` alias"),
             _ if self.at_kw("static") && self.at_ctx_item() => Some("a `static` (spec 5.3.3)"),
             _ if self.at_kw("extern") && self.at_ctx_item() => {
                 Some("an `extern` block (spec 5.9.8)")

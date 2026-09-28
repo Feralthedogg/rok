@@ -5,63 +5,6 @@
 use super::*;
 use rokc_ir_common::{Abi, FnRole, Linkage};
 
-/// Const-fold a static initializer: an integer (optionally negated),
-/// bool, string or `none` literal; `None` for anything else.
-pub(super) fn literal_to_const_val(expr: &Expr, ty: &HirTy) -> Option<ConstVal> {
-    use rokc_ast::Literal as L;
-    let lit = match &expr.kind {
-        ExprKind::Literal(l) => l,
-        ExprKind::OpPrefix { op, operand } if op == "-" => {
-            // `static N: i32 = -1;`
-            if let ExprKind::Literal(L::Int(text)) = &operand.kind {
-                let stripped = strip_int_suffix(text.as_str());
-                if let Ok(n) = stripped.parse::<i128>() {
-                    let prim = match ty {
-                        HirTy::Prim(p) => *p,
-                        _ => return None,
-                    };
-                    return Some(ConstVal::Int {
-                        value: -n,
-                        ty: prim,
-                    });
-                }
-            }
-            return None;
-        }
-        _ => return None,
-    };
-    match lit {
-        L::Int(text) => {
-            let stripped = strip_int_suffix(text.as_str());
-            let value: i128 = stripped.parse().ok()?;
-            let prim = match ty {
-                HirTy::Prim(p) => *p,
-                _ => return None,
-            };
-            Some(ConstVal::Int { value, ty: prim })
-        }
-        L::Bool(b) => Some(ConstVal::Bool(*b)),
-        L::Str(s) | L::RawStr(s) => Some(ConstVal::Str(s.clone())),
-        L::None => Some(ConstVal::None),
-        _ => None,
-    }
-}
-
-/// A static initializer that is not a (negated) literal runs once, on
-/// first access, as this synthesized function (`static M: Mutex<..> =
-/// Mutex::new(..)`).
-fn is_lazy_static_init(v: &Expr) -> bool {
-    match &v.kind {
-        // Folded by the compile-time evaluator instead.
-        ExprKind::Literal(AstLit::Float(_) | AstLit::ByteStr(_)) => true,
-        ExprKind::Literal(_) => false,
-        ExprKind::OpPrefix { op, operand } if op == "-" => {
-            !matches!(operand.kind, ExprKind::Literal(_))
-        }
-        _ => true,
-    }
-}
-
 /// An `extern` block marked `#[link(.., kind = "static")]` (spec 6.2.3):
 /// its statics are in the image, not imported from a DLL.
 fn links_static(attrs: &[rokc_ast::Attribute]) -> bool {
@@ -171,56 +114,40 @@ fn add_lazy_static_inits(program: &mut Program) {
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Static(s) => s
-                .value
-                .as_ref()
-                .filter(|v| is_lazy_static_init(v))
-                .map(|v| {
-                    Item::Fn(rokc_ast::FnDef {
-                        vis: Visibility::Private,
-                        attrs: Vec::new(),
-                        name: lazy_init_fn_name(&s.name),
-                        generics: rokc_ast::Generics::default(),
-                        params: Vec::new(),
-                        ret_ty: Some(s.ty.clone()),
-                        // `return v;` (not a trailing `v`): the return type
-                        // is the expected type that infers `Atomic::new(0)`.
-                        body: Some(
-                            rokc_ast::Block {
-                                stmts: vec![rokc_ast::Stmt {
-                                    kind: rokc_ast::StmtKind::Return(Some(v.clone())),
-                                    span: s.span,
-                                }],
-                                trailing: None,
+            Item::Static(s) => s.value.as_ref().map(|v| {
+                Item::Fn(rokc_ast::FnDef {
+                    vis: Visibility::Private,
+                    attrs: Vec::new(),
+                    name: lazy_init_fn_name(&s.name),
+                    generics: rokc_ast::Generics::default(),
+                    params: Vec::new(),
+                    ret_ty: Some(s.ty.clone()),
+                    // `return v;` (not a trailing `v`): the return type
+                    // is the expected type that infers `Atomic::new(0)`.
+                    body: Some(
+                        rokc_ast::Block {
+                            stmts: vec![rokc_ast::Stmt {
+                                kind: rokc_ast::StmtKind::Return(Some(v.clone())),
                                 span: s.span,
-                                label: None,
-                            }
-                            .into(),
-                        ),
-                        is_async: false,
-                        is_generator: false,
-                        is_unsafe: false,
-                        throws: rokc_ast::ThrowsKind::None,
-                        where_clause: Vec::new(),
-                        span: s.span,
-                    })
-                }),
+                            }],
+                            trailing: None,
+                            span: s.span,
+                            label: None,
+                        }
+                        .into(),
+                    ),
+                    is_async: false,
+                    is_generator: false,
+                    is_unsafe: false,
+                    throws: rokc_ast::ThrowsKind::None,
+                    where_clause: Vec::new(),
+                    span: s.span,
+                })
+            }),
             _ => None,
         })
         .collect();
     program.items.extend(inits);
-}
-
-pub(super) fn strip_int_suffix(s: &str) -> &str {
-    const SUFFIXES: &[&str] = &[
-        "isize", "usize", "i64", "u64", "i32", "u32", "i16", "u16", "i8", "u8",
-    ];
-    for sfx in SUFFIXES {
-        if let Some(rest) = s.strip_suffix(sfx) {
-            return rest;
-        }
-    }
-    s
 }
 
 /// What collecting the items of a stage leaves for the next stage and
@@ -244,7 +171,7 @@ pub(super) struct Collected<'a> {
     inherent_keys: std::collections::HashSet<String>,
     static_defs: Vec<HirStaticDef>,
     /// Per static: its type as written, module and initializer.
-    static_asts: Vec<(&'a Ty, String, Option<&'a Expr>)>,
+    static_asts: Vec<(&'a Ty, String)>,
     /// Per decl: its body is library code (`rok::<tier>` / a dependency),
     /// lowered only when reached (`lower_bodies`).
     lib_decl: Vec<bool>,
@@ -990,7 +917,7 @@ fn collect<'a>(
             }
             // Its type (and literal initializer) once every item is
             // registered.
-            static_asts.push((&s.ty, module_of(&s.name), s.value.as_ref()));
+            static_asts.push((&s.ty, module_of(&s.name)));
             static_tys.insert(s.name.clone(), HirTy::Unknown);
             static_defs.push(HirStaticDef {
                 name: s.name.clone(),
@@ -1021,7 +948,7 @@ fn collect<'a>(
                 }
                 // Its type is resolved in the block's module.
                 let module = item_modules.get(idx).cloned().unwrap_or_default();
-                static_asts.push((&s.ty, module, None));
+                static_asts.push((&s.ty, module));
                 static_tys.insert(s.name.clone(), HirTy::Unknown);
                 static_defs.push(HirStaticDef {
                     name: s.name.clone(),
@@ -1458,14 +1385,29 @@ fn collect<'a>(
             _ => None,
         };
         if impl_generic && generic_base.is_none() {
-            err(
-                &mut pre_diags,
-                here,
-                format!(
-                    "generic impl target `{}` must be a struct or enum (stage-1 limitation)",
-                    impl_def_display(&impl_def.self_ty)
-                ),
+            let target = impl_def_display(&impl_def.self_ty);
+            let is_param = impl_def.generics.params.iter().any(
+                |gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if *name == target),
             );
+            if is_param {
+                err(
+                    &mut pre_diags,
+                    here,
+                    format!(
+                        "an inherent `impl` attaches methods to a type, and `{target}` is a \
+                         type parameter of this `impl` (spec 2.9.1); methods for every type \
+                         belong to a trait: `impl<{target}> Tr for {target} {{ .. }}`"
+                    ),
+                );
+            } else {
+                // A path that names no type (other targets are templates above).
+                let name = target.split('<').next().unwrap_or(&target);
+                pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Resolve,
+                    here,
+                    format!("cannot find type `{name}` in this scope"),
+                ));
+            }
             continue;
         }
         pending.push(PendingImpl {
@@ -2204,33 +2146,14 @@ fn collect<'a>(
     let static_types: Vec<HirTy> = static_defs[first_static..]
         .iter()
         .zip(&static_asts[first_static..])
-        .map(|(d, (ast, module, _))| {
+        .map(|(d, (ast, module))| {
             let mut rcx = LowerCtx::new(&env, &no_subst, None, d.span);
             rcx.current_module.clone_from(module);
             rcx.resolve_ast_ty(ast)
         })
         .collect();
-    let new_statics = static_defs[first_static..].iter_mut();
-    for ((d, ty), (_, _, value)) in new_statics
-        .zip(static_types)
-        .zip(&static_asts[first_static..])
-    {
+    for (d, ty) in static_defs[first_static..].iter_mut().zip(static_types) {
         env.statics.insert(d.name.clone(), ty.clone());
-        // A non-lazy initializer must const-fold to a literal.
-        if let Some(v) = value.filter(|v| !is_lazy_static_init(v)) {
-            d.init = literal_to_const_val(v, &ty).unwrap_or_else(|| {
-                err(
-                    &mut pre_diags,
-                    d.span,
-                    format!(
-                        "static `{}` initializer must be a literal constant (stage-1 \
-                         limitation)",
-                        d.name
-                    ),
-                );
-                ConstVal::Unit
-            });
-        }
         d.ty = ty;
     }
     assign_discriminants(&env, &enum_decls[first_new_enum..]);

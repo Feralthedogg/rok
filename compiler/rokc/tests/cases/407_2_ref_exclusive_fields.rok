@@ -1,0 +1,27 @@
+// spec: refs-lang §4.7.2
+// expect-error: 21:5: `p.a` is passed as `ref` to `add` and also read by another argument
+// expect-error: 22:5: `p` is passed as `ref` to `put` and also read by another argument
+// expect-error: 23:5: `p.n` is passed as `ref` to `take` and also read by another argument
+// expect-error: 24:5: `p.n.c` is passed as `ref` to `add` and also read by another argument
+// expect-error: 25:13: `p.a` is passed as `ref` to `sum` and also read by another argument
+// expect-error: 26:5: `p.n` and `p.n.d` overlap and are both passed as `ref` in one call to `swap_in`
+
+// A place passed as `ref` must not be read or passed `ref` again by
+// another argument through an overlapping path.
+struct In { c: i32; d: i32; }
+struct P { a: i32; b: i32; n: In; }
+impl P { fn sum(self, ref x: i32) -> i32 { x = x + 1; self.a + self.b } }
+fn add(ref x: i32, y: i32) { x = x + y; }
+fn put(ref p: P, y: i32) { p.a = y; }
+fn take(ref q: In, y: i32) { q.c = y; }
+fn swap_in(ref a: In, ref b: i32) { a.c = b; }
+
+fn main() {
+    let p = P { a: 1, b: 2, n: In { c: 3, d: 4 } };
+    add(ref p.a, p.a);
+    put(ref p, p.n.c + 1);
+    take(ref p.n, p.n.d);
+    add(ref p.n.c, p.n.c);
+    let s = p.sum(ref p.a);
+    swap_in(ref p.n, ref p.n.d);
+}

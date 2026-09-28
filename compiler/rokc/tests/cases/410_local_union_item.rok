@@ -1,0 +1,7 @@
+// spec: refs-lang §4.10 / §5.2.2
+// expect-error: 6:5: a `union` is declared only at module level, not in a function body
+
+// `union Name` starts an item here too (spec 1.5.4).
+fn main() {
+    union U { a: i32; }
+}

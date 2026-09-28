@@ -24,8 +24,16 @@ pub(super) fn lower_closure_expr(
             rokc_ast::CaptureSpec::Value(_) => None,
         })
         .collect();
+    // Inside a narrowing of `x`, `[ref x]` shares the cell itself.
+    let cell_of = |l: LocalId| {
+        let mut l = l;
+        while let (false, Some(&(orig, _))) = (ctx.is_boxed(l), ctx.narrowed.get(&l)) {
+            l = orig;
+        }
+        l
+    };
     for n in &by_ref {
-        match ctx.lookup(n) {
+        match ctx.lookup(n).map(cell_of) {
             Some(l) if ctx.is_boxed(l) => {}
             Some(_) => ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -42,8 +50,11 @@ pub(super) fn lower_closure_expr(
     let captures: Vec<Capture> = crate::walk::free_names(params, body)
         .into_iter()
         .filter_map(|name| {
-            let local = ctx.lookup(&name)?;
-            let by_ref = by_ref.contains(&name.as_str()) && ctx.is_boxed(local);
+            let mut local = ctx.lookup(&name)?;
+            let by_ref = by_ref.contains(&name.as_str()) && ctx.is_boxed(cell_of(local));
+            if by_ref {
+                local = cell_of(local);
+            }
             let ty = if by_ref {
                 ctx.local_ty(local)
             } else {
@@ -115,6 +126,7 @@ pub(super) fn lower_closure_expr(
         probe.infer_ret = fixed_ret.is_none();
         probe.throws_probe = Some(Vec::new());
         let hint = probe.fn_ret_ty.clone();
+        super::expr::guard_sink(&mut probe, body);
         let value = lower_expected(&mut probe, body, hint);
         ctx.rollback(&mark);
         let errs = probe.throws_probe.take().unwrap_or_default();
@@ -138,6 +150,7 @@ pub(super) fn lower_closure_expr(
     cl_ctx.infer_ret = fixed_ret.is_none();
     cl_ctx.fn_throws.clone_from(&throws);
     let ret_hint = cl_ctx.fn_ret_ty.clone();
+    super::expr::guard_sink(&mut cl_ctx, body);
     let body_h = lower_expected(&mut cl_ctx, body, ret_hint);
     let diverges = hir_expr_diverges(&body_h);
     let final_ret_ty = match (fixed_ret, cl_ctx.fn_ret_ty.clone()) {

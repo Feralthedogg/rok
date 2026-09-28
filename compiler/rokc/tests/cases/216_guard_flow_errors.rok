@@ -1,0 +1,34 @@
+// spec: std 216-sync §2.16.3
+// expect-error: 22:10: this `MutexGuard` is never released: a guard received without `using` must be bound with `using
+// expect-error: 23:13: this `MutexGuard` is never released
+// expect-error: 24:25: this `MutexGuard` is never released
+// expect-error: 26:15: this `MutexGuard` is never released
+// expect-error: 27:19: this `MutexGuard` is never released
+// expect-error: 28:13: this `MutexGuard` is never released
+// expect-error: 30:5: `k` holds a `MutexGuard` that is never released
+// expect-error: 32:5: `s` holds a `MutexGuard` that is never released
+
+// A guard received without `using` must be bound with `using`: passing
+// it to a function, calling a method on it, storing it into a field or
+// a collection, or discarding it leaves its lock held. A guard variable
+// handed to a function or a field is still unreleased.
+static M: Mutex<i32> = Mutex::new(0);
+
+struct Holder { g: MutexGuard<i32>; }
+
+fn peek(g: MutexGuard<i32>) -> i32 { g.get() }
+
+fn main() {
+    peek(M.lock());
+    let n = M.lock().get();
+    let h = Holder { g: M.lock() };
+    using g = M.lock() {
+        h.g = M.lock();
+        let xs = [M.lock()];
+        _ = M.lock();
+    }
+    let k = M.lock();
+    peek(k);
+    let s = M.lock();
+    let h2 = Holder { g: s };
+}

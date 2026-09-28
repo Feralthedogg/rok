@@ -45,7 +45,6 @@ codec_enum!(Literal {
     Str(x0),
     RawStr(x0),
     ByteStr(x0),
-    FStr(x0),
     Char(x0),
     CChar(x0),
     None,
@@ -187,12 +186,6 @@ codec_enum!(ExprKind {
         catches,
         finally
     },
-    LetElse {
-        pat,
-        ty,
-        init,
-        else_body
-    },
     OpInfix { op, lhs, rhs },
     OpPrefix { op, operand },
     OpPostfix { op, operand },
@@ -247,8 +240,6 @@ codec_enum!(ExprKind {
         spread
     },
     Broadcast { callee, args },
-    Spread(x0),
-    Discard(x0),
     FString(x0),
 });
 codec_enum!(FStringPart {

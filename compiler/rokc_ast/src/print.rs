@@ -1231,23 +1231,6 @@ impl Printer {
                     self.block(f);
                 }
             }
-            ExprKind::LetElse {
-                pat,
-                ty,
-                init,
-                else_body,
-            } => {
-                self.s("let ");
-                self.pat(pat);
-                if let Some(t) = ty {
-                    self.s(": ");
-                    self.ty(t);
-                }
-                self.s(" = ");
-                self.expr(init);
-                self.s(" else ");
-                self.block(else_body);
-            }
             ExprKind::OpInfix { op, lhs, rhs } => {
                 // A left-associative chain (`1 + 1 + 1`) prints flat: its
                 // nesting would otherwise come back as groups.
@@ -1516,14 +1499,6 @@ impl Printer {
                 }
                 self.s(" }");
             }
-            ExprKind::Spread(x) => {
-                self.s("..");
-                self.operand(x);
-            }
-            ExprKind::Discard(x) => {
-                self.s("_ = ");
-                self.expr(x);
-            }
             ExprKind::FString(parts) => {
                 let open = self.out.len();
                 self.s("f\"");
@@ -1609,9 +1584,6 @@ impl Printer {
             }
             Literal::ByteStr(s) => {
                 let _ = write!(self.out, "b\"{s}\"");
-            }
-            Literal::FStr(s) => {
-                let _ = write!(self.out, "f\"{s}\"");
             }
             Literal::Char(c) => {
                 let _ = write!(self.out, "'{c}'");

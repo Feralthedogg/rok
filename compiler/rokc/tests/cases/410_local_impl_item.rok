@@ -1,0 +1,9 @@
+// spec: refs-lang §4.10 / §5.2.2
+// expect-error: 8:5: an `impl` is declared only at module level, not in a function body
+
+// A block declares only `fn`, `const` and `use` items.
+struct Q {}
+
+fn main() {
+    impl Q { fn f(self) {} }
+}

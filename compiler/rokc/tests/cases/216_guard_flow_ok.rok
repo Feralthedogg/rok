@@ -1,0 +1,41 @@
+// spec: std 216-sync §2.16.3
+// expect-exit: 0
+// expect-stdout:
+// 0
+// 1
+// 2
+// 3
+// 4
+
+// A guard bound with `using` can be passed on to functions; a function
+// may hand a guard to its caller (returned, or its body's value), and
+// the caller binds it with `using`.
+static M: Mutex<i32> = Mutex::new(0);
+
+fn peek(g: MutexGuard<i32>) -> i32 { g.get() }
+fn bump(g: MutexGuard<i32>) -> MutexGuard<i32> { g.set(g.get() + 1); g }
+fn acquire() -> MutexGuard<i32> { M.lock() }
+fn peek_free() -> bool { true }
+fn acquire_let() -> MutexGuard<i32> { let g = M.lock(); g }
+fn acquire_ret(early: bool) -> MutexGuard<i32> {
+    if early {
+        return M.lock();
+    }
+    let g = M.lock();
+    return g;
+}
+
+fn main() {
+    using g = M.lock() { println(f"{peek(g)}"); }
+    using g = acquire() { g.set(1); println(f"{g.get()}"); }
+    using g = if peek_free() { acquire_let() } else { acquire_ret(true) } {
+        g.set(2);
+        println(f"{peek(g)}");
+    }
+    using g = acquire_ret(false) {
+        g = bump(g);
+        println(f"{g.get()}");
+    }
+    let take = || M.lock();
+    using g = take() { g.set(g.get() + 1); println(f"{g.get()}"); }
+}

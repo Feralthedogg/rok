@@ -1,0 +1,33 @@
+// spec: refs-lang §4.7.2
+// expect-exit: 0
+// expect-stdout:
+// 3 2 3 4
+// 3 2 5 4
+// 3 2 5 9
+// 5 3 5 9
+// 10 3 5 9
+
+// `ref` of one field beside reads of disjoint fields, and of a name the
+// argument rebinds, are fine.
+struct In { c: i32; d: i32; }
+struct P { a: i32; b: i32; n: In; }
+fn add(ref x: i32, y: i32) { x = x + y; }
+fn take(ref q: In, y: i32) { q.c = y; }
+fn swap(ref a: i32, ref b: i32) { let t = a; a = b; b = t; }
+
+fn main() {
+    let p = P { a: 1, b: 2, n: In { c: 3, d: 4 } };
+    let show = |p: P| println(f"{p.a} {p.b} {p.n.c} {p.n.d}");
+    add(ref p.a, p.b);
+    show(p);
+    take(ref p.n, p.a + p.b);
+    show(p);
+    add(ref p.n.d, p.n.c);
+    show(p);
+    swap(ref p.a, ref p.b);
+    add(ref p.a, p.b);
+    add(ref p.b, p.a - p.a);
+    show(p);
+    add(ref p.a, { let p = 3; p + 2 });
+    show(p);
+}

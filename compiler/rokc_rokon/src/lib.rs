@@ -494,7 +494,6 @@ impl Conv<'_> {
                     _ => return Err(self.err(e, "a char literal holds one character")),
                 }
             }
-            Literal::FStr(_) => return Err(self.err(e, "f-strings are not allowed in ROKON")),
             Literal::CChar(_) => {
                 return Err(self.err(e, "`c'..'` literals are not allowed in ROKON (write `'a'`)"));
             }

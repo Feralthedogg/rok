@@ -1,0 +1,18 @@
+// spec: refs-lang §4.6.2 / §2.2.6
+// A capture stores a value outside the narrowed type: the next read of
+// the narrowed variable panics.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/406_2_ref_capture_narrowing_panics.rok:13:8:
+// expect-stderr: `v` no longer holds `i32`: a `[ref v]` capture changed it inside its narrowing
+// expect-stdout:
+// 1
+
+fn main() {
+    let v: i32 | str = 1;
+    let to_str = [ref v] || { v = "s"; };
+    if v is i32 {
+        println(f"{v}");
+        to_str();
+        println(f"{v + 1}");
+    }
+}

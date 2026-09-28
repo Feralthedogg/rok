@@ -1,0 +1,12 @@
+// spec: refs-lang §5.3.1
+// expect-error: 8:1: mismatched types: the return value expects `i32`, found `str`
+// expect-error: 9:16: integer literal `300` out of range for `u8`
+// expect-error: 10:1: mismatched types: the return value expects `bool`, found `i32`
+
+// A literal initializer is checked against the declared type like any
+// other.
+static S: i32 = "x";
+static B: u8 = 300;
+static K: bool = 1;
+
+fn main() { println(f"{S} {B} {K}"); }

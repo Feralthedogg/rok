@@ -19,6 +19,7 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
                 lower_let_struct(ctx, path, fields, ty.as_ref(), init, s.span, &mut stmts);
             }),
             StmtKind::LetPattern { pat, ty, init } => ctx.at_span(s.span, |ctx| {
+                guard_sink(ctx, init);
                 let value = match ty.as_ref().map(|t| ctx.resolve_ast_ty(t)) {
                     Some(t) => {
                         let v = lower_expected(ctx, init, t.clone());
@@ -359,6 +360,13 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             // The declared type (if any) is the init's expected type, so
             // literals and generic-enum leaves (`Box::None`) pick it up.
             let pre_ty = ty.as_ref().map(|t| ctx.resolve_ast_ty(t));
+            guard_sink(ctx, init);
+            // `using (a, b) = (..)` drops the whole tuple.
+            if let (true, ExprKind::Tuple(items)) = (name.starts_with("#using"), &init.kind) {
+                for i in items {
+                    guard_sink(ctx, i);
+                }
+            }
             let init = lower_expected(ctx, init, pre_ty.clone().unwrap_or(HirTy::Unknown));
             let (declared_ty, init) = if let Some(t) = pre_ty {
                 let init = coerce(ctx, &t, init, &|| format!("`let {name}`"));
@@ -386,6 +394,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
         StmtKind::Return(value) => {
             let ret = ctx.fn_ret_ty.clone();
             let value = if let Some(e) = value {
+                guard_sink(ctx, e);
                 let lowered = lower_expected(ctx, e, ret.clone());
                 // A closure without a declared return type takes it from
                 // its first `return`.
@@ -420,6 +429,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
         // Statement position: the value is discarded (expected `()`), so
         // `if` / `match` arms needn't agree on a type.
         StmtKind::Expr(expr) => {
+            guard_sink(ctx, expr);
             let h = lower_expected(ctx, expr, HirTy::Unit);
             if let Some(g) = lock_guard(ctx, &h.ty) {
                 ctx.emit_error_at(
@@ -478,15 +488,8 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             ctx.const_locals.insert(local, v.clone());
             Some(HirStmt::Let { local, init: v })
         }
-        StmtKind::Item(_) => {
-            ctx.emit_error(
-                rokc_diagnostic::ErrorKind::Type,
-                "items (fn / struct / impl ...) declared inside a function body are not \
-                 supported yet — move them to module level (stage-1 limitation)"
-                    .to_owned(),
-            );
-            None
-        }
+        // The parser keeps no other item in a block.
+        StmtKind::Item(_) => unreachable!("a block item other than `fn` / `const` / `use`"),
         StmtKind::Assign(target, value) => {
             let a = lower_assign(ctx, target, value, stmt.span);
             write_through(ctx, a, stmt.span)
@@ -720,6 +723,7 @@ pub(super) fn lower_assign(
         ExprKind::Path(p) if p.segments.len() == 1 => {
             let name = &p.segments[0].name;
             if let Some(local) = ctx.lookup(name) {
+                guard_sink(ctx, value);
                 if ctx.const_locals.contains_key(&local) {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -1259,6 +1263,85 @@ pub(super) fn check_index_ty(ctx: &LowerCtx<'_>, idx: &HirExpr) {
     }
 }
 
+/// Stdlib 2.16.3: a guard received without `using` must be bound with
+/// `using`. `e` (and the branches giving its value) may hand a guard
+/// over unreleased: to a binding, or out of the function.
+pub(super) fn guard_sink(ctx: &mut LowerCtx<'_>, e: &Expr) {
+    ctx.guard_sinks.insert(std::ptr::from_ref(e) as usize);
+    let tail = |ctx: &mut LowerCtx<'_>, b: &Block| {
+        if let Some(t) = &b.trailing {
+            guard_sink(ctx, t);
+        }
+    };
+    match &e.kind {
+        ExprKind::Block(b) | ExprKind::Unsafe(b) => tail(ctx, b),
+        ExprKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            tail(ctx, then_branch);
+            if let Some(x) = else_branch {
+                guard_sink(ctx, x);
+            }
+        }
+        ExprKind::Match { arms, .. } => {
+            for a in arms {
+                guard_sink(ctx, &a.body);
+            }
+        }
+        ExprKind::Catch { body, catches, .. } => {
+            guard_sink(ctx, body);
+            for c in catches {
+                tail(ctx, &c.body);
+            }
+        }
+        ExprKind::Try { operand, .. } => guard_sink(ctx, operand),
+        _ => {}
+    }
+}
+
+/// A guard `expr` produces outside a `guard_sink` is never released; a
+/// guard variable read in one is moved to its new holder.
+fn guard_flow(ctx: &mut LowerCtx<'_>, expr: &Expr, e: &HirExpr) {
+    let Some(g) = lock_guard(ctx, &e.ty) else {
+        return;
+    };
+    let sink = ctx
+        .guard_sinks
+        .contains(&(std::ptr::from_ref(expr) as usize));
+    match &expr.kind {
+        ExprKind::Path(p) => {
+            if let (true, [seg]) = (sink, p.segments.as_slice()) {
+                if let Some(l) = ctx.lookup(&seg.name) {
+                    ctx.guard_lets.retain(|x| x.0 != l);
+                }
+            }
+        }
+        // Reads of a place, and forms whose value comes from inner ones.
+        ExprKind::SelfLower
+        | ExprKind::Field(..)
+        | ExprKind::TupleField(..)
+        | ExprKind::Index(..)
+        | ExprKind::Block(_)
+        | ExprKind::Unsafe(_)
+        | ExprKind::If { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Catch { .. }
+        | ExprKind::Try { .. }
+        | ExprKind::Loop { .. } => {}
+        _ if !sink => ctx.emit_error_at(
+            rokc_diagnostic::ErrorKind::Type,
+            expr.span,
+            format!(
+                "this `{g}` is never released: a guard received without `using` must be \
+                 bound with `using g = .. {{ .. }}` (stdlib 2.16.3)"
+            ),
+        ),
+        _ => {}
+    }
+}
+
 pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
     let e = ctx.at_span(expr.span, |ctx| match expr.kind {
         ExprKind::While { .. } | ExprKind::For { .. } | ExprKind::Loop { .. } => {
@@ -1266,6 +1349,7 @@ pub(super) fn lower_expr(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
         }
         _ => lower_expr_inner(ctx, expr),
     });
+    guard_flow(ctx, expr, &e);
     if e.ty != HirTy::Never || hir_expr_diverges(&e) {
         return e;
     }
@@ -1380,12 +1464,6 @@ fn optional_cast_hint(ty: &Ty) -> &'static str {
 
 fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
     let span = expr.span;
-    let unsupported = |ctx: &LowerCtx<'_>, what: &str| {
-        ctx.error_expr(
-            span,
-            format!("{what} is not supported yet (stage-1 limitation)"),
-        )
-    };
     match &expr.kind {
         ExprKind::Literal(AstLit::ByteStr(body)) => lower_byte_str(ctx, body, span),
         ExprKind::Literal(lit) => super::bignum::literal(ctx, lit, false, span)
@@ -1474,15 +1552,8 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             type_args,
         } => {
             let all_args = with_trailing_closure(args, trailing_closure.as_deref());
-            let guards = ctx.guard_lets.clone();
             let recv_h = literal_conv_receiver(ctx, receiver, method)
                 .unwrap_or_else(|| lower_receiver(ctx, receiver));
-            // Calling a method on a guard does not move it.
-            if let HirExprKind::Local(l) = recv_h.kind {
-                ctx.guard_lets.retain(|g| g.0 != l);
-                ctx.guard_lets
-                    .extend(guards.into_iter().filter(|g| g.0 == l));
-            }
             ctx.method_type_args.clone_from(type_args);
             let method = match drop_method(ctx, &recv_h.ty, method, span) {
                 Ok(m) => m,
@@ -1535,7 +1606,10 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             body,
             is_await,
         } => lower_for(ctx, label.as_ref(), pat, iter, body, *is_await, span),
-        ExprKind::Match { scrutinee, arms } => lower_match(ctx, scrutinee, arms, span),
+        ExprKind::Match { scrutinee, arms } => {
+            guard_sink(ctx, scrutinee);
+            lower_match(ctx, scrutinee, arms, span)
+        }
         ExprKind::Try { kind, operand } => lower_try(ctx, *kind, operand, span),
         ExprKind::Catch {
             body,
@@ -1767,13 +1841,10 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             step.as_deref(),
             span,
         ),
-        ExprKind::LetElse { .. } => unsupported(ctx, "`let ... else` in expression position"),
         ExprKind::AsyncBlock(_) | ExprKind::YieldBlock(_) | ExprKind::AsyncYieldBlock(_) => {
             super::coro::lower_coro_expr(ctx, &expr.kind, span)
         }
         ExprKind::Broadcast { .. } => super::broadcast::lower(ctx, expr),
-        ExprKind::Spread(_) => unsupported(ctx, "a spread expression here"),
-        ExprKind::Discard(_) => unsupported(ctx, "a discard expression"),
         ExprKind::FString(parts) => super::fstring::lower_fstring(ctx, parts, span),
     }
 }
@@ -2784,9 +2855,8 @@ fn narrowings(ctx: &LowerCtx<'_>, cond: &Expr) -> Vec<(String, rokc_ast::Ty)> {
                     && ctx.lookup(&p.segments[0].name).is_some_and(|l| {
                         // An enum's `x is E::V` is a variant test: no narrowing.
                         // A plain member of the target sum stays as it is.
-                        let lt = ctx.local_ty(l);
-                        !ctx.is_boxed(l)
-                            && !matches!(lt, HirTy::Enum(_))
+                        let lt = ctx.var_ty(l);
+                        !matches!(lt, HirTy::Enum(_))
                             && !matches!(ctx.resolve_ast_ty(ty), HirTy::Sum(ws) if ws.contains(&lt))
                     }) =>
             {
@@ -2801,14 +2871,16 @@ fn narrowings(ctx: &LowerCtx<'_>, cond: &Expr) -> Vec<(String, rokc_ast::Ty)> {
 /// In the current (fresh) scope, rebind each narrowed local as `T`:
 /// `let x = match x { x: T => x };` (the test already passed, so the
 /// one-arm match is exhaustive at run time). Assignments to the new
-/// binding write through to the original (`narrowed`).
+/// binding write through to the original (`narrowed`). A `[ref]` cell
+/// is tested again on every read (`cell_views`): a capture may store a
+/// value that is not `T`, and reading it then panics.
 fn bind_narrowed(ctx: &mut LowerCtx<'_>, cond: &Expr) -> Vec<HirStmt> {
     let mut lets = Vec::new();
     for (name, ty) in narrowings(ctx, cond) {
         let Some(orig) = ctx.lookup(&name) else {
             continue;
         };
-        let orig_ty = ctx.local_ty(orig);
+        let orig_ty = ctx.var_ty(orig);
         let pat = rokc_ast::Pattern {
             kind: AstPatternKind::TypeCheck {
                 binder: Some(name.clone()),
@@ -2825,20 +2897,51 @@ fn bind_narrowed(ctx: &mut LowerCtx<'_>, cond: &Expr) -> Vec<HirStmt> {
         };
         let new_ty = ctx.local_ty(new);
         ctx.narrowed.insert(new, (orig, orig_ty.clone()));
+        let mut arms = vec![HirMatchArm {
+            pat: pat_h,
+            guard: None,
+            body: with_lets(resums, hir_local(new, &new_ty, cond.span)),
+        }];
+        let is_cell = ctx.is_boxed(orig) || ctx.cell_views.contains_key(&orig);
+        if is_cell {
+            let msg = format!(
+                "`{name}` no longer holds `{}`: a `[ref {name}]` capture changed it inside \
+                 its narrowing",
+                ctx.ty_name(&new_ty)
+            );
+            arms.push(HirMatchArm {
+                pat: HirPattern::Wildcard,
+                guard: None,
+                body: HirExpr {
+                    kind: HirExprKind::Block(Box::new(HirBlock {
+                        stmts: vec![HirStmt::Panic(super::throws::hook_call(
+                            ctx,
+                            "rok_panic_at",
+                            &msg,
+                            cond.span,
+                        ))],
+                        trailing: None,
+                        label: None,
+                    })),
+                    ty: new_ty.clone(),
+                    span: cond.span,
+                },
+            });
+        }
+        let read = HirExpr {
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(ctx.read_local(orig, cond.span)),
+                arms,
+            },
+            ty: new_ty,
+            span: cond.span,
+        };
+        if is_cell {
+            ctx.cell_views.insert(new, read.clone());
+        }
         lets.push(HirStmt::Let {
             local: new,
-            init: HirExpr {
-                kind: HirExprKind::Match {
-                    scrutinee: Box::new(hir_local(orig, &orig_ty, cond.span)),
-                    arms: vec![HirMatchArm {
-                        pat: pat_h,
-                        guard: None,
-                        body: with_lets(resums, hir_local(new, &new_ty, cond.span)),
-                    }],
-                },
-                ty: new_ty,
-                span: cond.span,
-            },
+            init: read,
         });
     }
     lets
@@ -2879,10 +2982,7 @@ fn write_through(
         let back = coerce(ctx, &orig_ty, hir_local(cur, &ty, span), &|| {
             "the narrowed slot".to_owned()
         });
-        stmts.push(HirStmt::Assign {
-            local: orig,
-            value: back,
-        });
+        stmts.push(ctx.store_local(orig, back));
         cur = orig;
     }
     Some(HirStmt::Expr(HirExpr {
@@ -3243,8 +3343,8 @@ pub(super) fn lower_args_ref(
     let c_varargs = check_arity(ctx, sig, callee, extra, c_varargs);
     let mut out = Vec::with_capacity(n);
     let mut places: Vec<Option<HirExpr>> = vec![None; n];
-    // Names other (non-`ref`) arguments read, for the exclusivity check.
-    let mut reads: Vec<(usize, Vec<String>)> = Vec::new();
+    // Places other (non-`ref`) arguments read, for the exclusivity check.
+    let mut reads: Vec<(String, Vec<String>)> = Vec::new();
     for (i, slot) in slots.into_iter().enumerate() {
         let pty = sig.param_tys[i].clone();
         let pname = sig.param_names.get(i).cloned().unwrap_or_default();
@@ -3265,7 +3365,7 @@ pub(super) fn lower_args_ref(
                      site (spec 4.7.3)"
                 ),
             ),
-            Some(ArgSrc::Ast(e)) => reads.push((i, crate::walk::free_names(&[], e))),
+            Some(ArgSrc::Ast(e)) => reads.extend(crate::walk::free_places(&[], e)),
             _ => {}
         }
         let v = match slot {
@@ -3851,37 +3951,44 @@ fn check_path_receiver(
     }
 }
 
-/// Field indices from the root of a place (`p.a.b` → `[a, b]`).
-fn field_path(e: &HirExpr) -> Vec<u32> {
+/// Field names from the root of a place (`p.a.b` → `[a, b]`).
+fn field_path(ctx: &LowerCtx<'_>, e: &HirExpr) -> Vec<String> {
     match &e.kind {
         HirExprKind::FieldRead {
             target,
+            struct_id,
             field_index,
             ..
         } => {
-            let mut v = field_path(target);
-            v.push(*field_index);
+            let mut v = field_path(ctx, target);
+            let def = ctx.struct_def(*struct_id);
+            v.extend(
+                def.fields
+                    .get(*field_index as usize)
+                    .map(|f| f.name.clone()),
+            );
             v
         }
         _ => Vec::new(),
     }
 }
 
-/// Spec 4.7.10: during one call a variable may be passed as `ref` only
-/// once, and not also be read through another argument — reported when
-/// visible syntactically (the root variable of each place).
+/// Spec 4.7.2: during one call a place passed as `ref` must not be
+/// passed as `ref` again, nor read by another argument, through an
+/// overlapping path (`p` and `p.x` overlap, `p.x` and `p.y` don't) —
+/// reported when visible syntactically.
 fn check_ref_exclusive(
     ctx: &LowerCtx<'_>,
     callee: &str,
     args: &[HirExpr],
     places: &[Option<HirExpr>],
-    reads: &[(usize, Vec<String>)],
+    reads: &[(String, Vec<String>)],
     has_receiver: bool,
 ) {
-    let roots: Vec<(usize, LocalId)> = places
+    let refs: Vec<(LocalId, Vec<String>)> = places
         .iter()
-        .enumerate()
-        .filter_map(|(i, p)| Some((i, super::mono::place_root(p.as_ref()?)?)))
+        .flatten()
+        .filter_map(|p| Some((super::mono::place_root(p)?, field_path(ctx, p))))
         .collect();
     let name = |l: LocalId| {
         ctx.locals
@@ -3889,55 +3996,56 @@ fn check_ref_exclusive(
             .and_then(|x| x.name.clone())
             .unwrap_or_default()
     };
-    // Field paths: `ref p.x, ref p.y` are disjoint, `ref p, ref p.x` not.
-    let paths: Vec<Vec<u32>> = places
-        .iter()
-        .flatten()
-        .filter(|p| super::mono::place_root(p).is_some())
-        .map(field_path)
-        .collect();
-    for (k, (_, a)) in roots.iter().enumerate() {
-        let overlaps = |j: usize| {
-            let (p, q) = (&paths[j], &paths[k]);
-            let n = p.len().min(q.len());
-            p[..n] == q[..n]
-        };
-        if (0..k).any(|j| roots[j].1 == *a && overlaps(j)) {
+    let overlaps = |p: &[String], q: &[String]| {
+        let n = p.len().min(q.len());
+        p[..n] == q[..n]
+    };
+    let shown = |l: LocalId, path: &[String]| {
+        std::iter::once(name(l))
+            .chain(path.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    for (k, (a, path)) in refs.iter().enumerate() {
+        if let Some((_, q)) = refs[..k].iter().find(|(b, q)| b == a && overlaps(path, q)) {
+            let what = if q == path {
+                format!("`{}` is passed as `ref` twice", shown(*a, path))
+            } else {
+                format!(
+                    "`{}` and `{}` overlap and are both passed as `ref`",
+                    shown(*a, q),
+                    shown(*a, path)
+                )
+            };
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
-                format!(
-                    "`{}` is passed as `ref` twice in one call to `{callee}` (spec 4.7.10)",
-                    name(*a)
-                ),
+                format!("{what} in one call to `{callee}` (spec 4.7.2)"),
             );
             return;
         }
     }
+    // A by-value receiver is read by the call too.
     let receiver_read = if has_receiver && places.first().is_some_and(Option::is_none) {
-        args.first().and_then(super::mono::place_root)
+        args.first()
+            .and_then(|r| Some((super::mono::place_root(r)?, field_path(ctx, r))))
     } else {
         None
     };
-    // Only a whole-variable `ref x` is checked against reads;
-    // `ref p.a` beside a read of `p.b` is fine, and telling it from a read
-    // of `p.a` would need per-field read analysis.
-    for (k, (_, root)) in roots.iter().enumerate() {
-        if !paths[k].is_empty() {
-            continue;
-        }
+    for (root, path) in &refs {
         let n = name(*root);
-        let read = receiver_read == Some(*root)
-            || reads.iter().any(|(_, names)| {
-                names
-                    .iter()
-                    .any(|x| *x == n && ctx.lookup(x) == Some(*root))
-            });
+        let read = receiver_read
+            .as_ref()
+            .is_some_and(|(r, q)| r == root && overlaps(path, q))
+            || reads
+                .iter()
+                .any(|(x, q)| *x == n && ctx.lookup(x) == Some(*root) && overlaps(path, q));
         if read {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "`{n}` is passed as `ref` to `{callee}` and also read by another argument \
-                     of the same call (spec 4.7.10)"
+                    "`{}` is passed as `ref` to `{callee}` and also read by another argument \
+                     of the same call (spec 4.7.2)",
+                    shown(*root, path)
                 ),
             );
         }
@@ -4914,6 +5022,12 @@ pub(super) fn method_call_on(
     let pick = match pick_method(ctx, &recv_h.ty, method, None) {
         Ok(p) => p,
         Err(msg) => {
+            let recv = Some(recv_h.clone());
+            if let Some(call) =
+                call_overload(ctx, &recv_h.ty, method, None, recv, args, method, span)
+            {
+                return call;
+            }
             if let Some(p) = pick_by_args(ctx, &recv_h.ty, method, args) {
                 Some(p)
             } else {
@@ -6417,7 +6531,7 @@ fn call_generic_positional(
         }
         lowered.push(r);
     }
-    let mut reads: Vec<(usize, Vec<String>)> = Vec::new();
+    let mut reads: Vec<(String, Vec<String>)> = Vec::new();
     let mut deferred: Vec<(usize, &Expr)> = Vec::new();
     for a in args {
         let (CallArg::Positional(e) | CallArg::Ref(e)) = a else {
@@ -6445,7 +6559,7 @@ fn call_generic_positional(
             );
         }
         if !is_ref {
-            reads.push((i, crate::walk::free_names(&[], e)));
+            reads.extend(crate::walk::free_places(&[], e));
         }
         let mut hint = generic_arg_hint(ctx, def, &subst, hint_self, i, e);
         // A slot several bounds of the trait type differently: an
@@ -7660,13 +7774,13 @@ fn named_type_overload(
     call_overload(ctx, &t, method, None, None, args, display, span)
 }
 
-/// `T::from(x)` where `T` implements one generic trait several times
-/// over (`From<i32>`, `From<i8>`): the impl whose first parameter is
-/// the first argument's type. `None` when `method` is not overloaded
-/// that way.
-// Picks on the first argument only, by exact type; enough
-// for `From` / `TryFrom`. Method-call and operator overloads still
-// report the ambiguity.
+/// One trait implemented several times over (`From<i32>` + `From<i8>`,
+/// `Add<i32>` + `Add<i64>`): the impl chosen by the first parameter the
+/// impls disagree on (spec 3.1.3) — an unsuffixed literal takes the one
+/// `pick_literal_impl` gives, any other argument the impl of its exact
+/// type. `recv` is the receiver of a method call. `None` when `method`
+/// is not overloaded that way, or (for a method call) when no impl has
+/// the type of an argument that is not a literal.
 #[allow(clippy::too_many_arguments)]
 fn call_overload(
     ctx: &mut LowerCtx<'_>,
@@ -7691,63 +7805,68 @@ fn call_overload(
         .iter()
         .flatten()
         .find(|t| trait_key.is_none_or(|k| k == **t))?;
-    let ids: Vec<FunctionId> = ids
+    let sigs: Vec<FnSig> = ids
         .iter()
         .zip(&traits)
         .filter(|(_, t)| **t == Some(tn))
-        .map(|(id, _)| *id)
+        .map(|(id, _)| ctx.sig_by_id(*id))
         .collect();
-    if ids.len() < 2 || traits.contains(&None) {
+    if sigs.len() < 2 || traits.contains(&None) {
         return None;
     }
-    let (first, rest) = match (recv, args) {
-        (Some(r), _) => (r, args),
-        (None, [CallArg::Positional(e), rest @ ..]) => {
-            // An unsuffixed literal takes the impl it fits (spec 3.1.3).
-            let params: Vec<HirTy> = ids
-                .iter()
-                .filter_map(|id| ctx.sig_by_id(*id).param_tys.first().cloned())
-                .collect();
-            match pick_literal_impl(ctx, e, &params) {
-                Ok(Some(i)) => (lower_expected(ctx, e, params[i].clone()), rest),
-                Ok(None) => (lower_expected(ctx, e, HirTy::Unknown), rest),
-                Err(fits) => {
-                    discard_args(ctx, args);
-                    return Some(ctx.error_expr(
-                        span,
-                        format!(
-                            "`{display}`: the literal fits several `{}` impls of `{}` ({fits}); \
-                             add a suffix or `as`",
-                            leaf_name(tn),
-                            ctx.ty_name(t)
-                        ),
-                    ));
-                }
+    let arity = sigs.iter().map(|s| s.param_tys.len()).min()?;
+    let slot = (0..arity).find(|&k| sigs.iter().any(|s| s.param_tys[k] != sigs[0].param_tys[k]))?;
+    let params: Vec<HirTy> = sigs.iter().map(|s| s.param_tys[slot].clone()).collect();
+    let mut literal = false;
+    let arg_ty = if let (Some(r), 0) = (&recv, slot) {
+        r.ty.clone()
+    } else {
+        let Some(CallArg::Positional(e)) = args.get(slot - usize::from(recv.is_some())) else {
+            return None;
+        };
+        literal = untyped_lit_value(e).is_some();
+        match pick_literal_impl(ctx, e, &params) {
+            Ok(Some(i)) => params[i].clone(),
+            Ok(None) => {
+                let mark = ctx.probe_mark();
+                let ty = lower_expected(ctx, e, HirTy::Unknown).ty;
+                ctx.rollback(&mark);
+                ty
+            }
+            Err(fits) => {
+                discard_args(ctx, args);
+                return Some(ctx.error_expr(
+                    span,
+                    format!(
+                        "`{display}`: the literal fits several `{}` impls of `{}` ({fits}); \
+                         add a suffix or `as`",
+                        leaf_name(tn),
+                        ctx.ty_name(t)
+                    ),
+                ));
             }
         }
-        _ => return None,
     };
-    let hit = ids
-        .iter()
-        .map(|id| ctx.sig_by_id(*id))
-        .find(|sig| sig.param_tys.first() == Some(&first.ty));
-    let Some(sig) = hit else {
-        discard_args(ctx, rest);
-        if first.ty == HirTy::Unknown {
-            return Some(first);
+    let Some(i) = params.iter().position(|p| *p == arg_ty) else {
+        if recv.is_some() && !literal {
+            return None;
+        }
+        discard_args(ctx, args);
+        if arg_ty == HirTy::Unknown {
+            return Some(poison(span));
         }
         return Some(ctx.error_expr(
             span,
             format!(
                 "`{display}`: no `{}<{}>` impl for `{}`",
                 leaf_name(tn),
-                ctx.ty_name(&first.ty),
+                ctx.ty_name(&arg_ty),
                 ctx.ty_name(t)
             ),
         ));
     };
-    check_method_visible(ctx, sig.id, method);
-    Some(call_sig(ctx, &sig, display, Some(first), rest, span))
+    check_method_visible(ctx, sigs[i].id, method);
+    Some(call_sig(ctx, &sigs[i], display, recv, args, span))
 }
 
 /// An unsuffixed numeric literal's value, read off the AST.
@@ -9920,8 +10039,6 @@ pub(super) fn lower_path(
             if let Some(v) = ctx.const_locals.get(&local) {
                 return v.clone();
             }
-            // A guard used as a value is moved: its new holder releases it.
-            ctx.guard_lets.retain(|g| g.0 != local);
             return ctx.read_local(local, span);
         }
     }
@@ -10302,10 +10419,6 @@ pub(super) fn lower_literal(
         },
         // Reached only under a unary minus (`lower_byte_str` otherwise).
         AstLit::ByteStr(_) => ctx.error_expr(span, "cannot negate a byte string".to_owned()),
-        AstLit::FStr(_) => ctx.error_expr(
-            span,
-            "f-string literals are not supported yet (stage-1 limitation)".to_owned(),
-        ),
     }
 }
 

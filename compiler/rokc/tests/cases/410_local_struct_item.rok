@@ -1,0 +1,8 @@
+// spec: refs-lang §4.10 / §5.2.2
+// expect-error: 6:5: a `struct` is declared only at module level, not in a function body
+
+// A block declares only `fn`, `const` and `use` items.
+fn main() {
+    struct P { x: i32; }
+    let p = P { x: 1 };
+}

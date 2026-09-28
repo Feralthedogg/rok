@@ -1580,14 +1580,6 @@ impl AstVisitor for Cx<'_> {
                     }
                 }
             }
-            ExprKind::Literal(Literal::FStr(text)) => {
-                // Holes that were not desugared: any word may be a read.
-                for w in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
-                    if !w.is_empty() {
-                        self.mark_used(w);
-                    }
-                }
-            }
             ExprKind::Call { callee, .. } => {
                 if let ExprKind::Path(p) = &callee.kind {
                     if let Some(last) = p.segments.last() {
@@ -1647,12 +1639,7 @@ impl AstVisitor for Cx<'_> {
                     pat_names(&a.pat, &mut self.file_names);
                 }
             }
-            ExprKind::Is(_, pat) | ExprKind::LetElse { pat, .. } => {
-                pat_names(pat, &mut self.file_names);
-                if let ExprKind::LetElse { else_body, .. } = &e.kind {
-                    self.block(else_body);
-                }
-            }
+            ExprKind::Is(_, pat) => pat_names(pat, &mut self.file_names),
             ExprKind::Catch {
                 catches, finally, ..
             } => {

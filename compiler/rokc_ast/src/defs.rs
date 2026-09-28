@@ -355,13 +355,6 @@ pub enum ExprKind {
         catches: Vec<CatchArm>,
         finally: Option<Block>,
     },
-    /// `let pat = expr else { ... };`
-    LetElse {
-        pat: Pattern,
-        ty: Option<Ty>,
-        init: Box<Expr>,
-        else_body: Block,
-    },
     /// Infix operator. `op` is the lexeme (e.g. `"+"`, `"<="`, `".+"`,
     /// `"≤"`); resolved to a stdlib trait method later.
     OpInfix {
@@ -446,10 +439,6 @@ pub enum ExprKind {
         callee: Box<Expr>,
         args: Vec<CallArg>,
     },
-    /// Spread expression for `..arg` in call sites or struct init.
-    Spread(Box<Expr>),
-    /// Discard expression `_ = expr`.
-    Discard(Box<Expr>),
     /// `f"..."` (spec 1.7.3): literal runs and `{expr:spec}` holes,
     /// formatted by type in HIR (stdlib 2.10).
     FString(Vec<FStringPart>),
