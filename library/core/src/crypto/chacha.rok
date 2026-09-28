@@ -13,7 +13,7 @@ pub(pkg) struct ChaChaState {
 impl ChaChaState {
     /// `key`: 32 bytes; `nonce`: 12 bytes.
     /// `key`: the eight little-endian key words.
-    pub(pkg) fn new(key: SecretWords, nonce: Slice<u8>, counter: u32) -> ChaChaState {
+    pub(pkg) const fn new(key: SecretWords, nonce: Slice<u8>, counter: u32) -> ChaChaState {
         let s: [u32; 16] = [0x61707865u32, 0x3320646eu32, 0x79622d32u32, 0x6b206574u32,
             0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32];
         for i in 0usize..8 { s[4 + i] = key[i]; }
@@ -23,7 +23,7 @@ impl ChaChaState {
     }
 
     /// The keystream block at the current counter; the counter advances.
-    pub(pkg) fn block(ref self) -> [u32; 16] {
+    pub(pkg) const fn block(ref self) -> [u32; 16] {
         let s = self.s;
         let x0 = s[0];
         let x1 = s[1];
@@ -85,7 +85,7 @@ impl ChaChaState {
     }
 
     /// `data` xored with the keystream.
-    pub(pkg) fn xor(ref self, data: Slice<u8>) -> List<u8> {
+    pub(pkg) const fn xor(ref self, data: Slice<u8>) -> List<u8> {
         let n = data.len();
         let out: List<u8> = List::with_capacity(n);
         let i = 0usize;
@@ -101,18 +101,18 @@ impl ChaChaState {
     }
 }
 
-fn le32(k: Slice<u8>, i: usize) -> u32 {
+const fn le32(k: Slice<u8>, i: usize) -> u32 {
     (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
 }
 
 const M26: u32 = 0x3ffffffu32;
 
-fn mul(a: u32, b: u32) -> u64 { (a as u64) * (b as u64) }
+const fn mul(a: u32, b: u32) -> u64 { (a as u64) * (b as u64) }
 
 /// `h` after absorbing the 16 bytes of `b` from `off`; `hibit`: 2^128
 /// (as `1 << 24` in limb 4) for a whole block, 0 for the padded last
 /// one.
-fn absorb(h: [u32; 5], r: [u32; 5], b: Slice<u8>, off: usize, hibit: u32) -> [u32; 5] {
+const fn absorb(h: [u32; 5], r: [u32; 5], b: Slice<u8>, off: usize, hibit: u32) -> [u32; 5] {
     let r0 = r[0];
     let r1 = r[1];
     let r2 = r[2];
@@ -165,7 +165,7 @@ pub(pkg) struct Poly1305State {
 impl Poly1305State {
     /// `k[0..8]`: the key `r || s` as little-endian words (a ChaCha20
     /// block).
-    pub(pkg) fn new(k: [u32; 16]) -> Poly1305State {
+    pub(pkg) const fn new(k: [u32; 16]) -> Poly1305State {
         Poly1305State {
             r: [k[0] & 0x3ffffffu32, ((k[0] >> 26) | (k[1] << 6)) & 0x3ffff03u32,
                 ((k[1] >> 20) | (k[2] << 12)) & 0x3ffc0ffu32, ((k[2] >> 14) | (k[3] << 18)) & 0x3f03fffu32,
@@ -177,7 +177,7 @@ impl Poly1305State {
         }
     }
 
-    pub(pkg) fn update(ref self, data: Slice<u8>) {
+    pub(pkg) const fn update(ref self, data: Slice<u8>) {
         let len = data.len();
         let i = 0usize;
         while self.n != 0 && i < len {
@@ -204,7 +204,7 @@ impl Poly1305State {
     }
 
     /// Zero bytes up to the next 16-byte boundary (RFC 8439 2.8).
-    pub(pkg) fn pad16(ref self) {
+    pub(pkg) const fn pad16(ref self) {
         if self.n != 0 {
             while self.n < 16 { self.buf[self.n] = 0u8; self.n += 1; }
             self.h = absorb(self.h, self.r, self.buf[0:16], 0, 1u32 << 24);

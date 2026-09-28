@@ -1,13 +1,14 @@
 //! Unicode `char` properties and case mapping (stdlib 2.15.2 / 2.15.4)
 //! over the tables `gen_unicode.py` generates from the UCD.
 //!
-//! Text that is not UTF-8 (`str` can carry raw OS bytes) falls back to
-//! ASCII-only trimming and case mapping.
+//! The one implementation: the runtime's `rok_char_*` / `rok_str_case` /
+//! `rok_str_trim` and the compiler's constant evaluator (`rokc_hir`,
+//! through `#[path]`) both call it. Uses `core` only. Text that is not
+//! UTF-8 (`str` can carry raw OS bytes) falls back to ASCII-only
+//! trimming and case mapping.
 
 use core::cmp::Ordering;
-use core::ptr;
 
-use crate::str::{RokStr, alloc_str, build, sub};
 use crate::unicode_tables as t;
 
 fn in_ranges(table: &[(u32, u32)], c: u32) -> bool {
@@ -33,8 +34,7 @@ fn lookup<V: Copy>(table: &[(u32, V)], c: u32) -> Option<V> {
 
 /// Property bits of `c`: 1 Alphabetic, 2 Lowercase, 4 Uppercase,
 /// 8 `White_Space`, 16 numeric (general category Nd / Nl / No).
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_char_props(c: u32) -> u32 {
+pub fn props(c: u32) -> u32 {
     let tables = [
         t::ALPHABETIC,
         t::LOWERCASE,
@@ -52,9 +52,8 @@ pub extern "C" fn rok_char_props(c: u32) -> u32 {
 }
 
 /// Simple (one-char) case mapping; `c` itself when it has none.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_char_to_case(c: u32, upper: i32) -> u32 {
-    let table = if upper != 0 { t::TO_UPPER } else { t::TO_LOWER };
+pub fn to_case(c: u32, upper: bool) -> u32 {
+    let table = if upper { t::TO_UPPER } else { t::TO_LOWER };
     lookup(table, c).unwrap_or(c)
 }
 
@@ -90,101 +89,53 @@ fn map_full(s: &str, i: usize, c: char, upper: bool, f: &mut impl FnMut(char)) {
     } else if !upper && c == 'Σ' && final_sigma(s, i) {
         f('ς');
     } else {
-        f(char::from_u32(rok_char_to_case(c as u32, i32::from(upper))).unwrap_or(c));
+        f(char::from_u32(to_case(c as u32, upper)).unwrap_or(c));
     }
 }
 
-/// `upper` != 0 → uppercase, else lowercase: full Unicode mappings
-/// (`ß` → `SS`) plus `Final_Sigma`; no locale-specific rules.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_case(s: RokStr, upper: i32) -> RokStr {
-    let upper = upper != 0;
-    let Ok(text) = core::str::from_utf8(s.bytes()) else {
-        let out = build(&[s.bytes()]);
-        // SAFETY: `out` is a fresh GC string of `len` bytes.
-        let b = unsafe { core::slice::from_raw_parts_mut(out.ptr.cast_mut(), out.len) };
-        if upper {
-            b.make_ascii_uppercase();
-        } else {
-            b.make_ascii_lowercase();
-        }
-        return out;
-    };
-    // Two passes: measure, then encode.
-    let mut len = 0;
+/// `text` uppercased (`upper`) or lowercased, char by char into `f`:
+/// full Unicode mappings (`ß` → `SS`) plus `Final_Sigma`; no
+/// locale-specific rules.
+pub fn case(text: &str, upper: bool, mut f: impl FnMut(char)) {
     for (i, c) in text.char_indices() {
-        map_full(text, i, c, upper, &mut |m| len += m.len_utf8());
+        map_full(text, i, c, upper, &mut f);
     }
-    let p = alloc_str(len);
-    let mut at = 0;
-    for (i, c) in text.char_indices() {
-        map_full(text, i, c, upper, &mut |m| {
-            let mut buf = [0u8; 4];
-            let e = m.encode_utf8(&mut buf);
-            // SAFETY: the first pass measured exactly `len` bytes.
-            unsafe { ptr::copy_nonoverlapping(e.as_ptr(), p.add(at), e.len()) };
-            at += e.len();
-        });
-    }
-    RokStr { ptr: p, len }
 }
 
-/// `which`: 0 = both ends, 1 = start, 2 = end. Unicode `White_Space`.
-/// Shares `s`'s bytes.
-#[unsafe(no_mangle)]
-pub extern "C" fn rok_str_trim(s: RokStr, which: i32) -> RokStr {
-    let Ok(text) = core::str::from_utf8(s.bytes()) else {
-        let mut b = s.bytes();
+/// `b` trimmed of Unicode `White_Space` (ASCII whitespace when not
+/// UTF-8): `which` 0 = both ends, 1 = start, 2 = end.
+pub fn trim(b: &[u8], which: i32) -> &[u8] {
+    let Ok(text) = core::str::from_utf8(b) else {
+        let mut b = b;
         while which != 2 && b.first().is_some_and(u8::is_ascii_whitespace) {
             b = &b[1..];
         }
         while which != 1 && b.last().is_some_and(u8::is_ascii_whitespace) {
             b = &b[..b.len() - 1];
         }
-        return sub(&s, b);
+        return b;
     };
     let text = match which {
         1 => text.trim_start_matches(is_white_space),
         2 => text.trim_end_matches(is_white_space),
         _ => text.trim_matches(is_white_space),
     };
-    sub(&s, text.as_bytes())
+    text.as_bytes()
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-
-    const fn s(b: &'static [u8]) -> RokStr {
-        RokStr {
-            ptr: b.as_ptr(),
-            len: b.len(),
-        }
-    }
 
     #[test]
     fn props_and_case() {
-        assert_eq!(rok_char_props('A' as u32), 1 | 4);
-        assert_eq!(rok_char_props('한' as u32), 1);
-        assert_eq!(rok_char_props('٣' as u32), 16);
-        assert_eq!(rok_char_props(0x3000), 8);
-        assert_eq!(rok_char_to_case('É' as u32, 0), 'é' as u32);
-        assert_eq!(rok_char_to_case('ß' as u32, 1), 'ß' as u32);
+        assert_eq!(props('A' as u32), 1 | 4);
+        assert_eq!(props('한' as u32), 1);
+        assert_eq!(props('٣' as u32), 16);
+        assert_eq!(props(0x3000), 8);
+        assert_eq!(to_case('É' as u32, false), 'é' as u32);
+        assert_eq!(to_case('ß' as u32, true), 'ß' as u32);
         assert!(final_sigma("ΟΔΟΣ", 6));
         assert!(!final_sigma("Σ", 0));
-    }
-
-    // Allocates: run from `str::tests::string_ops` (single GC mutator).
-    pub fn str_case_and_trim() {
-        assert_eq!(rok_str_case(s("straße".as_bytes()), 1).bytes(), b"STRASSE");
-        assert_eq!(
-            rok_str_case(s("ΟΔΟΣ Σ".as_bytes()), 0).bytes(),
-            "οδος σ".as_bytes()
-        );
-        assert_eq!(
-            rok_str_trim(s("\u{3000} x\u{85}".as_bytes()), 0).bytes(),
-            b"x"
-        );
-        assert_eq!(rok_str_trim(s(b"\xff "), 2).bytes(), b"\xff");
     }
 }

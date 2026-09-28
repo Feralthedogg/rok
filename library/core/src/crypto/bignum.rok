@@ -11,14 +11,14 @@ use sup::ct_mask;
 pub(pkg) struct Nat;
 
 impl Nat {
-    pub(pkg) fn zero(n: usize) -> List<u32> {
+    pub(pkg) const fn zero(n: usize) -> List<u32> {
         let r: List<u32> = List::with_capacity(n);
         for _ in 0..n { r.push(0u32); }
         r
     }
 
     /// Big-endian bytes as `n` limbs; `none` if the value needs more.
-    pub(pkg) fn from_be(b: Slice<u8>, n: usize) -> List<u32> | none {
+    pub(pkg) const fn from_be(b: Slice<u8>, n: usize) -> List<u32> | none {
         let r = Nat::zero(n);
         let len = b.len();
         for i in 0..len {
@@ -34,7 +34,7 @@ impl Nat {
     }
 
     /// The low `len` bytes of `a`, big-endian.
-    pub(pkg) fn to_be(a: List<u32>, len: usize) -> List<u8> {
+    pub(pkg) const fn to_be(a: List<u32>, len: usize) -> List<u8> {
         let out: List<u8> = List::with_capacity(len);
         for i in 0..len {
             let k = len - 1 - i;
@@ -58,7 +58,7 @@ impl Nat {
     }
 
     /// `a - b` (equal widths) and the borrow out (0 or 1).
-    pub(pkg) fn sub(a: List<u32>, b: List<u32>) -> (List<u32>, u32) {
+    pub(pkg) const fn sub(a: List<u32>, b: List<u32>) -> (List<u32>, u32) {
         let n = a.len();
         let r = Nat::zero(n);
         let borrow = 0u64;
@@ -71,7 +71,7 @@ impl Nat {
     }
 
     /// `a + b` (equal widths) and the carry out (0 or 1).
-    pub(pkg) fn add(a: List<u32>, b: List<u32>) -> (List<u32>, u32) {
+    pub(pkg) const fn add(a: List<u32>, b: List<u32>) -> (List<u32>, u32) {
         let n = a.len();
         let r = Nat::zero(n);
         let carry = 0u64;
@@ -84,7 +84,7 @@ impl Nat {
     }
 
     /// `a` if `mask` is all ones, `b` if it is zero.
-    pub(pkg) fn select(mask: u32, a: List<u32>, b: List<u32>) -> List<u32> {
+    pub(pkg) const fn select(mask: u32, a: List<u32>, b: List<u32>) -> List<u32> {
         let n = a.len();
         let r = Nat::zero(n);
         for i in 0..n {
@@ -94,25 +94,25 @@ impl Nat {
     }
 
     /// Whether `a < b` (equal widths).
-    pub(pkg) fn lt(a: List<u32>, b: List<u32>) -> bool {
+    pub(pkg) const fn lt(a: List<u32>, b: List<u32>) -> bool {
         let (_, borrow) = Nat::sub(a, b);
         borrow == 1u32
     }
 
-    pub(pkg) fn is_zero(a: List<u32>) -> bool {
+    pub(pkg) const fn is_zero(a: List<u32>) -> bool {
         let d = 0u32;
         for x in a { d = d | x; }
         d == 0u32
     }
 
-    pub(pkg) fn eq(a: List<u32>, b: List<u32>) -> bool {
+    pub(pkg) const fn eq(a: List<u32>, b: List<u32>) -> bool {
         let d = 0u32;
         for i in 0..a.len() { d = d | (a[i] ^ b[i]); }
         d == 0u32
     }
 
     /// Significant bits (variable-time).
-    pub(pkg) fn bits(a: List<u32>) -> usize {
+    pub(pkg) const fn bits(a: List<u32>) -> usize {
         let i = a.len();
         while i > 0 {
             i -= 1;
@@ -122,7 +122,7 @@ impl Nat {
     }
 
     /// `a` widened (or cut) to `n` limbs.
-    pub(pkg) fn resize(a: List<u32>, n: usize) -> List<u32> {
+    pub(pkg) const fn resize(a: List<u32>, n: usize) -> List<u32> {
         let r = Nat::zero(n);
         for i in 0..n {
             if i < a.len() { r[i] = a[i]; }
@@ -231,7 +231,7 @@ impl Modulus {
     }
 
     /// `R mod m`: one in Montgomery form.
-    pub(pkg) fn one(self) -> List<u32> { self.r1 }
+    pub(pkg) const fn one(self) -> List<u32> { self.r1 }
 
     /// `a^e` in Montgomery form (`a` in Montgomery form), `e` big-endian.
     /// Every bit squares and multiplies, so time depends on `e`'s length

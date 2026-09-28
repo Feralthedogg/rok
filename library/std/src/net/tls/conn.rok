@@ -115,7 +115,7 @@ pub(pkg) const OP_CLOSE_NOTIFY: u8 = 4u8;
 pub(pkg) const OP_KEY_UPDATE: u8 = 5u8;
 /// The signature schemes accepted from a peer (PKCS #1 only in
 /// certificates).
-fn sig_schemes() -> List<u16> {
+const fn sig_schemes() -> List<u16> {
     [ED25519_SCHEME, ECDSA_P256_SHA256, ECDSA_P384_SHA384, RSA_PSS_SHA256, RSA_PSS_SHA384, RSA_PSS_SHA512,
         RSA_PSS_PSS_SHA256, RSA_PSS_PSS_SHA384, RSA_PSS_PSS_SHA512, RSA_PKCS1_SHA256, RSA_PKCS1_SHA384, RSA_PKCS1_SHA512]
 }
@@ -127,57 +127,57 @@ const AGE_TOLERANCE_MS: i64 = 10000i64;
 /// is 2^24.5 full records).
 const UPDATE_AFTER: u64 = 0x100_0000u64;
 
-fn proto(msg: str, alert: u8) -> TlsError {
+const fn proto(msg: str, alert: u8) -> TlsError {
     TlsError { kind: TlsErrorKind::Protocol, msg, alert }
 }
 
-fn decode_err(what: str) -> TlsError { proto(f"malformed {what}", ALERT_DECODE_ERROR) }
+const fn decode_err(what: str) -> TlsError { proto(f"malformed {what}", ALERT_DECODE_ERROR) }
 
 // ---- byte building / reading ----
 
-fn put_u16(out: List<u8>, v: usize) {
+const fn put_u16(out: List<u8>, v: usize) {
     out.push((v >> 8) as u8);
     out.push(v as u8);
 }
 
-fn put_u32(out: List<u8>, v: u32) {
+const fn put_u32(out: List<u8>, v: u32) {
     out.push((v >> 24) as u8);
     out.push((v >> 16) as u8);
     out.push((v >> 8) as u8);
     out.push(v as u8);
 }
 
-fn put_u24(out: List<u8>, v: usize) {
+const fn put_u24(out: List<u8>, v: usize) {
     out.push((v >> 16) as u8);
     out.push((v >> 8) as u8);
     out.push(v as u8);
 }
 
-fn put(out: List<u8>, b: Slice<u8>) {
+const fn put(out: List<u8>, b: Slice<u8>) {
     for x in b { out.push(x); }
 }
 
-fn put_list(out: List<u8>, b: List<u8>) {
+const fn put_list(out: List<u8>, b: List<u8>) {
     for x in b { out.push(x); }
 }
 
-fn vec8(out: List<u8>, b: List<u8>) {
+const fn vec8(out: List<u8>, b: List<u8>) {
     out.push(b.len() as u8);
     put_list(out, b);
 }
 
-fn vec16(out: List<u8>, b: List<u8>) {
+const fn vec16(out: List<u8>, b: List<u8>) {
     put_u16(out, b.len());
     put_list(out, b);
 }
 
-fn ext(out: List<u8>, kind: u16, body: List<u8>) {
+const fn ext(out: List<u8>, kind: u16, body: List<u8>) {
     put_u16(out, kind as usize);
     vec16(out, body);
 }
 
 /// A handshake message: type, 24-bit length, body.
-fn message(kind: u8, body: List<u8>) -> List<u8> {
+const fn message(kind: u8, body: List<u8>) -> List<u8> {
     let m: List<u8> = List::with_capacity(body.len() + 4);
     m.push(kind);
     put_u24(m, body.len());
@@ -193,57 +193,57 @@ struct Rd {
 }
 
 impl Rd {
-    fn new(s: Slice<u8>, what: str) -> Rd { Rd { s, pos: 0, what } }
+    const fn new(s: Slice<u8>, what: str) -> Rd { Rd { s, pos: 0, what } }
 
-    fn left(self) -> usize { self.s.len() - self.pos }
+    const fn left(self) -> usize { self.s.len() - self.pos }
 
-    fn bytes(ref self, n: usize) throws (TlsError) -> Slice<u8> {
+    const fn bytes(ref self, n: usize) throws (TlsError) -> Slice<u8> {
         if self.left() < n { throw decode_err(self.what); }
         let b = self.s[self.pos:self.pos + n];
         self.pos += n;
         b
     }
 
-    fn u8(ref self) throws (TlsError) -> u8 { (try self.bytes(1))[0] }
+    const fn u8(ref self) throws (TlsError) -> u8 { (try self.bytes(1))[0] }
 
-    fn u16(ref self) throws (TlsError) -> usize {
+    const fn u16(ref self) throws (TlsError) -> usize {
         let b = try self.bytes(2);
         ((b[0] as usize) << 8) | (b[1] as usize)
     }
 
-    fn u32(ref self) throws (TlsError) -> u32 {
+    const fn u32(ref self) throws (TlsError) -> u32 {
         let b = try self.bytes(4);
         ((b[0] as u32) << 24) | ((b[1] as u32) << 16) | ((b[2] as u32) << 8) | (b[3] as u32)
     }
 
-    fn u24(ref self) throws (TlsError) -> usize {
+    const fn u24(ref self) throws (TlsError) -> usize {
         let b = try self.bytes(3);
         ((b[0] as usize) << 16) | ((b[1] as usize) << 8) | (b[2] as usize)
     }
 
-    fn vec8(ref self) throws (TlsError) -> Slice<u8> {
+    const fn vec8(ref self) throws (TlsError) -> Slice<u8> {
         let n = try self.u8();
         try self.bytes(n as usize)
     }
 
-    fn vec16(ref self) throws (TlsError) -> Slice<u8> {
+    const fn vec16(ref self) throws (TlsError) -> Slice<u8> {
         let n = try self.u16();
         try self.bytes(n)
     }
 
-    fn vec24(ref self) throws (TlsError) -> Slice<u8> {
+    const fn vec24(ref self) throws (TlsError) -> Slice<u8> {
         let n = try self.u24();
         try self.bytes(n)
     }
 
-    fn end(self) throws (TlsError) {
+    const fn end(self) throws (TlsError) {
         if self.left() != 0 { throw decode_err(self.what); }
     }
 }
 
 /// `(type, body)` pairs of an extension block; a repeated type is an
 /// error (RFC 8446 4.2).
-fn extensions(b: Slice<u8>, what: str) throws (TlsError) -> List<(usize, Slice<u8>)> {
+const fn extensions(b: Slice<u8>, what: str) throws (TlsError) -> List<(usize, Slice<u8>)> {
     let r = Rd::new(b, what);
     let out: List<(usize, Slice<u8>)> = [];
     while r.left() > 0 {
@@ -259,13 +259,13 @@ fn extensions(b: Slice<u8>, what: str) throws (TlsError) -> List<(usize, Slice<u
 
 /// An extension the peer may not send in `what` (RFC 8446 4.2: not
 /// requested, or not allowed in that message).
-fn only_exts(exts: List<(usize, Slice<u8>)>, allowed: List<u16>, what: str) throws (TlsError) {
+const fn only_exts(exts: List<(usize, Slice<u8>)>, allowed: List<u16>, what: str) throws (TlsError) {
     for (t, _) in exts {
         if !allowed.contains(t as u16) { throw proto(f"unexpected extension {t} in {what}", ALERT_UNSUPPORTED_EXTENSION); }
     }
 }
 
-fn find_ext(exts: List<(usize, Slice<u8>)>, t: u16) -> Slice<u8> | none {
+const fn find_ext(exts: List<(usize, Slice<u8>)>, t: u16) -> Slice<u8> | none {
     for (u, body) in exts {
         if u == t as usize { return body; }
     }
@@ -274,14 +274,14 @@ fn find_ext(exts: List<(usize, Slice<u8>)>, t: u16) -> Slice<u8> | none {
 
 // ---- key schedule (RFC 8446 7.1) ----
 
-pub(pkg) fn suite_hash(s: CipherSuite) -> HashAlgorithm {
+pub(pkg) const fn suite_hash(s: CipherSuite) -> HashAlgorithm {
     match s {
         CipherSuite::Aes256GcmSha384 => HashAlgorithm::Sha384,
         _ => HashAlgorithm::Sha256,
     }
 }
 
-fn suite_aead(s: CipherSuite) -> AeadAlgorithm {
+const fn suite_aead(s: CipherSuite) -> AeadAlgorithm {
     match s {
         CipherSuite::Aes128GcmSha256 => AeadAlgorithm::Aes128Gcm,
         CipherSuite::Aes256GcmSha384 => AeadAlgorithm::Aes256Gcm,
@@ -304,7 +304,7 @@ fn derive_secret(h: HashAlgorithm, secret: Secret, label: str, transcript: Diges
     expand_label(h, secret, label, transcript.finish(), h.output_len())
 }
 
-fn zeros(n: usize) -> List<u8> {
+const fn zeros(n: usize) -> List<u8> {
     let z: List<u8> = List::with_capacity(n);
     for _ in 0..n { z.push(0u8); }
     z
@@ -347,7 +347,7 @@ fn joined(a: Secret, b: Secret) -> Secret {
     s
 }
 
-fn nonce(d: Dir) -> List<u8> {
+const fn nonce(d: Dir) -> List<u8> {
     let n: List<u8> = List::with_capacity(12);
     for i in 0..12 {
         let b = d.iv[i];
@@ -441,11 +441,11 @@ pub(pkg) fn new_conn(sock: TcpStream, is_client: bool) -> Conn {
     }
 }
 
-fn closed_early() -> TlsError {
+const fn closed_early() -> TlsError {
     TlsError { kind: TlsErrorKind::Io, msg: "connection closed without close_notify", alert: ALERT_CLOSE_NOTIFY }
 }
 
-pub(pkg) fn io_tls(e: IoError) -> TlsError {
+pub(pkg) const fn io_tls(e: IoError) -> TlsError {
     TlsError { kind: TlsErrorKind::Io, msg: e.message, alert: ALERT_INTERNAL_ERROR }
 }
 
@@ -562,7 +562,7 @@ impl Conn {
 
     /// Received bytes `b` (none: the peer closed the socket), for a
     /// caller that reads the socket itself.
-    pub(pkg) fn feed(ref self, b: Slice<u8>) {
+    pub(pkg) const fn feed(ref self, b: Slice<u8>) {
         if b.len() == 0 {
             self.rx_eof = true;
         } else {
@@ -601,7 +601,7 @@ impl Conn {
     }
 
     /// An alert record: close_notify sets `eof`; anything else is fatal.
-    fn alert(ref self, data: List<u8>) throws (TlsError) {
+    const fn alert(ref self, data: List<u8>) throws (TlsError) {
         if data.len() != 2 { throw decode_err("alert"); }
         if data[1] == ALERT_CLOSE_NOTIFY {
             self.eof = true;
@@ -650,7 +650,7 @@ impl Conn {
     }
 
     /// Keys change only on a message boundary (RFC 8446 5.1).
-    fn boundary(self) throws (TlsError) {
+    const fn boundary(self) throws (TlsError) {
         if self.hs.len() != 0 { throw proto("handshake message spans a key change", ALERT_UNEXPECTED_MESSAGE); }
     }
 
@@ -1347,14 +1347,14 @@ impl Conn {
 
 /// Bytes of rejected 0-RTT records a server skips: the most it offers
 /// (or one full record) plus record overhead.
-fn early_skip(max_early: u32) -> usize {
+const fn early_skip(max_early: u32) -> usize {
     let m = max_early as usize;
     (if m > MAX_PLAINTEXT { m } else { MAX_PLAINTEXT }) + 4096
 }
 
 /// The server's ALPN choice (its preference) or none if the client
 /// offers none; no overlap is fatal.
-fn choose_alpn(mine: List<List<u8>>, theirs: List<List<u8>>) throws (TlsError) -> List<u8> | none {
+const fn choose_alpn(mine: List<List<u8>>, theirs: List<List<u8>>) throws (TlsError) -> List<u8> | none {
     if theirs.len() == 0 || mine.len() == 0 { return none; }
     for m in mine {
         if theirs.contains(m) { return m; }
@@ -1472,7 +1472,7 @@ impl Hs {
 
 // ---- messages ----
 
-fn suite_code(s: CipherSuite) -> u16 {
+const fn suite_code(s: CipherSuite) -> u16 {
     match s {
         CipherSuite::Aes128GcmSha256 => 0x1301u16,
         CipherSuite::Aes256GcmSha384 => 0x1302u16,
@@ -1481,7 +1481,7 @@ fn suite_code(s: CipherSuite) -> u16 {
 }
 
 /// The configured suite with code `code` (one the client offered).
-fn pick_offered(code: u16, suites: List<CipherSuite>) throws (TlsError) -> CipherSuite {
+const fn pick_offered(code: u16, suites: List<CipherSuite>) throws (TlsError) -> CipherSuite {
     for s in suites {
         if suite_code(s) == code { return s; }
     }
@@ -1489,7 +1489,7 @@ fn pick_offered(code: u16, suites: List<CipherSuite>) throws (TlsError) -> Ciphe
 }
 
 /// The first configured suite the client offers (server preference).
-fn pick_suite(suites: List<CipherSuite>, offered: List<u16>) throws (TlsError) -> CipherSuite {
+const fn pick_suite(suites: List<CipherSuite>, offered: List<u16>) throws (TlsError) -> CipherSuite {
     for s in suites {
         if offered.contains(suite_code(s)) { return s; }
     }
@@ -1524,7 +1524,7 @@ impl Shares {
         s
     }
 
-    fn has(self, g: u16) -> bool { self.groups.contains(g) }
+    const fn has(self, g: u16) -> bool { self.groups.contains(g) }
 
     fn x_secret(self) -> Secret { self.x25519 ?? Secret::zeroed(0) }
 
@@ -1574,7 +1574,7 @@ impl Shares {
     }
 }
 
-fn host_is_name(ip: List<u8> | none) -> bool { ip is none }
+const fn host_is_name(ip: List<u8> | none) -> bool { ip is none }
 
 /// The ClientHello for handshake state `x`; with a ticket, the PSK
 /// binder is left zero for `bind`.
@@ -1664,7 +1664,7 @@ struct Hello {
     psk: usize | none;
 }
 
-fn parse_server_hello(body: List<u8>, session_id: List<u8>) throws (TlsError) -> Hello {
+const fn parse_server_hello(body: List<u8>, session_id: List<u8>) throws (TlsError) -> Hello {
     let r = Rd::new(body[0:body.len()], "ServerHello");
     let version = try r.u16();
     let random32 = try r.bytes(32);
@@ -1745,7 +1745,7 @@ fn parse_certificate_msg(body: List<u8>, status_ok: bool) throws (TlsError) -> (
 
 /// A CertificateEntry list for `chain`, `leaf_ext` (an extension block)
 /// on the leaf.
-fn cert_entries(chain: List<Certificate>, leaf_ext: List<u8>) -> List<u8> {
+const fn cert_entries(chain: List<Certificate>, leaf_ext: List<u8>) -> List<u8> {
     let cl: List<u8> = [];
     for i in 0..chain.len() {
         let c = chain[i];
@@ -1770,7 +1770,7 @@ fn verify_input(context: str, hash: List<u8>) -> List<u8> {
 }
 
 /// The hash of an RSA-PSS scheme.
-fn pss_hash(scheme: u16) -> HashAlgorithm {
+const fn pss_hash(scheme: u16) -> HashAlgorithm {
     if scheme == RSA_PSS_SHA256 || scheme == RSA_PSS_PSS_SHA256 { return HashAlgorithm::Sha256; }
     if scheme == RSA_PSS_SHA384 || scheme == RSA_PSS_PSS_SHA384 { return HashAlgorithm::Sha384; }
     HashAlgorithm::Sha512
@@ -1873,7 +1873,7 @@ struct ClientHelloInfo {
 }
 
 impl ClientHelloInfo {
-    fn share_for(self, g: u16) -> Slice<u8> | none {
+    const fn share_for(self, g: u16) -> Slice<u8> | none {
         for (x, k) in self.shares {
             if x == g { return k; }
         }
@@ -1881,7 +1881,7 @@ impl ClientHelloInfo {
     }
 }
 
-fn u16_list(b: Slice<u8>, what: str) throws (TlsError) -> List<u16> {
+const fn u16_list(b: Slice<u8>, what: str) throws (TlsError) -> List<u16> {
     let r = Rd::new(b, what);
     let l = Rd::new(try r.vec16(), what);
     try r.end();
@@ -1891,7 +1891,7 @@ fn u16_list(b: Slice<u8>, what: str) throws (TlsError) -> List<u16> {
     out
 }
 
-fn parse_client_hello(body: List<u8>) throws (TlsError) -> ClientHelloInfo {
+const fn parse_client_hello(body: List<u8>) throws (TlsError) -> ClientHelloInfo {
     let r = Rd::new(body[0:body.len()], "ClientHello");
     let _version = try r.u16();
     let _random = try r.bytes(32);
@@ -1991,7 +1991,7 @@ fn parse_client_hello(body: List<u8>) throws (TlsError) -> ClientHelloInfo {
 
 /// The group to use: the hybrid if the client supports it, else X25519;
 /// 0 if neither.
-fn choose_group(c: ClientHelloInfo) -> u16 {
+const fn choose_group(c: ClientHelloInfo) -> u16 {
     if c.groups.contains(HYBRID_GROUP) { return HYBRID_GROUP; }
     if c.groups.contains(X25519_GROUP) { return X25519_GROUP; }
     0u16
@@ -2030,7 +2030,7 @@ fn server_share(group: u16, client: Slice<u8>) throws (TlsError) -> (List<u8>, S
 
 /// A ServerHello (`share` none: a HelloRetryRequest naming `group`),
 /// accepting PSK identity `psk` if any.
-fn server_hello(random32: List<u8>, session_id: List<u8>, suite: CipherSuite, group: u16, share: List<u8> | none, psk: usize | none) -> List<u8> {
+const fn server_hello(random32: List<u8>, session_id: List<u8>, suite: CipherSuite, group: u16, share: List<u8> | none, psk: usize | none) -> List<u8> {
     let b: List<u8> = [3u8, 3u8];
     put_list(b, random32);
     vec8(b, session_id);

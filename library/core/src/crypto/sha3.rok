@@ -27,7 +27,7 @@ struct Keccak {
 }
 
 impl Keccak {
-    fn new(rate: usize, pad: u8) -> Keccak {
+    const fn new(rate: usize, pad: u8) -> Keccak {
         Keccak { st: [0u64; 25], rate, pos: 0, pad, squeezing: false }
     }
 
@@ -47,7 +47,7 @@ impl Keccak {
         self.pos = p;
     }
 
-    fn squeeze(ref self, n: usize) -> List<u8> {
+    const fn squeeze(ref self, n: usize) -> List<u8> {
         let out: List<u8> = List::with_capacity(n);
         let left = n;
         while left > 0 {
@@ -61,7 +61,7 @@ impl Keccak {
 
     /// The next `n <= 168` output bytes, in an array (secret output in
     /// no list).
-    fn squeeze_raw(ref self, n: usize) -> [u8; 168] {
+    const fn squeeze_raw(ref self, n: usize) -> [u8; 168] {
         let st = self.st;
         let p = self.pos;
         if !self.squeezing {
@@ -87,7 +87,7 @@ impl Keccak {
 }
 
 /// Keccak-f[1600].
-fn keccak_f(a: [u64; 25]) -> [u64; 25] {
+const fn keccak_f(a: [u64; 25]) -> [u64; 25] {
     for r in 0..24 {
         let c0 = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
         let c1 = a[1] ^ a[6] ^ a[11] ^ a[16] ^ a[21];
@@ -138,7 +138,7 @@ pub struct Sha3_256 {
 impl Sha3_256 {
     pub const OUTPUT_LEN: usize = 32;
 
-    pub fn new() -> Sha3_256 { Sha3_256 { k: Keccak::new(136, 0x06u8) } }
+    pub const fn new() -> Sha3_256 { Sha3_256 { k: Keccak::new(136, 0x06u8) } }
 
     pub fn digest(data: Bytes) -> List<u8> {
         let h = Sha3_256::new();
@@ -148,7 +148,7 @@ impl Sha3_256 {
 
     pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
 
-    pub fn finish(self) -> List<u8> { self.k.squeeze(32) }
+    pub const fn finish(self) -> List<u8> { self.k.squeeze(32) }
 }
 
 /// SHA3-512: 64-byte digests.
@@ -159,7 +159,7 @@ pub struct Sha3_512 {
 impl Sha3_512 {
     pub const OUTPUT_LEN: usize = 64;
 
-    pub fn new() -> Sha3_512 { Sha3_512 { k: Keccak::new(72, 0x06u8) } }
+    pub const fn new() -> Sha3_512 { Sha3_512 { k: Keccak::new(72, 0x06u8) } }
 
     pub fn digest(data: Bytes) -> List<u8> {
         let h = Sha3_512::new();
@@ -169,10 +169,10 @@ impl Sha3_512 {
 
     pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
 
-    pub fn finish(self) -> List<u8> { self.k.squeeze(64) }
+    pub const fn finish(self) -> List<u8> { self.k.squeeze(64) }
 
     /// `finish` into the first 64 bytes of an array.
-    pub(pkg) fn finish_raw(self) -> [u8; 168] { self.k.squeeze_raw(64) }
+    pub(pkg) const fn finish_raw(self) -> [u8; 168] { self.k.squeeze_raw(64) }
 }
 
 /// SHAKE128: `update` the input, then `squeeze` output in any pieces.
@@ -182,11 +182,11 @@ pub struct Shake128 {
 }
 
 impl Shake128 {
-    pub fn new() -> Shake128 { Shake128 { k: Keccak::new(168, 0x1fu8) } }
+    pub const fn new() -> Shake128 { Shake128 { k: Keccak::new(168, 0x1fu8) } }
 
     pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
 
-    pub fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
+    pub const fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
 }
 
 /// SHAKE256, like `Shake128`.
@@ -195,12 +195,12 @@ pub struct Shake256 {
 }
 
 impl Shake256 {
-    pub fn new() -> Shake256 { Shake256 { k: Keccak::new(136, 0x1fu8) } }
+    pub const fn new() -> Shake256 { Shake256 { k: Keccak::new(136, 0x1fu8) } }
 
     pub fn update(ref self, data: Bytes) { self.k.absorb(data); }
 
-    pub fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
+    pub const fn squeeze(ref self, n: usize) -> List<u8> { self.k.squeeze(n) }
 
     /// `squeeze` of `n <= 168` bytes into an array.
-    pub(pkg) fn squeeze_raw(ref self, n: usize) -> [u8; 168] { self.k.squeeze_raw(n) }
+    pub(pkg) const fn squeeze_raw(ref self, n: usize) -> [u8; 168] { self.k.squeeze_raw(n) }
 }

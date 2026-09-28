@@ -56,17 +56,17 @@ pub struct TlsError {
 }
 
 impl TlsError {
-    pub(pkg) fn certificate(msg: str) -> TlsError {
+    pub(pkg) const fn certificate(msg: str) -> TlsError {
         TlsError { kind: TlsErrorKind::Certificate, msg, alert: 42u8 }
     }
 }
 
 impl Display for TlsError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"tls: {self.msg}") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"tls: {self.msg}") }
 }
 
 impl Debug for TlsError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TlsError({self.kind:?}, {self.msg:?}, alert {self.alert})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TlsError({self.kind:?}, {self.msg:?}, alert {self.alert})") }
 }
 
 impl Error for TlsError {}
@@ -81,7 +81,7 @@ pub enum CipherSuite {
 
 impl CipherSuite {
     /// All three, in the default preference order.
-    pub fn all() -> List<CipherSuite> {
+    pub const fn all() -> List<CipherSuite> {
         [CipherSuite::Aes128GcmSha256, CipherSuite::Aes256GcmSha384, CipherSuite::ChaCha20Poly1305Sha256]
     }
 }
@@ -109,14 +109,14 @@ impl Certificate {
     }
 
     /// The DER encoding.
-    pub fn der(self) -> List<u8> { self.der }
+    pub const fn der(self) -> List<u8> { self.der }
 
     /// The subjectAltName DNS names.
-    pub fn dns_names(self) -> List<str> { self.info.dns_names }
+    pub const fn dns_names(self) -> List<str> { self.info.dns_names }
 
     /// The validity period, Unix seconds.
-    pub fn not_before(self) -> i64 { self.info.not_before }
-    pub fn not_after(self) -> i64 { self.info.not_after }
+    pub const fn not_before(self) -> i64 { self.info.not_before }
+    pub const fn not_after(self) -> i64 { self.info.not_after }
 }
 
 /// A server's private key: Ed25519, ECDSA P-256 / P-384 or RSA.
@@ -132,7 +132,7 @@ pub(pkg) enum KeyKind {
     Rsa(RsaPrivateKey),
 }
 
-fn curve_of_oid(oid: str) throws (TlsError) -> EcCurve {
+const fn curve_of_oid(oid: str) throws (TlsError) -> EcCurve {
     if oid == "1.2.840.10045.3.1.7" { return EcCurve::P256; }
     if oid == "1.3.132.0.34" { return EcCurve::P384; }
     throw TlsError::certificate(f"unsupported EC private key curve {oid} (P-256 and P-384 only)");
@@ -353,7 +353,7 @@ pub struct SessionCache {
 }
 
 impl SessionCache {
-    pub fn new() -> SessionCache { SessionCache { m: Mutex::new([]) } }
+    pub const fn new() -> SessionCache { SessionCache { m: Mutex::new([]) } }
 
     /// Tickets held.
     pub fn len(self) -> usize {
@@ -429,7 +429,7 @@ pub struct TicketStore {
 }
 
 impl TicketStore {
-    pub fn new() -> TicketStore { TicketStore { m: Mutex::new([]) } }
+    pub const fn new() -> TicketStore { TicketStore { m: Mutex::new([]) } }
 
     /// Sessions held.
     pub fn len(self) -> usize {
@@ -536,7 +536,7 @@ pub fn system_roots() throws (TlsError) -> List<Certificate> { try load_roots() 
 // ---- connections ----
 
 /// `s` as an IP address's bytes, if it is one.
-fn ip_bytes(s: str) -> List<u8> | none {
+const fn ip_bytes(s: str) -> List<u8> | none {
     let h = if s.starts_with("[") && s.ends_with("]") { s[1:s.len() - 1] } else { s };
     let v4: rok::std::net::Ipv4Addr | none = try h.parse::<rok::std::net::Ipv4Addr>() catch _ { none };
     match v4 {
@@ -568,7 +568,7 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(c: Conn) -> Shared {
+    const fn new(c: Conn) -> Shared {
         unsafe {
             let b: GcBuf<Conn> = buf_new(1);
             b[0] = c;
@@ -576,7 +576,7 @@ impl Shared {
         }
     }
 
-    fn check(self) throws (IoError) {
+    const fn check(self) throws (IoError) {
         unsafe {
             match self.c[0].failed {
                 m: str => throw IoError::with_kind(IoErrorKind::InvalidData, f"tls: connection failed: {m}"),
@@ -657,7 +657,7 @@ impl Shared {
         }
     }
 
-    fn conn(self) -> Conn { unsafe { self.c[0] } }
+    const fn conn(self) -> Conn { unsafe { self.c[0] } }
 
     /// Run `op` (`Conn::step`) without blocking: the connection's
     /// records are written and more input read asynchronously until the
@@ -790,7 +790,7 @@ fn check_client_key(cfg: ClientConfig) throws (TlsError) {
 }
 
 /// An empty view, for operations without data.
-fn nothing() -> Slice<u8> {
+const fn nothing() -> Slice<u8> {
     let e: List<u8> = [];
     e[0:0]
 }
@@ -877,7 +877,7 @@ impl Client {
     pub fn write_all<B: AsBytes>(self, buf: B) throws (IoError) { try self.s.write(buf.byte_slice()); }
 
     /// Nothing to flush: records go straight to the socket.
-    pub fn flush(self) throws (IoError) {}
+    pub const fn flush(self) throws (IoError) {}
 
     /// Tell the server no more data follows (the read side stays open).
     pub fn close_notify(self) throws (IoError) { try self.s.close_notify(); }
@@ -902,18 +902,18 @@ impl Client {
     /// close_notify (if the connection is healthy), then close the socket.
     pub fn close(self) { self.s.close(); }
 
-    pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
+    pub const fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
 
     /// The server's certificate chain as sent, leaf first (on a resumed
     /// connection, the original connection's).
-    pub fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
+    pub const fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
 
     /// Whether the handshake resumed a session.
-    pub fn resumed(self) -> bool { self.s.conn().resumed }
+    pub const fn resumed(self) -> bool { self.s.conn().resumed }
 
     /// Whether the server took `ClientConfig::early_data` as 0-RTT data
     /// (else it was sent after the handshake).
-    pub fn early_data_accepted(self) -> bool { self.s.conn().early_accepted }
+    pub const fn early_data_accepted(self) -> bool { self.s.conn().early_accepted }
 }
 
 impl Reader for Client {
@@ -928,7 +928,7 @@ impl Writer for Client {
     }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.s.write(buf[0:buf.len()]); }
     fn write_str(ref self, s: str) throws (IoError) { try self.s.write(s.as_bytes()); }
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }
 
 impl Drop for Client {
@@ -990,7 +990,7 @@ impl Server {
     }
 
     pub fn write_all<B: AsBytes>(self, buf: B) throws (IoError) { try self.s.write(buf.byte_slice()); }
-    pub fn flush(self) throws (IoError) {}
+    pub const fn flush(self) throws (IoError) {}
     pub fn close_notify(self) throws (IoError) { try self.s.close_notify(); }
     pub fn key_update(self) throws (IoError) { try self.s.key_update(); }
 
@@ -1008,21 +1008,21 @@ impl Server {
     pub async fn close_notify_async(self) throws (IoError) { try await self.s.op_async(OP_CLOSE_NOTIFY, [], nothing()); }
     pub async fn key_update_async(self) throws (IoError) { try await self.s.op_async(OP_KEY_UPDATE, [], nothing()); }
     pub fn close(self) { self.s.close(); }
-    pub fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
+    pub const fn negotiated_alpn(self) -> List<u8> | none { self.s.conn().alpn }
 
     /// The client's validated certificate chain, leaf first (empty: it
     /// sent none; on a resumed connection, the original connection's).
-    pub fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
+    pub const fn peer_certificates(self) -> List<Certificate> { self.s.conn().peer }
 
     /// Whether the handshake resumed a session.
-    pub fn resumed(self) -> bool { self.s.conn().resumed }
+    pub const fn resumed(self) -> bool { self.s.conn().resumed }
 
     /// The 0-RTT data accepted from the client (empty: none); `read`
     /// returns what follows it.
-    pub fn early_data(self) -> List<u8> { self.s.conn().early }
+    pub const fn early_data(self) -> List<u8> { self.s.conn().early }
 
     /// The server name the client asked for (SNI).
-    pub fn server_name(self) -> str | none { self.s.conn().sni }
+    pub const fn server_name(self) -> str | none { self.s.conn().sni }
 }
 
 impl Reader for Server {
@@ -1037,7 +1037,7 @@ impl Writer for Server {
     }
     fn write_all(ref self, buf: List<u8>) throws (IoError) { try self.s.write(buf[0:buf.len()]); }
     fn write_str(ref self, s: str) throws (IoError) { try self.s.write(s.as_bytes()); }
-    fn flush(ref self) throws (IoError) {}
+    const fn flush(ref self) throws (IoError) {}
 }
 
 impl Drop for Server {

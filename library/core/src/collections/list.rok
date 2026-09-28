@@ -16,7 +16,7 @@ struct ListHead<T> {
 
 impl List<str> {
     /// The items with `sep` between each two: `["a", "b"].join(", ")`.
-    pub fn join(self, sep: str) -> str {
+    pub const fn join(self, sep: str) -> str {
         let b = StrBuf::new();
         for (i, s) in self.iter().enumerate() {
             if i > 0 {
@@ -448,7 +448,7 @@ impl<T> IntoIterator for List<T> {
 }
 
 impl<T> Default for List<T> {
-    fn default() -> List<T> { List::new() }
+    const fn default() -> List<T> { List::new() }
 }
 
 /// A new list with every element cloned (stdlib 2.13.2).
@@ -561,7 +561,7 @@ impl<T: Hash> Hash for List<T> {
 
 /// `[a, b, c]` with each element's `Debug`.
 impl<T: Debug> Debug for List<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("[");
         let first = true;
         for x in self {

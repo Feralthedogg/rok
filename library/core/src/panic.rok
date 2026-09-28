@@ -48,7 +48,7 @@ pub const fn assert_ne<T: PartialEq + Debug>(left: T, right: T, msg: str = "") {
     }
 }
 
-fn assert_failed(op: str, left: str, right: str, msg: str) -> str {
+const fn assert_failed(op: str, left: str, right: str, msg: str) -> str {
     let tail = if msg == "" { "" } else { f": {msg}" };
     f"assertion `left {op} right` failed{tail}\n  left: {left}\n right: {right}"
 }

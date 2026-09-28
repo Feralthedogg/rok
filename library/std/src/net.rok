@@ -88,18 +88,18 @@ impl PartialEq for Ipv6Addr {
 }
 
 impl Display for Ipv4Addr {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(f"{self.octets[0]}.{self.octets[1]}.{self.octets[2]}.{self.octets[3]}")
     }
 }
 
 impl Debug for Ipv4Addr {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 impl Display for Ipv6Addr {
     /// RFC 5952: lowercase hex, the longest run (2+) of zero groups as `::`.
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         let best = -1;
         let best_len = 1;
         let i = 0;
@@ -129,11 +129,11 @@ impl Display for Ipv6Addr {
 }
 
 impl Debug for Ipv6Addr {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 /// Lowercase hex digits of `n`.
-fn hex(n: u64) -> str {
+const fn hex(n: u64) -> str {
     if n == 0u64 { return "0"; }
     let digits = "0123456789abcdef";
     let out = "";
@@ -198,12 +198,12 @@ impl SocketAddr {
 }
 
 impl PartialEq for SocketAddr {
-    fn eq(self, rhs: SocketAddr) -> bool { f"{self}" == f"{rhs}" }
-    fn ne(self, rhs: SocketAddr) -> bool { !self.eq(rhs) }
+    const fn eq(self, rhs: SocketAddr) -> bool { f"{self}" == f"{rhs}" }
+    const fn ne(self, rhs: SocketAddr) -> bool { !self.eq(rhs) }
 }
 
 impl Display for SocketAddr {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(match self {
             SocketAddr::V4(a) => f"{a.ip}:{a.port}",
             SocketAddr::V6(a) => f"[{a.ip}]:{a.port}",
@@ -212,7 +212,7 @@ impl Display for SocketAddr {
 }
 
 impl Debug for SocketAddr {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 // ---- parsing ----
@@ -222,7 +222,7 @@ const fn bad_addr(s: str) -> ParseError {
 }
 
 /// Digits of `s` in `radix` (at most `max_len` of them) as a number.
-fn number(s: str, radix: u64, max_len: usize) -> u64 | none {
+const fn number(s: str, radix: u64, max_len: usize) -> u64 | none {
     if s.len() == 0 || s.len() > max_len { return none; }
     let n = 0u64;
     for c in s.chars() {
@@ -232,7 +232,7 @@ fn number(s: str, radix: u64, max_len: usize) -> u64 | none {
     n
 }
 
-fn parse_v4(s: str) -> Ipv4Addr | none {
+const fn parse_v4(s: str) -> Ipv4Addr | none {
     let parts: List<u8> = List::new();
     for p in s.split(".") {
         let n = number(p, 10u64, 3)?;
@@ -244,7 +244,7 @@ fn parse_v4(s: str) -> Ipv4Addr | none {
 }
 
 /// Hex groups of one side of `::` (empty side: no groups).
-fn groups(s: str) -> List<u16> | none {
+const fn groups(s: str) -> List<u16> | none {
     let out: List<u16> = List::new();
     if s.len() == 0 { return out; }
     for p in s.split(":") {
@@ -253,7 +253,7 @@ fn groups(s: str) -> List<u16> | none {
     out
 }
 
-fn parse_v6(s: str) -> Ipv6Addr | none {
+const fn parse_v6(s: str) -> Ipv6Addr | none {
     let seg: List<u16> = List::new();
     if let at: usize = s.find("::") {
         let h = groups(s[:at])?;
@@ -271,7 +271,7 @@ fn parse_v6(s: str) -> Ipv6Addr | none {
 
 impl FromStr for Ipv4Addr {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> Ipv4Addr {
+    const fn from_str(s: str) throws (ParseError) -> Ipv4Addr {
         if let a: Ipv4Addr = parse_v4(s) { return a; }
         throw bad_addr(s);
     }
@@ -279,20 +279,20 @@ impl FromStr for Ipv4Addr {
 
 impl FromStr for Ipv6Addr {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> Ipv6Addr {
+    const fn from_str(s: str) throws (ParseError) -> Ipv6Addr {
         if let a: Ipv6Addr = parse_v6(s) { return a; }
         throw bad_addr(s);
     }
 }
 
 /// A port number (`0..=65535`).
-fn port_of(s: str) -> u16 | none {
+const fn port_of(s: str) -> u16 | none {
     let p = number(s, 10u64, 5)?;
     if p > 65535u64 { return none; }
     p as u16
 }
 
-fn parse_socket_addr(s: str) -> SocketAddr | none {
+const fn parse_socket_addr(s: str) -> SocketAddr | none {
     if s.starts_with("[") {
         let at = s.find("]:")?;
         return SocketAddr::v6(parse_v6(s[1:at])?, port_of(s[at + 2:])?);
@@ -304,7 +304,7 @@ fn parse_socket_addr(s: str) -> SocketAddr | none {
 /// `"127.0.0.1:8080"` / `"[::1]:8080"`.
 impl FromStr for SocketAddr {
     type Err = ParseError;
-    fn from_str(s: str) throws (ParseError) -> SocketAddr {
+    const fn from_str(s: str) throws (ParseError) -> SocketAddr {
         if let a: SocketAddr = parse_socket_addr(s) { return a; }
         throw ParseError { input: s, pos: 0, reason: "invalid socket address syntax" };
     }

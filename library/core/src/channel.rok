@@ -24,17 +24,17 @@ pub enum TrySendError<T> {
 
 // Errors (2.14.3) whatever `T` is: the value they carry is not shown.
 impl<T> Display for SendError<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("sending on a closed channel") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("sending on a closed channel") }
 }
 
 impl<T> Debug for SendError<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Closed(..)") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("Closed(..)") }
 }
 
 impl<T> Error for SendError<T> {}
 
 impl<T> Display for TrySendError<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         match self {
             TrySendError::Full(_) => try f.write_str("sending on a full channel"),
             TrySendError::Closed(_) => try f.write_str("sending on a closed channel"),

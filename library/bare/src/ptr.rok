@@ -51,7 +51,7 @@ impl<T> Ptr<T> {
     pub const fn add(self, count: usize) -> Ptr<T> {
         Ptr { address: self.address + count * size_of::<T>() }
     }
-    pub fn sub(self, count: usize) -> Ptr<T> {
+    pub const fn sub(self, count: usize) -> Ptr<T> {
         Ptr { address: self.address - count * size_of::<T>() }
     }
     /// `count` bytes further.
@@ -125,7 +125,7 @@ pub struct ManyPtr<T> {
 }
 
 impl<T> ManyPtr<T> {
-    pub fn addr(self) -> usize { self.address }
+    pub const fn addr(self) -> usize { self.address }
     pub fn with_addr(self, addr: usize) -> ManyPtr<T> { ManyPtr { address: addr } }
     pub fn offset(self, count: isize) -> ManyPtr<T> {
         ManyPtr {
@@ -136,7 +136,7 @@ impl<T> ManyPtr<T> {
         ManyPtr { address: self.address + count * size_of::<T>() }
     }
     /// The first element as a single-element pointer.
-    pub fn as_one(self) -> Ptr<T> { Ptr { address: self.address } }
+    pub const fn as_one(self) -> Ptr<T> { Ptr { address: self.address } }
     pub fn as_const(self) -> ConstPtr<T> { ConstPtr { address: self.address } }
     /// Element `idx` (no bounds: the caller knows the length).
     pub unsafe fn read(self, idx: usize) -> T {
@@ -165,12 +165,12 @@ pub struct CPtr<T> {
 }
 
 impl<T> CPtr<T> {
-    pub fn null() -> CPtr<T> { CPtr { address: 0 } }
+    pub const fn null() -> CPtr<T> { CPtr { address: 0 } }
     pub fn from_ptr(p: Ptr<T>) -> CPtr<T> { CPtr { address: p.address } }
-    pub fn from_const(p: ConstPtr<T>) -> CPtr<T> { CPtr { address: p.address } }
+    pub const fn from_const(p: ConstPtr<T>) -> CPtr<T> { CPtr { address: p.address } }
     pub const fn from_addr(addr: usize) -> CPtr<T> { CPtr { address: addr } }
-    pub fn is_null(self) -> bool { self.address == 0 }
-    pub fn addr(self) -> usize { self.address }
+    pub const fn is_null(self) -> bool { self.address == 0 }
+    pub const fn addr(self) -> usize { self.address }
     /// `none` when null.
     pub const fn as_ptr(self) -> Ptr<T> | none {
         if self.address == 0 { return none; }
@@ -199,7 +199,7 @@ impl<T> !Sync for CPtr<T> {}
 pub const fn ptr_cast<U, T>(p: Ptr<T>) -> Ptr<U> { Ptr { address: p.address } }
 
 /// `p` as a `Ptr<T>` when its address suits `T`'s alignment (1.2.3).
-pub fn align_cast<T>(p: Ptr<u8>) -> Ptr<T> | none {
+pub const fn align_cast<T>(p: Ptr<u8>) -> Ptr<T> | none {
     if p.address % align_of::<T>() != 0 { return none; }
     let q: Ptr<T> = Ptr { address: p.address };
     q
@@ -207,14 +207,14 @@ pub fn align_cast<T>(p: Ptr<u8>) -> Ptr<T> | none {
 
 /// `p` as a `Ptr<T>` with no alignment check, not even in debug builds
 /// (1.2.3).
-pub fn align_cast_unchecked<T>(p: Ptr<u8>) -> Ptr<T> { Ptr { address: p.address } }
+pub const fn align_cast_unchecked<T>(p: Ptr<u8>) -> Ptr<T> { Ptr { address: p.address } }
 
 /// Drop the `const` (1.2.4): writing through the result is the caller's
 /// responsibility.
-pub fn const_cast<T>(p: ConstPtr<T>) -> Ptr<T> { Ptr { address: p.address } }
+pub const fn const_cast<T>(p: ConstPtr<T>) -> Ptr<T> { Ptr { address: p.address } }
 
 /// The address of `p`, marked as escaping (1.1.2 strict provenance).
-pub fn expose_provenance<T>(p: Ptr<T>) -> usize { p.address }
+pub const fn expose_provenance<T>(p: Ptr<T>) -> usize { p.address }
 
 /// A pointer at `addr`, assumed to carry an exposed provenance.
 pub const unsafe fn from_exposed_provenance<T>(addr: usize) -> Ptr<T> { Ptr { address: addr } }

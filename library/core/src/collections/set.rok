@@ -156,7 +156,7 @@ impl<T: Hash> Hash for Set<T> {
 
 /// `{a, b, ..}` with each member's `Debug`, in iteration order.
 impl<T: Hash + Debug> Debug for Set<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("{");
         let first = true;
         for x in self {

@@ -956,6 +956,59 @@ impl TryFrom<f64> for f32 {
     }
 }
 
+// TryFrom<str> (2.11.9): `FromStr`'s parse; any failure (empty, a bad
+// digit, out of range) throws `OverflowError`.
+
+impl TryFrom<str> for i8 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> i8 { try i8::from_str(s) catch _ { throw overflow("i8"); } }
+}
+
+impl TryFrom<str> for i16 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> i16 { try i16::from_str(s) catch _ { throw overflow("i16"); } }
+}
+
+impl TryFrom<str> for i32 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> i32 { try i32::from_str(s) catch _ { throw overflow("i32"); } }
+}
+
+impl TryFrom<str> for i64 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> i64 { try i64::from_str(s) catch _ { throw overflow("i64"); } }
+}
+
+impl TryFrom<str> for isize {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> isize { try isize::from_str(s) catch _ { throw overflow("isize"); } }
+}
+
+impl TryFrom<str> for u8 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> u8 { try u8::from_str(s) catch _ { throw overflow("u8"); } }
+}
+
+impl TryFrom<str> for u16 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> u16 { try u16::from_str(s) catch _ { throw overflow("u16"); } }
+}
+
+impl TryFrom<str> for u32 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> u32 { try u32::from_str(s) catch _ { throw overflow("u32"); } }
+}
+
+impl TryFrom<str> for u64 {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> u64 { try u64::from_str(s) catch _ { throw overflow("u64"); } }
+}
+
+impl TryFrom<str> for usize {
+    type Error = OverflowError;
+    const fn try_from(s: str) throws (OverflowError) -> usize { try usize::from_str(s) catch _ { throw overflow("usize"); } }
+}
+
 // SaturatingFrom
 
 impl SaturatingFrom<i8> for i16 {

@@ -8,7 +8,7 @@ use crate::str::{
     RokStr, rok_str_char_count, rok_str_concat, rok_str_eq_at, rok_str_find, rok_str_parse_float,
     rok_str_parse_int, rok_str_replace, rok_str_rfind, rok_str_slice, text,
 };
-use crate::unicode::{rok_str_case, rok_str_trim};
+use crate::str::{rok_str_case, rok_str_trim};
 use rokr_common::object_header::HEADER_SIZE;
 
 struct Rng(u64);

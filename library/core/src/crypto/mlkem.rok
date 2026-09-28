@@ -41,18 +41,18 @@ const GAMMAS: [u16; 128] = [
 ];
 
 /// `floor(x / q)` for `x < 2^24`, without a divide instruction.
-fn div_q(x: u32) -> u32 {
+const fn div_q(x: u32) -> u32 {
     (((x as u64) * 20642679u64) >> 36u64) as u32
 }
 
 /// `x mod q` for `x < 2^24`.
-fn mod_q(x: u32) -> u32 { x - div_q(x) * Q }
+const fn mod_q(x: u32) -> u32 { x - div_q(x) * Q }
 
-fn add_q(a: u32, b: u32) -> u32 { mod_q(a + b) }
+const fn add_q(a: u32, b: u32) -> u32 { mod_q(a + b) }
 
-fn sub_q(a: u32, b: u32) -> u32 { mod_q(a + Q - b) }
+const fn sub_q(a: u32, b: u32) -> u32 { mod_q(a + Q - b) }
 
-fn mul_q(a: u32, b: u32) -> u32 { mod_q(a * b) }
+const fn mul_q(a: u32, b: u32) -> u32 { mod_q(a * b) }
 
 fn zeros(n: usize) -> SecretWords { SecretWords::new(n) }
 
@@ -64,7 +64,7 @@ fn secret_of(b: [u8; 168], at: usize, n: usize) -> Secret {
 }
 
 /// In-place NTT of the polynomial at `f[o..o + 256]` (Algorithm 9).
-fn ntt(f: SecretWords, o: usize) {
+const fn ntt(f: SecretWords, o: usize) {
     let i = 1usize;
     let len = 128usize;
     while len >= 2 {
@@ -84,7 +84,7 @@ fn ntt(f: SecretWords, o: usize) {
 }
 
 /// In-place inverse NTT (Algorithm 10).
-fn inv_ntt(f: SecretWords, o: usize) {
+const fn inv_ntt(f: SecretWords, o: usize) {
     let i = 127usize;
     let len = 2usize;
     while len <= 128 {
@@ -105,7 +105,7 @@ fn inv_ntt(f: SecretWords, o: usize) {
 }
 
 /// `acc[ao..] += a[ai..] * b[bi..]` in the NTT domain (Algorithm 11).
-fn mul_acc(acc: SecretWords, ao: usize, a: SecretWords, ai: usize, b: SecretWords, bi: usize) {
+const fn mul_acc(acc: SecretWords, ao: usize, a: SecretWords, ai: usize, b: SecretWords, bi: usize) {
     for i in 0usize..128 {
         let a0 = a[ai + 2 * i];
         let a1 = a[ai + 2 * i + 1];
@@ -161,7 +161,7 @@ fn cbd(f: SecretWords, o: usize, s: Slice<u8>, b: u8) {
 }
 
 /// `ByteEncode_d` of `f[0..n]` into `out[at..]`; the end.
-fn encode(f: SecretWords, n: usize, d: u32, out: Secret, at: usize) -> usize {
+const fn encode(f: SecretWords, n: usize, d: u32, out: Secret, at: usize) -> usize {
     let acc = 0u64;
     let bits = 0u32;
     let p = at;
@@ -199,14 +199,14 @@ fn decode(b: Slice<u8>, n: usize, d: u32) -> SecretWords {
 }
 
 /// `Compress_d` in place: `round(2^d x / q) mod 2^d`.
-fn compress(f: SecretWords, d: u32) {
+const fn compress(f: SecretWords, d: u32) {
     for i in 0..f.len() {
         f[i] = div_q((f[i] << d) + 1664u32) & ((1u32 << d) - 1u32);
     }
 }
 
 /// `Decompress_d` in place: `round(q y / 2^d)`.
-fn decompress(f: SecretWords, d: u32) {
+const fn decompress(f: SecretWords, d: u32) {
     for i in 0..f.len() {
         f[i] = (f[i] * Q + (1u32 << (d - 1u32))) >> d;
     }
@@ -264,7 +264,7 @@ fn decrypt(dk: Slice<u8>, c: Slice<u8>) -> Secret {
     m
 }
 
-fn need(b: Slice<u8>, n: usize, what: str) throws (ValueError) {
+const fn need(b: Slice<u8>, n: usize, what: str) throws (ValueError) {
     if b.len() != n { throw ValueError { msg: f"ML-KEM-768: {what} must be {n} bytes" }; }
 }
 

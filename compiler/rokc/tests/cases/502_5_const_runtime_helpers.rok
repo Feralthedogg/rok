@@ -1,0 +1,52 @@
+// spec: 005.02-const
+// expect-exit: 0
+// expect-stdout:
+// [ ASSA A | assa a |aßa a|aßa a | aßa a| <>ß<> <> |. .a.ß.a. .a. .|1|6|true|true|true| aßa a !|aß|aßa a ]
+// [true|false|false|true|σ|Σ false|true|false|false|٣|٣ false|false|true|false|　|　]
+// [42|42|42 -7|none|-7 300|none|300 none|none|1000 none|none|none]
+// [2|3|3|2|2.5|0|2.5|-2.5|6|3 -3|-2|-3|-2|2.5|-2.5|0|-2.5|-4|-3 0|1|0|0|0.49999999999999994|0|0.49999999999999994|-0.49999999999999994|2|1]
+// true true true true
+
+// Spec 5.2.5: the pure runtime helpers under `str`, `char`, `StrBuf`,
+// parsing and exact float rounding run at compile time with the
+// runtime's own code; each line is built at compile time and again at
+// run time.
+const fn strs(s: str) -> str {
+    let b = StrBuf::new();
+    b.push_str(s);
+    b.push('!');
+    let up = s.to_uppercase();
+    let low = up.to_lowercase();
+    f"{up}|{low}|{s.trim()}|{s.trim_start()}|{s.trim_end()}|{s.replace("a", "<>")}|{s.replace("", ".")}|{s.find("a"):?}|{s.rfind("a"):?}|{s.starts_with(" ")}|{s.ends_with("a ")}|{s.contains("ß")}|{b.to_str()}|{b[1:4]}|{s[1:]}"
+}
+
+const fn chars(c: char) -> str {
+    f"{c.is_alphabetic()}|{c.is_numeric()}|{c.is_whitespace()}|{c.is_uppercase()}|{c.to_lowercase()}|{c.to_uppercase()}"
+}
+
+const fn nums(s: str) -> str {
+    let i = try? s.parse::<i32>();
+    let u = try? s.parse::<u8>();
+    let f = try? s.parse::<f64>();
+    f"{i:?}|{u:?}|{f:?}"
+}
+
+const fn rounding(x: f64) -> str {
+    f"{x.floor()}|{x.ceil()}|{x.round()}|{x.trunc()}|{x.abs()}|{x.min(0.0)}|{x.max(0.0)}|{x.copysign(-1.0)}|{x.mul_add(2.0, 1.0)}|{(x as f32).round()}"
+}
+
+const S: str = strs(" aßa a ");
+const C: str = chars('Σ') + " " + chars('٣') + " " + chars('\u{3000}');
+const P: str = nums("42") + " " + nums("-7") + " " + nums("300") + " " + nums("1e3") + " " + nums("x");
+const R: str = rounding(2.5) + " " + rounding(-2.5) + " " + rounding(0.49999999999999994);
+
+fn main() {
+    println(f"[{S}]");
+    println(f"[{C}]");
+    println(f"[{P}]");
+    println(f"[{R}]");
+    let c = chars('Σ') + " " + chars('٣') + " " + chars('\u{3000}');
+    let p = nums("42") + " " + nums("-7") + " " + nums("300") + " " + nums("1e3") + " " + nums("x");
+    let r = rounding(2.5) + " " + rounding(-2.5) + " " + rounding(0.49999999999999994);
+    println(f"{S == strs(" aßa a ")} {C == c} {P == p} {R == r}");
+}

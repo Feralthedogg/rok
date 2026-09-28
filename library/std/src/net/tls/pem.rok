@@ -3,7 +3,7 @@
 
 use sup::TlsError;
 
-fn sextet(c: u8) -> i32 {
+const fn sextet(c: u8) -> i32 {
     if c >= 0x41u8 && c <= 0x5au8 { return (c - 0x41u8) as i32; }
     if c >= 0x61u8 && c <= 0x7au8 { return (c - 0x61u8) as i32 + 26; }
     if c >= 0x30u8 && c <= 0x39u8 { return (c - 0x30u8) as i32 + 52; }

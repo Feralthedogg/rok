@@ -36,24 +36,24 @@ const P_BYTES: [u8; 32] = [
     0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0x7fu8,
 ];
 
-fn width(i: usize) -> u64 { if i % 2 == 0 { 26u64 } else { 25u64 } }
+const fn width(i: usize) -> u64 { if i % 2 == 0 { 26u64 } else { 25u64 } }
 
-pub(pkg) fn f25519_zero() -> Fe25519 { [0i64; 10] }
+pub(pkg) const fn f25519_zero() -> Fe25519 { [0i64; 10] }
 
-pub(pkg) fn f25519_one() -> Fe25519 {
+pub(pkg) const fn f25519_one() -> Fe25519 {
     let h = f25519_zero();
     h[0] = 1i64;
     h
 }
 
-pub(pkg) fn f25519_small(v: i64) -> Fe25519 {
+pub(pkg) const fn f25519_small(v: i64) -> Fe25519 {
     let h = f25519_zero();
     h[0] = v;
     h
 }
 
 /// Limbs back to |h_i| <= 2^25 (2^24 for odd), rounding carries.
-fn carry(h: Fe25519) -> Fe25519 {
+const fn carry(h: Fe25519) -> Fe25519 {
     for i in 0usize..11 {
         let k = i % 10;
         let w = width(k);
@@ -64,21 +64,21 @@ fn carry(h: Fe25519) -> Fe25519 {
     h
 }
 
-pub(pkg) fn f25519_add(f: Fe25519, g: Fe25519) -> Fe25519 {
+pub(pkg) const fn f25519_add(f: Fe25519, g: Fe25519) -> Fe25519 {
     let h = f25519_zero();
     for i in 0usize..10 { h[i] = f[i] + g[i]; }
     carry(h)
 }
 
-pub(pkg) fn f25519_sub(f: Fe25519, g: Fe25519) -> Fe25519 {
+pub(pkg) const fn f25519_sub(f: Fe25519, g: Fe25519) -> Fe25519 {
     let h = f25519_zero();
     for i in 0usize..10 { h[i] = f[i] - g[i]; }
     carry(h)
 }
 
-pub(pkg) fn f25519_neg(f: Fe25519) -> Fe25519 { f25519_sub(f25519_zero(), f) }
+pub(pkg) const fn f25519_neg(f: Fe25519) -> Fe25519 { f25519_sub(f25519_zero(), f) }
 
-pub(pkg) fn f25519_mul(f: Fe25519, g: Fe25519) -> Fe25519 {
+pub(pkg) const fn f25519_mul(f: Fe25519, g: Fe25519) -> Fe25519 {
     let h = f25519_zero();
     for i in 0usize..10 {
         let fi = f[i];
@@ -92,9 +92,9 @@ pub(pkg) fn f25519_mul(f: Fe25519, g: Fe25519) -> Fe25519 {
     carry(h)
 }
 
-pub(pkg) fn f25519_sq(f: Fe25519) -> Fe25519 { f25519_mul(f, f) }
+pub(pkg) const fn f25519_sq(f: Fe25519) -> Fe25519 { f25519_mul(f, f) }
 
-fn f25519_sq_n(f: Fe25519, n: usize) -> Fe25519 {
+const fn f25519_sq_n(f: Fe25519, n: usize) -> Fe25519 {
     let h = f;
     for _ in 0usize..n { h = f25519_sq(h); }
     h
@@ -102,7 +102,7 @@ fn f25519_sq_n(f: Fe25519, n: usize) -> Fe25519 {
 
 /// `(z^11, z^(2^250 - 1))`, the shared prefix of the inversion and
 /// square root chains.
-fn chain(z: Fe25519) -> (Fe25519, Fe25519) {
+const fn chain(z: Fe25519) -> (Fe25519, Fe25519) {
     let t0 = f25519_sq(z);
     let t1 = f25519_mul(z, f25519_sq_n(t0, 2));
     let z11 = f25519_mul(t0, t1);
@@ -118,13 +118,13 @@ fn chain(z: Fe25519) -> (Fe25519, Fe25519) {
 }
 
 /// `z^(p - 2)` (0 for 0).
-pub(pkg) fn f25519_invert(z: Fe25519) -> Fe25519 {
+pub(pkg) const fn f25519_invert(z: Fe25519) -> Fe25519 {
     let (z11, e250) = chain(z);
     f25519_mul(f25519_sq_n(e250, 5), z11)
 }
 
 /// `z^((p - 5) / 8)`.
-fn f25519_pow22523(z: Fe25519) -> Fe25519 {
+const fn f25519_pow22523(z: Fe25519) -> Fe25519 {
     let (_, e250) = chain(z);
     f25519_mul(f25519_sq_n(e250, 2), z)
 }
@@ -148,7 +148,7 @@ pub(pkg) fn f25519_select(f: Fe25519, g: Fe25519, b: i64) -> Fe25519 {
 }
 
 /// The canonical 32-byte little-endian encoding.
-pub(pkg) fn f25519_to_bytes(f: Fe25519) -> [u8; 32] {
+pub(pkg) const fn f25519_to_bytes(f: Fe25519) -> [u8; 32] {
     let h = carry(f);
     let q = (19i64 * h[9] + (1i64 << 24)) >> 25;
     for i in 0usize..10 {
@@ -181,7 +181,7 @@ pub(pkg) fn f25519_to_bytes(f: Fe25519) -> [u8; 32] {
 
 /// A field element from 32 bytes; bit 255 is ignored, values >= p
 /// are taken mod p.
-pub(pkg) fn f25519_from_bytes(b: Slice<u8>) -> Fe25519 {
+pub(pkg) const fn f25519_from_bytes(b: Slice<u8>) -> Fe25519 {
     let h = f25519_zero();
     let acc = 0u64;
     let n = 0u64;
@@ -201,13 +201,13 @@ pub(pkg) fn f25519_from_bytes(b: Slice<u8>) -> Fe25519 {
     h
 }
 
-fn f25519_const(b: [u8; 32]) -> Fe25519 { f25519_from_bytes(b[0:32]) }
+const fn f25519_const(b: [u8; 32]) -> Fe25519 { f25519_from_bytes(b[0:32]) }
 
 /// Low bit of the canonical form.
-pub(pkg) fn f25519_is_negative(f: Fe25519) -> i64 { (f25519_to_bytes(f)[0] & 1u8) as i64 }
+pub(pkg) const fn f25519_is_negative(f: Fe25519) -> i64 { (f25519_to_bytes(f)[0] & 1u8) as i64 }
 
 /// 1 when `f` is 0 mod p, else 0; constant time.
-pub(pkg) fn f25519_is_zero(f: Fe25519) -> i64 {
+pub(pkg) const fn f25519_is_zero(f: Fe25519) -> i64 {
     let b = f25519_to_bytes(f);
     let d = 0u32;
     for i in 0usize..32 { d |= b[i] as u32; }
@@ -215,7 +215,7 @@ pub(pkg) fn f25519_is_zero(f: Fe25519) -> i64 {
 }
 
 /// Whether 32 bytes encode a value below p, ignoring bit 255.
-fn canonical(b: Slice<u8>) -> bool {
+const fn canonical(b: Slice<u8>) -> bool {
     let i = 31;
     while i >= 0 {
         let x = if i == 31 { b[31] & 0x7fu8 } else { b[i as usize] };
@@ -235,12 +235,12 @@ pub(pkg) struct EdPoint {
     t: Fe25519;
 }
 
-pub(pkg) fn ge_identity() -> EdPoint {
+pub(pkg) const fn ge_identity() -> EdPoint {
     EdPoint { x: f25519_zero(), y: f25519_one(), z: f25519_one(), t: f25519_zero() }
 }
 
 /// `p + q` (complete: any inputs, doubling included).
-pub(pkg) fn ge_add(p: EdPoint, q: EdPoint) -> EdPoint {
+pub(pkg) const fn ge_add(p: EdPoint, q: EdPoint) -> EdPoint {
     let a = f25519_mul(f25519_sub(p.y, p.x), f25519_sub(q.y, q.x));
     let b = f25519_mul(f25519_add(p.y, p.x), f25519_add(q.y, q.x));
     let c = f25519_mul(f25519_mul(p.t, f25519_const(D2_BYTES)), q.t);
@@ -253,7 +253,7 @@ pub(pkg) fn ge_add(p: EdPoint, q: EdPoint) -> EdPoint {
     EdPoint { x: f25519_mul(e, f), y: f25519_mul(g, h), z: f25519_mul(f, g), t: f25519_mul(e, h) }
 }
 
-pub(pkg) fn ge_double(p: EdPoint) -> EdPoint {
+pub(pkg) const fn ge_double(p: EdPoint) -> EdPoint {
     let a = f25519_sq(p.x);
     let b = f25519_sq(p.y);
     let zz = f25519_sq(p.z);
@@ -265,7 +265,7 @@ pub(pkg) fn ge_double(p: EdPoint) -> EdPoint {
     EdPoint { x: f25519_mul(e, f), y: f25519_mul(g, h), z: f25519_mul(f, g), t: f25519_mul(e, h) }
 }
 
-pub(pkg) fn ge_negate(p: EdPoint) -> EdPoint {
+pub(pkg) const fn ge_negate(p: EdPoint) -> EdPoint {
     EdPoint { x: f25519_neg(p.x), y: p.y, z: p.z, t: f25519_neg(p.t) }
 }
 
@@ -273,7 +273,7 @@ fn ge_select(p: EdPoint, q: EdPoint, b: i64) -> EdPoint {
     EdPoint { x: f25519_select(p.x, q.x, b), y: f25519_select(p.y, q.y, b), z: f25519_select(p.z, q.z, b), t: f25519_select(p.t, q.t, b) }
 }
 
-pub(pkg) fn ge_encode(p: EdPoint) -> List<u8> {
+pub(pkg) const fn ge_encode(p: EdPoint) -> List<u8> {
     let zi = f25519_invert(p.z);
     let x = f25519_mul(p.x, zi);
     let y = f25519_to_bytes(f25519_mul(p.y, zi));
@@ -284,7 +284,7 @@ pub(pkg) fn ge_encode(p: EdPoint) -> List<u8> {
 /// The point a 32-byte encoding names; `none` for a non-canonical y,
 /// a y off the curve, or x = 0 with the sign bit set (RFC 8032 5.1.3).
 /// Variable time: for public points.
-pub(pkg) fn ge_decode(b: Slice<u8>) -> EdPoint | none {
+pub(pkg) const fn ge_decode(b: Slice<u8>) -> EdPoint | none {
     if b.len() != 32 || !canonical(b) { return none; }
     let y = f25519_from_bytes(b);
     let sign = ((b[31] >> 7u8) & 1u8) as i64;
@@ -303,7 +303,7 @@ pub(pkg) fn ge_decode(b: Slice<u8>) -> EdPoint | none {
     EdPoint { x, y, z: f25519_one(), t: f25519_mul(x, y) }
 }
 
-pub(pkg) fn ge_base() -> EdPoint {
+pub(pkg) const fn ge_base() -> EdPoint {
     match ge_decode(BASE_BYTES[0:32]) {
         p: EdPoint => p,
         none => ge_identity(),
@@ -401,7 +401,7 @@ pub(pkg) fn sc25519_muladd(a: [u8; 32], b: [u8; 32], c: [u8; 32]) -> [u8; 32] {
 }
 
 /// Whether a 32-byte scalar is below L (variable time).
-pub(pkg) fn sc25519_is_canonical(b: Slice<u8>) -> bool {
+pub(pkg) const fn sc25519_is_canonical(b: Slice<u8>) -> bool {
     let i = 7;
     while i >= 0 {
         let w = (b[4 * i as usize] as u32) | ((b[4 * i as usize + 1] as u32) << 8u32)

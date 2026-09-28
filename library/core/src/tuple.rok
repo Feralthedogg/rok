@@ -12,7 +12,7 @@ impl<A: Default> Default for (A,) {
     fn default() -> (A,) { (rok::core::marker::default_of(),) }
 }
 impl<A: Debug> Debug for (A,) {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("(");
         try Debug::fmt(self.0, ref f);
         try f.write_str(",)")
@@ -40,7 +40,7 @@ impl<A: Default, B: Default> Default for (A, B) {
     const fn default() -> (A, B) { (rok::core::marker::default_of(), rok::core::marker::default_of()) }
 }
 impl<A: Debug, B: Debug> Debug for (A, B) {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("(");
         try Debug::fmt(self.0, ref f);
         try f.write_str(", ");

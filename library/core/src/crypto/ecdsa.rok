@@ -23,7 +23,7 @@ pub enum EcCurve {
     P384,
 }
 
-fn fe_small(v: u32) -> Fe {
+const fn fe_small(v: u32) -> Fe {
     let r = fe_zero();
     r[0] = v;
     r
@@ -37,7 +37,7 @@ fn fe_hex(s: str) -> Fe {
 }
 
 /// Big-endian bytes; `none` if the value needs more than `n` limbs.
-fn fe_from_be(b: Slice<u8>, n: usize) -> Fe | none {
+const fn fe_from_be(b: Slice<u8>, n: usize) -> Fe | none {
     let l: List<u32> = Nat::from_be(b, n) else { return none; };
     let r = fe_zero();
     for i in 0..n { r[i] = l[i]; }
@@ -45,7 +45,7 @@ fn fe_from_be(b: Slice<u8>, n: usize) -> Fe | none {
 }
 
 /// The low `len` bytes, big-endian.
-fn fe_to_be(a: Fe, len: usize) -> List<u8> {
+const fn fe_to_be(a: Fe, len: usize) -> List<u8> {
     let out: List<u8> = List::with_capacity(len);
     for i in 0..len {
         let k = len - 1 - i;
@@ -55,7 +55,7 @@ fn fe_to_be(a: Fe, len: usize) -> List<u8> {
 }
 
 /// `a - b` over `n` limbs and the borrow (0 or 1).
-fn fe_sub(a: Fe, b: Fe, n: usize) -> (Fe, u32) {
+const fn fe_sub(a: Fe, b: Fe, n: usize) -> (Fe, u32) {
     let r = fe_zero();
     let borrow = 0u64;
     for i in 0..n {
@@ -67,26 +67,26 @@ fn fe_sub(a: Fe, b: Fe, n: usize) -> (Fe, u32) {
 }
 
 /// `a` where `mask` is all ones, `b` where it is zero.
-fn fe_select(mask: u32, a: Fe, b: Fe) -> Fe {
+const fn fe_select(mask: u32, a: Fe, b: Fe) -> Fe {
     let r = fe_zero();
     for i in 0usize..12 { r[i] = (a[i] & mask) | (b[i] & ~mask); }
     r
 }
 
-fn fe_is_zero(a: Fe) -> bool {
+const fn fe_is_zero(a: Fe) -> bool {
     let d = 0u32;
     for i in 0usize..12 { d = d | a[i]; }
     d == 0u32
 }
 
-fn fe_eq(a: Fe, b: Fe) -> bool {
+const fn fe_eq(a: Fe, b: Fe) -> bool {
     let d = 0u32;
     for i in 0usize..12 { d = d | (a[i] ^ b[i]); }
     d == 0u32
 }
 
 /// Whether `a < b` (constant time).
-fn fe_lt(a: Fe, b: Fe, n: usize) -> bool {
+const fn fe_lt(a: Fe, b: Fe, n: usize) -> bool {
     let (_, borrow) = fe_sub(a, b, n);
     borrow == 1u32
 }
@@ -300,7 +300,7 @@ fn curve_of(c: EcCurve) -> Curve {
 }
 
 impl Curve {
-    fn identity(self) -> Point { Point { x: fe_zero(), y: self.fp.one, z: fe_zero() } }
+    const fn identity(self) -> Point { Point { x: fe_zero(), y: self.fp.one, z: fe_zero() } }
 
     /// `p + q`, complete (algorithm 4).
     fn add(self, p: Point, q: Point) -> Point {
@@ -478,7 +478,7 @@ impl Curve {
 /// A DER INTEGER at `s[at..]` as a positive value of at most `max`
 /// bytes: its magnitude and the index past it. Strict DER: minimal
 /// length, no negative numbers.
-fn der_uint(s: Slice<u8>, at: usize, max: usize) -> (Slice<u8>, usize) | none {
+const fn der_uint(s: Slice<u8>, at: usize, max: usize) -> (Slice<u8>, usize) | none {
     if at + 2 > s.len() || s[at] != 0x02u8 { return none; }
     let len = s[at + 1] as usize;
     if len >= 0x80 || len == 0 || at + 2 + len > s.len() { return none; }
@@ -491,7 +491,7 @@ fn der_uint(s: Slice<u8>, at: usize, max: usize) -> (Slice<u8>, usize) | none {
 }
 
 /// `(r, s)` from a DER `SEQUENCE { INTEGER, INTEGER }`, nothing after.
-fn parse_sig(sig: Slice<u8>, size: usize) -> (Slice<u8>, Slice<u8>) | none {
+const fn parse_sig(sig: Slice<u8>, size: usize) -> (Slice<u8>, Slice<u8>) | none {
     if sig.len() < 2 || sig[0] != 0x30u8 { return none; }
     let at = 2usize;
     let len = sig[1] as usize;
@@ -512,7 +512,7 @@ fn parse_sig(sig: Slice<u8>, size: usize) -> (Slice<u8>, Slice<u8>) | none {
 }
 
 /// A DER INTEGER of the big-endian magnitude `v`.
-fn der_int(out: List<u8>, v: List<u8>) {
+const fn der_int(out: List<u8>, v: List<u8>) {
     let i = 0usize;
     while i + 1 < v.len() && v[i] == 0u8 { i += 1; }
     let pad = v[i] >= 0x80u8;

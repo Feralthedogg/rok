@@ -104,7 +104,7 @@ impl PartialEq for IoErrorKind {
 }
 
 impl Debug for IoErrorKind {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(match self {
             IoErrorKind::Other => "Other",
             IoErrorKind::NotFound => "NotFound",
@@ -160,11 +160,11 @@ impl IoError {
 }
 
 impl Display for IoError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.message) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.message) }
 }
 
 impl Debug for IoError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(f"IoError({self.kind:?}, {self.code}, {self.message})")
     }
 }
@@ -203,7 +203,7 @@ pub(pkg) const fn region<B: AsBytes>(b: B) -> (GcBuf<u8>, usize, usize) {
 }
 
 /// A new list of `b`'s bytes.
-pub(pkg) fn list_of<B: AsBytes>(b: B) -> List<u8> {
+pub(pkg) const fn list_of<B: AsBytes>(b: B) -> List<u8> {
     let (src, at, n) = region(b);
     let out = byte_buf(n);
     let (dst, to, _) = region(out);
@@ -212,7 +212,7 @@ pub(pkg) fn list_of<B: AsBytes>(b: B) -> List<u8> {
 }
 
 /// A new list of `s`'s UTF-8 bytes.
-pub(pkg) fn list_of_str(s: str) -> List<u8> {
+pub(pkg) const fn list_of_str(s: str) -> List<u8> {
     let out = byte_buf(s.len());
     let (dst, to, _) = region(out);
     unsafe { rok_buf_put_str(dst, to, s) };
@@ -233,7 +233,7 @@ const fn spare(out: List<u8>, n: usize) -> (GcBuf<u8>, usize) {
 }
 
 /// Append `src[at..at + n]` to `out`.
-pub(pkg) fn append(out: List<u8>, src: GcBuf<u8>, at: usize, n: usize) {
+pub(pkg) const fn append(out: List<u8>, src: GcBuf<u8>, at: usize, n: usize) {
     let (dst, to) = spare(out, n);
     unsafe { rok_buf_copy(dst, to, src, at, n) };
 }
@@ -293,7 +293,7 @@ pub(pkg) fn write_region(buf: GcBuf<u8>, at: usize, n: usize, write: RegionIo, c
 }
 
 /// Bytes as text, or `InvalidData`.
-pub(pkg) fn text_of(bytes: List<u8>) throws (IoError) -> str {
+pub(pkg) const fn text_of(bytes: List<u8>) throws (IoError) -> str {
     try str::from_utf8(bytes) catch _ {
         throw IoError::with_kind(IoErrorKind::InvalidData, "stream did not contain valid UTF-8");
     }
@@ -308,7 +308,7 @@ pub trait Reader {
     /// The OS descriptor `copy` may hand to the kernel: one with no
     /// buffer, timeout or non-blocking mode of the stream's own. `-1`
     /// (the default): none.
-    fn raw_fd(self) -> RawFd { -1 }
+    const fn raw_fd(self) -> RawFd { -1 }
 
     /// Fill all of `buf`, or `UnexpectedEof`.
     fn read_exact(ref self, buf: List<u8>) throws (IoError) {
@@ -374,7 +374,7 @@ pub trait Writer {
     fn flush(ref self) throws (IoError);
 
     /// As `Reader::raw_fd`.
-    fn raw_fd(self) -> RawFd { -1 }
+    const fn raw_fd(self) -> RawFd { -1 }
 
     fn write_all(ref self, buf: List<u8>) throws (IoError) {
         let rest = buf;

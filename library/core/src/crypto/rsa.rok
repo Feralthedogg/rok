@@ -14,7 +14,7 @@ pub struct RsaPublicKey {
 }
 
 /// `b` without its leading zero bytes.
-fn strip(b: Slice<u8>) -> Slice<u8> {
+const fn strip(b: Slice<u8>) -> Slice<u8> {
     let i = 0usize;
     while i < b.len() && b[i] == 0u8 { i += 1; }
     b[i:b.len()]
@@ -22,7 +22,7 @@ fn strip(b: Slice<u8>) -> Slice<u8> {
 
 /// A DER length at `s[at..]`: the length and the index past it
 /// (definite, minimal, below 2^16).
-fn der_len(s: Slice<u8>, at: usize) -> (usize, usize) | none {
+const fn der_len(s: Slice<u8>, at: usize) -> (usize, usize) | none {
     if at >= s.len() { return none; }
     let b = s[at];
     if b < 0x80u8 { return (b as usize, at + 1); }
@@ -39,7 +39,7 @@ fn der_len(s: Slice<u8>, at: usize) -> (usize, usize) | none {
 
 /// A positive DER INTEGER at `s[at..]`: its magnitude and the index
 /// past it.
-fn der_uint(s: Slice<u8>, at: usize) -> (Slice<u8>, usize) | none {
+const fn der_uint(s: Slice<u8>, at: usize) -> (Slice<u8>, usize) | none {
     if at >= s.len() || s[at] != 0x02u8 { return none; }
     let t1: (usize, usize) = der_len(s, at + 1) else { return none; };
     let (len, start) = t1;
@@ -51,7 +51,7 @@ fn der_uint(s: Slice<u8>, at: usize) -> (Slice<u8>, usize) | none {
 }
 
 /// The DER `DigestInfo` prefix of `hash` (RFC 8017 9.2 note 1).
-fn digest_info(hash: HashAlgorithm) -> List<u8> {
+const fn digest_info(hash: HashAlgorithm) -> List<u8> {
     let id = match hash {
         HashAlgorithm::Sha256 => 1u8,
         HashAlgorithm::Sha384 => 2u8,
@@ -64,7 +64,7 @@ fn digest_info(hash: HashAlgorithm) -> List<u8> {
 
 /// EMSA-PKCS1-v1_5 of digest `h` in `k` bytes (`k` >= 256: room for
 /// the 8-byte minimum padding with any digest).
-fn pkcs1_encoding(hash: HashAlgorithm, h: List<u8>, k: usize) -> List<u8> {
+const fn pkcs1_encoding(hash: HashAlgorithm, h: List<u8>, k: usize) -> List<u8> {
     let t = digest_info(hash);
     for x in h { t.push(x); }
     let em: List<u8> = List::with_capacity(k);
@@ -133,16 +133,16 @@ impl RsaPublicKey {
         try RsaPublicKey::new(n, e)
     }
 
-    pub fn bits(self) -> usize { self.bits }
+    pub const fn bits(self) -> usize { self.bits }
 
     /// The modulus, big-endian without leading zeros.
-    pub fn modulus(self) -> List<u8> {
+    pub const fn modulus(self) -> List<u8> {
         let k = (self.bits + 7) / 8;
         Nat::to_be(self.md.m, k)
     }
 
     /// The public exponent, big-endian without leading zeros.
-    pub fn exponent(self) -> List<u8> { self.e.clone() }
+    pub const fn exponent(self) -> List<u8> { self.e.clone() }
 
     /// `signature^e mod n` as `k` bytes; `none` if the signature is not
     /// `k` bytes or not below `n`.
@@ -211,7 +211,7 @@ pub struct RsaPrivateKey {
 }
 
 /// `b` with leading zeros to `len` bytes (`b.len() <= len`).
-fn pad_be(b: Slice<u8>, len: usize) -> List<u8> {
+const fn pad_be(b: Slice<u8>, len: usize) -> List<u8> {
     let out: List<u8> = List::with_capacity(len);
     for _ in b.len()..len { out.push(0u8); }
     for x in b { out.push(x); }
@@ -265,9 +265,9 @@ impl RsaPrivateKey {
         }
     }
 
-    pub fn public_key(self) -> RsaPublicKey { self.public }
+    pub const fn public_key(self) -> RsaPublicKey { self.public }
 
-    pub fn bits(self) -> usize { self.public.bits }
+    pub const fn bits(self) -> usize { self.public.bits }
 
     /// `m^d mod n` for `m < n` by the CRT, blinded with `r` (`r^e`
     /// multiplied in, `r^-1` taken out per prime), then checked against

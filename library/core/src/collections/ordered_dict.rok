@@ -137,7 +137,7 @@ impl<K: Hash, V: PartialEq> PartialEq for OrderedDict<K, V> {
 
 /// `{k: v, ..}` in insertion order.
 impl<K: Hash + Debug, V: Debug> Debug for OrderedDict<K, V> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("{");
         let first = true;
         for (k, v) in self {

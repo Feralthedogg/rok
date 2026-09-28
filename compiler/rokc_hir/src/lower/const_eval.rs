@@ -25,6 +25,9 @@ use std::rc::Rc;
 
 use rokc_diagnostic::Span;
 
+use crate::fmt_spec::unpack;
+use crate::{fmt_text, str_ops, unicode};
+
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -735,10 +738,20 @@ impl<'b> Interp<'b> {
                 });
                 return Err(Stop::Fail(span, format!("panicked{msg}")));
             }
-            Callee::Extern(name) => {
-                return pure_extern(&name, &args).ok_or_else(|| {
-                    Stop::Runtime(span, format!("calls the extern function `{name}`"))
+            Callee::Extern(name) if evaluable_extern(&name) => {
+                return run_extern(&name, &args).map_err(|e| match e {
+                    Ext::Panic(m) => Stop::Fail(span, format!("panicked: {m}")),
+                    Ext::No => Stop::Runtime(
+                        span,
+                        format!("calls `{name}` with arguments it cannot take at compile time"),
+                    ),
                 });
+            }
+            Callee::Extern(name) => {
+                return Err(Stop::Runtime(
+                    span,
+                    format!("calls the extern function `{name}`"),
+                ));
             }
             Callee::Refused(why) => return Err(Stop::Runtime(span, why)),
             Callee::Poisoned => return Err(Stop::Poisoned),
@@ -886,55 +899,6 @@ impl<'b> Interp<'b> {
     }
 }
 
-/// The runtime's pure `str` functions (`rok::core::str` is built on
-/// them), computed here exactly as `rokr` does.
-fn pure_extern(name: &str, args: &[Value]) -> Option<Value> {
-    let int = |v: &Value| match v {
-        Value::Int(i, _) => usize::try_from(*i).ok(),
-        _ => None,
-    };
-    let usize_value = |n: usize| Value::Int(n as i128, PrimTy::Usize);
-    Some(match (name, args) {
-        ("rok_str_len", [Value::Str(s)]) => usize_value(s.len()),
-        ("rok_str_char_count", [Value::Str(s)]) => usize_value(s.chars().count()),
-        ("rok_str_byte", [Value::Str(s), i]) => Value::Int(
-            i128::from(s.as_bytes().get(int(i)?).copied().unwrap_or(0)),
-            PrimTy::U8,
-        ),
-        // FNV-1a, as `rokr`'s.
-        ("rok_str_hash", [Value::Str(s)]) => Value::Int(
-            i128::from(s.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-            })),
-            PrimTy::U64,
-        ),
-        ("rok_str_eq", [Value::Str(a), Value::Str(b)]) => {
-            Value::Int(i128::from(a == b), PrimTy::I32)
-        }
-        ("rok_f64_abs", [Value::Float(x, p)]) => Value::Float(x.abs(), *p),
-        ("rok_f64_trunc", [Value::Float(x, p)]) => Value::Float(x.trunc(), *p),
-        ("rok_str_cmp", [Value::Str(a), Value::Str(b)]) => {
-            Value::Int(a.as_bytes().cmp(b.as_bytes()) as i128, PrimTy::I32)
-        }
-        ("rok_str_concat", [Value::Str(a), Value::Str(b)]) => Value::Str(format!("{a}{b}").into()),
-        ("rok_str_from_char", [c]) => {
-            let c = match c {
-                Value::Int(c, _) => u32::try_from(*c).ok()?,
-                Value::Char(c) => *c,
-                _ => return None,
-            };
-            Value::Str(char::from_u32(c)?.to_string().into())
-        }
-        ("rok_bytes_slice", [Value::Str(s), a, b]) => {
-            let end = int(b)?.min(s.len());
-            let start = int(a)?.min(end);
-            // A cut inside a char is not a `str` this evaluator holds.
-            Value::Str(s.get(start..end)?.into())
-        }
-        _ => return None,
-    })
-}
-
 /// The byte size of a primitive, `()` or an array of them: the target
 /// layout (`rokc_mir::Target::size_align`) needs no more than the
 /// pointer width there.
@@ -949,24 +913,453 @@ fn plain_size(ty: &HirTy) -> Option<u32> {
     })
 }
 
-/// Whether extern `name` runs at compile time (`pure_extern`, or a
+/// The runtime functions computed at compile time: the pure ones
+/// `rok::core` is built on, by the runtime's own code where it is more
+/// than a line (`fmt_text`, `str_ops`, `unicode`, shared by `#[path]`),
+/// so a constant equals the run-time result (5.2.5). libm's inexact
+/// functions are not here (the target's libm may round differently),
+/// nor the `int` kernels (`rok_nat_*`).
+const EVALUABLE: &[&str] = &[
+    "rok_str_len",
+    "rok_str_char_count",
+    "rok_str_byte",
+    "rok_str_cmp",
+    "rok_str_hash",
+    "rok_str_eq",
+    "rok_str_eq_at",
+    "rok_str_find",
+    "rok_str_rfind",
+    "rok_str_concat",
+    "rok_str_slice",
+    "rok_str_replace",
+    "rok_str_from_char",
+    "rok_str_from_buf",
+    "rok_str_case",
+    "rok_str_trim",
+    "rok_str_parse_int",
+    "rok_str_parse_float",
+    "rok_buf_put_str",
+    "rok_buf_put_char",
+    "rok_buf_copy",
+    "rok_buf_utf8_error",
+    "rok_buf_slice_str",
+    "rok_char_props",
+    "rok_char_to_case",
+    "rok_fmt_new",
+    "rok_fmt_finish",
+    "rok_fmt_len",
+    "rok_fmt_str",
+    "rok_fmt_char",
+    "rok_fmt_escaped",
+    "rok_fmt_int",
+    "rok_fmt_digits",
+    "rok_fmt_integral",
+    "rok_fmt_f64",
+    "rok_fmt_pad",
+    "rok_fmt_pack",
+    "rok_fmt_spec_parse",
+    "rok_f64_floor",
+    "rok_f64_ceil",
+    "rok_f64_round",
+    "rok_f64_trunc",
+    "rok_f64_abs",
+    "rok_f64_copysign",
+    "rok_f64_min",
+    "rok_f64_max",
+    "rok_f64_mul_add",
+    "rok_f32_floor",
+    "rok_f32_ceil",
+    "rok_f32_round",
+    "rok_f32_trunc",
+    "rok_f32_abs",
+    "rok_f32_copysign",
+    "rok_f32_min",
+    "rok_f32_max",
+    "rok_f32_mul_add",
+];
+
+/// Whether extern `name` runs at compile time (`run_extern`, or a
 /// panic, which fails the evaluation).
 fn evaluable_extern(name: &str) -> bool {
-    name.starts_with("rok_panic")
-        || matches!(
-            name,
-            "rok_str_len"
-                | "rok_str_char_count"
-                | "rok_str_byte"
-                | "rok_str_cmp"
-                | "rok_str_hash"
-                | "rok_str_eq"
-                | "rok_f64_abs"
-                | "rok_f64_trunc"
-                | "rok_str_concat"
-                | "rok_str_from_char"
-                | "rok_bytes_slice"
-        )
+    name.starts_with("rok_panic") || EVALUABLE.contains(&name)
+}
+
+/// What a runtime function did at compile time.
+enum Ext {
+    /// Arguments it cannot take here (a cut inside a char, ..).
+    No,
+    /// It panicked with this message.
+    Panic(String),
+}
+
+impl From<std::num::TryFromIntError> for Ext {
+    fn from(_: std::num::TryFromIntError) -> Self {
+        Self::No
+    }
+}
+
+/// A text being written (`fmt_text::Text`).
+struct Out(Vec<u8>);
+
+impl std::fmt::Write for Out {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+}
+
+impl fmt_text::Text for Out {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn put(&mut self, b: &[u8]) {
+        self.0.extend_from_slice(b);
+    }
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+    fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
+    }
+}
+
+fn int_of(v: &Value) -> Result<i128, Ext> {
+    match v {
+        Value::Int(i, _) => Ok(*i),
+        Value::Char(c) => Ok(i128::from(*c)),
+        _ => Err(Ext::No),
+    }
+}
+
+fn usize_of(v: &Value) -> Result<usize, Ext> {
+    Ok(usize::try_from(int_of(v)?)?)
+}
+
+/// A primitive's bits as `u64` (the packed spec words, `i64` values).
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+fn bits_of(v: &Value) -> Result<u64, Ext> {
+    Ok(int_of(v)? as u64)
+}
+
+fn str_of(v: &Value) -> Result<&str, Ext> {
+    match v {
+        Value::Str(s) => Ok(s),
+        _ => Err(Ext::No),
+    }
+}
+
+const fn float_of(v: &Value) -> Result<f64, Ext> {
+    match v {
+        Value::Float(x, _) => Ok(*x),
+        _ => Err(Ext::No),
+    }
+}
+
+const fn buf_of(v: &Value) -> Result<&Rc<RefCell<Vec<Value>>>, Ext> {
+    match v {
+        Value::Buf(b) => Ok(b),
+        _ => Err(Ext::No),
+    }
+}
+
+/// `buf[off..off + len]` of a byte buffer.
+fn bytes_of(v: &Value, off: usize, len: usize) -> Result<Vec<u8>, Ext> {
+    let items = buf_of(v)?.borrow();
+    let end = off.checked_add(len).ok_or(Ext::No)?;
+    items
+        .get(off..end)
+        .ok_or(Ext::No)?
+        .iter()
+        .map(|b| Ok(u8::try_from(int_of(b)?)?))
+        .collect()
+}
+
+/// Store `bits` at `buf[i]`, in the element's own type.
+#[allow(clippy::cast_possible_wrap)]
+fn put_bits(buf: &Value, i: usize, bits: u64) -> Result<(), Ext> {
+    let mut items = buf_of(buf)?.borrow_mut();
+    let slot = items.get_mut(i).ok_or(Ext::No)?;
+    *slot = match slot {
+        Value::Int(_, p) => Value::Int(wrap(i128::from(bits), *p), *p),
+        Value::Float(_, PrimTy::F32) => {
+            Value::Float(f64::from(f32::from_bits(bits as u32)), PrimTy::F32)
+        }
+        Value::Float(_, p) => Value::Float(f64::from_bits(bits), *p),
+        _ => return Err(Ext::No),
+    };
+    Ok(())
+}
+
+fn put_bytes(buf: &Value, off: usize, bytes: &[u8]) -> Result<(), Ext> {
+    for (i, b) in bytes.iter().enumerate() {
+        put_bits(buf, off + i, u64::from(*b))?;
+    }
+    Ok(())
+}
+
+/// A text (`str` bytes) back as a value; not UTF-8 is not a `str` this
+/// evaluator holds.
+fn text_value(b: Vec<u8>) -> Result<Value, Ext> {
+    String::from_utf8(b)
+        .map(|s| Value::Str(s.into()))
+        .map_err(|_| Ext::No)
+}
+
+const fn usize_value(n: usize) -> Value {
+    Value::Int(n as i128, PrimTy::Usize)
+}
+
+fn i32_value(n: i32) -> Value {
+    Value::Int(i128::from(n), PrimTy::I32)
+}
+
+/// Extern `name` on `args`, computed as `rokr` does.
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn run_extern(name: &str, args: &[Value]) -> Result<Value, Ext> {
+    // The f-string writers: the text so far, the packed spec words.
+    let text = |t: &Value, write: &dyn Fn(&mut Out) -> Result<(), Ext>| {
+        let mut out = Out(str_of(t)?.as_bytes().to_vec());
+        write(&mut out)?;
+        text_value(out.0)
+    };
+    let spec =
+        |flags: &Value, counts: &Value| Ok::<_, Ext>(unpack(bits_of(flags)?, bits_of(counts)?));
+    let f32_op = |x: &Value, op: fn(f32) -> f32| -> Result<Value, Ext> {
+        Ok(Value::Float(
+            f64::from(op(float_of(x)? as f32)),
+            PrimTy::F32,
+        ))
+    };
+    let f32_op2 = |x: &Value, y: &Value, op: fn(f32, f32) -> f32| -> Result<Value, Ext> {
+        let r = op(float_of(x)? as f32, float_of(y)? as f32);
+        Ok(Value::Float(f64::from(r), PrimTy::F32))
+    };
+    let f64_op = |x: &Value, op: fn(f64) -> f64| -> Result<Value, Ext> {
+        Ok(Value::Float(op(float_of(x)?), PrimTy::F64))
+    };
+    let f64_op2 = |x: &Value, y: &Value, op: fn(f64, f64) -> f64| -> Result<Value, Ext> {
+        Ok(Value::Float(op(float_of(x)?, float_of(y)?), PrimTy::F64))
+    };
+    Ok(match (name, args) {
+        ("rok_str_len", [s]) => usize_value(str_of(s)?.len()),
+        ("rok_str_char_count", [s]) => usize_value(str_of(s)?.chars().count()),
+        ("rok_str_byte", [s, i]) => {
+            let b = str_of(s)?.as_bytes().get(usize_of(i)?).copied();
+            Value::Int(i128::from(b.unwrap_or(0)), PrimTy::U8)
+        }
+        // FNV-1a, as `rokr`'s.
+        ("rok_str_hash", [s]) => Value::Int(
+            i128::from(str_of(s)?.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+            })),
+            PrimTy::U64,
+        ),
+        ("rok_str_eq", [a, b]) => i32_value(i32::from(str_of(a)? == str_of(b)?)),
+        ("rok_str_cmp", [a, b]) => {
+            i32_value(str_of(a)?.as_bytes().cmp(str_of(b)?.as_bytes()) as i32)
+        }
+        ("rok_str_eq_at", [s, at, pat]) => {
+            let hit = str_ops::eq_at(
+                str_of(s)?.as_bytes(),
+                usize_of(at)?,
+                str_of(pat)?.as_bytes(),
+            );
+            i32_value(i32::from(hit))
+        }
+        ("rok_str_find" | "rok_str_rfind", [s, pat]) => {
+            let (h, n) = (str_of(s)?.as_bytes(), str_of(pat)?.as_bytes());
+            let at = if name == "rok_str_find" {
+                str_ops::find(h, n)
+            } else {
+                str_ops::rfind(h, n)
+            };
+            Value::Int(at.map_or(-1, |i| i as i128), PrimTy::Isize)
+        }
+        ("rok_str_concat", [a, b]) => Value::Str(format!("{}{}", str_of(a)?, str_of(b)?).into()),
+        // The caller's position comes last (`#[track_caller]`).
+        ("rok_str_slice", [s, a, b, ..]) => {
+            let (s, a, b) = (str_of(s)?, usize_of(a)?, usize_of(b)?);
+            str_ops::slice_check(s.as_bytes(), a, b).map_err(|m| Ext::Panic(m.to_owned()))?;
+            Value::Str(s.get(a..b).ok_or(Ext::No)?.into())
+        }
+        ("rok_str_replace", [s, from, to]) => {
+            let mut out = Vec::new();
+            let (h, f, t) = (str_of(s)?, str_of(from)?, str_of(to)?);
+            str_ops::replace(h.as_bytes(), f.as_bytes(), t.as_bytes(), |b| {
+                out.extend_from_slice(b);
+            });
+            text_value(out)?
+        }
+        ("rok_str_from_char", [c]) => {
+            let c =
+                char::from_u32(u32::try_from(int_of(c)?)?).unwrap_or(char::REPLACEMENT_CHARACTER);
+            Value::Str(c.to_string().into())
+        }
+        ("rok_str_from_buf", [buf, off, len]) => {
+            text_value(bytes_of(buf, usize_of(off)?, usize_of(len)?)?)?
+        }
+        ("rok_str_case", [s, upper]) => {
+            let mut out = String::new();
+            unicode::case(str_of(s)?, int_of(upper)? != 0, |c| out.push(c));
+            Value::Str(out.into())
+        }
+        ("rok_str_trim", [s, which]) => {
+            let t = unicode::trim(str_of(s)?.as_bytes(), i32::try_from(int_of(which)?)?);
+            text_value(t.to_vec())?
+        }
+        ("rok_str_parse_int", [s, radix, signed, bits, out]) => {
+            let r = str_ops::parse_int(
+                str_of(s)?.as_bytes(),
+                u32::try_from(int_of(radix)?)?,
+                int_of(signed)? != 0,
+                u32::try_from(int_of(bits)?)?,
+            );
+            match r {
+                Ok(v) => {
+                    put_bits(out, 0, v)?;
+                    i32_value(0)
+                }
+                Err(st) => i32_value(st),
+            }
+        }
+        ("rok_str_parse_float", [s, out]) => match str_ops::parse_float(str_of(s)?) {
+            Ok(v) => {
+                put_bits(out, 0, v.to_bits())?;
+                i32_value(0)
+            }
+            Err(st) => i32_value(st),
+        },
+        ("rok_buf_put_str", [buf, off, s]) => {
+            put_bytes(buf, usize_of(off)?, str_of(s)?.as_bytes())?;
+            Value::Unit
+        }
+        ("rok_buf_put_char", [buf, off, c]) => {
+            let c =
+                char::from_u32(u32::try_from(int_of(c)?)?).unwrap_or(char::REPLACEMENT_CHARACTER);
+            let mut tmp = [0; 4];
+            let b = c.encode_utf8(&mut tmp).as_bytes();
+            put_bytes(buf, usize_of(off)?, b)?;
+            usize_value(b.len())
+        }
+        ("rok_buf_copy", [dst, doff, src, soff, len]) => {
+            let b = bytes_of(src, usize_of(soff)?, usize_of(len)?)?;
+            put_bytes(dst, usize_of(doff)?, &b)?;
+            Value::Unit
+        }
+        ("rok_buf_utf8_error", [buf, off, len]) => {
+            let b = bytes_of(buf, usize_of(off)?, usize_of(len)?)?;
+            Value::Int(str_ops::utf8_error(&b) as i128, PrimTy::Isize)
+        }
+        ("rok_buf_slice_str", [buf, len, a, b, ..]) => {
+            let bytes = bytes_of(buf, 0, usize_of(len)?)?;
+            let (a, b) = (usize_of(a)?, usize_of(b)?);
+            str_ops::slice_check(&bytes, a, b).map_err(|m| Ext::Panic(m.to_owned()))?;
+            text_value(bytes[a..b].to_vec())?
+        }
+        ("rok_char_props", [c]) => Value::Int(
+            i128::from(unicode::props(u32::try_from(int_of(c)?)?)),
+            PrimTy::U32,
+        ),
+        ("rok_char_to_case", [c, upper]) => {
+            let c = unicode::to_case(u32::try_from(int_of(c)?)?, int_of(upper)? != 0);
+            Value::Int(i128::from(c), PrimTy::U32)
+        }
+        // A formatter's text is its `str` so far.
+        ("rok_fmt_new", [_]) => Value::Str("".into()),
+        ("rok_fmt_finish", [t]) => Value::Str(str_of(t)?.into()),
+        ("rok_fmt_len", [t]) => usize_value(str_of(t)?.len()),
+        ("rok_fmt_str", [t, s]) => Value::Str(format!("{}{}", str_of(t)?, str_of(s)?).into()),
+        ("rok_fmt_char", [t, c]) => {
+            let c =
+                char::from_u32(u32::try_from(int_of(c)?)?).unwrap_or(char::REPLACEMENT_CHARACTER);
+            Value::Str(format!("{}{c}", str_of(t)?).into())
+        }
+        ("rok_fmt_escaped", [t, s, quote]) => text(t, &|w| {
+            fmt_text::escape(w, str_of(s)?, u32::try_from(int_of(quote)?)?);
+            Ok(())
+        })?,
+        ("rok_fmt_int", [t, flags, counts, v, signed, bits]) => text(t, &|w| {
+            let v = i64::try_from(int_of(v)?)?;
+            let signed = int_of(signed)? != 0;
+            fmt_text::int(
+                w,
+                &spec(flags, counts)?,
+                v,
+                signed,
+                u32::try_from(int_of(bits)?)?,
+            );
+            Ok(())
+        })?,
+        ("rok_fmt_digits", [t, flags, counts, neg, d]) => text(t, &|w| {
+            let neg = int_of(neg)? != 0;
+            fmt_text::digits(w, &spec(flags, counts)?, neg, str_of(d)?.as_bytes());
+            Ok(())
+        })?,
+        ("rok_fmt_integral", [t, flags, counts, nonneg, prefix, buf]) => text(t, &|w| {
+            let (prefix, buf) = (str_of(prefix)?.as_bytes(), str_of(buf)?.as_bytes());
+            fmt_text::integral(w, &spec(flags, counts)?, int_of(nonneg)? != 0, prefix, buf);
+            Ok(())
+        })?,
+        ("rok_fmt_f64", [t, flags, counts, v, is_f32]) => text(t, &|w| {
+            let is_f32 = int_of(is_f32)? != 0;
+            fmt_text::float_number(w, &spec(flags, counts)?, float_of(v)?, is_f32)
+                .map_err(|m| Ext::Panic(m.to_owned()))
+        })?,
+        ("rok_fmt_pad", [t, flags, counts, start, mid, numeric]) => text(t, &|w| {
+            let (start, mid) = (usize_of(start)?, usize_of(mid)?);
+            let numeric = int_of(numeric)? != 0;
+            fmt_text::pad_span(w, &spec(flags, counts)?, start, mid, numeric);
+            Ok(())
+        })?,
+        ("rok_fmt_pack", [s, text_only, out]) => {
+            let src = str_of(s)?;
+            let (flags, counts) = fmt_text::pack_spec(src, int_of(text_only)? != 0)
+                .map_err(|why| bad_spec(src, why))?;
+            put_bits(out, 0, flags)?;
+            put_bits(out, 1, counts)?;
+            Value::Unit
+        }
+        ("rok_fmt_spec_parse", [s, out]) => {
+            let src = str_of(s)?;
+            let words = fmt_text::spec_words(src).map_err(|why| bad_spec(src, why))?;
+            for (i, w) in words.into_iter().enumerate() {
+                put_bits(out, i, w as u64)?;
+            }
+            Value::Unit
+        }
+        // Exact in every libm: Rust's own give the same bits.
+        ("rok_f64_floor", [x]) => f64_op(x, f64::floor)?,
+        ("rok_f64_ceil", [x]) => f64_op(x, f64::ceil)?,
+        ("rok_f64_round", [x]) => f64_op(x, f64::round)?,
+        ("rok_f64_trunc", [x]) => f64_op(x, f64::trunc)?,
+        ("rok_f64_abs", [x]) => f64_op(x, f64::abs)?,
+        ("rok_f64_copysign", [x, y]) => f64_op2(x, y, f64::copysign)?,
+        ("rok_f64_min", [x, y]) => f64_op2(x, y, f64::min)?,
+        ("rok_f64_max", [x, y]) => f64_op2(x, y, f64::max)?,
+        ("rok_f64_mul_add", [x, y, z]) => Value::Float(
+            float_of(x)?.mul_add(float_of(y)?, float_of(z)?),
+            PrimTy::F64,
+        ),
+        ("rok_f32_floor", [x]) => f32_op(x, f32::floor)?,
+        ("rok_f32_ceil", [x]) => f32_op(x, f32::ceil)?,
+        ("rok_f32_round", [x]) => f32_op(x, f32::round)?,
+        ("rok_f32_trunc", [x]) => f32_op(x, f32::trunc)?,
+        ("rok_f32_abs", [x]) => f32_op(x, f32::abs)?,
+        ("rok_f32_copysign", [x, y]) => f32_op2(x, y, f32::copysign)?,
+        ("rok_f32_min", [x, y]) => f32_op2(x, y, f32::min)?,
+        ("rok_f32_max", [x, y]) => f32_op2(x, y, f32::max)?,
+        ("rok_f32_mul_add", [x, y, z]) => {
+            let r = (float_of(x)? as f32).mul_add(float_of(y)? as f32, float_of(z)? as f32);
+            Value::Float(f64::from(r), PrimTy::F32)
+        }
+        _ => return Err(Ext::No),
+    })
+}
+
+fn bad_spec(spec: &str, why: &str) -> Ext {
+    let mut m = String::new();
+    fmt_text::bad_spec(&mut m, spec, why);
+    Ext::Panic(m)
 }
 
 /// Spec 5.2.5: a `const fn` calls only `const fn`s and reads no

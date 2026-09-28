@@ -421,7 +421,7 @@ impl IntMag {
     }
 
     /// `self mod (B^m - 1)`.
-    fn fold(self, m: usize) -> IntMag {
+    const fn fold(self, m: usize) -> IntMag {
         unsafe {
             let x = self;
             while x.n > m { x = x.low(m).plus(x.slice(m, x.n)); }
@@ -505,7 +505,7 @@ impl IntMag {
 /// the reciprocal (about 15 of length P, the digit's), the two
 /// prepared operands, and per digit the inverse and a forward transform
 /// of the quotient product (length L) and of the remainder's (m).
-fn mu_cost(qn: usize, n: usize, nb: usize) -> u64 {
+const fn mu_cost(qn: usize, n: usize, nb: usize) -> u64 {
     let k = (qn + nb - 1) / nb;
     let lp = pow2_log(k + 2);
     let ll = pow2_log(2 * k + 2);
@@ -659,7 +659,7 @@ fn put_digits(x: IntMag, pw: List<Pow>, w: GcBuf<u32>, wn: usize, k: usize, per:
 
 /// The value of the checked digits `bs[lo..hi]`, folded `per` at a
 /// time: acc = acc * radix^k + chunk (quadratic).
-fn fold_digits(bs: Slice<u8>, lo: usize, hi: usize, radix: u32, per: u32) -> IntMag {
+const fn fold_digits(bs: Slice<u8>, lo: usize, hi: usize, radix: u32, per: u32) -> IntMag {
     unsafe {
         let acc: GcBuf<u32> = buf_new((hi - lo) / (per as usize) + 2);
         let len = 0usize;

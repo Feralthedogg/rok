@@ -127,7 +127,7 @@ pub(pkg) struct CertInfo {
     pub(pkg) must_staple: bool;
 }
 
-fn hash_of_oid(oid: str) -> HashAlgorithm | none {
+const fn hash_of_oid(oid: str) -> HashAlgorithm | none {
     if oid == "2.16.840.1.101.3.4.2.1" { return HashAlgorithm::Sha256; }
     if oid == "2.16.840.1.101.3.4.2.2" { return HashAlgorithm::Sha384; }
     if oid == "2.16.840.1.101.3.4.2.3" { return HashAlgorithm::Sha512; }
@@ -136,7 +136,7 @@ fn hash_of_oid(oid: str) -> HashAlgorithm | none {
 
 /// `AlgorithmIdentifier` of a hash: its function (parameters absent or
 /// NULL).
-fn hash_alg(b: Slice<u8>) throws (TlsError) -> HashAlgorithm | none {
+const fn hash_alg(b: Slice<u8>) throws (TlsError) -> HashAlgorithm | none {
     let d = Der::new(b);
     let oid = try der::oid_text(try d.expect(OID));
     let _ = try d.optional(NULL);
@@ -242,7 +242,7 @@ pub(pkg) fn public_key(b: Slice<u8>) throws (TlsError) -> PubKey {
 }
 
 /// `GeneralSubtrees` of a nameConstraints field into DNS / IP lists.
-fn subtrees(b: Slice<u8>, ref dns: List<str>, ref ip: List<List<u8>>) throws (TlsError) {
+const fn subtrees(b: Slice<u8>, ref dns: List<str>, ref ip: List<List<u8>>) throws (TlsError) {
     let d = Der::new(b);
     while !d.done() {
         let st = try d.enter(SEQUENCE);
@@ -348,7 +348,7 @@ pub(pkg) fn parse(der_bytes: Slice<u8>) throws (TlsError) -> CertInfo {
 }
 
 /// Apply extension `oid` to `info`.
-fn extension(ref info: CertInfo, oid: str, critical: bool, value: Slice<u8>) throws (TlsError) {
+const fn extension(ref info: CertInfo, oid: str, critical: bool, value: Slice<u8>) throws (TlsError) {
     let d = Der::new(value);
     if oid == "2.5.29.19" {
         // basicConstraints
@@ -414,7 +414,7 @@ fn extension(ref info: CertInfo, oid: str, critical: bool, value: Slice<u8>) thr
 
 // ---- names ----
 
-fn lower(s: str) -> str { s.to_lowercase() }
+const fn lower(s: str) -> str { s.to_lowercase() }
 
 /// Whether DNS name `pattern` from a certificate matches `host`
 /// (RFC 6125 6.4): ASCII case-insensitive; a wildcard is the whole
@@ -442,7 +442,7 @@ pub(pkg) fn dns_match(pattern: str, host: str) -> bool {
 
 /// Whether `name` lies in the DNS subtree `base` (RFC 5280 4.2.1.10:
 /// `base` itself or a subdomain; a leading `.` means subdomains only).
-fn in_subtree(name: str, base: str) -> bool {
+const fn in_subtree(name: str, base: str) -> bool {
     let n = lower(name);
     let b = lower(base);
     if b.len() == 0 { return true; }
@@ -450,7 +450,7 @@ fn in_subtree(name: str, base: str) -> bool {
     n == b || n.ends_with("." + b)
 }
 
-fn ip_in(ip: List<u8>, net: List<u8>) -> bool {
+const fn ip_in(ip: List<u8>, net: List<u8>) -> bool {
     let n = ip.len();
     if net.len() != 2 * n { return false; }
     for i in 0..n {
@@ -460,14 +460,14 @@ fn ip_in(ip: List<u8>, net: List<u8>) -> bool {
 }
 
 /// `*.rest` as `rest`.
-fn unwild(n: str) -> str {
+const fn unwild(n: str) -> str {
     if n.starts_with("*.") { return n[2:n.len()]; }
     n
 }
 
 /// Whether CA `ca`'s name constraints allow `leaf`'s names (DNS names
 /// and IP addresses, and `host` itself).
-fn names_allowed(ca: CertInfo, leaf: CertInfo) -> bool {
+const fn names_allowed(ca: CertInfo, leaf: CertInfo) -> bool {
     for name in leaf.dns_names {
         for x in ca.excluded_dns {
             if in_subtree(unwild(name), x) { return false; }
@@ -496,7 +496,7 @@ fn names_allowed(ca: CertInfo, leaf: CertInfo) -> bool {
 }
 
 /// Whether `c` may be used for `usage` (an extendedKeyUsage OID).
-fn eku_ok(c: CertInfo, usage: str) -> bool {
+const fn eku_ok(c: CertInfo, usage: str) -> bool {
     match c.eku {
         l: List<str> => {
             for u in l {
@@ -566,7 +566,7 @@ const ALERT_CERTIFICATE_EXPIRED: u8 = 45u8;
 const ALERT_UNKNOWN_CA: u8 = 48u8;
 const UNKNOWN_CA: str = "certificate signed by an unknown authority";
 
-fn cert_err(msg: str, alert: u8) -> TlsError {
+const fn cert_err(msg: str, alert: u8) -> TlsError {
     let e = TlsError::certificate(msg);
     e.alert = alert;
     e

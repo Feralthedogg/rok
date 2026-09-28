@@ -48,7 +48,7 @@ const IV384: [u64; 8] = [
 ];
 
 /// One SHA-256 compression of `buf` into `hs`.
-fn compress256(hs: [u32; 8], buf: [u8; 64]) -> [u32; 8] {
+const fn compress256(hs: [u32; 8], buf: [u8; 64]) -> [u32; 8] {
     let w: [u32; 64] = [0u32; 64];
     for i in 0..16 {
         w[i] = ((buf[4 * i] as u32) << 24) | ((buf[4 * i + 1] as u32) << 16)
@@ -96,7 +96,7 @@ fn compress256(hs: [u32; 8], buf: [u8; 64]) -> [u32; 8] {
 }
 
 /// One SHA-512 compression of `buf` into `hs`.
-fn compress512(hs: [u64; 8], buf: [u8; 128]) -> [u64; 8] {
+const fn compress512(hs: [u64; 8], buf: [u8; 128]) -> [u64; 8] {
     let w: [u64; 80] = [0u64; 80];
     for i in 0..16 {
         let v = 0u64;
@@ -155,7 +155,7 @@ struct Sha256State {
 }
 
 impl Sha256State {
-    fn new() -> Sha256State {
+    const fn new() -> Sha256State {
         Sha256State {
             h: [0x6a09e667u32, 0xbb67ae85u32, 0x3c6ef372u32, 0xa54ff53au32,
                 0x510e527fu32, 0x9b05688cu32, 0x1f83d9abu32, 0x5be0cd19u32],
@@ -186,7 +186,7 @@ impl Sha256State {
     }
 
     /// `update` with `b[0:len]`.
-    fn update_raw(ref self, b: [u8; 128], len: usize) {
+    const fn update_raw(ref self, b: [u8; 128], len: usize) {
         let h = self.h;
         let buf = self.buf;
         let n = self.n;
@@ -205,7 +205,7 @@ impl Sha256State {
     }
 
     /// The digest in the first 32 bytes (of a copy: `self` is a value).
-    fn finish(self) -> [u8; 64] {
+    const fn finish(self) -> [u8; 64] {
         let bits = self.total.wrapping_mul(8u64);
         self.buf[self.n] = 0x80u8;
         self.n += 1;
@@ -238,7 +238,7 @@ struct Sha512State {
 }
 
 impl Sha512State {
-    fn new(iv: [u64; 8], out_len: usize) -> Sha512State {
+    const fn new(iv: [u64; 8], out_len: usize) -> Sha512State {
         Sha512State { h: iv, buf: [0u8; 128], n: 0, total: 0u64, out_len }
     }
 
@@ -262,7 +262,7 @@ impl Sha512State {
         self.total = self.total.wrapping_add(s.len() as u64);
     }
 
-    fn update_raw(ref self, b: [u8; 128], len: usize) {
+    const fn update_raw(ref self, b: [u8; 128], len: usize) {
         let h = self.h;
         let buf = self.buf;
         let n = self.n;
@@ -280,7 +280,7 @@ impl Sha512State {
         self.total = self.total.wrapping_add(len as u64);
     }
 
-    fn finish(self) -> [u8; 64] {
+    const fn finish(self) -> [u8; 64] {
         // Message lengths stay below 2^61 bytes: the high length word is 0.
         let bits = self.total.wrapping_mul(8u64);
         self.buf[self.n] = 0x80u8;
@@ -312,7 +312,7 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
-    pub fn output_len(self) -> usize {
+    pub const fn output_len(self) -> usize {
         match self {
             HashAlgorithm::Sha256 => 32,
             HashAlgorithm::Sha384 => 48,
@@ -320,7 +320,7 @@ impl HashAlgorithm {
         }
     }
 
-    pub fn block_len(self) -> usize {
+    pub const fn block_len(self) -> usize {
         match self {
             HashAlgorithm::Sha256 => 64,
             _ => 128,
@@ -343,7 +343,7 @@ pub struct Digest {
 }
 
 impl Digest {
-    pub fn new(alg: HashAlgorithm) -> Digest {
+    pub const fn new(alg: HashAlgorithm) -> Digest {
         let s512 = match alg {
             HashAlgorithm::Sha384 => Sha512State::new(IV384, 48),
             _ => Sha512State::new(IV512, 64),
@@ -351,7 +351,7 @@ impl Digest {
         Digest { alg, s256: Sha256State::new(), s512 }
     }
 
-    pub fn algorithm(self) -> HashAlgorithm { self.alg }
+    pub const fn algorithm(self) -> HashAlgorithm { self.alg }
 
     pub fn update(ref self, data: Bytes) {
         match self.alg {
@@ -360,7 +360,7 @@ impl Digest {
         }
     }
 
-    pub fn finish(self) -> List<u8> {
+    pub const fn finish(self) -> List<u8> {
         let d = self.finish_raw();
         let out: List<u8> = List::with_capacity(self.alg.output_len());
         for i in 0..self.alg.output_len() { out.push(d[i]); }
@@ -368,7 +368,7 @@ impl Digest {
     }
 
     /// `update` with `b[0:len]`: secret input that is in no list.
-    pub(pkg) fn update_raw(ref self, b: [u8; 128], len: usize) {
+    pub(pkg) const fn update_raw(ref self, b: [u8; 128], len: usize) {
         match self.alg {
             HashAlgorithm::Sha256 => self.s256.update_raw(b, len),
             _ => self.s512.update_raw(b, len),
@@ -376,7 +376,7 @@ impl Digest {
     }
 
     /// `finish` into the first `output_len` bytes of an array.
-    pub(pkg) fn finish_raw(self) -> [u8; 64] {
+    pub(pkg) const fn finish_raw(self) -> [u8; 64] {
         match self.alg {
             HashAlgorithm::Sha256 => self.s256.finish(),
             _ => self.s512.finish(),

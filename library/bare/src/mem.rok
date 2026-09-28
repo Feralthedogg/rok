@@ -110,9 +110,9 @@ pub unsafe fn transmute_unchecked<A, B>(a: A) -> B {
 }
 
 /// Size of `T` (the value's own type; rok has no unsized values yet).
-pub fn size_of_val<T>(val: T) -> usize { size_of::<T>() }
-pub fn align_of_val<T>(val: T) -> usize { align_of::<T>() }
-pub fn min_align_of<T>() -> usize { align_of::<T>() }
+pub const fn size_of_val<T>(val: T) -> usize { size_of::<T>() }
+pub const fn align_of_val<T>(val: T) -> usize { align_of::<T>() }
+pub const fn min_align_of<T>() -> usize { align_of::<T>() }
 
 pub unsafe fn read<T>(src: ConstPtr<T>) -> T { src.read() }
 pub unsafe fn write<T>(dst: Ptr<T>, value: T) { dst.write(value); }
@@ -193,7 +193,7 @@ impl<T> MaybeUninit<T> {
         }
     }
 
-    pub fn new(value: T) -> MaybeUninit<T> { MaybeUninit { value: value } }
+    pub const fn new(value: T) -> MaybeUninit<T> { MaybeUninit { value: value } }
 
     pub const fn write(ref self, value: T) { self.value = value; }
 

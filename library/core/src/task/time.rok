@@ -110,7 +110,7 @@ impl Mul<Duration> for f64 {
 /// The largest unit the span reaches, fraction without trailing zeros:
 /// `1.234s`, `5ms`, `1.5µs`, `100ns`, `0ns`, `-2s`.
 impl Display for Duration {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         let mag = self.ns.unsigned_abs();
         let sign = if self.ns < 0 { "-" } else { "" };
         let (unit, name, width) = if mag >= 1000000000u64 {
@@ -143,7 +143,7 @@ impl Display for Duration {
 }
 
 impl Debug for Duration {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
 impl Add for Duration {

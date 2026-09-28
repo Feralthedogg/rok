@@ -1,0 +1,11 @@
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/panic_loc_strbuf_slice.rok:11:9:
+// expect-stderr: string slice is not on a char boundary
+// expect-stdout:
+
+// `StrBuf` slicing checks bounds as `str` slicing does (stdlib 2.15.3)
+// and reports the user's expression.
+let b = StrBuf::new();
+b.push_str("a가");
+let n = 2;
+println(b[1:n]);

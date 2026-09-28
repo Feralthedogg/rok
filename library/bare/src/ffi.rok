@@ -22,13 +22,13 @@ pub struct NulError {
 }
 
 impl Display for NulError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(f"nul byte found at position {self.position}")
     }
 }
 
 impl Debug for NulError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NulError({self.position})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NulError({self.position})") }
 }
 
 impl Error for NulError {}
@@ -39,11 +39,11 @@ pub struct FromBytesWithNulError {
 }
 
 impl Display for FromBytesWithNulError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.reason) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.reason) }
 }
 
 impl Debug for FromBytesWithNulError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(f"FromBytesWithNulError({self.reason})")
     }
 }
@@ -51,7 +51,7 @@ impl Debug for FromBytesWithNulError {
 impl Error for FromBytesWithNulError {}
 
 /// `bytes` and a final NUL as one `str` object.
-fn with_nul(bytes: Slice<u8>) -> str {
+const fn with_nul(bytes: Slice<u8>) -> str {
     let n = bytes.len();
     unsafe {
         let buf: GcBuf<u8> = buf_new(n + 1);
@@ -64,7 +64,7 @@ fn with_nul(bytes: Slice<u8>) -> str {
 }
 
 /// The index of the first NUL in `bytes`.
-fn nul_in(bytes: Slice<u8>) -> usize | none {
+const fn nul_in(bytes: Slice<u8>) -> usize | none {
     for i in 0..bytes.len() {
         if bytes[i] == 0u8 {
             return i;
@@ -99,7 +99,7 @@ impl CStr {
     }
 
     /// `bytes` when the last one is the only NUL.
-    pub fn from_bytes_with_nul(bytes: Slice<u8>) throws (FromBytesWithNulError) -> CStr {
+    pub const fn from_bytes_with_nul(bytes: Slice<u8>) throws (FromBytesWithNulError) -> CStr {
         let n = bytes.len();
         match nul_in(bytes) {
             i: usize if i + 1 == n => CStr { s: with_nul(bytes[0:i]) },
@@ -109,7 +109,7 @@ impl CStr {
     }
 
     /// `bytes`, whose last byte must be the only NUL (not checked).
-    pub fn from_bytes_with_nul_unchecked(bytes: Slice<u8>) -> CStr {
+    pub const fn from_bytes_with_nul_unchecked(bytes: Slice<u8>) -> CStr {
         CStr { s: with_nul(bytes[0:bytes.len() - 1]) }
     }
 
@@ -125,7 +125,7 @@ impl CStr {
     pub fn to_str(self) throws (Utf8Error) -> str { try str::from_utf8(self.as_bytes()) }
 
     /// Bytes before the NUL.
-    pub fn len(self) -> usize { self.s.len() - 1 }
+    pub const fn len(self) -> usize { self.s.len() - 1 }
 }
 
 /// An owned NUL-terminated string (1.7.2).
@@ -135,7 +135,7 @@ pub struct CString {
 
 impl CString {
     /// `bytes` and a NUL; throws if `bytes` has a NUL of its own.
-    pub fn new(bytes: Slice<u8>) throws (NulError) -> CString {
+    pub const fn new(bytes: Slice<u8>) throws (NulError) -> CString {
         if let i: usize = nul_in(bytes) {
             throw NulError { position: i };
         }
@@ -144,7 +144,7 @@ impl CString {
 
     pub fn from_str(s: str) throws (NulError) -> CString { try CString::new(s.as_bytes()) }
 
-    pub fn as_c_str(self) -> CStr { self.c }
+    pub const fn as_c_str(self) -> CStr { self.c }
     pub fn as_ptr(self) -> ConstPtr<c_char> { self.c.as_ptr() }
 
     /// The bytes without the NUL.

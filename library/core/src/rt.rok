@@ -58,6 +58,8 @@ extern "rok" {
     fn rok_str_replace(s: str, from: str, to: str) -> str;
     fn rok_str_from_char(c: u32) -> str;
     fn rok_str_from_buf(buf: GcBuf<u8>, off: usize, len: usize) -> str;
+    #[track_caller]
+    fn rok_buf_slice_str(buf: GcBuf<u8>, len: usize, start: usize, end: usize) -> str;
 
     // Formatting: a `Formatter`'s text; f-strings call these directly too. The
     // writing ones return it, moved when it outgrew its allocation; a

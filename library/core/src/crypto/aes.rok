@@ -7,7 +7,7 @@ use sup::secret::SecretWords;
 
 /// Bit `i` of every byte gathered into word `i` (and back: an
 /// involution).
-fn ortho(ref q: [u32; 8]) {
+const fn ortho(ref q: [u32; 8]) {
     swap(ref q, 0, 1, 0x55555555u32, 1u32);
     swap(ref q, 2, 3, 0x55555555u32, 1u32);
     swap(ref q, 4, 5, 0x55555555u32, 1u32);
@@ -22,7 +22,7 @@ fn ortho(ref q: [u32; 8]) {
     swap(ref q, 3, 7, 0x0f0f0f0fu32, 4u32);
 }
 
-fn swap(ref q: [u32; 8], i: usize, j: usize, cl: u32, s: u32) {
+const fn swap(ref q: [u32; 8], i: usize, j: usize, cl: u32, s: u32) {
     let a = q[i];
     let b = q[j];
     let ch = ~cl;
@@ -30,7 +30,7 @@ fn swap(ref q: [u32; 8], i: usize, j: usize, cl: u32, s: u32) {
     q[j] = ((a & ch) >> s) | (b & ch);
 }
 
-fn sbox(ref q: [u32; 8]) {
+const fn sbox(ref q: [u32; 8]) {
     let x0 = q[7];
     let x1 = q[6];
     let x2 = q[5];
@@ -174,7 +174,7 @@ fn sbox(ref q: [u32; 8]) {
 }
 
 /// SubWord on the four bytes of `x`.
-fn sub_word(x: u32) -> u32 {
+const fn sub_word(x: u32) -> u32 {
     let q: [u32; 8] = [0u32; 8];
     q[0] = x;
     ortho(ref q);
@@ -183,7 +183,7 @@ fn sub_word(x: u32) -> u32 {
     q[0]
 }
 
-fn shift_rows(ref q: [u32; 8]) {
+const fn shift_rows(ref q: [u32; 8]) {
     for i in 0..8 {
         let x = q[i];
         q[i] = (x & 0x000000ffu32)
@@ -193,7 +193,7 @@ fn shift_rows(ref q: [u32; 8]) {
     }
 }
 
-fn mix_columns(ref q: [u32; 8]) {
+const fn mix_columns(ref q: [u32; 8]) {
     let q0 = q[0];
     let q1 = q[1];
     let q2 = q[2];
@@ -220,14 +220,14 @@ fn mix_columns(ref q: [u32; 8]) {
     q[7] = q6 ^ r6 ^ r7 ^ (q7 ^ r7).rotate_right(16);
 }
 
-fn le32(k: Slice<u8>, i: usize) -> u32 {
+const fn le32(k: Slice<u8>, i: usize) -> u32 {
     (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
 }
 
 /// Expand a 16- or 32-byte key (the caller checks the length) into
 /// `sk[0..8 * (rounds + 1)]`: the bitsliced round keys. The number of
 /// rounds.
-pub(pkg) fn aes_expand(key: Slice<u8>, sk: SecretWords) -> usize {
+pub(pkg) const fn aes_expand(key: Slice<u8>, sk: SecretWords) -> usize {
     let rcon: [u32; 10] = [0x01u32, 0x02u32, 0x04u32, 0x08u32, 0x10u32, 0x20u32, 0x40u32, 0x80u32, 0x1bu32, 0x36u32];
     let nk = key.len() / 4;
     let rounds = nk + 6;
@@ -279,7 +279,7 @@ pub(pkg) fn aes_expand(key: Slice<u8>, sk: SecretWords) -> usize {
 /// and `w[4..8]`, each four little-endian words. Inlined: a call per
 /// block pair would root `sk` each time.
 #[inline(always)]
-pub(pkg) fn aes_encrypt2(sk: SecretWords, rounds: usize, ref w: [u32; 8]) {
+pub(pkg) const fn aes_encrypt2(sk: SecretWords, rounds: usize, ref w: [u32; 8]) {
     if sk.len() < 8 * (rounds + 1) { panic("AES schedule too short"); }
     let q: [u32; 8] = [w[0], w[4], w[1], w[5], w[2], w[6], w[3], w[7]];
     ortho(ref q);

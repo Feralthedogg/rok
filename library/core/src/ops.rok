@@ -417,7 +417,7 @@ impl<K: Hash, V> Contains<K> for Dict<K, V> {
 
 /// A substring.
 impl Contains<str> for str {
-    fn contains(self, item: str) -> bool { str::contains(self, item) }
+    const fn contains(self, item: str) -> bool { str::contains(self, item) }
 }
 
 /// `start <= item < end`.

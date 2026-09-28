@@ -4,11 +4,19 @@
 mod codec;
 #[path = "../../../runtime/rokr/src/fmt_spec.rs"]
 mod fmt_spec;
+#[path = "../../../runtime/rokr/src/fmt_text.rs"]
+mod fmt_text;
 mod lower;
 mod print;
+#[path = "../../../runtime/rokr/src/str_ops.rs"]
+mod str_ops;
 #[cfg(test)]
 mod tests;
 mod ty;
+#[path = "../../../runtime/rokr/src/unicode.rs"]
+mod unicode;
+#[path = "../../../runtime/rokr/src/unicode_tables.rs"]
+mod unicode_tables;
 mod uses;
 pub mod walk;
 

@@ -21,7 +21,7 @@ pub(pkg) const ALERT_BAD_CERTIFICATE_STATUS: u8 = 113u8;
 /// Clock skew allowed on thisUpdate, seconds.
 const SKEW: i64 = 300i64;
 
-fn bad(msg: str) -> TlsError {
+const fn bad(msg: str) -> TlsError {
     TlsError { kind: TlsErrorKind::Certificate, msg: f"OCSP response: {msg}", alert: ALERT_BAD_CERTIFICATE_STATUS }
 }
 
@@ -138,7 +138,7 @@ fn matches(b: Slice<u8>, leaf: CertInfo, issuer: CertInfo) throws (TlsError) -> 
 }
 
 /// SHA-1 (FIPS 180-4), only to match CertIDs, which commonly use it.
-fn sha1(data: Slice<u8>) -> List<u8> {
+const fn sha1(data: Slice<u8>) -> List<u8> {
     let m = data.to_list();
     let bits = (data.len() as u64) * 8u64;
     m.push(0x80u8);

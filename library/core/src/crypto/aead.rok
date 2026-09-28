@@ -16,16 +16,16 @@ pub enum AeadAlgorithm {
 }
 
 impl AeadAlgorithm {
-    pub fn key_len(self) -> usize {
+    pub const fn key_len(self) -> usize {
         match self {
             AeadAlgorithm::Aes128Gcm => 16,
             _ => 32,
         }
     }
 
-    pub fn nonce_len(self) -> usize { 12 }
+    pub const fn nonce_len(self) -> usize { 12 }
 
-    pub fn tag_len(self) -> usize { 16 }
+    pub const fn tag_len(self) -> usize { 16 }
 }
 
 /// A key ready for `seal` / `open`.
@@ -58,7 +58,7 @@ impl Aead {
         Aead { alg, k: w, rounds }
     }
 
-    pub fn algorithm(self) -> AeadAlgorithm { self.alg }
+    pub const fn algorithm(self) -> AeadAlgorithm { self.alg }
 
     /// Overwrite the key material with zeros now (every copy shares
     /// it); `seal` and `open` are meaningless afterwards.
@@ -126,7 +126,7 @@ impl Aead {
     }
 
     /// AES-CTR from counter block 2 (`J0 + 1`).
-    fn ctr(self, n: Slice<u8>, data: Slice<u8>) -> List<u8> {
+    const fn ctr(self, n: Slice<u8>, data: Slice<u8>) -> List<u8> {
         let len = data.len();
         let out: List<u8> = List::with_capacity(len + 16);
         let n0 = le32(n, 0);
@@ -147,7 +147,7 @@ impl Aead {
         out
     }
 
-    fn gcm_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {
+    const fn gcm_tag(self, n: Slice<u8>, a: Slice<u8>, c: Slice<u8>) -> List<u8> {
         let r = 8 * (self.rounds + 1);
         let h: [u64; 2] = [((self.k[r] as u64) << 32) | (self.k[r + 1] as u64), ((self.k[r + 2] as u64) << 32) | (self.k[r + 3] as u64)];
         let x: [u64; 2] = [0u64, 0u64];
@@ -181,15 +181,15 @@ fn nonce12(nonce: Bytes) throws (ValueError) -> Slice<u8> {
     n
 }
 
-fn le32(k: Slice<u8>, i: usize) -> u32 {
+const fn le32(k: Slice<u8>, i: usize) -> u32 {
     (k[i] as u32) | ((k[i + 1] as u32) << 8) | ((k[i + 2] as u32) << 16) | ((k[i + 3] as u32) << 24)
 }
 
-fn put_le64(out: List<u8>, v: u64) {
+const fn put_le64(out: List<u8>, v: u64) {
     for i in 0u64..8 { out.push((v >> (8u64 * i)) as u8); }
 }
 
-fn be64at(d: Slice<u8>, i: usize) -> u64 {
+const fn be64at(d: Slice<u8>, i: usize) -> u64 {
     let v = 0u64;
     for j in 0usize..8 { v = (v << 8) | (d[i + j] as u64); }
     v
@@ -198,7 +198,7 @@ fn be64at(d: Slice<u8>, i: usize) -> u64 {
 /// Carry-less 32x32 product: the operands are split into four sparse
 /// pieces (every fourth bit), so integer products keep each 4-bit digit
 /// sum below 16 and never carry into the next digit.
-fn bmul(x: u32, y: u32) -> u64 {
+const fn bmul(x: u32, y: u32) -> u64 {
     let x0 = (x & 0x11111111u32) as u64;
     let x1 = (x & 0x22222222u32) as u64;
     let x2 = (x & 0x44444444u32) as u64;
@@ -216,7 +216,7 @@ fn bmul(x: u32, y: u32) -> u64 {
 }
 
 /// Carry-less 64x64 product (Karatsuba): `[high, low]`.
-fn clmul64(a: u64, b: u64) -> [u64; 2] {
+const fn clmul64(a: u64, b: u64) -> [u64; 2] {
     let al = a as u32;
     let ah = (a >> 32) as u32;
     let bl = b as u32;
@@ -232,7 +232,7 @@ fn clmul64(a: u64, b: u64) -> [u64; 2] {
 /// shifted left once, holds the polynomial product with coefficient `k`
 /// at bit `255 - k`; the low half is folded back with x^128 = x^7 + x^2
 /// + x + 1.
-fn gmul(x: [u64; 2], h: [u64; 2]) -> [u64; 2] {
+const fn gmul(x: [u64; 2], h: [u64; 2]) -> [u64; 2] {
     let lo = clmul64(x[1], h[1]);
     let hi = clmul64(x[0], h[0]);
     let mid = clmul64(x[0] ^ x[1], h[0] ^ h[1]);
@@ -255,7 +255,7 @@ fn gmul(x: [u64; 2], h: [u64; 2]) -> [u64; 2] {
 }
 
 /// GHASH `data` (zero-padded to whole blocks) into `x`.
-fn ghash(ref x: [u64; 2], h: [u64; 2], data: Slice<u8>) {
+const fn ghash(ref x: [u64; 2], h: [u64; 2], data: Slice<u8>) {
     let len = data.len();
     let i = 0usize;
     let y = x;

@@ -25,6 +25,7 @@ mod bignum;
 mod deque;
 mod fmt;
 mod fmt_spec;
+mod fmt_text;
 #[cfg(test)]
 mod fuzz_tests;
 mod lane;
@@ -76,6 +77,7 @@ pub const extern "C" fn rok_lock_notes() -> i32 {
 mod stack;
 mod stdio;
 mod str;
+mod str_ops;
 mod thread;
 mod unicode;
 mod unicode_tables;

@@ -41,8 +41,8 @@ const fn fail(cs: List<char>, at: usize, msg: str) -> RokonError {
     e
 }
 
-fn is_ident_start(c: char) -> bool { c == '_' || c.is_alphabetic() }
-fn is_ident_continue(c: char) -> bool { c == '_' || c.is_alphanumeric() }
+const fn is_ident_start(c: char) -> bool { c == '_' || c.is_alphabetic() }
+const fn is_ident_continue(c: char) -> bool { c == '_' || c.is_alphanumeric() }
 
 const fn at(cs: List<char>, i: usize) -> char {
     if i < cs.len() { cs[i] } else { '\0' }
@@ -115,7 +115,7 @@ fn lex(cs: List<char>) throws (RokonError) -> List<Tok> {
     toks
 }
 
-fn slice(cs: List<char>, from: usize, to: usize) -> str {
+const fn slice(cs: List<char>, from: usize, to: usize) -> str {
     let b = StrBuf::new();
     for k in from..to { b.push(cs[k]); }
     b.to_str()
@@ -123,7 +123,7 @@ fn slice(cs: List<char>, from: usize, to: usize) -> str {
 
 /// A number literal: `0x` / `0o` / `0b` integers, decimal integers and
 /// floats (`1.5`, `1.`, `2e10`), `_` between digits, no suffix.
-fn number(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
+const fn number(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
     let i = start;
     let radix = 10u32;
     let c1 = at(cs, i + 1);
@@ -162,7 +162,7 @@ fn number(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> 
 }
 
 /// Digits of `radix` with single `_` between them, from `i`.
-fn digits(cs: List<char>, i: usize, radix: u32, lit: usize) throws (RokonError) -> usize {
+const fn digits(cs: List<char>, i: usize, radix: u32, lit: usize) throws (RokonError) -> usize {
     let first = i;
     while i < cs.len() && (cs[i] == '_' || cs[i].is_digit(radix)) {
         if cs[i] == '_' && (i == first || i + 1 >= cs.len() || !cs[i + 1].is_digit(radix)) {
@@ -192,7 +192,7 @@ fn string(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> 
 }
 
 /// `r"..."` / `r#"..."#`: no escapes, ends at `"` plus the same `#`s.
-fn raw_string(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
+const fn raw_string(cs: List<char>, start: usize, toks: List<Tok>) throws (RokonError) -> usize {
     let i = start + 1;
     let hashes = 0usize;
     while at(cs, i) == '#' {
@@ -352,14 +352,14 @@ impl Reader {
 
     const fn err(self, at: usize, msg: str) -> RokonError { fail(self.cs, at, msg) }
 
-    fn expect(ref self, p: str, what: str) throws (RokonError) {
+    const fn expect(ref self, p: str, what: str) throws (RokonError) {
         if !self.at_punct(p) { throw self.unexpected(self.peek(), what); }
         self.i += 1;
     }
 
     /// The error for `t` where `what` was expected, naming what ROKON
     /// leaves out when that is what `t` starts.
-    fn unexpected(self, t: Tok, what: str) -> RokonError {
+    const fn unexpected(self, t: Tok, what: str) -> RokonError {
         if t.kind == K_EOF { return self.err(t.at, f"unexpected end of input, expected {what}"); }
         if t.kind == K_PUNCT {
             if t.text == ".." { return self.err(t.at, "`..` is not allowed in ROKON"); }

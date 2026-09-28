@@ -54,11 +54,11 @@ impl f64 {
     pub const fn is_sign_negative(self) -> bool { self.to_bits() & 0x8000000000000000 != 0 }
 
     /// Largest integer `<= self`.
-    pub fn floor(self) -> f64 { unsafe { rok_f64_floor(self) } }
+    pub const fn floor(self) -> f64 { unsafe { rok_f64_floor(self) } }
     /// Smallest integer `>= self`.
-    pub fn ceil(self) -> f64 { unsafe { rok_f64_ceil(self) } }
+    pub const fn ceil(self) -> f64 { unsafe { rok_f64_ceil(self) } }
     /// Nearest integer, halves away from zero.
-    pub fn round(self) -> f64 { unsafe { rok_f64_round(self) } }
+    pub const fn round(self) -> f64 { unsafe { rok_f64_round(self) } }
     /// Integer part (toward zero).
     pub const fn trunc(self) -> f64 { unsafe { rok_f64_trunc(self) } }
     pub const fn abs(self) -> f64 { unsafe { rok_f64_abs(self) } }
@@ -108,15 +108,15 @@ impl f64 {
     /// `sqrt(self² + other²)` without overflow.
     pub fn hypot(self, other: f64) -> f64 { unsafe { rok_f64_hypot(self, other) } }
     /// `self`'s magnitude with `sign`'s sign.
-    pub fn copysign(self, sign: f64) -> f64 { unsafe { rok_f64_copysign(self, sign) } }
+    pub const fn copysign(self, sign: f64) -> f64 { unsafe { rok_f64_copysign(self, sign) } }
     /// The smaller; a NaN operand loses to a number.
-    pub fn min(self, other: f64) -> f64 { unsafe { rok_f64_min(self, other) } }
+    pub const fn min(self, other: f64) -> f64 { unsafe { rok_f64_min(self, other) } }
     /// The larger; a NaN operand loses to a number.
-    pub fn max(self, other: f64) -> f64 { unsafe { rok_f64_max(self, other) } }
+    pub const fn max(self, other: f64) -> f64 { unsafe { rok_f64_max(self, other) } }
     pub fn powf(self, exp: f64) -> f64 { self.pow(exp) }
     pub fn powi(self, n: i32) -> f64 { self.pow(n as f64) }
     /// `self * a + b` with one rounding.
-    pub fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { rok_f64_mul_add(self, a, b) } }
+    pub const fn mul_add(self, a: f64, b: f64) -> f64 { unsafe { rok_f64_mul_add(self, a, b) } }
     /// `self` limited to `lo..=hi`; NaN stays NaN.
     pub const fn clamp(self, lo: f64, hi: f64) -> f64 {
         if self < lo { return lo; }
@@ -186,14 +186,14 @@ impl f32 {
     pub const fn is_sign_negative(self) -> bool { self.to_bits() & 0x80000000 != 0 }
 
     /// Largest integer `<= self`.
-    pub fn floor(self) -> f32 { unsafe { rok_f32_floor(self) } }
+    pub const fn floor(self) -> f32 { unsafe { rok_f32_floor(self) } }
     /// Smallest integer `>= self`.
-    pub fn ceil(self) -> f32 { unsafe { rok_f32_ceil(self) } }
+    pub const fn ceil(self) -> f32 { unsafe { rok_f32_ceil(self) } }
     /// Nearest integer, halves away from zero.
-    pub fn round(self) -> f32 { unsafe { rok_f32_round(self) } }
+    pub const fn round(self) -> f32 { unsafe { rok_f32_round(self) } }
     /// Integer part (toward zero).
-    pub fn trunc(self) -> f32 { unsafe { rok_f32_trunc(self) } }
-    pub fn abs(self) -> f32 { unsafe { rok_f32_abs(self) } }
+    pub const fn trunc(self) -> f32 { unsafe { rok_f32_trunc(self) } }
+    pub const fn abs(self) -> f32 { unsafe { rok_f32_abs(self) } }
     pub fn cbrt(self) -> f32 { unsafe { rok_f32_cbrt(self) } }
     /// `e^self`.
     pub fn exp(self) -> f32 { unsafe { rok_f32_exp(self) } }
@@ -220,7 +220,7 @@ impl f32 {
     pub fn acosh(self) -> f32 { unsafe { rok_f32_acosh(self) } }
     pub fn atanh(self) -> f32 { unsafe { rok_f32_atanh(self) } }
     /// `self - self.trunc()`.
-    pub fn fract(self) -> f32 { self - self.trunc() }
+    pub const fn fract(self) -> f32 { self - self.trunc() }
     /// `-1.0` / `1.0` by sign; zeros and NaN are returned as they are
     /// (spec 2.1.4: `-1.0, 0.0, or 1.0`).
     pub const fn signum(self) -> f32 {
@@ -240,29 +240,29 @@ impl f32 {
     /// `sqrt(self² + other²)` without overflow.
     pub fn hypot(self, other: f32) -> f32 { unsafe { rok_f32_hypot(self, other) } }
     /// `self`'s magnitude with `sign`'s sign.
-    pub fn copysign(self, sign: f32) -> f32 { unsafe { rok_f32_copysign(self, sign) } }
+    pub const fn copysign(self, sign: f32) -> f32 { unsafe { rok_f32_copysign(self, sign) } }
     /// The smaller; a NaN operand loses to a number.
-    pub fn min(self, other: f32) -> f32 { unsafe { rok_f32_min(self, other) } }
+    pub const fn min(self, other: f32) -> f32 { unsafe { rok_f32_min(self, other) } }
     /// The larger; a NaN operand loses to a number.
-    pub fn max(self, other: f32) -> f32 { unsafe { rok_f32_max(self, other) } }
+    pub const fn max(self, other: f32) -> f32 { unsafe { rok_f32_max(self, other) } }
     pub fn powf(self, exp: f32) -> f32 { self.pow(exp) }
     pub fn powi(self, n: i32) -> f32 { self.pow(n as f32) }
     /// `self * a + b` with one rounding.
-    pub fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { rok_f32_mul_add(self, a, b) } }
+    pub const fn mul_add(self, a: f32, b: f32) -> f32 { unsafe { rok_f32_mul_add(self, a, b) } }
     /// `self` limited to `lo..=hi`; NaN stays NaN.
     pub const fn clamp(self, lo: f32, hi: f32) -> f32 {
         if self < lo { return lo; }
         if self > hi { return hi; }
         self
     }
-    pub fn div_euclid(self, rhs: f32) -> f32 {
+    pub const fn div_euclid(self, rhs: f32) -> f32 {
         let q = (self / rhs).trunc();
         if self % rhs < 0.0 {
             return if rhs > 0.0 { q - 1.0 } else { q + 1.0 };
         }
         q
     }
-    pub fn rem_euclid(self, rhs: f32) -> f32 {
+    pub const fn rem_euclid(self, rhs: f32) -> f32 {
         let r = self % rhs;
         if r < 0.0 { r + rhs.abs() } else { r }
     }

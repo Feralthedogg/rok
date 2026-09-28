@@ -40,7 +40,7 @@ impl<T> Pinnable for List<T> {
 }
 
 impl Pinnable for str {
-    fn gc_object(self) -> GcBuf<u8> | none { none }
+    const fn gc_object(self) -> GcBuf<u8> | none { none }
 }
 
 impl<T> Pinnable for GcPtr<T> {
@@ -63,20 +63,20 @@ impl<T> !Sync for GcPtr<T> {}
 
 impl<T> GcPtr<T> {
     /// A new object holding `value`.
-    pub fn new(value: T) -> GcPtr<T> {
+    pub const fn new(value: T) -> GcPtr<T> {
         let obj: GcBuf<T> = unsafe { buf_new(1) };
         unsafe { buf_set(obj, 0, value) };
         GcPtr { obj }
     }
 
     /// The value.
-    pub fn get(self) -> T { unsafe { buf_get(self.obj, 0) } }
+    pub const fn get(self) -> T { unsafe { buf_get(self.obj, 0) } }
 
     /// Replace the value; every copy sees it.
-    pub fn set(self, value: T) { unsafe { buf_set(self.obj, 0, value) }; }
+    pub const fn set(self, value: T) { unsafe { buf_set(self.obj, 0, value) }; }
 
     /// Whether `self` and `other` are one object (identity, not value).
-    pub fn same(self, other: GcPtr<T>) -> bool { buf_same(self.obj, other.obj) }
+    pub const fn same(self, other: GcPtr<T>) -> bool { buf_same(self.obj, other.obj) }
 }
 
 /// A reference to a `GcPtr<T>`'s object that does not keep it alive

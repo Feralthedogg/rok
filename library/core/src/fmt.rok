@@ -14,11 +14,11 @@ use rok::core::collections::raw::{GcBuf, buf_new};
 pub struct FmtError;
 
 impl Display for FmtError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("an error occurred when formatting") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("an error occurred when formatting") }
 }
 
 impl Debug for FmtError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("FmtError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("FmtError") }
 }
 
 /// The spec's `align`.
@@ -107,7 +107,7 @@ impl FormatSpec {
 
     /// `text` parsed by the runtime with the parser the compiler checks
     /// static specs with; panics on a malformed spec.
-    pub fn parse(text: str) -> FormatSpec {
+    pub const fn parse(text: str) -> FormatSpec {
         unsafe {
             let w: GcBuf<i64> = buf_new(8);
             rok_fmt_spec_parse(text, w);
@@ -149,15 +149,15 @@ const fn count_bits(v: usize | none) -> u64 {
 }
 
 impl Formatter {
-    pub fn new() -> Formatter { Formatter::with_capacity(16) }
+    pub const fn new() -> Formatter { Formatter::with_capacity(16) }
 
     /// Empty, with room for `cap` bytes.
-    pub fn with_capacity(cap: usize) -> Formatter {
+    pub const fn with_capacity(cap: usize) -> Formatter {
         Formatter { t: unsafe { rok_fmt_new(cap) }, flags: PLAIN_FLAGS, counts: PLAIN_COUNTS }
     }
 
     /// Empty, writing values per `spec`.
-    pub fn with_spec(spec: FormatSpec) -> Formatter {
+    pub const fn with_spec(spec: FormatSpec) -> Formatter {
         let f = Formatter::new();
         let ty = if spec.ty == 's' || spec.ty == 'd' || spec.ty == 'g' { '\0' } else { spec.ty };
         let alt = if spec.alt { 1u64 } else { 0u64 };
@@ -172,15 +172,15 @@ impl Formatter {
     }
 
     /// The text written, as a `str` (no copy); the formatter is spent.
-    pub fn finish(self) -> str { unsafe { rok_fmt_finish(self.t) } }
+    pub const fn finish(self) -> str { unsafe { rok_fmt_finish(self.t) } }
 
-    pub fn write_str(ref self, s: str) throws (FmtError) { self.t = unsafe { rok_fmt_str(self.t, s) }; }
+    pub const fn write_str(ref self, s: str) throws (FmtError) { self.t = unsafe { rok_fmt_str(self.t, s) }; }
 
-    pub fn write_char(ref self, c: char) throws (FmtError) { self.t = unsafe { rok_fmt_char(self.t, c as u32) }; }
+    pub const fn write_char(ref self, c: char) throws (FmtError) { self.t = unsafe { rok_fmt_char(self.t, c as u32) }; }
 
     /// `s` cut to `precision` chars and padded to `width` (text aligns
     /// left by default).
-    pub fn pad(ref self, s: str) throws (FmtError) {
+    pub const fn pad(ref self, s: str) throws (FmtError) {
         let start = unsafe { rok_fmt_len(self.t) };
         self.t = unsafe { rok_fmt_str(self.t, s) };
         self.t = unsafe { rok_fmt_pad(self.t, self.flags, self.counts, start, start, 0u32) };
@@ -189,7 +189,7 @@ impl Formatter {
     /// An integer: the sign, `prefix` (`"0x"` ..) under `#`, the digits
     /// `buf`, padded to `width` — right by default; `0` and `=` fill
     /// between the prefix and the digits.
-    pub fn pad_integral(ref self, is_nonnegative: bool, prefix: str, buf: str) throws (FmtError) {
+    pub const fn pad_integral(ref self, is_nonnegative: bool, prefix: str, buf: str) throws (FmtError) {
         let nonneg = if is_nonnegative { 1u32 } else { 0u32 };
         self.t = unsafe { rok_fmt_integral(self.t, self.flags, self.counts, nonneg, prefix, buf) };
     }
@@ -222,14 +222,14 @@ const fn count_of(v: u64) -> usize | none {
 // `t`; each returns it, maybe moved). Formatting to memory never fails.
 
 /// `{v}`.
-pub fn fstr_display<T: Display>(t: str, v: T) -> str {
+pub const fn fstr_display<T: Display>(t: str, v: T) -> str {
     let f = Formatter { t: t, flags: PLAIN_FLAGS, counts: PLAIN_COUNTS };
     try! Display::fmt(v, ref f);
     f.t
 }
 
 /// `{v:?}`.
-pub fn fstr_debug<T: Debug>(t: str, v: T) -> str {
+pub const fn fstr_debug<T: Debug>(t: str, v: T) -> str {
     let f = Formatter { t: t, flags: PLAIN_FLAGS, counts: PLAIN_COUNTS };
     try! Debug::fmt(v, ref f);
     f.t
@@ -244,7 +244,7 @@ pub fn fstr_num<T: Display>(t: str, v: T, flags: u64, counts: u64) -> str {
 
 /// A dynamic spec's packed words; panics when malformed, or when
 /// `text_only` and it has a number's type letter.
-pub fn fstr_pack(spec: str, text_only: bool) -> (u64, u64) {
+pub const fn fstr_pack(spec: str, text_only: bool) -> (u64, u64) {
     unsafe {
         let out: GcBuf<u64> = buf_new(2);
         rok_fmt_pack(spec, if text_only { 1u32 } else { 0u32 }, out);
@@ -254,7 +254,7 @@ pub fn fstr_pack(spec: str, text_only: bool) -> (u64, u64) {
 
 /// A dynamic spec on a value with both: `?` picks the Debug; then cut
 /// and padded as text.
-pub fn fstr_text_any<T: Display + Debug>(t: str, v: T, spec: str) -> str {
+pub const fn fstr_text_any<T: Display + Debug>(t: str, v: T, spec: str) -> str {
     let (flags, counts) = fstr_pack(spec, true);
     let start = unsafe { rok_fmt_len(t) };
     let debug = ((flags >> 48u64) & 0xFFu64) == 63u64;
@@ -264,44 +264,44 @@ pub fn fstr_text_any<T: Display + Debug>(t: str, v: T, spec: str) -> str {
 
 // Integers: `b o x X` show a fixed-width integer's two's complement at
 // its width (2.10.5).
-impl Display for i8 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 8u32) }; } }
-impl Display for i16 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 16u32) }; } }
-impl Display for i32 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 32u32) }; } }
-impl Display for i64 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self, 1u32, 64u32) }; } }
-impl Display for isize { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 64u32) }; } }
-impl Display for u8 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 8u32) }; } }
-impl Display for u16 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 16u32) }; } }
-impl Display for u32 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 32u32) }; } }
-impl Display for u64 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 64u32) }; } }
-impl Display for usize { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 64u32) }; } }
+impl Display for i8 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 8u32) }; } }
+impl Display for i16 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 16u32) }; } }
+impl Display for i32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 32u32) }; } }
+impl Display for i64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self, 1u32, 64u32) }; } }
+impl Display for isize { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 1u32, 64u32) }; } }
+impl Display for u8 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 8u32) }; } }
+impl Display for u16 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 16u32) }; } }
+impl Display for u32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 32u32) }; } }
+impl Display for u64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 64u32) }; } }
+impl Display for usize { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_int(f.t, f.flags, f.counts, self as i64, 0u32, 64u32) }; } }
 /// Shortest round-trip digits, never an exponent (`1`, `0.1`, `1e21` as
 /// `1000000000000000000000`), `inf` / `NaN`.
-impl Display for f32 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_f64(f.t, f.flags, f.counts, self as f64, 1u32) }; } }
-impl Display for f64 { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_f64(f.t, f.flags, f.counts, self, 0u32) }; } }
+impl Display for f32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_f64(f.t, f.flags, f.counts, self as f64, 1u32) }; } }
+impl Display for f64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_f64(f.t, f.flags, f.counts, self, 0u32) }; } }
 impl Display for bool {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(if self { "true" } else { "false" }) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(if self { "true" } else { "false" }) }
 }
-impl Display for char { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_char(self) } }
-impl Display for str { fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(self) } }
+impl Display for char { const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_char(self) } }
+impl Display for str { const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(self) } }
 
-impl Debug for i8 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for i16 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for i32 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for i64 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for isize { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u8 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u16 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u32 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u64 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for usize { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for f32 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for f64 { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for bool { fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i8 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i16 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for i64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for isize { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u8 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u16 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for u64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for usize { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for f32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for f64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+impl Debug for bool { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
 /// A rok literal: quotes, `\\`, `\n` `\r` `\t` `\0` escaped, other
 /// control and bidi chars as `\u{..}` (2.10.4).
 impl Debug for char {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         f.t = unsafe { rok_fmt_escaped(f.t, rok_str_from_char(self as u32), 39u32) };
     }
 }
-impl Debug for str { fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_escaped(f.t, self, 34u32) }; } }
+impl Debug for str { const fn fmt(self, ref f: Formatter) throws (FmtError) { f.t = unsafe { rok_fmt_escaped(f.t, self, 34u32) }; } }

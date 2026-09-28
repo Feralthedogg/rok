@@ -39,7 +39,7 @@ const fn comp_end(s: str, i: usize) -> usize {
 /// Byte length of `s`'s Windows prefix (0 on Unix, or without one) and
 /// whether a root follows it (always, after a UNC / verbatim / device
 /// prefix).
-fn prefix_of(s: str) -> (usize, bool) {
+const fn prefix_of(s: str) -> (usize, bool) {
     let n = s.len();
     if !WINDOWS { return (0usize, n > 0 && s.byte(0) == 47u8); }
     if n >= 2 && sep_at(s, 0) && sep_at(s, 1) {
@@ -92,7 +92,7 @@ impl PartialEq for Component {
 }
 
 impl Debug for Component {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(match self {
             Component::RootDir => "RootDir",
             Component::Prefix(p) => f"Prefix({p})",
@@ -107,10 +107,10 @@ impl Debug for Component {
 pub struct StripPrefixError {}
 
 impl Display for StripPrefixError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("prefix not found") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("prefix not found") }
 }
 impl Debug for StripPrefixError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("StripPrefixError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("StripPrefixError") }
 }
 impl Error for StripPrefixError {}
 
@@ -128,7 +128,7 @@ impl AsPath for str {
 }
 
 /// `s` without trailing `/`s (but `/` stays `/`).
-fn trim_slashes(s: str) -> str {
+const fn trim_slashes(s: str) -> str {
     let n = s.len();
     while n > 1 && s[n - 1:n] == "/" { n -= 1; }
     s[:n]
@@ -138,26 +138,26 @@ impl Path {
     pub const fn new() -> Path { Path { s: "" } }
     pub const fn from(s: str) -> Path { Path { s: s } }
 
-    pub fn from_components<I: Iterator<Item = str>>(components: I) -> Path {
+    pub const fn from_components<I: Iterator<Item = str>>(components: I) -> Path {
         let p = Path::new();
         for c in components { p = p.join(Path::from(c)); }
         p
     }
 
     pub const fn as_str(self) -> str { self.s }
-    pub fn to_raw(self) -> RawPath { raw_of(self.s) }
+    pub const fn to_raw(self) -> RawPath { raw_of(self.s) }
 
     /// Unix: rooted. Windows: a prefix and a root (`C:\x`, `\\srv\s\x`).
-    pub fn is_absolute(self) -> bool {
+    pub const fn is_absolute(self) -> bool {
         let (p, root) = prefix_of(self.s);
         root && (p > 0 || !WINDOWS)
     }
-    pub fn is_relative(self) -> bool { !self.is_absolute() }
-    pub fn has_root(self) -> bool { prefix_of(self.s).1 }
+    pub const fn is_relative(self) -> bool { !self.is_absolute() }
+    pub const fn has_root(self) -> bool { prefix_of(self.s).1 }
 
     /// The path without its last component; `none` for `/` and `""`.
     /// `Path::from("a").parent()` is `""` (as in Rust).
-    pub fn parent(self) -> Path | none {
+    pub const fn parent(self) -> Path | none {
         let comps = self.component_list();
         let n = comps.len();
         if n == 0 { return none; }
@@ -171,7 +171,7 @@ impl Path {
     }
 
     /// The last component unless it is `..` / `/`.
-    pub fn file_name(self) -> str | none {
+    pub const fn file_name(self) -> str | none {
         let comps = self.component_list();
         let n = comps.len();
         if n == 0 { return none; }
@@ -182,7 +182,7 @@ impl Path {
     }
 
     /// `file_name` without its extension.
-    pub fn file_stem(self) -> str | none {
+    pub const fn file_stem(self) -> str | none {
         let name = self.file_name()?;
         let dot = name.rfind(".") ?? 0usize;
         if dot == 0 { return name; }
@@ -190,14 +190,14 @@ impl Path {
     }
 
     /// After the last `.` of `file_name` (`none` for `.bashrc`, `a`).
-    pub fn extension(self) -> str | none {
+    pub const fn extension(self) -> str | none {
         let name = self.file_name()?;
         let dot = name.rfind(".") ?? 0usize;
         if dot == 0 { return none; }
         name[dot + 1:]
     }
 
-    pub fn components(self) -> Components {
+    pub const fn components(self) -> Components {
         Components { items: self.component_list(), pos: 0 }
     }
 
@@ -206,7 +206,7 @@ impl Path {
         Ancestors { next: self }
     }
 
-    fn component_list(self) -> List<Component> {
+    const fn component_list(self) -> List<Component> {
         let out: List<Component> = List::new();
         let (p, root) = prefix_of(self.s);
         if p > 0 { out.push(Component::Prefix(self.s[:p])); }
@@ -232,7 +232,7 @@ impl Path {
     /// `other` appended; an absolute `other` replaces `self`. Windows:
     /// so does one with a prefix (`D:x`), and a rooted one without
     /// (`\x`) keeps `self`'s prefix.
-    pub fn join(self, other: Path) -> Path {
+    pub const fn join(self, other: Path) -> Path {
         if other.is_absolute() || self.s == "" { return other; }
         if other.s == "" { return self; }
         let (op, oroot) = prefix_of(other.s);
@@ -245,19 +245,19 @@ impl Path {
         Path { s: self.s + SEP + other.s }
     }
 
-    pub fn with_file_name(self, name: str) -> Path {
+    pub const fn with_file_name(self, name: str) -> Path {
         let parent = self.parent() ?? Path::new();
         parent.join(Path::from(name))
     }
 
-    pub fn with_extension(self, ext: str) -> Path {
+    pub const fn with_extension(self, ext: str) -> Path {
         let stem = self.file_stem() ?? "";
         if ext == "" { return self.with_file_name(stem); }
         self.with_file_name(stem + "." + ext)
     }
 
     /// Component-wise prefix test.
-    pub fn starts_with(self, base: Path) -> bool {
+    pub const fn starts_with(self, base: Path) -> bool {
         unsafe {
             let a = self.component_list();
             let b = base.component_list();
@@ -270,7 +270,7 @@ impl Path {
     }
 
     /// Component-wise suffix test.
-    pub fn ends_with(self, suffix: Path) -> bool {
+    pub const fn ends_with(self, suffix: Path) -> bool {
         unsafe {
             let a = self.component_list();
             let b = suffix.component_list();
@@ -283,7 +283,7 @@ impl Path {
         }
     }
 
-    pub fn strip_prefix(self, base: Path) throws (StripPrefixError) -> Path {
+    pub const fn strip_prefix(self, base: Path) throws (StripPrefixError) -> Path {
         if !self.starts_with(base) { throw StripPrefixError {}; }
         let a = self.component_list();
         let out = Path::new();
@@ -294,7 +294,7 @@ impl Path {
     }
 
     /// Lexical `.` / `..` resolution (no filesystem access).
-    pub fn normalize(self) -> Path {
+    pub const fn normalize(self) -> Path {
         let kept: List<Component> = List::new();
         for c in self.component_list() {
             match c {
@@ -345,12 +345,12 @@ impl Path {
 
 impl Div<str> for Path {
     type Output = Path;
-    fn div(self, rhs: str) -> Path { self.join(Path::from(rhs)) }
+    const fn div(self, rhs: str) -> Path { self.join(Path::from(rhs)) }
 }
 
 impl Div<Path> for Path {
     type Output = Path;
-    fn div(self, rhs: Path) -> Path { self.join(rhs) }
+    const fn div(self, rhs: Path) -> Path { self.join(rhs) }
 }
 
 /// OS path bytes that need not be UTF-8 (3.8.5): Unix bytes.
@@ -360,23 +360,23 @@ pub struct RawPath {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn raw_of(s: str) -> RawPath { RawPath { raw: list_of_str(s) } }
+const fn raw_of(s: str) -> RawPath { RawPath { raw: list_of_str(s) } }
 
 #[cfg(not(target_os = "windows"))]
 impl RawPath {
-    pub fn from_bytes(bytes: List<u8>) -> RawPath { RawPath { raw: list_of(bytes) } }
+    pub const fn from_bytes(bytes: List<u8>) -> RawPath { RawPath { raw: list_of(bytes) } }
 
     pub const fn as_bytes(self) -> Slice<u8> { self.raw[0:self.raw.len()] }
 
     /// The path, if the bytes are UTF-8.
-    pub fn try_to_path(self) throws (NonUtf8Error) -> Path {
+    pub const fn try_to_path(self) throws (NonUtf8Error) -> Path {
         let s = try str::from_utf8(self.raw) catch e { throw NonUtf8Error { valid_up_to: e.valid_up_to }; };
         Path { s: s }
     }
 
     /// The path with each maximal ill-formed subsequence replaced by
     /// one U+FFFD (`str::from_utf8_lossy`; Windows: each lone surrogate).
-    pub fn to_path_lossy(self) -> Path { Path { s: str::from_utf8_lossy(self.raw) } }
+    pub const fn to_path_lossy(self) -> Path { Path { s: str::from_utf8_lossy(self.raw) } }
 }
 
 /// An OS path that need not be valid UTF-16 (3.8.5): Windows WTF-16
@@ -456,14 +456,14 @@ impl PartialEq for RawPath {
 }
 
 impl Debug for RawPath {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"RawPath({self.to_path_lossy().as_str():?})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"RawPath({self.to_path_lossy().as_str():?})") }
 }
 
 /// `Path::try_from(raw)`: `raw` as a path; throws if it is not UTF-8
 /// (3.8.4).
 impl TryFrom<RawPath> for Path {
     type Error = NonUtf8Error;
-    fn try_from(raw: RawPath) throws (NonUtf8Error) -> Path { try raw.try_to_path() }
+    const fn try_from(raw: RawPath) throws (NonUtf8Error) -> Path { try raw.try_to_path() }
 }
 
 /// `RawPath` contents that are not UTF-8 (Windows: not UTF-16).
@@ -473,10 +473,10 @@ pub struct NonUtf8Error {
 }
 
 impl Display for NonUtf8Error {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"path is not UTF-8 (valid up to byte {self.valid_up_to})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"path is not UTF-8 (valid up to byte {self.valid_up_to})") }
 }
 impl Debug for NonUtf8Error {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NonUtf8Error {{ valid_up_to: {self.valid_up_to} }}") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"NonUtf8Error {{ valid_up_to: {self.valid_up_to} }}") }
 }
 impl Error for NonUtf8Error {}
 
@@ -486,11 +486,11 @@ impl PartialEq for Path {
 }
 
 impl Display for Path {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.s) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.s) }
 }
 
 impl Debug for Path {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try Debug::fmt(self.s, ref f) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try Debug::fmt(self.s, ref f) }
 }
 
 pub struct Components {
@@ -513,7 +513,7 @@ pub struct Ancestors {
 
 impl Iterator for Ancestors {
     type Item = Path;
-    fn next(ref self) -> Path | none {
+    const fn next(ref self) -> Path | none {
         let p = self.next?;
         self.next = p.parent();
         p

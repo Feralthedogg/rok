@@ -1373,11 +1373,11 @@ impl Hash for TaskId {
 }
 
 impl Display for TaskId {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.id, ref f) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self.id, ref f) }
 }
 
 impl Debug for TaskId {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TaskId({self.id})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"TaskId({self.id})") }
 }
 
 /// The running task's id; panics outside a task (`try_id`).
@@ -1399,11 +1399,11 @@ pub fn try_id() -> TaskId | none {
 pub struct CancellationError {}
 
 impl Display for CancellationError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("task cancelled") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("task cancelled") }
 }
 
 impl Debug for CancellationError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("CancellationError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("CancellationError") }
 }
 
 impl Error for CancellationError {}
@@ -1669,11 +1669,11 @@ impl<T> Timeout<T> {
 pub struct TimeoutError {}
 
 impl Display for TimeoutError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("timed out") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("timed out") }
 }
 
 impl Debug for TimeoutError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("TimeoutError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("TimeoutError") }
 }
 
 impl Error for TimeoutError {}
@@ -1923,7 +1923,7 @@ fn solo_wait(next: i64) {
 fn io_armed() -> bool { unsafe { rok_io_armed() } != 0 }
 
 #[cfg(not(target_os = "wasi"))]
-fn io_armed() -> bool { false }
+const fn io_armed() -> bool { false }
 
 /// Completes once `fd` may be readable (`await task::readable(fd)`
 /// after a read hit `WouldBlock`); it may also complete spuriously, so

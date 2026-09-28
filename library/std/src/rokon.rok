@@ -39,7 +39,7 @@ impl Value {
     pub fn to_string(self) -> str { write::pretty(self, 0, 0, 0) }
 
     /// What kind of value this is, for messages (`integer`, `struct`, ..).
-    pub fn kind(self) -> str {
+    pub const fn kind(self) -> str {
         match self {
             Value::None => "none",
             Value::Bool(_) => "bool",
@@ -171,7 +171,7 @@ impl RokonError {
 }
 
 impl Display for RokonError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         let s = if self.line > 0u32 {
             f"{self.line}:{self.col}: {self.msg}"
         } else if self.path != "" {
@@ -184,7 +184,7 @@ impl Display for RokonError {
 }
 
 impl Debug for RokonError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"RokonError({self})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"RokonError({self})") }
 }
 
 impl Error for RokonError {}
@@ -226,16 +226,16 @@ pub fn from_str<T: FromRokon>(s: str) throws (RokonError) -> T {
 pub const fn encode<T: ToRokon>(x: T) -> Value { x.to_rokon() }
 
 /// `v` as a `T`, errors placed under `seg`.
-pub fn decode<T: FromRokon>(v: Value, seg: str) throws (RokonError) -> T {
+pub const fn decode<T: FromRokon>(v: Value, seg: str) throws (RokonError) -> T {
     try T::from_rokon(v) catch e { throw e.within(seg); }
 }
 
-fn mismatch<T>(v: Value) -> RokonError {
+const fn mismatch<T>(v: Value) -> RokonError {
     RokonError::new(f"expected {T::type_name()}, found {v.kind()}")
 }
 
 /// The last `::` segment of a path (`a::b::Point` → `Point`).
-fn last_seg(path: str) -> str {
+const fn last_seg(path: str) -> str {
     match path.rfind("::") {
         at: usize => path[at + 2:],
         none => path,
@@ -255,7 +255,7 @@ pub struct Fields {
 impl Fields {
     /// `v` as the fields of struct `name` (`Name { .. }`, `{ .. }`,
     /// `m::Name { .. }`, or `{}`); a field not in `names` is an error.
-    pub fn of_struct(v: Value, name: str, names: List<str>) throws (RokonError) -> Fields {
+    pub const fn of_struct(v: Value, name: str, names: List<str>) throws (RokonError) -> Fields {
         let given: OrderedDict<str, Value> = match v {
             Value::Struct { name: n, fields } => {
                 if let w: str = n {
@@ -280,11 +280,11 @@ impl Fields {
 
     /// A named variant's values: positional ones fill the fields in
     /// order, then the named ones (`E::V(1, b: 2)`, `E::V { a: 1, b: 2 }`).
-    pub fn of_variant(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, names: List<str>) throws (RokonError) -> Fields {
+    pub const fn of_variant(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, names: List<str>) throws (RokonError) -> Fields {
         try Fields::make(args, named, ctx, names)
     }
 
-    fn make(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, names: List<str>) throws (RokonError) -> Fields {
+    const fn make(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, names: List<str>) throws (RokonError) -> Fields {
         let f = Fields { vals: OrderedDict::new(), segs: OrderedDict::new(), ctx: ctx };
         let i = 0usize;
         for a in args {
@@ -311,7 +311,7 @@ impl Fields {
     pub const fn has(self, name: str) -> bool { self.vals.contains_key(name) }
 
     /// Field `name` as a `T`: its value, or `T::from_missing()` when absent.
-    pub fn get<T: FromRokon>(self, name: str) throws (RokonError) -> T {
+    pub const fn get<T: FromRokon>(self, name: str) throws (RokonError) -> T {
         if let v: Value = self.vals.get(name) {
             let seg = self.segs.get(name) ?? "";
             return try decode::<T>(v, seg);
@@ -321,7 +321,7 @@ impl Fields {
 }
 
 /// `v` as the values of tuple struct `name` (`Name(a, b)`), `n` of them.
-pub fn struct_args(v: Value, name: str, n: usize) throws (RokonError) -> List<Value> {
+pub const fn struct_args(v: Value, name: str, n: usize) throws (RokonError) -> List<Value> {
     match v {
         Value::Variant { path, args, named } => {
             if last_seg(path) == name && named.is_empty() {
@@ -335,7 +335,7 @@ pub fn struct_args(v: Value, name: str, n: usize) throws (RokonError) -> List<Va
 
 /// `v` as a variant of enum `name`: (variant name, positional values,
 /// named values).
-pub fn variant_of(v: Value, name: str) throws (RokonError) -> (str, List<Value>, OrderedDict<str, Value>) {
+pub const fn variant_of(v: Value, name: str) throws (RokonError) -> (str, List<Value>, OrderedDict<str, Value>) {
     match v {
         Value::Variant { path, args, named } => {
             let head = match path.rfind("::") {
@@ -352,14 +352,14 @@ pub fn variant_of(v: Value, name: str) throws (RokonError) -> (str, List<Value>,
 }
 
 /// A tuple variant's (or unit variant's, `n` = 0) values.
-pub fn variant_args(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, n: usize) throws (RokonError) -> List<Value> {
+pub const fn variant_args(args: List<Value>, named: OrderedDict<str, Value>, ctx: str, n: usize) throws (RokonError) -> List<Value> {
     for (k, _) in named.entries() {
         throw RokonError::new(f"{ctx} has no named fields (found `{k}`)").within("." + k).at_key();
     }
     try count_args(args, ctx, n)
 }
 
-fn count_args(args: List<Value>, ctx: str, n: usize) throws (RokonError) -> List<Value> {
+const fn count_args(args: List<Value>, ctx: str, n: usize) throws (RokonError) -> List<Value> {
     if args.len() != n {
         let s = if n == 1 { "" } else { "s" };
         throw RokonError::new(f"{ctx} takes {n} value{s}, found {args.len()}");
@@ -367,7 +367,7 @@ fn count_args(args: List<Value>, ctx: str, n: usize) throws (RokonError) -> List
     args
 }
 
-pub fn unknown_variant(v: str, ctx: str) -> RokonError {
+pub const fn unknown_variant(v: str, ctx: str) -> RokonError {
     RokonError::new(f"`{ctx}::{v}` is not a variant of {ctx}")
 }
 
@@ -505,7 +505,7 @@ impl ToRokon for bool {
 }
 
 impl FromRokon for bool {
-    fn from_rokon(v: Value) throws (RokonError) -> bool {
+    const fn from_rokon(v: Value) throws (RokonError) -> bool {
         match v {
             Value::Bool(b) => b,
             _ => throw mismatch::<bool>(v),
@@ -518,7 +518,7 @@ impl ToRokon for char {
 }
 
 impl FromRokon for char {
-    fn from_rokon(v: Value) throws (RokonError) -> char {
+    const fn from_rokon(v: Value) throws (RokonError) -> char {
         match v {
             Value::Char(c) => c,
             _ => throw mismatch::<char>(v),
@@ -531,7 +531,7 @@ impl ToRokon for str {
 }
 
 impl FromRokon for str {
-    fn from_rokon(v: Value) throws (RokonError) -> str {
+    const fn from_rokon(v: Value) throws (RokonError) -> str {
         match v {
             Value::Str(s) => s,
             _ => throw mismatch::<str>(v),
@@ -544,10 +544,10 @@ impl ToRokon for Int {
 }
 
 impl FromRokon for Int {
-    fn from_rokon(v: Value) throws (RokonError) -> int { try int_of::<int>(v) }
+    const fn from_rokon(v: Value) throws (RokonError) -> int { try int_of::<int>(v) }
 }
 
-fn int_of<T>(v: Value) throws (RokonError) -> int {
+const fn int_of<T>(v: Value) throws (RokonError) -> int {
     match v {
         Value::Int(n) => n,
         _ => throw mismatch::<T>(v),
@@ -677,7 +677,7 @@ impl<T: ToRokon> ToRokon for T | none {
 }
 
 impl<T: FromRokon> FromRokon for T | none {
-    fn from_rokon(v: Value) throws (RokonError) -> T | none {
+    const fn from_rokon(v: Value) throws (RokonError) -> T | none {
         match v {
             Value::None => none,
             _ => try T::from_rokon(v),
@@ -688,7 +688,7 @@ impl<T: FromRokon> FromRokon for T | none {
 }
 
 /// The items of a list (or a tuple) value.
-fn items_of<T>(v: Value) throws (RokonError) -> List<Value> {
+const fn items_of<T>(v: Value) throws (RokonError) -> List<Value> {
     match v {
         Value::List(xs) => xs,
         Value::Tuple(xs) => xs,
@@ -705,7 +705,7 @@ impl<T: ToRokon> ToRokon for List<T> {
 }
 
 impl<T: FromRokon> FromRokon for List<T> {
-    fn from_rokon(v: Value) throws (RokonError) -> List<T> {
+    const fn from_rokon(v: Value) throws (RokonError) -> List<T> {
         let xs = try items_of::<List<T>>(v);
         let out: List<T> = List::with_capacity(xs.len());
         let i = 0usize;
@@ -726,7 +726,7 @@ impl<T: ToRokon + Hash> ToRokon for Set<T> {
 }
 
 impl<T: FromRokon + Hash> FromRokon for Set<T> {
-    fn from_rokon(v: Value) throws (RokonError) -> Set<T> {
+    const fn from_rokon(v: Value) throws (RokonError) -> Set<T> {
         let out: Set<T> = Set::new();
         for x in try List::<T>::from_rokon(v) { out.insert(x); }
         out
@@ -742,7 +742,7 @@ impl<T: ToRokon + Hash> ToRokon for OrderedSet<T> {
 }
 
 impl<T: FromRokon + Hash> FromRokon for OrderedSet<T> {
-    fn from_rokon(v: Value) throws (RokonError) -> OrderedSet<T> {
+    const fn from_rokon(v: Value) throws (RokonError) -> OrderedSet<T> {
         let out: OrderedSet<T> = OrderedSet::new();
         for x in try List::<T>::from_rokon(v) { out.insert(x); }
         out
@@ -758,7 +758,7 @@ impl<T: ToRokon, const N: usize> ToRokon for [T; N] {
 }
 
 impl<T: FromRokon, const N: usize> FromRokon for [T; N] {
-    fn from_rokon(v: Value) throws (RokonError) -> [T; N] {
+    const fn from_rokon(v: Value) throws (RokonError) -> [T; N] {
         let xs = try List::<T>::from_rokon(v);
         if xs.len() != N {
             throw RokonError::new(f"expected {N} items, found {xs.len()}");
@@ -776,7 +776,7 @@ impl<T: FromRokon, const N: usize> FromRokon for [T; N] {
 }
 
 /// The entries of a dict value.
-fn entries_of<T>(v: Value) throws (RokonError) -> OrderedDict<Value, Value> {
+const fn entries_of<T>(v: Value) throws (RokonError) -> OrderedDict<Value, Value> {
     match v {
         Value::Dict(d) => d,
         _ => throw mismatch::<T>(v),
@@ -829,7 +829,7 @@ impl<K: FromRokon + Hash, V: FromRokon> FromRokon for OrderedDict<K, V> {
 }
 
 /// A tuple value with `n` items (a list is taken too).
-fn tuple_of<T>(v: Value, n: usize) throws (RokonError) -> List<Value> {
+const fn tuple_of<T>(v: Value, n: usize) throws (RokonError) -> List<Value> {
     let xs = try items_of::<T>(v);
     if xs.len() != n { throw RokonError::new(f"expected a {n}-tuple, found {xs.len()} items"); }
     xs
@@ -849,7 +849,7 @@ impl<A: ToRokon, B: ToRokon> ToRokon for (A, B) {
     fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon(), self.1.to_rokon()]) }
 }
 impl<A: FromRokon, B: FromRokon> FromRokon for (A, B) {
-    fn from_rokon(v: Value) throws (RokonError) -> (A, B) {
+    const fn from_rokon(v: Value) throws (RokonError) -> (A, B) {
         let xs = try tuple_of::<(A, B)>(v, 2);
         (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"))
     }
@@ -858,7 +858,7 @@ impl<A: ToRokon, B: ToRokon, C: ToRokon> ToRokon for (A, B, C) {
     const fn to_rokon(self) -> Value { Value::Tuple([self.0.to_rokon(), self.1.to_rokon(), self.2.to_rokon()]) }
 }
 impl<A: FromRokon, B: FromRokon, C: FromRokon> FromRokon for (A, B, C) {
-    fn from_rokon(v: Value) throws (RokonError) -> (A, B, C) {
+    const fn from_rokon(v: Value) throws (RokonError) -> (A, B, C) {
         let xs = try tuple_of::<(A, B, C)>(v, 3);
         (try decode::<A>(xs[0], "[0]"), try decode::<B>(xs[1], "[1]"), try decode::<C>(xs[2], "[2]"))
     }

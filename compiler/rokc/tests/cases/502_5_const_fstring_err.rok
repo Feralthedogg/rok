@@ -1,0 +1,43 @@
+// spec: 005.02-const
+// spec: §6.5.8
+// A panic or `throw` whose message is an f-string fails the evaluation
+// with that text; a malformed dynamic spec panics as at run time.
+// expect-error: const `A` cannot be evaluated at compile time: panicked: 3 is odd (want 4 or 6)
+// expect-error: const `B` cannot be evaluated at compile time: panicked: invalid format spec `>q`: unknown format type
+// expect-error: const `C` cannot be evaluated at compile time: panicked: invalid format spec: a float has no binary / octal / hex form
+// expect-error: literal cannot be evaluated at compile time: the handler threw "70000 > 65535"
+const fn even(n: i32) -> i32 {
+    if n % 2 != 0 {
+        panic(f"{n} is odd (want {n + 1} or {n + 3})");
+    }
+    n
+}
+
+const fn padded(s: str, spec: str) -> str { f"{s:${spec}}" }
+
+const fn hex(x: f64) -> str { f"{x:${"x"}}" }
+
+const A: i32 = even(3);
+const B: str = padded("a", ">q");
+const C: str = hex(1.5);
+
+struct Port {
+    n: i64;
+}
+
+struct PortError {
+    msg: str;
+}
+
+#[literal(number "port")]
+const fn port(n: i64) throws (PortError) -> Port {
+    if n > 65535 {
+        throw PortError { msg: f"{n} > 65535" };
+    }
+    Port { n: n }
+}
+
+fn main() -> i32 {
+    let p = try! 70000port;
+    return A + B.len() as i32 + C.len() as i32 + p.n as i32;
+}

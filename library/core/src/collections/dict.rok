@@ -472,7 +472,7 @@ impl<K: Hash, V: Hash> Hash for Dict<K, V> {
 
 /// `{k: v, ..}` with each key's and value's `Debug`, in iteration order.
 impl<K: Hash + Debug, V: Debug> Debug for Dict<K, V> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("{");
         let first = true;
         for (k, v) in self {

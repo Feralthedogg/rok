@@ -1,0 +1,31 @@
+// spec: 005.02-const
+// expect-exit: 0
+// expect-stdout:
+//   $1234.56|$1234.56   |7|+7|(1, 'a')|[1, 2, 3]|AB|x|true|a+b|2
+//      $0.05|$0.05|none|-1|(1, 'a')|[1, 2, 3]|AB|x|true|a+b|2
+// true true
+
+// Spec 5.2.5: a `const` builds f-strings over a user `Display` that is a
+// `const fn`, sum types, tuples, lists and standard `str` / `char`
+// methods, with static and dynamic (`${..}`) specs; the text equals the
+// run-time one.
+struct Money { cents: i64; }
+
+impl Display for Money {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
+        try f.pad(f"${self.cents / 100}.{self.cents % 100:02}")
+    }
+}
+
+const fn show(m: i64, o: i32 | none, w: usize) -> str {
+    f"{Money { cents: m }:>10}|{Money { cents: m }:<${w}}|{o:?}|{o ?? -1:+}|{(1, 'a'):?}|{[1, 2, 3]:?}|{"ab".to_uppercase()}|{"  x ".trim()}|{'ß'.is_alphabetic()}|{"a-b".replace("-", "+")}|{"abc".find("c"):?}"
+}
+
+const A: str = show(123456, 7, 11);
+const B: str = show(5, none, 3);
+
+fn main() {
+    println(A);
+    println(B);
+    println(f"{A == show(123456, 7, 11)} {B == show(5, none, 3)}");
+}

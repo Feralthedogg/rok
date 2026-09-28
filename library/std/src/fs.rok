@@ -191,7 +191,7 @@ impl File {
         }
     }
 
-    fn live(self) throws (IoError) -> i32 {
+    const fn live(self) throws (IoError) -> i32 {
         unsafe {
             let fd = self.fd[0];
             if fd < 0 { throw IoError::with_kind(IoErrorKind::InvalidInput, f"{self.path}: file is closed"); }
@@ -634,7 +634,7 @@ impl Dir {
     }
 
     /// `p` checked against this capability; the string to pass to `*at`.
-    fn rel<P: AsPath>(self, p: P) throws (IoError) -> str {
+    const fn rel<P: AsPath>(self, p: P) throws (IoError) -> str {
         let path = p.as_path();
         if self.fd() >= 0 {
             // A root or a prefix (Windows `C:`) leaves the directory too.
@@ -652,7 +652,7 @@ impl Dir {
     }
 
     /// For messages: the path as the user would spell it.
-    fn shown(self, p: str) -> str {
+    const fn shown(self, p: str) -> str {
         if self.path == "" { return p; }
         Path::from(self.path).join(Path::from(p)).as_str()
     }

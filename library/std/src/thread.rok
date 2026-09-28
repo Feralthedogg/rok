@@ -97,7 +97,7 @@ pub struct JoinError {
 pub const JOIN_LOST: i32 = -1;
 
 impl Display for JoinError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         if self.code == JOIN_LOST {
             try f.write_str("thread join failed: the thread ended with a failed REPL cell")
         } else {

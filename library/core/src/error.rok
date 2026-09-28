@@ -112,11 +112,11 @@ pub struct ParseError {
 }
 
 impl Display for ParseError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"cannot parse \"{self.input}\": {self.reason}") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"cannot parse \"{self.input}\": {self.reason}") }
 }
 
 impl Debug for ParseError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ParseError({self})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ParseError({self})") }
 }
 
 impl Error for ParseError {}
@@ -128,11 +128,11 @@ pub struct ValueError {
 }
 
 impl Display for ValueError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.msg) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.msg) }
 }
 
 impl Debug for ValueError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ValueError({self.msg:?})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ValueError({self.msg:?})") }
 }
 
 impl Error for ValueError {}
@@ -147,11 +147,11 @@ pub struct OverflowError {
 }
 
 impl Display for OverflowError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"{self.op}: value out of range for `{self.ty}`") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"{self.op}: value out of range for `{self.ty}`") }
 }
 
 impl Debug for OverflowError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"OverflowError({self})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"OverflowError({self})") }
 }
 
 impl Error for OverflowError {}
@@ -163,11 +163,11 @@ pub struct ConversionError {
 }
 
 impl Display for ConversionError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.msg) }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(self.msg) }
 }
 
 impl Debug for ConversionError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ConversionError({self.msg:?})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"ConversionError({self.msg:?})") }
 }
 
 impl Error for ConversionError {}
@@ -179,11 +179,11 @@ pub struct TypeError {
 }
 
 impl Display for TypeError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"expected `{self.expected}`, found `{self.actual}`") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"expected `{self.expected}`, found `{self.actual}`") }
 }
 
 impl Debug for TypeError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(f"TypeError {{ expected: {self.expected:?}, actual: {self.actual:?} }}")
     }
 }
@@ -198,11 +198,11 @@ pub struct IndexError {
 }
 
 impl Display for IndexError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"index {self.index} out of bounds (len {self.len})") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"index {self.index} out of bounds (len {self.len})") }
 }
 
 impl Debug for IndexError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str(f"IndexError {{ index: {self.index}, len: {self.len} }}")
     }
 }
@@ -215,11 +215,11 @@ impl Error for IndexError {}
 pub struct StackOverflowError;
 
 impl Display for StackOverflowError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("stack overflow") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("stack overflow") }
 }
 
 impl Debug for StackOverflowError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("StackOverflowError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("StackOverflowError") }
 }
 
 impl Error for StackOverflowError {}
@@ -227,11 +227,11 @@ impl Error for StackOverflowError {}
 pub struct OutOfMemoryError;
 
 impl Display for OutOfMemoryError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("out of memory") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("out of memory") }
 }
 
 impl Debug for OutOfMemoryError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("OutOfMemoryError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("OutOfMemoryError") }
 }
 
 impl Error for OutOfMemoryError {}
@@ -239,11 +239,11 @@ impl Error for OutOfMemoryError {}
 pub struct InternalError;
 
 impl Display for InternalError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("internal compiler error") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("internal compiler error") }
 }
 
 impl Debug for InternalError {
-    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("InternalError") }
+    const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str("InternalError") }
 }
 
 impl Error for InternalError {}
@@ -259,7 +259,7 @@ pub trait Error: Display + Debug {
 
 /// `Ok(<v:?>)` / `Err(<e:?>)`.
 impl<T: Debug, E: Debug> Debug for Result<T, E> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         match self {
             Result::Ok(v) => {
                 try f.write_str("Ok(");

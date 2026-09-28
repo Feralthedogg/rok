@@ -135,7 +135,6 @@ pub fn pack(s: &FmtSpec) -> (u64, u64) {
 
 /// [`pack`]'s inverse.
 #[must_use]
-#[allow(dead_code)] // the runtime's
 #[allow(clippy::cast_possible_truncation)] // fields of the packed words
 pub fn unpack(flags: u64, counts: u64) -> FmtSpec {
     let byte = |at: u32| (flags >> at) as u8;

@@ -270,7 +270,7 @@ impl<T: PartialEq> PartialEq for Slice<T> {
 
 /// `[a, b, c]` like a list.
 impl<T: Debug> Debug for Slice<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("[");
         for i in 0..self.len {
             if i > 0 { try f.write_str(", "); }

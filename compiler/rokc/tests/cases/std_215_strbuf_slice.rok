@@ -1,0 +1,22 @@
+// spec: std 215-string §2.15.3
+// expect-exit: 0
+// expect-stdout:
+// 가 a가b ab b|가b
+// 가 zz z 3
+// Ab
+
+// Spec 2.15.3: `StrBuf` slices by byte offsets like `str` (clamped,
+// negative from the end) into a `str`. Only the range is copied, and the
+// `str` is immutable (2.15.1): later edits of the buffer never show in it.
+fn main() {
+    let b = StrBuf::new();
+    b.push_str("a가b");
+    let s = b[1:4];
+    println(f"{s} {b[0:99]} {b[0:1] + b[-1:]} {b[4:]}|{b[1:]}");
+    b.clear();
+    b.push_str("zzzz");
+    println(f"{s} {b[0:2]} {b[-1:]} {b[1:].len()}");
+    let big = StrBuf::with_capacity(4);
+    for i in 0..1000 { big.push(if i % 2 == 0 { 'A' } else { 'b' }); }
+    println(big[998:1000]);
+}

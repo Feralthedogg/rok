@@ -131,7 +131,7 @@ impl<T: Hash> PartialEq for OrderedSet<T> {
 
 /// `{a, b, ..}` in insertion order.
 impl<T: Hash + Debug> Debug for OrderedSet<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("{");
         let first = true;
         for x in self {

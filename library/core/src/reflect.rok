@@ -48,7 +48,7 @@ pub fn cast<T>(value: any) -> T | none;
 fn method_table<T>() -> str;
 
 /// `T`'s inherent methods, by name.
-pub fn methods_of<T>() -> List<MethodInfo> {
+pub const fn methods_of<T>() -> List<MethodInfo> {
     let out: List<MethodInfo> = List::new();
     for line in method_table::<T>().split("\n") {
         if line.len() == 0 {

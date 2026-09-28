@@ -241,7 +241,7 @@ impl<T> IndexSet<usize> for Deque<T> {
 
 /// `[a, b, c]`, front to back.
 impl<T: Debug> Debug for Deque<T> {
-    fn fmt(self, ref f: Formatter) throws (FmtError) {
+    const fn fmt(self, ref f: Formatter) throws (FmtError) {
         try f.write_str("[");
         let first = true;
         for x in self {

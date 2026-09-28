@@ -18,6 +18,8 @@ use core::ptr;
 
 use rokr_common::object_header::{HEADER_ALIGN, HEADER_SIZE};
 
+use crate::{str_ops, unicode};
+
 /// Standard-library type id of runtime strings (801 §8.1.2 reserved
 /// range); never registered, so the collector traces nothing inside.
 const STR_TYPE_ID: u32 = rokr_common::gc_abi::PLAIN_TYPE_ID;
@@ -109,12 +111,8 @@ pub extern "C" fn rok_str_hash(s: RokStr) -> u64 {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_slice(s: RokStr, start: usize, end: usize, at: RokStr) -> RokStr {
     let b = s.bytes();
-    if start > end || end > b.len() {
-        crate::panic_at(b"string slice out of range", Some(at.bytes()));
-    }
-    let boundary = |i: usize| i == b.len() || (b[i] & 0xC0) != 0x80;
-    if !boundary(start) || !boundary(end) {
-        crate::panic_at(b"string slice is not on a char boundary", Some(at.bytes()));
+    if let Err(m) = str_ops::slice_check(b, start, end) {
+        crate::panic_at(m.as_bytes(), Some(at.bytes()));
     }
     sub(&s, &b[start..end])
 }
@@ -175,84 +173,30 @@ pub const extern "C" fn rok_str_bytes_buf(s: RokStr) -> *const u8 {
 /// Byte offset of the first `pat` in `s`, or -1.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_find(s: RokStr, pat: RokStr) -> isize {
-    let (h, n) = (s.bytes(), pat.bytes());
-    if let [c] = n {
-        return h.iter().position(|b| b == c).map_or(-1, |i| i as isize);
-    }
-    if n.is_empty() {
-        return 0;
-    }
-    h.windows(n.len())
-        .position(|w| w == n)
-        .map_or(-1, |i| i as isize)
+    str_ops::find(s.bytes(), pat.bytes()).map_or(-1, |i| i as isize)
 }
 
 /// Byte offset of the last `pat` in `s`, or -1.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_rfind(s: RokStr, pat: RokStr) -> isize {
-    let (h, n) = (s.bytes(), pat.bytes());
-    if n.is_empty() {
-        return h.len() as isize;
-    }
-    h.windows(n.len())
-        .rposition(|w| w == n)
-        .map_or(-1, |i| i as isize)
+    str_ops::rfind(s.bytes(), pat.bytes()).map_or(-1, |i| i as isize)
 }
 
-/// Every non-overlapping `from` replaced by `to`.
+/// Every non-overlapping `from` replaced by `to` (`str_ops::replace`).
 #[unsafe(no_mangle)]
 #[allow(clippy::many_single_char_names)] // byte-crunching locals
 pub extern "C" fn rok_str_replace(s: RokStr, from: RokStr, to: RokStr) -> RokStr {
     let (h, f, t) = (s.bytes(), from.bytes(), to.bytes());
-    // An empty `from` matches at every char boundary: "ab" → "-a-b-".
-    if f.is_empty() {
-        let chars = h.iter().filter(|&&b| (b & 0xC0) != 0x80).count();
-        let p = alloc_str(h.len() + (chars + 1) * t.len());
-        let mut o = 0;
-        // SAFETY: one `t` per boundary plus every byte of `h`: the length
-        // allocated above.
-        unsafe {
-            ptr::copy_nonoverlapping(t.as_ptr(), p, t.len());
-            o += t.len();
-            for (i, &b) in h.iter().enumerate() {
-                *p.add(o) = b;
-                o += 1;
-                if h.get(i + 1).is_none_or(|n| (n & 0xC0) != 0x80) {
-                    ptr::copy_nonoverlapping(t.as_ptr(), p.add(o), t.len());
-                    o += t.len();
-                }
-            }
-        }
-        return RokStr { ptr: p, len: o };
-    }
     // Two passes: measure, then copy.
-    let mut count = 0;
-    let mut i = 0;
-    while i + f.len() <= h.len() {
-        if &h[i..i + f.len()] == f {
-            count += 1;
-            i += f.len();
-        } else {
-            i += 1;
-        }
-    }
-    let len = h.len() - count * f.len() + count * t.len();
+    let mut len = 0;
+    str_ops::replace(h, f, t, |b| len += b.len());
     let p = alloc_str(len);
-    let (mut i, mut o) = (0, 0);
-    // SAFETY: writes stay within the `len` bytes measured above.
-    unsafe {
-        while i < h.len() {
-            if i + f.len() <= h.len() && &h[i..i + f.len()] == f {
-                ptr::copy_nonoverlapping(t.as_ptr(), p.add(o), t.len());
-                o += t.len();
-                i += f.len();
-            } else {
-                *p.add(o) = h[i];
-                o += 1;
-                i += 1;
-            }
-        }
-    }
+    let mut o = 0;
+    str_ops::replace(h, f, t, |b| {
+        // SAFETY: the pieces add up to the `len` bytes measured above.
+        unsafe { ptr::copy_nonoverlapping(b.as_ptr(), p.add(o), b.len()) };
+        o += b.len();
+    });
     RokStr { ptr: p, len }
 }
 
@@ -260,43 +204,6 @@ pub extern "C" fn rok_str_replace(s: RokStr, from: RokStr, to: RokStr) -> RokStr
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_char_count(s: RokStr) -> usize {
     s.bytes().iter().filter(|&&b| (b & 0xC0) != 0x80).count()
-}
-
-/// `src` as a rok literal between `quote`s (`"` for `str`, `'` for `char`),
-/// escaped so the lexer reads it back (`Debug`).
-/// Control chars and the bidi controls the lexer rejects (refs-lang 1.1)
-/// go out as `\u{..}`.
-pub fn escape(src: &str, quote: u32, mut put: impl FnMut(&[u8])) {
-    let delim = [quote as u8];
-    put(&delim);
-    for ch in src.chars() {
-        match ch {
-            '\\' => put(b"\\\\"),
-            '\n' => put(b"\\n"),
-            '\r' => put(b"\\r"),
-            '\t' => put(b"\\t"),
-            '\0' => put(b"\\0"),
-            ch if ch as u32 == quote => put(&[b'\\', delim[0]]),
-            ch if ch.is_control()
-                || matches!(ch, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') =>
-            {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                let mut digits = [0u8; 6];
-                let mut start = digits.len();
-                let mut rest = ch as u32;
-                while start == digits.len() || rest != 0 {
-                    start -= 1;
-                    digits[start] = HEX[(rest & 15) as usize];
-                    rest >>= 4;
-                }
-                put(b"\\u{");
-                put(&digits[start..]);
-                put(b"}");
-            }
-            ch => put(ch.encode_utf8(&mut [0; 4]).as_bytes()),
-        }
-    }
-    put(&delim);
 }
 
 /// UTF-8 encoding of `c` (U+FFFD for a non-scalar value).
@@ -340,32 +247,10 @@ pub unsafe extern "C" fn rok_str_parse_int(
     bits: u32,
     out: *mut u8,
 ) -> i32 {
-    let (neg, digits) = match s.bytes() {
-        [b'-', rest @ ..] => (true, rest),
-        [b'+', rest @ ..] => (false, rest),
-        all => (false, all),
+    let v = match str_ops::parse_int(s.bytes(), radix, signed != 0, bits) {
+        Ok(v) => v,
+        Err(st) => return st,
     };
-    if digits.is_empty() {
-        return 1;
-    }
-    if !(2..=36).contains(&radix) || !digits.iter().all(|&c| char::from(c).is_digit(radix)) {
-        return 2;
-    }
-    let mag = digits.iter().try_fold(0u64, |m, &c| {
-        let d = char::from(c).to_digit(radix).unwrap_or(0);
-        m.checked_mul(radix.into())?.checked_add(d.into())
-    });
-    let bits = bits.clamp(1, 64);
-    let limit = match (signed != 0, neg) {
-        (true, true) => 1u64 << (bits - 1),
-        (true, false) => (1u64 << (bits - 1)) - 1,
-        (false, false) => u64::MAX >> (64 - bits),
-        (false, true) => 0,
-    };
-    let Some(mag) = mag.filter(|&m| m <= limit && !(neg && signed == 0)) else {
-        return 3;
-    };
-    let v = if neg { mag.wrapping_neg() } else { mag };
     // SAFETY: caller contract; elements start after the header.
     unsafe { ptr::copy_nonoverlapping(v.to_ne_bytes().as_ptr(), out.add(HEADER_SIZE), 8) };
     0
@@ -378,14 +263,10 @@ pub unsafe extern "C" fn rok_str_parse_int(
 /// `out` is a live `GcBuf<f64>` of at least one element.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rok_str_parse_float(s: RokStr, out: *mut u8) -> i32 {
-    let t = text(&s);
-    let Ok(v) = t.parse::<f64>() else {
-        return 2;
+    let v = match str_ops::parse_float(text(&s)) {
+        Ok(v) => v,
+        Err(st) => return st,
     };
-    // Digits that round past f64's range (`inf` itself has none).
-    if v.is_infinite() && t.bytes().any(|b| b.is_ascii_digit()) {
-        return 3;
-    }
     // SAFETY: caller contract; elements start after the header.
     unsafe { ptr::copy_nonoverlapping(v.to_ne_bytes().as_ptr(), out.add(HEADER_SIZE), 8) };
     0
@@ -410,8 +291,7 @@ pub const extern "C" fn rok_str_len(s: RokStr) -> usize {
 /// 1 if `s[at..at + pat.len]` is `pat`, else 0 (`starts_with` / `ends_with`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_str_eq_at(s: RokStr, at: usize, pat: RokStr) -> i32 {
-    let b = s.bytes();
-    i32::from(at.checked_add(pat.len).and_then(|end| b.get(at..end)) == Some(pat.bytes()))
+    i32::from(str_ops::eq_at(s.bytes(), at, pat.bytes()))
 }
 
 /// `len` bytes of the `GcBuf<u8>` `buf` from `off`, as a new `str`. No
@@ -477,7 +357,84 @@ pub const unsafe extern "C" fn rok_buf_copy(
 pub unsafe extern "C" fn rok_buf_utf8_error(buf: *mut u8, off: usize, len: usize) -> isize {
     // SAFETY: caller contract.
     let b = unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE + off), len) };
-    core::str::from_utf8(b).map_or_else(|e| e.valid_up_to() as isize, |_| -1)
+    str_ops::utf8_error(b)
+}
+
+/// `buf[start..end]`, checked as `str` slicing over the `len` bytes of
+/// contents (`StrBuf`), as a new `str`; panics like `rok_str_slice`.
+///
+/// # Safety
+/// `buf` must be a live `GcBuf<u8>` with at least `len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rok_buf_slice_str(
+    buf: *mut u8,
+    len: usize,
+    start: usize,
+    end: usize,
+    at: RokStr,
+) -> RokStr {
+    // SAFETY: caller contract.
+    let b = unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE), len) };
+    if let Err(m) = str_ops::slice_check(b, start, end) {
+        crate::panic_at(m.as_bytes(), Some(at.bytes()));
+    }
+    // `build` may collect before copying; the caller's frame roots `buf`.
+    build(&[&b[start..end]])
+}
+
+// ---------------------------------------------------------------------
+// Unicode (`unicode`): `char` properties, case, trimming
+// ---------------------------------------------------------------------
+
+/// Property bits of `c`: 1 Alphabetic, 2 Lowercase, 4 Uppercase,
+/// 8 `White_Space`, 16 numeric (general category Nd / Nl / No).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_char_props(c: u32) -> u32 {
+    unicode::props(c)
+}
+
+/// Simple (one-char) case mapping; `c` itself when it has none.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_char_to_case(c: u32, upper: i32) -> u32 {
+    unicode::to_case(c, upper != 0)
+}
+
+/// `upper` != 0 → uppercase, else lowercase (`unicode::case`); ASCII
+/// only when `s` is not UTF-8.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_case(s: RokStr, upper: i32) -> RokStr {
+    let upper = upper != 0;
+    let Ok(text) = core::str::from_utf8(s.bytes()) else {
+        let out = build(&[s.bytes()]);
+        // SAFETY: `out` is a fresh GC string of `len` bytes.
+        let b = unsafe { core::slice::from_raw_parts_mut(out.ptr.cast_mut(), out.len) };
+        if upper {
+            b.make_ascii_uppercase();
+        } else {
+            b.make_ascii_lowercase();
+        }
+        return out;
+    };
+    // Two passes: measure, then encode.
+    let mut len = 0;
+    unicode::case(text, upper, |m| len += m.len_utf8());
+    let p = alloc_str(len);
+    let mut at = 0;
+    unicode::case(text, upper, |m| {
+        let mut buf = [0u8; 4];
+        let e = m.encode_utf8(&mut buf);
+        // SAFETY: the first pass measured exactly `len` bytes.
+        unsafe { ptr::copy_nonoverlapping(e.as_ptr(), p.add(at), e.len()) };
+        at += e.len();
+    });
+    RokStr { ptr: p, len }
+}
+
+/// `which`: 0 = both ends, 1 = start, 2 = end (`unicode::trim`). Shares
+/// `s`'s bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_str_trim(s: RokStr, which: i32) -> RokStr {
+    sub(&s, unicode::trim(s.bytes(), which))
 }
 
 #[cfg(test)]
@@ -557,8 +514,17 @@ pub mod tests {
         );
         assert_eq!(rok_str_find(s(b"hello"), s(b"ll")), 2);
         assert_eq!(rok_str_rfind(s(b"abab"), s(b"ab")), 2);
-        assert_eq!(crate::unicode::rok_str_trim(s(b"  x "), 0).bytes(), b"x");
-        crate::unicode::tests::str_case_and_trim();
+        assert_eq!(rok_str_trim(s(b"  x "), 0).bytes(), b"x");
+        assert_eq!(rok_str_case(s("straße".as_bytes()), 1).bytes(), b"STRASSE");
+        assert_eq!(
+            rok_str_case(s("ΟΔΟΣ Σ".as_bytes()), 0).bytes(),
+            "οδος σ".as_bytes()
+        );
+        assert_eq!(
+            rok_str_trim(s("\u{3000} x\u{85}".as_bytes()), 0).bytes(),
+            b"x"
+        );
+        assert_eq!(rok_str_trim(s(b"\xff "), 2).bytes(), b"\xff");
         assert_eq!(
             rok_str_replace(s(b"a-b-c"), s(b"-"), s(b"+")).bytes(),
             b"a+b+c"

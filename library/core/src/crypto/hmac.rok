@@ -48,12 +48,12 @@ impl Hmac {
 
     pub fn update(ref self, data: Bytes) { self.inner.update(data); }
 
-    pub fn finish(self) -> List<u8> {
+    pub const fn finish(self) -> List<u8> {
         self.outer_raw().finish()
     }
 
     /// The outer hash with the inner one absorbed (through an array).
-    fn outer_raw(self) -> Digest {
+    const fn outer_raw(self) -> Digest {
         let alg = self.outer.algorithm();
         let h = self.inner.finish_raw();
         let b: [u8; 128] = [0u8; 128];
