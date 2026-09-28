@@ -24,6 +24,7 @@ const SHF_INFO_LINK: u64 = 0x40;
 const STB_LOCAL: u8 = 0;
 const STB_GLOBAL: u8 = 1;
 const STB_WEAK: u8 = 2;
+const STV_HIDDEN: u8 = 2;
 const STT_NOTYPE: u8 = 0;
 const STT_OBJECT: u8 = 1;
 const STT_FUNC: u8 = 2;
@@ -281,26 +282,27 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     }
     let mut strtab = vec![0u8];
     let mut symtab = vec![0u8; 24];
-    let mut entry = |symtab: &mut Vec<u8>, name: u32, info: u8, shndx: usize, value, size| {
-        put32(symtab, name);
-        symtab.push(info);
-        symtab.push(0);
-        put16(
-            symtab,
-            if shndx >= SHN_LORESERVE {
-                SHN_XINDEX
-            } else {
-                shndx as u16
-            },
-        );
-        put64(symtab, value);
-        put64(symtab, size);
-        if xindex {
-            put32(&mut shndx_tab, shndx as u32);
-        }
-    };
+    let mut entry =
+        |symtab: &mut Vec<u8>, name: u32, info: u8, other, shndx: usize, value, size| {
+            put32(symtab, name);
+            symtab.push(info);
+            symtab.push(other);
+            put16(
+                symtab,
+                if shndx >= SHN_LORESERVE {
+                    SHN_XINDEX
+                } else {
+                    shndx as u16
+                },
+            );
+            put64(symtab, value);
+            put64(symtab, size);
+            if xindex {
+                put32(&mut shndx_tab, shndx as u32);
+            }
+        };
     for shndx in &sect_syms {
-        entry(&mut symtab, 0, STT_SECTION, *shndx, 0, 0);
+        entry(&mut symtab, 0, STT_SECTION, 0, *shndx, 0, 0);
     }
     let first_global = 1 + nsect_syms + order.iter().filter(|&&i| local(i)).count();
     for &i in &order {
@@ -328,7 +330,16 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         } else {
             STB_GLOBAL
         };
-        entry(&mut symtab, name, (bind << 4) | ty, shndx, value, size);
+        let other = if s.hidden { STV_HIDDEN } else { 0 };
+        entry(
+            &mut symtab,
+            name,
+            (bind << 4) | ty,
+            other,
+            shndx,
+            value,
+            size,
+        );
     }
     let symtab_index = outs.len() + relas.iter().filter(|r| !r.1.is_empty()).count();
     for (target, rs) in &relas {

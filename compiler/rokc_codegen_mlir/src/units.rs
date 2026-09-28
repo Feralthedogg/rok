@@ -181,8 +181,20 @@ pub fn package_internal(symbol: &str) -> bool {
 /// package with hash `pkg`: an `i32` the glue defines.
 #[must_use]
 pub fn gc_symbol(pkg: &str, table: &[u32]) -> String {
+    format!("_Y{pkg}_gctype.{:016x}", table_hash(table))
+}
+
+/// The symbol of the `ScanTable` `table` (its words): named by its
+/// contents, a hidden definition every package that registers it has
+/// and the link keeps once.
+#[must_use]
+pub fn scan_symbol(table: &[u32]) -> String {
+    format!("rok.scan.{:016x}", table_hash(table))
+}
+
+fn table_hash(table: &[u32]) -> u64 {
     let bytes: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
-    format!("_Y{pkg}_gctype.{:016x}", fnv(&bytes))
+    fnv(&bytes)
 }
 
 /// The units of `module`, a program or library (not a REPL cell).

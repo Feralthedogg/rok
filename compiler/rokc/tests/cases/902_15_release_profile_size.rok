@@ -1,0 +1,39 @@
+// spec: 9.2.15
+// A release build for size: functions of identical code are folded and
+// symbols stripped, yet each still runs as itself through a function
+// value and a panic still names its location.
+// rokc-arg: -Os
+// expect-exit: 101
+// expect-stdout: 6 6 7
+// expect-stderr: thread 'main' panicked at tests/cases/902_15_release_profile_size.rok:30:9:
+// expect-stderr: past the end
+
+fn twice(n: i64) -> i64 {
+    n * 2
+}
+
+fn double(n: i64) -> i64 {
+    n * 2
+}
+
+fn more(n: i64) -> i64 {
+    n * 2 + 1
+}
+
+fn apply(f: fn(i64) -> i64, n: i64) -> i64 {
+    f(n)
+}
+
+fn check(xs: List<i64>, i: usize) -> i64 {
+    if i >= xs.len() {
+        // A located panic in a stripped binary.
+        panic("past the end");
+    }
+    xs[i]
+}
+
+fn main() {
+    let fs = [twice, double, more];
+    println(f"{apply(fs[0], 3)} {apply(fs[1], 3)} {apply(fs[2], 3)}");
+    check([1, 2], 2);
+}

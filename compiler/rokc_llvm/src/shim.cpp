@@ -484,6 +484,12 @@ void unswitch_nontrivial(int opt) {
 // with a summary.
 void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o,
               llvm::raw_ostream *thin) {
+  // As clang marks every function at -Os: the inliner and the code
+  // generator read the attribute, not the pipeline's level.
+  if (o.opt == 's')
+    for (llvm::Function &f : m)
+      if (!f.isDeclaration())
+        f.addFnAttr(llvm::Attribute::OptimizeForSize);
   if (llvm::Function *f = m.getFunction(ALLOC)) {
     f->addFnAttr(llvm::Attribute::get(
         m.getContext(), llvm::Attribute::AllocKind,

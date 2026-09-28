@@ -19,6 +19,7 @@ const LC_DYSYMTAB: u32 = 0xb;
 const LC_BUILD_VERSION: u32 = 0x32;
 const N_SECT: u8 = 0xe;
 const N_EXT: u8 = 0x1;
+const N_PEXT: u8 = 0x10;
 const N_WEAK_DEF: u16 = 0x80;
 const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
 const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
@@ -234,7 +235,11 @@ pub fn write(obj: &Obj) -> Vec<u8> {
             Some((sec, off, _)) => {
                 let k = sect_index.get(&sec).copied().unwrap_or(0);
                 let base = outs.get(k as usize - 1).map_or(0, |o| o.addr);
-                let ext = if s.global { N_EXT } else { 0 };
+                let ext = match (s.global, s.hidden) {
+                    (true, true) => N_EXT | N_PEXT,
+                    (true, false) => N_EXT,
+                    (false, _) => 0,
+                };
                 let desc = if s.weak { N_WEAK_DEF } else { 0 };
                 (N_SECT | ext, k, desc, base + u64::from(off))
             }

@@ -781,9 +781,10 @@ impl Emitter {
         for (i, words) in self.gc_types.iter().enumerate().skip(pre) {
             let list = words.iter().map(u32::to_string).collect::<Vec<_>>();
             let n = words.len();
+            let table = crate::units::scan_symbol(words);
             let _ = writeln!(
                 self.out,
-                "  llvm.mlir.global internal constant @rok.scan{i}(dense<[{}]> : tensor<{n}xi32>) {{addr_space = 0 : i32}} : !llvm.array<{n} x i32>",
+                "  llvm.mlir.global weak_odr hidden constant @{table}(dense<[{}]> : tensor<{n}xi32>) {{addr_space = 0 : i32}} : !llvm.array<{n} x i32>",
                 list.join(", ")
             );
             let id = self.gc_type_base() + i as u32;
@@ -796,7 +797,7 @@ impl Emitter {
             }
             let _ = write!(
                 calls,
-                "    %t{i} = arith.constant {id} : i32\n    %s{i} = llvm.mlir.addressof @rok.scan{i} : !llvm.ptr\n    func.call @rok_gc_register_type(%t{i}, %s{i}) : (i32, !llvm.ptr) -> ()\n"
+                "    %t{i} = arith.constant {id} : i32\n    %s{i} = llvm.mlir.addressof @{table} : !llvm.ptr\n    func.call @rok_gc_register_type(%t{i}, %s{i}) : (i32, !llvm.ptr) -> ()\n"
             );
             self.needs.insert("rok_gc_register_type");
         }

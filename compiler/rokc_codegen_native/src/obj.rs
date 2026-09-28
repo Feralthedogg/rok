@@ -89,6 +89,9 @@ pub struct Sym {
     pub def: Option<(Sect, u32, u32)>,
     pub global: bool,
     pub weak: bool,
+    /// Global within the link only (Mach-O private extern, ELF hidden;
+    /// a COFF image exports nothing unasked).
+    pub hidden: bool,
 }
 
 /// A code range of a function (unwind info, debug info).
@@ -152,6 +155,54 @@ impl Obj {
     }
 
     /// The symbol named `name` (undefined until `define`d).
+    /// Drop the undefined symbols no relocation refers to: what was
+    /// declared but never called (a REPL cell declares every function
+    /// earlier cells have).
+    pub fn drop_unreferenced(&mut self) {
+        let refs = |r: &Reloc| r.kind != RelKind::SecOff32;
+        let mut keep: Vec<bool> = self.syms.iter().map(|s| s.def.is_some()).collect();
+        for s in self.sects.values().chain(self.extra.iter().map(|e| &e.3)) {
+            for r in s.relocs.iter().filter(|r| refs(r)) {
+                keep[r.sym as usize] = true;
+            }
+        }
+        let mut map = vec![SymId::MAX; self.syms.len()];
+        let mut n = 0;
+        for (i, k) in keep.iter().enumerate() {
+            if *k {
+                map[i] = n;
+                n += 1;
+            }
+        }
+        if n as usize == self.syms.len() {
+            return;
+        }
+        let mut i = 0;
+        self.syms.retain(|_| {
+            i += 1;
+            keep[i - 1]
+        });
+        let sects = self.sects.values_mut();
+        for s in sects.chain(self.extra.iter_mut().map(|e| &mut e.3)) {
+            for r in s.relocs.iter_mut().filter(|r| refs(r)) {
+                r.sym = map[r.sym as usize];
+            }
+        }
+        for f in &mut self.fns {
+            f.sym = map[f.sym as usize];
+        }
+        self.by_name.retain(|_, s| keep[*s as usize]);
+        for s in self.by_name.values_mut().chain(self.strings.values_mut()) {
+            *s = map[*s as usize];
+        }
+    }
+
+    /// Some code so far refers to `name` (or defines it).
+    #[must_use]
+    pub fn named(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
     pub fn sym(&mut self, name: &str) -> SymId {
         if let Some(s) = self.by_name.get(name) {
             return *s;
@@ -161,6 +212,7 @@ impl Obj {
             def: None,
             global: true,
             weak: false,
+            hidden: false,
         });
         let id = self.syms.len() as SymId - 1;
         self.by_name.insert(name.to_owned(), id);

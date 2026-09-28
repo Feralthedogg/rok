@@ -96,7 +96,10 @@ build options:
   --target=<target>            a built-in target (--print target-list) or
                                a custom one's <name>.rokon file
   --release                    optimized build (same as -O2)
-  -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0)
+  -O0 | -O1 | -O2 | -O3 | -Os  optimization level (default -O0); -O2 / -O3 / -Os
+                               build the release profile (no debug info, code
+                               folded, symbols stripped), the others the
+                               debug profile (debug info)
   -C overflow-checks[=yes|no]  integer overflow panics (default: on at -O0)
   -C backend=native|llvm       code generator (default: native at -O0, else LLVM)
   -C target-cpu=<cpu>|native   build for that CPU instead of the target's
@@ -153,8 +156,9 @@ build options:
   --target-dir <dir>           instead of the package's target/ (without a
                                package: the system temp directory's
                                rokc-target/)
-  -g, --debug                  DWARF debug info (macOS: a .dSYM next to the
-                               executable)
+  -g                           debug info in a release build too (a debug
+                               build always has it; macOS: a .dSYM next to
+                               the executable)
   --keep                       keep the temporary build directory
 
 check options:  --check-library (check every library body, reached or not)
@@ -398,7 +402,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             }
             "-C" | "--codegen" => codegen_option(&mut a, &value(&name, inline, &mut it)),
             "--keep" => a.opts.keep_temps = true,
-            "-g" | "--debug" => a.opts.debug = true,
+            "-g" => a.opts.debug = true,
             "--check" => a.check = true,
             "--check-library" => a.check_library = true,
             "--std" => a.std = true,
@@ -455,6 +459,12 @@ fn parse_args(raw: Vec<String>) -> Args {
     }
     if a.cmd.is_empty() && a.print.is_none() {
         usage_error("missing command");
+    }
+    // A `debug` profile build's executable or archive carries debug
+    // info; `-g` adds it to a `release` one (9.2.15).
+    let output = matches!(a.cmd.as_str(), "build" | "run" | "test") && a.emit.is_empty();
+    if output && !a.opts.release() {
+        a.opts.debug = true;
     }
     let mut spec = TargetSpec::resolve(a.target.as_deref()).unwrap_or_else(|e| fail(&e));
     spec.set_cpu(
@@ -1065,8 +1075,7 @@ fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
     if a.target.is_some() {
         dir.push(&a.spec().name);
     }
-    let release = matches!(a.opts.opt_level.as_str(), "2" | "3" | "s");
-    dir.join(if release { "release" } else { "debug" })
+    dir.join(if a.opts.release() { "release" } else { "debug" })
 }
 
 /// The file name of executable `name` for the build's target.

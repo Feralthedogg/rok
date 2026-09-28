@@ -151,6 +151,14 @@ impl Profile {
     }
 }
 
+impl BuildOptions {
+    /// The `release` profile (spec 9.2.15): `-O2`, `-O3` or `-Os`.
+    #[must_use]
+    pub fn release(&self) -> bool {
+        matches!(self.opt_level.as_str(), "2" | "3" | "s")
+    }
+}
+
 impl Default for BuildOptions {
     fn default() -> Self {
         Self {
@@ -201,6 +209,18 @@ impl TempDir {
             }
         }
         Err(err("cannot create a unique temporary directory".to_owned()))
+    }
+
+    /// `.<name>.objs` beside the output `out`, made anew: the same
+    /// path in every build of `out`.
+    pub fn beside(out: &Path, keep: bool) -> Result<Self, RokDiagnostic> {
+        let mut name = std::ffi::OsString::from(".");
+        name.push(out.file_name().unwrap_or_default());
+        name.push(".objs");
+        let path = out.with_file_name(name);
+        let _ = std::fs::remove_dir_all(&path);
+        private_dir(&path).map_err(|e| err(format!("cannot create {}: {e}", path.display())))?;
+        Ok(Self { path, keep })
     }
 
     #[must_use]
@@ -336,7 +356,9 @@ pub fn link_executable(
     } else {
         llvm(module, sources, opts, rokc_llvm::Emit::Obj, 0)?.0
     };
-    let tmp = TempDir::new(opts.keep_temps)?;
+    // A Mach-O debug map names the objects (dsymutil reads them before
+    // they go): the same names in every build.
+    let tmp = TempDir::beside(out, opts.keep_temps)?;
     let mut paths = Vec::new();
     for (i, o) in objects.iter().enumerate() {
         let p = tmp.path().join(format!("module{i}.o"));
@@ -565,9 +587,7 @@ pub fn link_object(
         if let Some(o) = origin {
             link.arg(format!("-Wl,-rpath,{o}"));
         }
-        if opts.debug {
-            link.arg("-g");
-        }
+        link.args(cc_profile_args(t, opts));
         // Apple's clang links for the machine it runs as (not rokc's,
         // under Rosetta) unless told.
         if !t.is_host() || apple {
@@ -621,6 +641,7 @@ pub fn link_object(
         if let Some(o) = origin {
             inputs.extend(["-rpath".into(), o.into()]);
         }
+        inputs.extend(release_link_args(t, opts).into_iter().map(OsString::from));
         let t = &*entry_model(t, wit);
         rokc_diagnostic::time("link", || {
             rokc_llvm::link_executable(t, &inputs, out, true, opts.libc.as_deref())
@@ -647,6 +668,35 @@ pub fn link_object(
             .map_err(|e| err(format!("{}: {e}", out.display())))?;
     }
     Ok(())
+}
+
+/// lld's arguments of a `release` profile link (9.2.15): identical code
+/// folded (`safe`: not code whose address an object marks as taken,
+/// all of an object that marks none), and without `-g` no symbols but
+/// what the loader needs. A COFF link folds without `/debug` already;
+/// a wasm module keeps its name section.
+fn release_link_args(t: &TargetSpec, opts: &BuildOptions) -> Vec<&'static str> {
+    let strip = !opts.debug;
+    match t.object_format {
+        _ if !opts.release() => Vec::new(),
+        ObjectFormat::MachO if strip => vec!["--icf=safe", "-x", "-no_exported_symbols"],
+        ObjectFormat::Elf if strip => vec!["--icf=safe", "--strip-all"],
+        ObjectFormat::MachO | ObjectFormat::Elf => vec!["--icf=safe"],
+        _ => Vec::new(),
+    }
+}
+
+/// The C compiler driver's (`ROK_CC`) arguments of the profile: `-g`,
+/// or a release link's stripped symbols (`release_link_args`; the
+/// system linker folds code its own way).
+fn cc_profile_args(t: &TargetSpec, opts: &BuildOptions) -> &'static [&'static str] {
+    match t.object_format {
+        _ if opts.debug => &["-g"],
+        _ if !opts.release() => &[],
+        ObjectFormat::MachO => &["-Wl,-x,-no_exported_symbols"],
+        ObjectFormat::Elf => &["-s"],
+        _ => &[],
+    }
 }
 
 /// `wasm-component-ld`'s arguments for the WIT of `ffi::wit` (stdlib

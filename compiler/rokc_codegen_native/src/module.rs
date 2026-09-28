@@ -358,8 +358,9 @@ fn glue_code(
         let lazy = pkgs.lazy_statics.get(&s.name).cloned();
         if prebuilt_static(&s.name) {
             // An earlier REPL cell's `.init` stays to itself (a private
-            // copy here).
-            if let Some(init) = lazy {
+            // copy here), made only when this object's code reads the
+            // static.
+            if let Some(init) = lazy.filter(|_| ctx.obj.named(&format!("{name}.init"))) {
                 let state = ctx.sym(&format!("{name}.state"));
                 let init = ctx.sym(&init);
                 let f_sym = ctx.sym(&format!("{name}.init"));
@@ -430,8 +431,11 @@ fn glue_code(
     for i in pre_tables..ctx.gc_types.len() {
         let words = ctx.gc_types[i].clone();
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let sym = ctx.sym(&format!("rok.scan{i}"));
-        ctx.obj.define_data(sym, Sect::Const, &bytes, 4, false);
+        let sym = ctx.sym(&rokc_codegen_mlir::units::scan_symbol(&words));
+        ctx.obj.define_data(sym, Sect::Const, &bytes, 4, true);
+        let s = &mut ctx.obj.syms[sym as usize];
+        s.weak = true;
+        s.hidden = true;
         let id = gc_type_base + i as u32;
         tables.push((id, sym));
         // A unit build's glue: the id units read (`Lower::gc_tid`).

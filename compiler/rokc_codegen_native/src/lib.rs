@@ -143,6 +143,7 @@ fn finish(
     if let Some(d) = rokc_codegen_mlir::codegen_error(&c.errors) {
         return Err(d);
     }
+    c.obj.drop_unreferenced();
     Ok(Output {
         object: if c.obj.coff {
             coff::write(&c.obj)

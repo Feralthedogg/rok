@@ -461,20 +461,25 @@ g()
         "usize: 3\ni32: 11\ni32: 2\ni32: 12\n",
         "stderr: {stderr}"
     );
-    let counts: Vec<(usize, usize)> = stderr
+    let counts: Vec<(usize, usize, usize)> = stderr
         .lines()
         .filter_map(|l| l.strip_prefix("[repl] functions: "))
         .filter_map(|l| {
             let (new, old) = l.split_once(" compiled, ")?;
-            Some((new.parse().ok()?, old.split(' ').next()?.parse().ok()?))
+            let (old, bytes) = old.split_once(" from earlier cells; object: ")?;
+            let bytes = bytes.strip_suffix(" bytes")?;
+            Some((new.parse().ok()?, old.parse().ok()?, bytes.parse().ok()?))
         })
         .collect();
     assert_eq!(counts.len(), 5, "{stderr}");
-    // `l.len()`: `List`'s methods come from the first cell.
+    // `l.len()`: `List`'s methods come from the first cell, and its
+    // object holds only its own code (no copies of what it does not
+    // call, no symbols it does not use).
     assert!(
         counts[0].0 > 10 && counts[1].0 <= 3 && counts[1].1 > 10,
         "{stderr}"
     );
+    assert!(counts[1].2 < 4096, "{stderr}");
 }
 
 /// The library is collected (or its stage read back) once per session:

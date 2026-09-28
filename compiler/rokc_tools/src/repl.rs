@@ -760,9 +760,10 @@ impl Repl {
         };
         lap.mark("codegen");
         lap.note(&format!(
-            "functions: {} compiled, {} from earlier cells",
+            "functions: {} compiled, {} from earlier cells; object: {} bytes",
             out.fns.len(),
-            out.reused
+            out.reused,
+            ir.len()
         ));
         self.link_archives(&r);
         let value = self.load(&ir);

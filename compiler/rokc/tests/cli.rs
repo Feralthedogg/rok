@@ -170,13 +170,16 @@ fn unchanged_package_is_fresh() {
     put(app.join("src/main.rok"), "println(\"changed\");\n").unwrap();
     assert_eq!(built(&["run"]), (true, "changed\n".to_owned()));
     assert!(!built(&["build"]).0);
-    assert!(built(&["build", "-g"]).0);
+    // A debug build has debug info already.
     assert!(!built(&["build", "-g"]).0);
+    let other = ["build", "-C", "overflow-checks=no"];
+    assert!(built(&other).0);
+    assert!(!built(&other).0);
     // A file the package does not use is still one of its sources.
     put(app.join("src/other.rok"), "fn f() {}\n").unwrap();
-    assert!(built(&["build", "-g"]).0);
+    assert!(built(&other).0);
     put(app.join("target/debug").join(exe_name("app")), "").unwrap();
-    assert!(built(&["build", "-g"]).0);
+    assert!(built(&other).0);
     // A `#[path]` module outside the package is a source too.
     put(dir.join("shared.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
     put(
@@ -188,6 +191,56 @@ fn unchanged_package_is_fresh() {
     assert_eq!(built(&["run"]), (false, "1\n".to_owned()));
     put(dir.join("shared.rok"), "pub fn v() -> i32 {\n    2\n}\n").unwrap();
     assert_eq!(built(&["run"]), (true, "2\n".to_owned()));
+}
+
+/// 902.15: the `debug` profile has debug info and symbols; the `release`
+/// one neither (unless `-g`), and a panic still names its location.
+#[test]
+fn profiles_differ() {
+    let Some(env) = setup() else { return };
+    if TargetSpec::host().object_format == ObjectFormat::Coff {
+        return; // a PE executable has no symbol table either way
+    }
+    let dir = scratch("profiles");
+    let app = new_package(&dir, "app", false);
+    put(
+        app.join("src/main.rok"),
+        "use rok::std::env;\n#[inline(never)]\nfn distinctive_name(n: i64) -> i64 {\n    if n > 2 {\n        panic(\"too big\");\n    }\n    \
+         n\n}\n\nfn main() {\n    println(f\"{distinctive_name(env::args().len() as i64)}\");\n}\n",
+    )
+    .unwrap();
+    let exe = |profile: &str| app.join("target").join(profile).join(exe_name("app"));
+    let named = |p: &Path| {
+        let b = fs::read(p).unwrap();
+        b.windows(13).any(|w| w == b"distinctive_0")
+    };
+    assert_exit(&rokc(Some(&env), &app, &["build"]), 0);
+    assert!(named(&exe("debug")));
+    let mut dsym = exe("debug").into_os_string();
+    dsym.push(".dSYM");
+    let debug_info = if cfg!(target_vendor = "apple") {
+        Path::new(&dsym).is_dir()
+    } else {
+        let b = fs::read(exe("debug")).unwrap();
+        b.windows(11).any(|w| w == b".debug_info")
+    };
+    assert!(debug_info, "no debug info in the debug profile");
+    assert_exit(&rokc(Some(&env), &app, &["build", "--release"]), 0);
+    assert!(!named(&exe("release")));
+    let out = Command::new(exe("release"))
+        .args(["a", "b"])
+        .output()
+        .unwrap();
+    assert!(
+        text(&out.stderr).contains("panicked at src/main.rok:5:9:\ntoo big"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_exit(&rokc(Some(&env), &app, &["build", "--release", "-g"]), 0);
+    assert!(named(&exe("release")));
+    let out = rokc(Some(&env), &app, &["build", "--debug"]);
+    assert_exit(&out, 2);
+    assert!(text(&out.stderr).contains("unknown option `--debug`"));
 }
 
 /// A file `include_str!` / `include_bytes!` reads is an input: editing
