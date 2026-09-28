@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use rokc_diagnostic::{ErrorKind, Span};
 use rokc_ir_common::LocalId;
 
-use super::send_check::{Child, each_binding, each_child, root};
+use super::send_check::{Child, each_child, root};
 use super::{Env, LowerCtx};
 use crate::{HirBlock, HirExpr, HirExprKind, HirFunction, HirStmt, HirTy};
 
@@ -194,7 +194,7 @@ impl Walk<'_> {
             HirExprKind::Match { scrutinee, arms } => {
                 self.expr(scrutinee);
                 for a in arms {
-                    each_binding(&a.pat, &mut |l| {
+                    a.pat.each_binding(&mut |l| {
                         self.frame.remove(&l);
                     });
                     if let Some(g) = &a.guard {

@@ -340,7 +340,7 @@ impl Walk<'_> {
     }
 
     fn pattern(&mut self, p: &HirPattern) {
-        each_binding(p, &mut |l| self.declare(l, None));
+        p.each_binding(&mut |l| self.declare(l, None));
     }
 
     fn expr(&mut self, e: &HirExpr) {
@@ -402,25 +402,6 @@ impl Walk<'_> {
                 }
             }
         }
-    }
-}
-
-pub(super) fn each_binding(p: &HirPattern, out: &mut dyn FnMut(LocalId)) {
-    match p {
-        HirPattern::Binding { local, .. }
-        | HirPattern::SumVariant {
-            binder: Some(local),
-            ..
-        } => out(*local),
-        HirPattern::At { local, sub, .. } => {
-            out(*local);
-            each_binding(sub, out);
-        }
-        HirPattern::Or(ps) | HirPattern::Tuple(ps) => ps.iter().for_each(|p| each_binding(p, out)),
-        HirPattern::Struct { fields, .. } => fields.iter().for_each(|(_, p)| each_binding(p, out)),
-        HirPattern::EnumVariant { args, .. } => args.iter().for_each(|p| each_binding(p, out)),
-        HirPattern::SumMember { sub, .. } => each_binding(sub, out),
-        _ => {}
     }
 }
 
@@ -845,7 +826,7 @@ impl Flow<'_> {
                 let mut r = Set::new();
                 for a in arms {
                     let mut ls = Vec::new();
-                    each_binding(&a.pat, &mut |l| ls.push(l));
+                    a.pat.each_binding(&mut |l| ls.push(l));
                     for l in ls {
                         self.add(Node::Local(self.cur, l), &v);
                     }

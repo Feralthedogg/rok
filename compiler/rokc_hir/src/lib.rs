@@ -708,6 +708,26 @@ impl HirPattern {
             | Self::SumMember { .. } => false,
         }
     }
+
+    /// Each local the pattern binds.
+    pub fn each_binding(&self, out: &mut dyn FnMut(LocalId)) {
+        match self {
+            Self::Binding { local, .. }
+            | Self::SumVariant {
+                binder: Some(local),
+                ..
+            } => out(*local),
+            Self::At { local, sub, .. } => {
+                out(*local);
+                sub.each_binding(out);
+            }
+            Self::Or(ps) | Self::Tuple(ps) => ps.iter().for_each(|p| p.each_binding(out)),
+            Self::Struct { fields, .. } => fields.iter().for_each(|(_, p)| p.each_binding(out)),
+            Self::EnumVariant { args, .. } => args.iter().for_each(|p| p.each_binding(out)),
+            Self::SumMember { sub, .. } => sub.each_binding(out),
+            _ => {}
+        }
+    }
 }
 
 thread_local! {

@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use rokc_diagnostic::Span;
 use rokc_ir_common::{FunctionId, LocalId};
 
-use super::send_check::{Child, each_binding, each_child};
+use super::send_check::{Child, each_child};
 use super::{Env, LowerCtx};
 use crate::{HirBlock, HirExpr, HirExprKind, HirFunction, HirStmt, HirTy, LintHit};
 
@@ -676,7 +676,7 @@ impl<'h> Walk<'_, 'h> {
                 let mut out = None;
                 for a in arms {
                     self.cur = base.clone();
-                    each_binding(&a.pat, &mut |l| {
+                    a.pat.each_binding(&mut |l| {
                         self.store(&(l, Vec::new()), scrutinee, true);
                     });
                     if let Some(g) = &a.guard {
