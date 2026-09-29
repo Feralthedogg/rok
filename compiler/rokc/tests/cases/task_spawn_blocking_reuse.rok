@@ -1,0 +1,23 @@
+// expect-exit: 0
+// gc-stress: 50
+// expect-stdout: 2000 jobs on one thread true
+
+// A job's awaiter sees its result only once the lane thread is back on
+// the idle list: polled the moment the job has run (before any wake),
+// its next job still finds that thread instead of starting one.
+use rok::std::thread;
+
+let ids: Set<u64> = Set::new();
+let ran = Atomic::new(0);
+for i in 0..2000 {
+    let b = task::spawn_blocking(|| {
+        let id = thread::current().id().as_u64();
+        ran.store(i + 1);
+        id
+    });
+    while ran.load() != i + 1 {}
+    ids.insert(await b);
+}
+println(f"2000 jobs on one thread {ids.len() == 1}");
+
+// spec: std 218-task

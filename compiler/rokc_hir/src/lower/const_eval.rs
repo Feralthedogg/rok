@@ -1618,7 +1618,9 @@ fn binop(op: PrimOp, l: Value, r: Value, span: Span) -> R<Value> {
                 O::Rem => a % b,
                 O::Mod => {
                     let r = a % b;
-                    if r != 0.0 && (r < 0.0) != (b < 0.0) {
+                    if r == 0.0 {
+                        0.0f64.copysign(b)
+                    } else if (r < 0.0) != (b < 0.0) {
                         r + b
                     } else {
                         r

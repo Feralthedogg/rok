@@ -1,0 +1,32 @@
+// spec: std 203-ops §2.3 Modulo
+// expect-exit: 0
+// expect-stdout:
+// run: -0 0 0 -0 -1 0.5
+// inf: 0 -0 -inf NaN
+// f32: -0 0
+// const: -0 0
+// assign: -0
+// dot: [-0, 0]
+
+// `%%` gives its result the divisor's sign, a float zero included
+// (Python's `%`): `44.0 %% -4.0` is `-0.0`, `-44.0 %% 4.0` is `0.0`,
+// whether computed at run time or folded.
+fn m(a: f64, b: f64) -> f64 { a %% b }
+fn m32(a: f32, b: f32) -> f32 { a %% b }
+
+const C: f64 = 44.0 %% -4.0;
+const D: f64 = -44.0 %% 4.0;
+
+fn main() {
+    println(f"run: {m(44.0, -4.0)} {m(-44.0, 4.0)} {m(-0.0, 4.0)} {m(0.0, -4.0)} {m(43.0, -4.0)} {m(-7.5, 2.0)}");
+    let inf = f64::INFINITY;
+    println(f"inf: {m(0.0, inf)} {m(-0.0, -inf)} {m(5.0, -inf)} {m(1.0, 0.0)}");
+    println(f"f32: {m32(44.0f32, -4.0f32)} {m32(-44.0f32, 4.0f32)}");
+    println(f"const: {C} {D}");
+    let x = 12.0;
+    x %%= -3.0;
+    println(f"assign: {x}");
+    let l: List<f64> = [44.0, -44.0];
+    let r: List<f64> = [-4.0, 4.0];
+    println(f"dot: {l .%% r:?}");
+}

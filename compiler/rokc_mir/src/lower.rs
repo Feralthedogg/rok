@@ -2926,7 +2926,7 @@ impl<'a> FnBuilder<'a> {
     }
 
     /// `a %% b`: `r = a % b`, plus `b` when `r` is nonzero and its sign
-    /// differs from `b`'s (unsigned: `r`).
+    /// differs from `b`'s (unsigned: `r`). A float zero takes `b`'s sign.
     fn lower_floored_mod(
         &mut self,
         lhs: &HirExpr,
@@ -2943,9 +2943,17 @@ impl<'a> FnBuilder<'a> {
             lhs: a,
             rhs: b.clone(),
         };
-        let zero = match &op_ty {
-            MirTy::Prim(p) if p.is_signed_int() => ConstVal::Int { value: 0, ty: *p },
-            MirTy::Prim(p) if p.is_float() => ConstVal::Float { bits: 0, ty: *p },
+        let (zero, neg_zero) = match &op_ty {
+            MirTy::Prim(p) if p.is_signed_int() => (ConstVal::Int { value: 0, ty: *p }, None),
+            MirTy::Prim(p) if p.is_float() => {
+                let sign = if *p == IrPrimTy::F32 {
+                    1 << 31
+                } else {
+                    1 << 63
+                };
+                let z = |bits| ConstVal::Float { bits, ty: *p };
+                (z(0), Some(z(sign)))
+            }
             _ => return rem,
         };
         let r = self.fresh_local(op_ty.clone());
@@ -2988,7 +2996,7 @@ impl<'a> FnBuilder<'a> {
             PrimOp::Lt,
             op_ty.clone(),
             b.clone(),
-            zero,
+            zero.clone(),
             bool_ty.clone(),
         );
         let differ = bin(
@@ -2996,20 +3004,62 @@ impl<'a> FnBuilder<'a> {
             PrimOp::Ne,
             bool_ty.clone(),
             r_neg,
-            b_neg,
+            b_neg.clone(),
             bool_ty.clone(),
         );
-        let adjust = bin(self, PrimOp::BitAnd, bool_ty.clone(), nz, differ, bool_ty);
+        let adjust = bin(
+            self,
+            PrimOp::BitAnd,
+            bool_ty.clone(),
+            nz.clone(),
+            differ,
+            bool_ty,
+        );
         let then_bb = self.new_block();
         let merge_bb = self.new_block();
         let out = self.add_block_param(merge_bb, op_ty.clone());
+        let keep_bb = if neg_zero.is_some() {
+            self.new_block()
+        } else {
+            merge_bb
+        };
         self.terminate(Terminator::If {
             cond: adjust,
             then_bb,
             then_args: Vec::new(),
-            else_bb: merge_bb,
-            else_args: vec![r_op.clone()],
+            else_bb: keep_bb,
+            else_args: if neg_zero.is_some() {
+                Vec::new()
+            } else {
+                vec![r_op.clone()]
+            },
         });
+        // A float zero (`-0.0` from a negative `a`, `0.0` else): `b`'s sign.
+        if let Some(neg_zero) = neg_zero {
+            self.current = keep_bb;
+            let zero_bb = self.new_block();
+            self.terminate(Terminator::If {
+                cond: nz,
+                then_bb: merge_bb,
+                then_args: vec![r_op.clone()],
+                else_bb: zero_bb,
+                else_args: Vec::new(),
+            });
+            self.current = zero_bb;
+            let neg_bb = self.new_block();
+            self.terminate(Terminator::If {
+                cond: b_neg,
+                then_bb: neg_bb,
+                then_args: Vec::new(),
+                else_bb: merge_bb,
+                else_args: vec![zero],
+            });
+            self.current = neg_bb;
+            self.terminate(Terminator::Goto {
+                target: merge_bb,
+                args: vec![Operand::Const(neg_zero)],
+            });
+        }
         self.current = then_bb;
         let sum = bin(self, PrimOp::Add, op_ty.clone(), r_op, b, op_ty);
         self.terminate(Terminator::Goto {
