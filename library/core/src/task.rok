@@ -399,6 +399,7 @@ fn executor() -> Pool {
 impl Pool {
     fn start() -> Pool {
         unsafe {
+            let mode = rok_sched_mode();
             let pool = Pool {
                 workers: List::new(),
                 injector: queue_new(),
@@ -413,8 +414,8 @@ impl Pool {
                 monitor_id: buf_new(1),
                 driver_id: buf_new(1),
                 solo: rok_cpu_count() == 0,
-                pinned: (rok_sched_mode() & 1u32) != 0u32,
-                dynamic: (rok_sched_mode() & 2u32) != 0u32,
+                pinned: (mode & 1u32) != 0u32,
+                dynamic: (mode & 2u32) != 0u32,
             };
             let n = rok_sched_workers();
             pool.signal[ACTIVE] = n as i32;

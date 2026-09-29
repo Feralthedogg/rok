@@ -333,8 +333,8 @@ pub extern "C" fn rok_cpu_count() -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_sched_workers() -> usize {
     let n = rok_cpu_count();
-    match rokr_gc::env_num(c"ROK_WORKERS") {
-        Some(w) if w > 0 && n > 0 => usize::try_from(w).unwrap_or(usize::MAX),
+    match rokr_common::env_num(c"ROK_WORKERS", true) {
+        Some(w) if n > 0 => usize::try_from(w).unwrap_or(usize::MAX),
         _ => n,
     }
 }
@@ -344,7 +344,7 @@ pub extern "C" fn rok_sched_workers() -> usize {
 /// `ROK_DYNAMIC_WORKERS=1`).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_sched_mode() -> u32 {
-    let on = |name: &core::ffi::CStr| rokr_gc::env_num(name).is_some_and(|v| v != 0);
+    let on = rokr_common::env_flag;
     u32::from(on(c"ROK_THREAD_PER_CORE")) | (u32::from(on(c"ROK_DYNAMIC_WORKERS")) << 1)
 }
 

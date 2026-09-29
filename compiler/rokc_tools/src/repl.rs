@@ -105,11 +105,7 @@ struct Lap(Option<std::time::Instant>);
 
 impl Lap {
     fn start() -> Self {
-        Self(
-            std::env::var_os("ROK_REPL_TIME")
-                .is_some_and(|v| !v.is_empty() && v != "0")
-                .then(std::time::Instant::now),
-        )
+        Self(rokc_core::env_flag("ROK_REPL_TIME").then(std::time::Instant::now))
     }
 
     fn note(&self, what: &str) {

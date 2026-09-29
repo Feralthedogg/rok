@@ -4540,3 +4540,41 @@ fn tls_interop_openssl() {
         "{report}"
     );
 }
+
+/// A compiler knob (9.1.7, 9.9.5) set to a value outside its accepted
+/// ones warns once on stderr and keeps its default.
+// spec: §9.1.7 §9.9.5
+#[test]
+fn env_knob_bad_value_warns() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("env-knob");
+    let lib = new_package(&dir, "knobs", true);
+    let out = Command::new(ROKC)
+        .current_dir(&lib)
+        .env("ROK_HOME", workspace())
+        .env("ROK_BACKEND", "gcc")
+        .env("ROKC_VERBOSE", "yes")
+        .env("ROK_TIME_PASSES", "on")
+        .env("ROKC_INCR_VERIFY", "true")
+        .env("ROKC_NUM_JOBS", "0")
+        .args(["test", "-q", "--rokr"])
+        .arg(&env.rokr)
+        .output()
+        .unwrap();
+    assert_exit(&out, 0);
+    let err = text(&out.stderr);
+    let warnings: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("rokc: warning: "))
+        .collect();
+    assert_eq!(
+        warnings,
+        [
+            "rokc: warning: ignoring ROK_BACKEND=gcc (expected native|llvm)",
+            "rokc: warning: ignoring ROKC_VERBOSE=yes (expected 0|1)",
+            "rokc: warning: ignoring ROK_TIME_PASSES=on (expected 0|1)",
+            "rokc: warning: ignoring ROKC_INCR_VERIFY=true (expected 0|1)",
+            "rokc: warning: ignoring ROKC_NUM_JOBS=0 (expected a positive number)",
+        ]
+    );
+}

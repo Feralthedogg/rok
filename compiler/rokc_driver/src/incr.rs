@@ -445,8 +445,7 @@ pub fn bodies(i: std::sync::Arc<Incr>, files: &rokc_diagnostic::SourceMap) -> ro
 /// with them, and the two must agree; the check of the second against
 /// the first (a difference is an error of the build).
 pub fn verify() -> Option<fn(&rokc_hir::HirModule, &mut rokc_hir::HirModule)> {
-    let on = std::env::var_os("ROKC_INCR_VERIFY").is_some_and(|v| !v.is_empty() && v != "0");
-    on.then_some(check)
+    rokc_core::env_flag("ROKC_INCR_VERIFY").then_some(check)
 }
 
 fn check(clean: &rokc_hir::HirModule, incr: &mut rokc_hir::HirModule) {

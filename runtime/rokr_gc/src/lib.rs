@@ -76,7 +76,8 @@
 //! marks concurrently / none does), `ROK_GC_STATS=1` (counts, pause
 //! times, blocks and bytes moved, full-collection pauses and marker CPU
 //! to stderr at exit), `ROK_GC_LOG=1` (a line per collection, [`Pause`])
-//! and `ROK_HEAP_DUMP=on_oom` ([`heap_dump`]).
+//! and `ROK_HEAP_DUMP=on_oom` ([`heap_dump`]). Any other value warns
+//! and reads as the default ([`rokr_common::env_knob`]).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
 //! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` on
@@ -112,7 +113,7 @@ use rokr_common::object_header::{
     FLAG_SATB, FLAG_SCANNED, FLAG_STICKY, FLAG_UNLOGGED, FLAG_WIPE, HEADER_ALIGN, HEADER_SIZE,
     ObjectHeader,
 };
-use rokr_common::{fatal, sys};
+use rokr_common::{env_choice, env_flag, env_num, fatal, sys};
 
 mod concurrent;
 pub mod world;
@@ -586,22 +587,22 @@ fn configure(h: &mut Heap) {
         return;
     }
     h.configured = true;
-    h.stress = env_num(c"ROK_GC_STRESS").unwrap_or(0);
-    h.evac_always = env_str(c"ROK_GC_EVAC") == b"always";
-    h.concurrent = match env_str(c"ROK_GC_CONCURRENT") {
-        b"always" => Concurrent::Always,
-        b"off" => Concurrent::Off,
+    h.stress = env_num(c"ROK_GC_STRESS", false).unwrap_or(0);
+    h.evac_always = env_choice(c"ROK_GC_EVAC", "always").is_some();
+    h.concurrent = match env_choice(c"ROK_GC_CONCURRENT", "auto|always|off") {
+        Some("always") => Concurrent::Always,
+        Some("off") => Concurrent::Off,
         _ => Concurrent::Auto,
     };
     // One thread: no marker thread to run beside the mutator.
     if cfg!(rok_solo) {
         h.concurrent = Concurrent::Off;
     }
-    if env_num(c"ROK_GC_STATS").is_some_and(|v| v != 0) {
+    if env_flag(c"ROK_GC_STATS") {
         sys::atexit(print_stats);
     }
-    h.log = env_num(c"ROK_GC_LOG").is_some_and(|v| v != 0);
-    if env_str(c"ROK_HEAP_DUMP") == b"on_oom" {
+    h.log = env_flag(c"ROK_GC_LOG");
+    if env_choice(c"ROK_HEAP_DUMP", "on_oom").is_some() {
         rokr_common::set_oom_hook(heap_dump);
     }
 }
@@ -614,36 +615,6 @@ impl core::fmt::Write for Stderr {
         // SAFETY: `s` is valid for its own length.
         unsafe { rokr_common::write_stderr(s.as_ptr(), s.len()) };
         Ok(())
-    }
-}
-
-/// The bytes of env var `name` (empty if unset).
-fn env_str(name: &core::ffi::CStr) -> &'static [u8] {
-    // SAFETY: `name` is NUL-terminated; getenv's result is null or
-    // NUL-terminated (read once, before any thread may set it).
-    unsafe {
-        let p = libc::getenv(name.as_ptr());
-        if p.is_null() {
-            return b"";
-        }
-        core::ffi::CStr::from_ptr(p).to_bytes()
-    }
-}
-
-/// Decimal value of env var `name` (`Some(0)` if set but not a number).
-pub fn env_num(name: &core::ffi::CStr) -> Option<u64> {
-    // SAFETY: `name` is NUL-terminated; getenv's result is NUL-terminated.
-    unsafe {
-        let mut p = libc::getenv(name.as_ptr()).cast::<u8>().cast_const();
-        if p.is_null() {
-            return None;
-        }
-        let mut n = 0u64;
-        while (*p).is_ascii_digit() {
-            n = n.saturating_mul(10).saturating_add(u64::from(*p - b'0'));
-            p = p.add(1);
-        }
-        Some(n)
     }
 }
 

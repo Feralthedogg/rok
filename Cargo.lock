@@ -22,6 +22,7 @@ dependencies = [
 name = "rokc"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rokc_core",
  "rokc_diagnostic",
  "rokc_fmt",

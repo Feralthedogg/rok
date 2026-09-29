@@ -54,3 +54,72 @@ pub fn fatal(msg: &[u8]) -> ! {
     // SAFETY: plain libc call.
     unsafe { libc::exit(101) }
 }
+
+/// Env knob `name` as `parse` reads it; `None` if unset or empty. A
+/// value `parse` rejects is warned about on stderr, naming `expected`,
+/// and reads as unset (the default).
+pub fn env_knob<T>(
+    name: &core::ffi::CStr,
+    expected: &str,
+    parse: impl FnOnce(&[u8]) -> Option<T>,
+) -> Option<T> {
+    // SAFETY: `name` is NUL-terminated; getenv's result is null or
+    // NUL-terminated (read before any thread may set it).
+    let v = unsafe {
+        let p = libc::getenv(name.as_ptr());
+        if p.is_null() {
+            return None;
+        }
+        core::ffi::CStr::from_ptr(p).to_bytes()
+    };
+    if v.is_empty() {
+        return None;
+    }
+    let r = parse(v);
+    if r.is_none() {
+        write_all(
+            2,
+            &[
+                b"rok: warning: ignoring ",
+                name.to_bytes(),
+                b"=",
+                v,
+                b" (expected ",
+                expected.as_bytes(),
+                b")\n",
+            ],
+        );
+    }
+    r
+}
+
+/// Knob `name` set to one of `choices` (`a|b|c`): that choice.
+pub fn env_choice<'a>(name: &core::ffi::CStr, choices: &'a str) -> Option<&'a str> {
+    env_knob(name, choices, |v| {
+        choices.split('|').find(|c| c.as_bytes() == v)
+    })
+}
+
+/// Knob `name` = `0|1`.
+pub fn env_flag(name: &core::ffi::CStr) -> bool {
+    env_choice(name, "0|1") == Some("1")
+}
+
+/// Knob `name`: a decimal number, positive if `positive`.
+pub fn env_num(name: &core::ffi::CStr, positive: bool) -> Option<u64> {
+    let expected = if positive {
+        "a positive number"
+    } else {
+        "a number"
+    };
+    env_knob(name, expected, |v| {
+        let mut n = 0u64;
+        for &d in v {
+            if !d.is_ascii_digit() {
+                return None;
+            }
+            n = n.checked_mul(10)?.checked_add(u64::from(d - b'0'))?;
+        }
+        (n > 0 || !positive).then_some(n)
+    })
+}

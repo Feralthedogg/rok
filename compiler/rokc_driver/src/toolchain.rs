@@ -172,7 +172,7 @@ impl Default for BuildOptions {
             mlir_dialect_plugins: Vec::new(),
             mlir_pass_plugins: Vec::new(),
             mlir_passes: Vec::new(),
-            backend: std::env::var("ROK_BACKEND").ok().filter(|b| !b.is_empty()),
+            backend: rokc_core::env_choice("ROK_BACKEND", "native|llvm").map(str::to_owned),
             lib_dirs: Vec::new(),
             libs: Vec::new(),
             runtime_files: Vec::new(),

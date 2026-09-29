@@ -34,9 +34,14 @@ use std::time::{Duration, Instant};
 use common::{ROKC, Rng, par_map, workspace};
 
 const DEFAULT_SEED: u64 = 0x005e_ed0f_f022;
-/// A `rokc check` slower than this is a hang (a debug `rokc` checks a
-/// case in about a second).
-const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// CPU seconds after which a `rokc check` is a hang (a debug `rokc`
+/// checks a case in about a second): `RLIMIT_CPU`, so a loaded machine
+/// does not stretch it. Unix only.
+#[cfg(unix)]
+const CHECK_CPU_SECS: libc::rlim_t = 30;
+/// Wall-clock backstop for a hang that does not spin; the only limit
+/// where there is no `RLIMIT_CPU` (Windows).
+const CHECK_WALL: Duration = Duration::from_secs(300);
 /// An in-process input slower than this is a hang.
 const IN_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -616,14 +621,27 @@ struct Outcome {
 }
 
 fn run_check(src: &str) -> Outcome {
-    let mut child = Command::new(ROKC)
-        .args(["-q", "--color=never", "check", "-"])
+    let mut cmd = Command::new(ROKC);
+    cmd.args(["-q", "--color=never", "check", "-"])
         .env("ROK_HOME", workspace())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn rokc");
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    // SAFETY: getrlimit / setrlimit are async-signal-safe.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+            let mut r: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_CPU, &mut r) == 0 {
+                r.rlim_cur = CHECK_CPU_SECS.min(r.rlim_max);
+                if libc::setrlimit(libc::RLIMIT_CPU, &r) == 0 {
+                    return Ok(());
+                }
+            }
+            Err(std::io::Error::last_os_error())
+        });
+    }
+    let mut child = cmd.spawn().expect("spawn rokc");
     let mut stdin = child.stdin.take().unwrap();
     let text = src.to_owned();
     let writer = thread::spawn(move || {
@@ -641,7 +659,7 @@ fn run_check(src: &str) -> Outcome {
         if let Some(st) = child.try_wait().unwrap() {
             break Some(st);
         }
-        if start.elapsed() > CHECK_TIMEOUT {
+        if start.elapsed() > CHECK_WALL {
             let _ = child.kill();
             let _ = child.wait();
             timed_out = true;
@@ -649,6 +667,12 @@ fn run_check(src: &str) -> Outcome {
         }
         thread::sleep(Duration::from_millis(5));
     };
+    // The kernel ends a child past its CPU limit with SIGXCPU.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        timed_out |= status.and_then(|s| s.signal()) == Some(libc::SIGXCPU);
+    }
     let _ = writer.join();
     let stderr = String::from_utf8_lossy(&reader.join().unwrap()).into_owned();
     Outcome {

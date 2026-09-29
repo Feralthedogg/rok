@@ -25,5 +25,9 @@ rokc_parser = { workspace = true }
 rokc_rokon = { workspace = true }
 rokc_target = { workspace = true }
 
+[target.'cfg(unix)'.dev-dependencies]
+# tests/fuzz.rs: the CPU limit of a checked `rokc`.
+libc = { workspace = true }
+
 [lints]
 workspace = true

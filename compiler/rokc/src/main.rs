@@ -480,7 +480,7 @@ fn parse_args(raw: Vec<String>) -> Args {
         };
         a.opts.profile = Profile::CsGenerate(p.clone(), g);
     }
-    if std::env::var_os("ROKC_VERBOSE").is_some_and(|v| !v.is_empty() && v != "0") {
+    if rokc_core::env_flag("ROKC_VERBOSE") {
         a.verbose = a.verbose.max(1);
     }
     a
@@ -1403,7 +1403,11 @@ fn cmd_test(mut a: Args) {
     finished(&a, started);
     let threads = a
         .threads
-        .or_else(|| std::env::var("ROKC_NUM_JOBS").ok()?.parse().ok())
+        .or_else(|| {
+            rokc_core::env_knob("ROKC_NUM_JOBS", "a positive number", |v| {
+                v.parse().ok().filter(|&n| n > 0)
+            })
+        })
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
     let ok = test_runner::run(
         &exe,

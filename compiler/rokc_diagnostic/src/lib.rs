@@ -49,9 +49,7 @@ impl Span {
 #[must_use]
 pub fn time_passes() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("ROK_TIME_PASSES").is_some_and(|v| !v.is_empty() && v != "0")
-    })
+    *ON.get_or_init(|| rokc_core::env_flag("ROK_TIME_PASSES"))
 }
 
 /// Run `f` as pass `what`, timed under `ROK_TIME_PASSES`.

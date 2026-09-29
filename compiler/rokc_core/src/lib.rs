@@ -25,6 +25,41 @@ pub fn rok_home() -> Option<PathBuf> {
     Some(user_home()?.join(".rok"))
 }
 
+/// Env knob `name` as `parse` reads it; `None` if unset or empty. A
+/// value `parse` rejects is warned about on stderr (once per knob),
+/// naming `expected`, and reads as unset (the default).
+pub fn env_knob<T>(
+    name: &'static str,
+    expected: &str,
+    parse: impl FnOnce(&str) -> Option<T>,
+) -> Option<T> {
+    static WARNED: std::sync::Mutex<std::collections::BTreeSet<&str>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    let v = std::env::var_os(name).filter(|v| !v.is_empty())?;
+    let r = v.to_str().and_then(parse);
+    if r.is_none()
+        && WARNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(name)
+    {
+        let v = v.to_string_lossy();
+        eprintln!("rokc: warning: ignoring {name}={v} (expected {expected})");
+    }
+    r
+}
+
+/// Knob `name` set to one of `choices` (`a|b|c`): that choice.
+pub fn env_choice(name: &'static str, choices: &'static str) -> Option<&'static str> {
+    env_knob(name, choices, |v| choices.split('|').find(|&c| c == v))
+}
+
+/// Knob `name` = `0|1`.
+#[must_use]
+pub fn env_flag(name: &'static str) -> bool {
+    env_choice(name, "0|1") == Some("1")
+}
+
 /// The user's home directory: `%USERPROFILE%` on Windows, else `$HOME`.
 #[must_use]
 pub fn user_home() -> Option<PathBuf> {
