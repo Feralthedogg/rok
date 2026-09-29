@@ -928,6 +928,9 @@ pub enum HirTy {
         args: Vec<HirTy>,
         ret: Box<HirTy>,
         env: Box<HirTy>,
+        /// It captures a `[ref x]` cell, which the creator keeps using:
+        /// never `Send` / `Sync` (spec 4.6.9).
+        shares: bool,
     },
     // What a function declared `throws (err) -> ok` returns: the
     // `{ is_err: bool, ok, err }` carrier (value-based errors, no

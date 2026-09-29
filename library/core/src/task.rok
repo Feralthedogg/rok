@@ -1693,6 +1693,9 @@ struct Parking {
     used: Atomic<bool>;
 }
 
+// `waiting` is reached only under `lock`.
+unsafe impl Sync for Parking {}
+
 static PARKING: Parking = Parking {
     lock: Mutex::new(0),
     waiting: Dict::<usize, List<Waker>>::new(),

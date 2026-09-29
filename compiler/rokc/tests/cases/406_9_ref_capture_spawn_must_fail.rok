@@ -1,0 +1,31 @@
+// spec: refs-lang §4.6.9
+// expect-error: 16:13: `[ref s]` can't be used in a closure that may run on another thread: both threads could change `s` at once (spec 4.6.9)
+// expect-error: help: write `let s = Mutex::new(s);` before the closure, capture `s` without `ref`, and use `using g = s.lock() { g.set(..); }`; or return the value from the closure instead
+// expect-error: 23:13: `[ref v]` can't be used in a closure that may run on another thread: both threads could change `v` at once (spec 4.6.9)
+// expect-error: help: write `let v = Mutex::new(v);` before the closure, capture `v` without `ref`, and use `using g = v.lock() { g.set(..); }`; or return the value from the closure instead
+// expect-error: 27:5: `[ref n]` can't be used in a closure that may run on another thread: both threads could change `n` at once (spec 4.6.9)
+// expect-error: help: write `let n = Atomic::new(n);` before the closure, capture `n` without `ref`, and use `n.load()` / `n.store(..)`; or return the value from the closure instead
+
+// A `[ref x]` cell is written by the closure and by the code that made
+// it, so it is never `Sync`: a `str` torn mid-write, or a sum's tag and
+// payload written apart, would be read as garbage.
+use rok::std::thread;
+
+fn main() {
+    let s = "a";
+    let t = thread::spawn([ref s] || {
+        for i in 0..100000 { s = if i % 2 == 0 { "a" } else { "bbbbbbbbbbbbbbbbbbbbbbbbbbbb" }; }
+        0
+    });
+    let n = 0usize;
+    for _ in 0..100000 { n += s.len(); }
+    let v: i64 | str = 0;
+    let u = thread::spawn([ref v] || {
+        for i in 0..200000 { if i % 2 == 0 { v = 0x4141414141i64; } else { v = "xyz"; } }
+        0
+    });
+    par::for_each([1, 2, 3], [ref n] |x: i32| { n += x as usize; });
+    try! t.join();
+    try! u.join();
+    println(f"{n > 0}");
+}

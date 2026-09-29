@@ -817,7 +817,7 @@ fn library_units(env: &Env, target: Option<&str>, opt: &str) {
     }
     put(
         a.join("src/lib.rok"),
-        "mod util;\n\nstatic NAMES: List<str> = [\"x\", \"yy\"];\n\n\
+        "mod util;\n\nstatic NAMES: [str; 2] = [\"x\", \"yy\"];\n\n\
          pub fn total(n: i64) -> i64 {\n    let t: i64 = 0;\n    for i in 0..n {\n        \
          t += util::weight(f\"p{i}\");\n    }\n    t + NAMES.len() as i64\n}\n",
     )

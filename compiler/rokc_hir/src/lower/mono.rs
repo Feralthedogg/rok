@@ -249,7 +249,7 @@ pub(super) fn ty_size(ty: &HirTy) -> usize {
         HirTy::Sum(p) | HirTy::Tuple(p) => p.iter().map(ty_size).sum(),
         HirTy::Array(e, _) => ty_size(e),
         HirTy::Fn(a, r, _) => a.iter().map(ty_size).sum::<usize>() + ty_size(r),
-        HirTy::Closure { args, ret, env } => {
+        HirTy::Closure { args, ret, env, .. } => {
             args.iter().map(ty_size).sum::<usize>() + ty_size(ret) + ty_size(env)
         }
         HirTy::Throws { ok, err } => ty_size(ok) + ty_size(err),
@@ -852,7 +852,7 @@ fn has_unknown(t: &HirTy) -> bool {
         HirTy::Sum(ts) | HirTy::Tuple(ts) => ts.iter().any(has_unknown),
         HirTy::Array(t, _) | HirTy::GcBuf(t) => has_unknown(t),
         HirTy::Fn(ps, r, _) => ps.iter().any(has_unknown) || has_unknown(r),
-        HirTy::Closure { args, ret, env } => {
+        HirTy::Closure { args, ret, env, .. } => {
             args.iter().any(has_unknown) || has_unknown(ret) || has_unknown(env)
         }
         HirTy::Throws { ok, err } => has_unknown(ok) || has_unknown(err),

@@ -6143,7 +6143,7 @@ pub(super) fn call_value(
             }
             (a, *r, None)
         }
-        HirTy::Closure { args, ret, env } => (args, *ret, Some(*env)),
+        HirTy::Closure { args, ret, env, .. } => (args, *ret, Some(*env)),
         HirTy::Unknown => {
             discard_args(ctx, args);
             return callee_h;

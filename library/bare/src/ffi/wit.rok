@@ -176,6 +176,9 @@ pub struct Table<T> {
     free: List<i32>;
 }
 
+// A component instance runs on one thread at a time.
+unsafe impl<T> Sync for Table<T> {}
+
 impl<T> Table<T> {
     pub fn new() -> Table<T> { Table { slots: List::new(), free: List::new() } }
 

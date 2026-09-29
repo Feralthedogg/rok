@@ -75,7 +75,7 @@ pub(super) fn has_var(ctx: &LowerCtx<'_>, t: &HirTy) -> bool {
         HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),
         HirTy::Array(e, _) | HirTy::GcBuf(e) => rec(e),
         HirTy::Fn(a, r, _) => a.iter().any(rec) || rec(r),
-        HirTy::Closure { args, ret, env } => args.iter().any(rec) || rec(ret) || rec(env),
+        HirTy::Closure { args, ret, env, .. } => args.iter().any(rec) || rec(ret) || rec(env),
         HirTy::Throws { ok, err } => rec(ok) || rec(err),
         _ => false,
     }
@@ -111,10 +111,16 @@ pub(super) fn zonk(ctx: &LowerCtx<'_>, t: &HirTy) -> HirTy {
         HirTy::Array(e, n) => HirTy::Array(Box::new(rec(e)), *n),
         HirTy::GcBuf(e) => HirTy::GcBuf(Box::new(rec(e))),
         HirTy::Fn(a, r, b) => HirTy::Fn(all(a), Box::new(rec(r)), b.clone()),
-        HirTy::Closure { args, ret, env } => HirTy::Closure {
+        HirTy::Closure {
+            args,
+            ret,
+            env,
+            shares,
+        } => HirTy::Closure {
             args: all(args),
             ret: Box::new(rec(ret)),
             env: Box::new(rec(env)),
+            shares: *shares,
         },
         HirTy::Throws { ok, err } => HirTy::Throws {
             ok: Box::new(rec(ok)),
@@ -259,7 +265,7 @@ fn zonk_has(ctx: &LowerCtx<'_>, t: &HirTy, v: usize) -> bool {
             HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),
             HirTy::Array(e, _) | HirTy::GcBuf(e) => rec(e),
             HirTy::Fn(a, r, _) => a.iter().any(rec) || rec(r),
-            HirTy::Closure { args, ret, env } => args.iter().any(rec) || rec(ret) || rec(env),
+            HirTy::Closure { args, ret, env, .. } => args.iter().any(rec) || rec(ret) || rec(env),
             HirTy::Throws { ok, err } => rec(ok) || rec(err),
             _ => false,
         }
@@ -310,10 +316,16 @@ pub(super) fn lower_let(
         expr::lower_block(&mut probe, &tail);
         // A closure's result is only what its body returns.
         match zonk(ctx, &open) {
-            HirTy::Closure { args, ret, env } if has_var(ctx, &ret) => HirTy::Closure {
+            HirTy::Closure {
+                args,
+                ret,
+                env,
+                shares,
+            } if has_var(ctx, &ret) => HirTy::Closure {
                 args,
                 ret: Box::new(HirTy::Unknown),
                 env,
+                shares,
             },
             HirTy::Fn(args, ret, b) if has_var(ctx, &ret) => {
                 HirTy::Fn(args, Box::new(HirTy::Unknown), b)
@@ -392,7 +404,9 @@ pub(super) fn drop_var_instances(structs: &mut [HirStructDef], enums: &mut [HirE
                 HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),
                 HirTy::Array(elem, _) | HirTy::GcBuf(elem) => rec(elem),
                 HirTy::Fn(params, ret, _) => params.iter().any(rec) || rec(ret),
-                HirTy::Closure { args, ret, env } => args.iter().any(rec) || rec(ret) || rec(env),
+                HirTy::Closure { args, ret, env, .. } => {
+                    args.iter().any(rec) || rec(ret) || rec(env)
+                }
                 HirTy::Throws { ok, err } => rec(ok) || rec(err),
                 _ => false,
             }

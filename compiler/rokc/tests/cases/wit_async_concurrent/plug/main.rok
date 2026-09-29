@@ -5,7 +5,7 @@ ffi::wit::export { "../src/wit/svc.wit" }
 use wasi::clocks::monotonic_clock;
 use rok::core::channel::{Sender, channel};
 
-static SIGNAL: List<Sender<u32>> = List::new();
+static SIGNAL: Mutex<List<Sender<u32>>> = Mutex::new([]);
 
 #[wit::export]
 async fn sleep_add(a: u32, ms: u32) -> u32 {
@@ -16,7 +16,7 @@ async fn sleep_add(a: u32, ms: u32) -> u32 {
 #[wit::export]
 async fn wait_signal() -> u32 {
     let (tx, rx) = channel::<u32>();
-    SIGNAL.push(tx);
+    using g = SIGNAL.lock() { g.get().push(tx); }
     match await rx.recv_async() {
         v: u32 => v,
         none => 0u32,
@@ -25,5 +25,5 @@ async fn wait_signal() -> u32 {
 
 #[wit::export]
 async fn signal(v: u32) {
-    try! SIGNAL[0].send(v);
+    using g = SIGNAL.lock() { try! g.get()[0].send(v); }
 }

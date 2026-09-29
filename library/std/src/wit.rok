@@ -111,6 +111,10 @@ struct Loop {
     active: List<bool>;
 }
 
+// A component instance runs on one thread at a time.
+#[cfg(target_os = "wasi")]
+unsafe impl Sync for Loop {}
+
 #[cfg(target_os = "wasi")]
 static LOOP: Loop = Loop {
     waiting: Dict::new(),

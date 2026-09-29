@@ -2,7 +2,7 @@
 // expect-stdout: 3 2 w
 // A static of a generic type is instantiated like any other use of it.
 struct W<T> { v: T; }
-static L: List<i32> = [1, 2, 3];
+static L: [i32; 3] = [1, 2, 3];
 static G: W<str> = W { v: "w" };
 
 fn main() {

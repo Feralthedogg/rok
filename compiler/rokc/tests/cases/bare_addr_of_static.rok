@@ -17,10 +17,10 @@ struct Pt { x: i64; y: i64; }
 
 static TABLE: [i32; 4] = [10, 20, 30, 40];
 static ORIGIN: Pt = Pt { x: 2, y: 9 };
-static NAMES: List<str> = make_names();
+static NAMES: [str; 3] = make_names();
 static SIX: i64 = six();
 
-fn make_names() -> List<str> {
+fn make_names() -> [str; 3] {
     return [f"{churn(3)}", "b", "c"];
 }
 
@@ -45,8 +45,8 @@ fn main() -> i32 {
     let py = addr_of(ORIGIN.y);
     println(f"{unsafe { px.read() }} {unsafe { py.read() }}");
 
-    // Lazy: the pointer comes after initialization; the list stays rooted.
-    let pn: Ptr<List<str>> = addr_of(NAMES);
+    // Lazy: the pointer comes after initialization; the strings stay rooted.
+    let pn: Ptr<[str; 3]> = addr_of(NAMES);
     churn(3000);
     let names = unsafe { pn.read() };
     churn(3000);

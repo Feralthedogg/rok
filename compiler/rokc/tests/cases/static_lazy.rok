@@ -19,7 +19,7 @@ extern "C" { fn rok_gc_collect(); }
 
 static COUNTER: Atomic<i64> = Atomic::new(0);
 static LOG: Mutex<List<i32>> = Mutex::new([]);
-static NAMES: List<str> = make_names();
+static NAMES: [str; 3] = make_names();
 static NOISY: i32 = noisy();
 
 fn noisy() -> i32 {
@@ -27,10 +27,10 @@ fn noisy() -> i32 {
     return 7;
 }
 
-fn make_names() -> List<str> {
-    let xs: List<str> = [];
+fn make_names() -> [str; 3] {
+    let xs: [str; 3] = ["", "", ""];
     let i = 0;
-    while i < 3 { xs.push(f"n{i}"); i += 1; }
+    while i < 3 { xs[i] = f"n{i}"; i += 1; }
     return xs;
 }
 

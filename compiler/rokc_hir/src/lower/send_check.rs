@@ -186,6 +186,8 @@ fn frame(
             .unwrap_or_else(|| "a temporary".to_owned())
     };
     let ty_of = |l: LocalId| f.locals.iter().find(|x| x.id == l).map(|x| &x.ty);
+    // A `[ref x]` cell: written by both sides, never `Sync` (spec 4.6.9).
+    let cell = |l: LocalId| f.locals.iter().any(|x| x.id == l && x.boxed);
     let lacks = |t: &HirTy, k: &str| {
         !matches!(
             t,
@@ -202,7 +204,7 @@ fn frame(
         .collect();
     let mut w = Walk {
         non_send_local: &|l| ty_of(l).is_some_and(non_send),
-        non_sync_local: &|l| ty_of(l).is_some_and(non_sync),
+        non_sync_local: &|l| cell(l) || ty_of(l).is_some_and(non_sync),
         non_send_ty: &non_send,
         env_params: &env_params,
         declared: Vec::new(),
@@ -243,6 +245,13 @@ fn frame(
         ),
     });
     let why_shared = w.shared.map(|l| {
+        if cell(l) {
+            let n = name(l);
+            return format!(
+                "it has a `[ref {n}]` capture, which the code that made it could change at the \
+                 same time (spec 4.6.9)"
+            );
+        }
         format!(
             "it captures `{}: {}`, which is not `Sync`{} (the spawner keeps its copy, spec \
              4.6.9)",

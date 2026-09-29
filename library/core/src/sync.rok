@@ -434,7 +434,8 @@ pub struct RwLock<T> {
     value: GcBuf<T>;
 }
 
-unsafe impl<T: Send> Sync for RwLock<T> {}
+// Readers share the value: it must be `Sync` too.
+unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
 impl<T> RwLock<T> {
     pub const fn new(value: T) -> RwLock<T> {

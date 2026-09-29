@@ -1,0 +1,16 @@
+// spec: refs-lang §5.3
+// expect-error: 9:1: a `static` is shared by every thread, so it can't be a `List<i32>`: two threads could change it at once (spec 5.3)
+// expect-error: help: write `static XS: Mutex<List<i32>> = Mutex::new([]);` and use it inside `using g = XS.lock() { .. }`
+
+// A `static` is reachable from every thread, so its type must be
+// `Sync`: two threads pushing to a static list at once corrupt it.
+use rok::std::thread;
+
+static XS: List<i32> = [];
+
+fn main() {
+    let t = thread::spawn(|| { XS.push(1); 0 });
+    XS.push(2);
+    try! t.join();
+    println(f"{XS.len()}");
+}

@@ -2332,6 +2332,7 @@ fn finish<'a>(
         functions[i].name = name;
     }
     check_type_bounds(&env);
+    check_statics_sync(&env, checked);
     rokc_diagnostic::time("hir send check", || {
         *env.auto_memo.borrow_mut() = Some(HashMap::new());
         super::send_check::check(&env, &functions);
@@ -4907,6 +4908,95 @@ fn check_type_bounds(env: &Env<'_>) {
                     );
                 }
             }
+        }
+    }
+}
+
+/// Spec 5.3: every thread reads a `static`, so its type is `Sync`.
+/// The error says what to write instead: the value in a `Mutex`, or a
+/// `Cell` of a number in an `Atomic`.
+fn check_statics_sync(env: &Env<'_>, programs: &[&Program]) {
+    let no_subst = HashMap::new();
+    let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
+    let sync = ctx.lang("sync_trait");
+    if sync.is_empty() {
+        return;
+    }
+    let text = |sp: Span| {
+        let (_, src) = env.sources.file(sp.file)?;
+        src.get(sp.start as usize..sp.end as usize)
+    };
+    for s in programs
+        .iter()
+        .flat_map(|p| &p.items)
+        .filter_map(|i| match i {
+            Item::Static(s) => Some(s),
+            _ => None,
+        })
+    {
+        let Some(ty) = env.statics.get(&s.name) else {
+            continue;
+        };
+        if ctx.has_trait(ty, sync) {
+            continue;
+        }
+        // `Cell<T>` / `RwLock<T>` around a `T`: the wrapper is replaced,
+        // with the argument of its `::new(..)`.
+        let wrapped = match ty {
+            HirTy::Struct(id) => {
+                let d = ctx.struct_def(*id);
+                let base = d.name.split("__").next().unwrap_or_default();
+                ["rok::core::sync::Cell", "rok::core::sync::RwLock"]
+                    .contains(&base)
+                    .then(|| d.generic_args.first().cloned())
+                    .flatten()
+                    .map(|t| (base == "rok::core::sync::Cell", t))
+            }
+            _ => None,
+        };
+        let arg = match s.value.as_ref().map(|v| &v.kind) {
+            Some(ExprKind::Call { args, .. }) if wrapped.is_some() && args.len() == 1 => {
+                match &args[0] {
+                    rokc_ast::CallArg::Positional(e) => text(e.span),
+                    _ => None,
+                }
+            }
+            _ => s
+                .value
+                .as_ref()
+                .and_then(|v| text(v.span))
+                .filter(|_| wrapped.is_none()),
+        }
+        .unwrap_or("..");
+        let name = leaf_name(&s.name);
+        let (inner, cell) = match &wrapped {
+            Some((cell, t)) => (t, *cell),
+            None => (ty, false),
+        };
+        let atomic = cell && matches!(inner, HirTy::Prim(p) if p.is_int() || *p == PrimTy::Bool);
+        let inner_name = ctx.ty_name(inner);
+        let help = if atomic {
+            format!(
+                "help: write `static {name}: Atomic<{inner_name}> = Atomic::new({arg});` and use \
+                 `{name}.load()` / `{name}.store(..)`"
+            )
+        } else {
+            format!(
+                "help: write `static {name}: Mutex<{inner_name}> = Mutex::new({arg});` and use it \
+                 inside `using g = {name}.lock() {{ .. }}`"
+            )
+        };
+        ctx.emit_error_at(
+            rokc_diagnostic::ErrorKind::Type,
+            s.span,
+            format!(
+                "a `static` is shared by every thread, so it can't be a `{}`: two threads could \
+                 change it at once (spec 5.3)",
+                ctx.ty_name(ty)
+            ),
+        );
+        if let Some(d) = env.sink.diagnostics.borrow_mut().last_mut() {
+            d.notes.push(help);
         }
     }
 }

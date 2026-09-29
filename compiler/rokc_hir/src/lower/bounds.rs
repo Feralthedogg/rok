@@ -69,7 +69,7 @@ pub(super) fn has_param(ctx: &LowerCtx<'_>, t: &HirTy) -> bool {
         HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),
         HirTy::Array(e, _) | HirTy::GcBuf(e) => rec(e),
         HirTy::Fn(a, r, _) => a.iter().any(rec) || rec(r),
-        HirTy::Closure { args, ret, env } => args.iter().any(rec) || rec(ret) || rec(env),
+        HirTy::Closure { args, ret, env, .. } => args.iter().any(rec) || rec(ret) || rec(env),
         HirTy::Throws { ok, err } => rec(ok) || rec(err),
         HirTy::AnyTrait(bs) => bs
             .iter()

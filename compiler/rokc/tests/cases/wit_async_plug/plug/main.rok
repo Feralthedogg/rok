@@ -7,7 +7,7 @@ use rok::bare::ffi::wit::ErrorContext;
 use rok::core::channel::{Receiver, channel};
 use rok::core::future::AsyncFuture;
 
-static DROPS: List<u32> = [0u32];
+static DROPS: Atomic<u32> = Atomic::new(0u32);
 
 #[wit::export]
 pub struct Counter {
@@ -31,7 +31,7 @@ impl Counter {
 
 impl rok::core::marker::Drop for Counter {
     fn drop(ref self) {
-        DROPS[0] = DROPS[0] + 1u32;
+        DROPS.fetch_add(1u32);
     }
 }
 
@@ -118,7 +118,7 @@ fn maybe(x: u32??) -> u32?? {
 }
 
 #[wit::export]
-fn drops() -> u32 { DROPS[0] }
+fn drops() -> u32 { DROPS.load() }
 
 #[wit::export]
 fn get() -> i32 { 7 }

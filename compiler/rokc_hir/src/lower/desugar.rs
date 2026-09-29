@@ -238,6 +238,7 @@ pub(super) fn lower_closure_expr(
             args: user_arg_tys,
             ret: Box::new(final_ret_ty),
             env: Box::new(env_ty_v),
+            shares: captures.iter().any(|c| c.3),
         },
         span,
     }

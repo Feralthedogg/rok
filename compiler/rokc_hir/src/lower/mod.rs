@@ -1997,6 +1997,21 @@ fn coerce(
         && (!ty_compatible(slot, &v.ty)
             || matches!(v.ty, HirTy::Closure { .. } if matches!(slot, HirTy::Fn(..))))
     {
+        if let (HirTy::Fn(_, _, want), Some((name, x))) = (slot, ctx.ref_capture(&v)) {
+            if !want.auto.is_empty() {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!(
+                        "`[ref {name}]` can't be used in a closure that may run on another \
+                         thread: both threads could change `{name}` at once (spec 4.6.9)"
+                    ),
+                );
+                if let Some(d) = ctx.env.sink.diagnostics.borrow_mut().last_mut() {
+                    d.notes.push(ref_capture_help(&name, &x));
+                }
+                return v;
+            }
+        }
         let hint = fn_mismatch_hint(slot, &v.ty);
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
@@ -2017,9 +2032,38 @@ fn coerce(
     v
 }
 
+/// What to write instead of a `[ref name]` capture (`x` its variable's
+/// type) in a closure that may run on another thread.
+fn ref_capture_help(name: &str, x: &HirTy) -> String {
+    let share = if matches!(x, HirTy::Prim(p) if p.is_int() || *p == PrimTy::Bool) {
+        format!(
+            "`let {name} = Atomic::new({name});` before the closure, capture `{name}` without \
+             `ref`, and use `{name}.load()` / `{name}.store(..)`"
+        )
+    } else {
+        format!(
+            "`let {name} = Mutex::new({name});` before the closure, capture `{name}` without \
+             `ref`, and use `using g = {name}.lock() {{ g.set(..); }}`"
+        )
+    };
+    format!("help: write {share}; or return the value from the closure instead")
+}
+
+/// A closure with a `[ref]` capture, or one capturing such a closure.
+fn holds_ref_cell(ty: &HirTy) -> bool {
+    match ty {
+        HirTy::Closure { env, shares, .. } => *shares || holds_ref_cell(env),
+        HirTy::Tuple(ts) => ts.iter().any(holds_ref_cell),
+        _ => false,
+    }
+}
+
 /// Why a function value does not fit a `fn` slot (`""`: no hint).
 fn fn_mismatch_hint(slot: &HirTy, ty: &HirTy) -> &'static str {
-    if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Closure { .. }) if *want != crate::FnBounds::default())
+    if matches!(slot, HirTy::Fn(_, _, want) if !want.auto.is_empty()) && holds_ref_cell(ty) {
+        " — the closure holds a `[ref ..]` capture, which the code that made it could change at \
+         the same time; share the value through a `Mutex` or an `Atomic` instead (spec 4.6.9)"
+    } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Closure { .. }) if *want != crate::FnBounds::default())
     {
         " — the closure's captures don't meet the `fn` type's bounds"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
@@ -3201,11 +3245,12 @@ impl<'a> LowerCtx<'a> {
             HirTy::Array(e, _) | HirTy::GcBuf(e) => rec(e),
             // A capture is a copy of a handle the creating thread keeps
             // using, so a closure that crosses threads shares every
-            // capture: each must be `Sync` too (a `[ref x]` cell is a
-            // `GcBuf<X>`, so `X: Sync` — spec 4.6.9).
-            HirTy::Closure { env, .. } => {
+            // capture: each must be `Sync` too. A `[ref x]` cell is
+            // written by both sides, so it is never `Sync` (spec 4.6.9).
+            HirTy::Closure { env, shares, .. } => {
                 let sync = self.lang("sync_trait");
-                rec(env)
+                !shares
+                    && rec(env)
                     && (key == sync || self.auto_trait(env, sync, depth, &mut AutoSeen::default()))
             }
             HirTy::Throws { ok, err } => rec(ok) && rec(err),
@@ -3280,6 +3325,15 @@ impl<'a> LowerCtx<'a> {
                 if self.env.opts_out(base, key) {
                     return String::new();
                 }
+                if base == "rok::core::sync::RwLock" {
+                    if let Some(t) = def.generic_args.first() {
+                        let t = self.ty_name(t);
+                        return format!(
+                            ": its readers could change the `{t}` inside at once; use \
+                             `Mutex<{t}>` and `.lock()` in place of `.read()` / `.write()`"
+                        );
+                    }
+                }
                 def.fields
                     .iter()
                     .find(|f| lacks(&f.ty))
@@ -3305,6 +3359,23 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
+    /// A closure value's first `[ref x]` capture: `x` and its type.
+    fn ref_capture(&self, value: &HirExpr) -> Option<(String, HirTy)> {
+        let HirExprKind::ClosureValue { env, .. } = &value.kind else {
+            return None;
+        };
+        let HirExprKind::Tuple { fields } = &env.kind else {
+            return None;
+        };
+        fields.iter().find_map(|f| {
+            let (HirExprKind::Local(l), HirTy::GcBuf(x)) = (&f.kind, &f.ty) else {
+                return None;
+            };
+            let local = self.locals.get(l.0 as usize).filter(|x| x.boxed)?;
+            Some((local.name.clone()?, (**x).clone()))
+        })
+    }
+
     /// For a closure that does not fit a `fn .. + Send` slot: which
     /// capture is not `Send` / `Sync`, and why.
     fn closure_bound_note(&self, value: &HirExpr) -> Option<String> {
@@ -3328,16 +3399,11 @@ impl<'a> LowerCtx<'a> {
                 .iter()
                 .find(|k| !self.auto_trait(&f.ty, k, 0, &mut AutoSeen::default()))?;
             let name = self.locals.get(local.0 as usize)?.name.clone()?;
-            // A `[ref x]` capture is a cell of `x`'s type.
-            let shown = match &f.ty {
-                HirTy::GcBuf(t) => t,
-                t => t,
-            };
             Some(format!(
                 "the closure captures `{name}` (type `{}`), which is not `{}`{}",
-                self.ty_name(shown),
+                self.ty_name(&f.ty),
                 leaf_name(key),
-                self.auto_trait_cause(shown, key, 0)
+                self.auto_trait_cause(&f.ty, key, 0)
             ))
         })
     }

@@ -732,14 +732,20 @@ pub(super) fn ty_mangle(ty: &HirTy) -> String {
         HirTy::OpenConst(n) => format!("Path_#{n}"),
         HirTy::Var(v) => format!("Path_#var_{v}"),
         HirTy::Param(v) => format!("Path_#param_{v}"),
-        HirTy::Closure { args, ret, env } => {
+        HirTy::Closure {
+            args,
+            ret,
+            env,
+            shares,
+        } => {
             let inner: Vec<String> = args.iter().map(ty_mangle).collect();
             format!(
-                "Closure{}of{}_to_{}_env{}",
+                "Closure{}of{}_to_{}_env{}{}",
                 args.len(),
                 inner.join("x"),
                 ty_mangle(ret),
-                ty_mangle(env)
+                ty_mangle(env),
+                if *shares { "_ref" } else { "" }
             )
         }
         HirTy::Throws { ok, err } => format!("Throws{}_or_{}", ty_mangle(ok), ty_mangle(err)),

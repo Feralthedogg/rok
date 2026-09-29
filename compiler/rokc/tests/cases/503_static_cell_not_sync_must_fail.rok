@@ -1,0 +1,18 @@
+// spec: refs-lang §5.3 §5.3.4
+// expect-error: 10:1: a `static` is shared by every thread, so it can't be a `Cell<i64>`: two threads could change it at once (spec 5.3)
+// expect-error: help: write `static C: Atomic<i64> = Atomic::new(0);` and use `C.load()` / `C.store(..)`
+// expect-error: 11:1: a `static` is shared by every thread, so it can't be a `Cell<str>`: two threads could change it at once (spec 5.3)
+// expect-error: help: write `static NAME: Mutex<str> = Mutex::new("a");` and use it inside `using g = NAME.lock() { .. }`
+
+// A `Cell` is for one thread; a `static` one is shared by all.
+use rok::std::thread;
+
+static C: Cell<i64> = Cell::new(0);
+static NAME: Cell<str> = Cell::new("a");
+
+fn main() {
+    let t = thread::spawn(|| { C.set(1); NAME.set("b"); 0 });
+    C.set(2);
+    try! t.join();
+    println(f"{C.get()} {NAME.get()}");
+}
