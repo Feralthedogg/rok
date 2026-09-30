@@ -2578,9 +2578,6 @@ struct LowerCtx<'a> {
     /// In a closure: locals holding a value capture (assigning one is an
     /// error, spec 4.6.4).
     value_captured: std::collections::HashSet<LocalId>,
-    /// Body `const`s (spec 5.2.2): the local naming one, and its value,
-    /// inlined at each read.
-    const_locals: HashMap<LocalId, HirExpr>,
     /// Set by a path call (`Tr::m(x)` / `Tr::m(ref x)`) whose first
     /// argument fills `self`: whether it was passed with `ref`. Taken by
     /// the argument lowering of that call.
@@ -2797,7 +2794,6 @@ impl<'a> LowerCtx<'a> {
             pending_cells: Vec::new(),
             pending_resums: Vec::new(),
             value_captured: std::collections::HashSet::new(),
-            const_locals: HashMap::new(),
             unsafe_depth: 0,
             explicit_recv: None,
             breakables: Vec::new(),
@@ -3807,7 +3803,9 @@ impl<'a> LowerCtx<'a> {
     fn resolve_any_fn(&self, segments: &[&str]) -> Option<String> {
         let env = self.env;
         if let [name] = segments {
-            if let Some(k) = self.nested_fns.iter().rev().find_map(|m| m.get(*name)) {
+            // An empty key: a `use` of the name hides outer nested fns.
+            let nested = self.nested_fns.iter().rev().find_map(|m| m.get(*name));
+            if let Some(k) = nested.filter(|k| !k.is_empty()) {
                 return Some(k.clone());
             }
         }

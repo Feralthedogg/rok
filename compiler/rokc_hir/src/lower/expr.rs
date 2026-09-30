@@ -92,6 +92,26 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
 fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
     let mut own: HashMap<&str, rokc_diagnostic::Span> = HashMap::new();
     for inherited in [true, false] {
+        if !inherited {
+            // A `use` of the block hides the nested fns of the blocks
+            // around it (an empty key, `resolve_any_fn`).
+            for s in &block.stmts {
+                let StmtKind::Item(Item::Use(u)) = &s.kind else {
+                    continue;
+                };
+                if u.attrs
+                    .iter()
+                    .any(|a| a.path == [rokc_ast::INHERITED_USE_ATTR])
+                {
+                    continue;
+                }
+                let mut names = Vec::new();
+                rokc_ast::rename::use_names(&u.tree, &mut names);
+                if let Some(m) = ctx.nested_fns.last_mut() {
+                    m.extend(names.into_iter().map(|n| (n.to_owned(), String::new())));
+                }
+            }
+        }
         for s in &block.stmts {
             let StmtKind::Item(Item::Fn(f)) = &s.kind else {
                 continue;
@@ -144,6 +164,151 @@ fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
             }
         }
     }
+}
+
+/// Spec 3.9.1: a block-local item (the parser lifted it to module level
+/// and left this copy) sees no local or generic parameter of the code
+/// around it.
+fn check_local_item(ctx: &LowerCtx<'_>, item: &Item) {
+    use crate::walk::AstVisitor;
+    #[derive(Default)]
+    struct Free {
+        scopes: Vec<Vec<String>>,
+        values: Vec<(String, rokc_diagnostic::Span)>,
+        types: Vec<(String, rokc_diagnostic::Span)>,
+    }
+    impl AstVisitor for Free {
+        fn expr(&mut self, e: &Expr) {
+            if let ExprKind::Path(p) = &e.kind {
+                if let [seg] = p.segments.as_slice() {
+                    if !self.scopes.iter().flatten().any(|n| *n == seg.name) {
+                        self.values.push((seg.name.clone(), e.span));
+                    }
+                }
+            }
+        }
+        fn ty(&mut self, t: &Ty) {
+            if let rokc_ast::TyKind::Path(p) = &t.kind {
+                if let [seg] = p.segments.as_slice() {
+                    self.types.push((seg.name.clone(), t.span));
+                }
+            }
+        }
+        fn bind(&mut self, name: &str) {
+            if let Some(s) = self.scopes.last_mut() {
+                s.push(name.to_owned());
+            }
+        }
+        fn push_scope(&mut self) {
+            self.scopes.push(Vec::new());
+        }
+        fn pop_scope(&mut self) {
+            self.scopes.pop();
+        }
+    }
+    let mut free = Free::default();
+    free.push_scope();
+    crate::walk::walk_item(&mut free, item);
+    let outer = rokc_core::local::qualified(item.local_outer().unwrap_or_default());
+    let (what, own) = match item.name() {
+        Some(n) => (format!("`{}`", rokc_core::local::leaf(n)), true),
+        None => ("this `impl`".to_owned(), false),
+    };
+    let mut seen = std::collections::HashSet::new();
+    for (name, span) in &free.values {
+        if ctx.lookup(name).is_none() || !seen.insert(name) {
+            continue;
+        }
+        let fix = match item {
+            Item::Static(_) => "a `static` is made once, so its value can use only items",
+            Item::Const(_) => "a `const` is computed at compile time, so it can use only items",
+            Item::Struct(_) | Item::Enum(_) | Item::Union(_) if own => {
+                "pass it as a field or a parameter instead"
+            }
+            _ => "pass it as a parameter instead",
+        };
+        ctx.emit_error_at(
+            rokc_diagnostic::ErrorKind::Type,
+            *span,
+            format!(
+                "{what} is declared inside `{outer}` and can't use `{name}`, a local of \
+                 `{outer}`; {fix} (spec 3.9.1)"
+            ),
+        );
+    }
+    let mut generics = Vec::new();
+    local_item_generics(item, &mut generics);
+    for (name, span) in free.types.iter().chain(&free.values) {
+        if !ctx.ty_subst.contains_key(name)
+            || generics.contains(&name.as_str())
+            || !seen.insert(name)
+        {
+            continue;
+        }
+        let leaf = item.name().map(rokc_core::local::leaf).unwrap_or_default();
+        let keyword = match item {
+            Item::Struct(_) => "struct",
+            Item::Enum(_) => "enum",
+            Item::Union(_) => "union",
+            Item::Trait(_) => "trait",
+            Item::TypeAlias(_) => "type",
+            _ => "fn",
+        };
+        let fix = match item {
+            Item::Static(_) | Item::Const(_) => {
+                format!("it has one value, whatever `{outer}` is called with")
+            }
+            Item::Impl(_) => format!("declare it on the impl instead: `impl<{name}>`"),
+            _ => format!("declare its own instead: `{keyword} {leaf}<{name}>`"),
+        };
+        ctx.emit_error_at(
+            rokc_diagnostic::ErrorKind::Type,
+            *span,
+            format!(
+                "{what} is declared inside `{outer}` and can't use `{name}`, a generic \
+                 parameter of `{outer}`; {fix} (spec 3.9.1)"
+            ),
+        );
+    }
+}
+
+/// The generic parameters and associated types `item` declares
+/// anywhere (on itself and its methods).
+fn local_item_generics<'a>(item: &'a Item, out: &mut Vec<&'a str>) {
+    let mut gs: Vec<&rokc_ast::Generics> = Vec::new();
+    match item {
+        Item::Fn(f) => gs.push(&f.generics),
+        Item::Struct(x) => gs.push(&x.generics),
+        Item::Enum(x) => gs.push(&x.generics),
+        Item::Union(x) => gs.push(&x.generics),
+        Item::TypeAlias(x) => gs.push(&x.generics),
+        Item::Trait(t) => {
+            gs.push(&t.generics);
+            for ti in &t.items {
+                match ti {
+                    rokc_ast::TraitItem::Method(m) => gs.push(&m.generics),
+                    rokc_ast::TraitItem::AssocType { name, .. } => out.push(name),
+                    rokc_ast::TraitItem::Const { .. } => {}
+                }
+            }
+        }
+        Item::Impl(i) => {
+            gs.push(&i.generics);
+            for ii in &i.items {
+                match ii {
+                    rokc_ast::ImplItem::Method(m) => gs.push(&m.generics),
+                    rokc_ast::ImplItem::AssocType { name, .. } => out.push(name),
+                    rokc_ast::ImplItem::Const(_) => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    out.extend(gs.iter().flat_map(|g| &g.params).map(|p| match p {
+        rokc_ast::GenericParam::Type { name, .. } | rokc_ast::GenericParam::Const { name, .. } => {
+            name.as_str()
+        }
+    }));
 }
 
 /// `let S { f1, f2: alias, .. } [: T] = init;` → temp local + one field
@@ -471,22 +636,9 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             None
         }
         StmtKind::Item(Item::Fn(f)) if rokc_ast::nested_marker_of(f).is_some() => None,
-        StmtKind::Item(Item::Const(c)) => {
-            // Spec 5.2.2 / 5.2.7: evaluated per instance of the body; a
-            // read inlines the value, the local only serves captures.
-            if ctx.lookup_in_current_scope(&c.name).is_some() {
-                ctx.emit_error(
-                    rokc_diagnostic::ErrorKind::Type,
-                    format!("`{}` is already declared in this scope", c.name),
-                );
-            }
-            let ty = ctx.resolve_ast_ty(&c.ty);
-            let v = lower_expected(ctx, &c.value, ty.clone());
-            let v = coerce(ctx, &ty, v, &|| format!("const `{}`", c.name));
-            let v = super::const_eval::const_item(ctx, &c.name, v);
-            let local = ctx.declare(Some(c.name.clone()), ty);
-            ctx.const_locals.insert(local, v.clone());
-            Some(HirStmt::Let { local, init: v })
+        StmtKind::Item(item) if item.is_local() => {
+            check_local_item(ctx, item);
+            None
         }
         // The parser keeps no other item in a block.
         StmtKind::Item(_) => unreachable!("a block item other than `fn` / `const` / `use`"),
@@ -724,12 +876,6 @@ pub(super) fn lower_assign(
             let name = &p.segments[0].name;
             if let Some(local) = ctx.lookup(name) {
                 guard_sink(ctx, value);
-                if ctx.const_locals.contains_key(&local) {
-                    ctx.emit_error(
-                        rokc_diagnostic::ErrorKind::Type,
-                        format!("cannot assign to const `{name}` (spec 5.2)"),
-                    );
-                }
                 if ctx.value_captured.contains(&local) {
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
@@ -758,6 +904,13 @@ pub(super) fn lower_assign(
                 let v = lower_expected(ctx, value, ty.clone());
                 let value = coerce(ctx, &ty, v, &|| format!("assignment to `{name}`"));
                 return Some(HirStmt::StaticAssign { name: full, value });
+            }
+            if ctx.resolve_in(&segs, false).is_some() {
+                ctx.emit_error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    format!("cannot assign to const `{name}` (spec 5.2)"),
+                );
+                return None;
             }
             // Only `let` declares; assigning an undeclared name is an error.
             ctx.emit_error(
@@ -10036,9 +10189,6 @@ pub(super) fn lower_path(
             return h.clone();
         }
         if let Some(local) = ctx.lookup(name) {
-            if let Some(v) = ctx.const_locals.get(&local) {
-                return v.clone();
-            }
             return ctx.read_local(local, span);
         }
     }

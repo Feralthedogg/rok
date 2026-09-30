@@ -69,7 +69,7 @@ fn collect_in(
             .join("::")
     };
     for item in items {
-        let attrs = crate::parser::meta::item_attrs(item);
+        let attrs = item.attrs();
         let mut cfg = cfg.to_vec();
         cfg.extend(attrs.iter().filter(|a| a.name() == "cfg").cloned());
         let (handler, ty) = match item {

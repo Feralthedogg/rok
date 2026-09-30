@@ -2492,48 +2492,81 @@ fn finish<'a>(
                 .as_ref()
                 .is_some_and(|l| failed_derives.contains(&l.span))
     });
+    // A block-local item's capture error (spec 3.9.1) says why its name
+    // is not found there.
+    let captured: std::collections::HashSet<_> = (module.diagnostics.iter())
+        .filter(|d| d.message.contains(" and can't use `"))
+        .filter_map(|d| d.primary.as_ref().map(|l| l.span))
+        .collect();
+    module.diagnostics.retain(|d| {
+        !(d.message.starts_with("cannot find ")
+            && d.primary
+                .as_ref()
+                .is_some_and(|l| captured.contains(&l.span)))
+    });
     for p in programs {
-        show_nested_fn_names(p, &mut module.diagnostics);
+        show_local_names(p, &mut module.diagnostics);
     }
     module.diagnostics.splice(0..0, early);
     module
 }
 
-/// Diagnostics name a nested fn (spec 4.10) as written: its lifted
-/// name `outer/inner` (`/2` .. for a repeated name) reads `inner`.
-fn show_nested_fn_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiagnostic]) {
+/// Diagnostics name an item declared in a block (spec 3.9.1, 4.10) as
+/// written: its lifted name `f/S` (`f/S/2` for a repeated name) reads
+/// `S`, or `f::S` when another item of the file has that name. A name
+/// not found where such an item has it gets a note on its scope.
+fn show_local_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiagnostic]) {
+    use rokc_core::local::{leaf, qualified};
     if diags.is_empty() {
         return;
     }
-    let mut lifted: Vec<(&str, &str)> = program
+    let names: Vec<&str> = program
         .items
         .iter()
-        .filter_map(|it| match it {
-            Item::Fn(f) => {
-                let leaf = leaf_name(&f.name);
-                let (rest, last) = leaf.rsplit_once('/')?;
-                let shown = if last.starts_with(|c: char| c.is_ascii_digit()) {
-                    rest.rsplit_once('/')?.1
-                } else {
-                    last
-                };
-                Some((leaf, shown))
-            }
-            _ => None,
-        })
+        .filter_map(Item::name)
+        .map(leaf_name)
         .collect();
+    let mut lifted: Vec<&str> = names.iter().copied().filter(|n| n.contains('/')).collect();
     if lifted.is_empty() {
         return;
     }
-    lifted.sort_by_key(|(l, _)| std::cmp::Reverse(l.len()));
+    let mut count: HashMap<std::borrow::Cow<'_, str>, usize> = HashMap::new();
+    for n in &names {
+        *count.entry(leaf(n)).or_default() += 1;
+    }
+    lifted.sort_by_key(|l| std::cmp::Reverse(l.len()));
+    let shown: Vec<(&str, String)> = lifted
+        .iter()
+        .map(|l| {
+            let short = leaf(l);
+            let s = if count[&short] > 1 {
+                qualified(l)
+            } else {
+                short.into_owned()
+            };
+            (*l, s)
+        })
+        .collect();
     let fix = |s: &mut String| {
-        for (l, shown) in &lifted {
+        for (l, shown) in &shown {
             if s.contains(l) {
                 *s = s.replace(l, shown);
             }
         }
     };
     for d in diags {
+        let missing = d
+            .message
+            .strip_prefix("cannot find ")
+            .and_then(|r| r.split('`').nth(1));
+        if let Some(l) = missing.and_then(|m| lifted.iter().find(|l| leaf(l) == m)) {
+            let outer = qualified(rokc_core::local::outer(l));
+            d.notes.push(format!(
+                "`{}` is declared inside `{outer}` and visible only in its block; move it to \
+                 module level to use it here (spec 3.9.1)",
+                leaf(l)
+            ));
+        }
         fix(&mut d.message);
         if let Some(p) = &mut d.primary {
             fix(&mut p.message);

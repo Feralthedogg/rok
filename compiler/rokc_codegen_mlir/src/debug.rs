@@ -214,7 +214,8 @@ impl DebugInfo {
             "{sp} = #llvm.di_subprogram<id = distinct[{n}]<>, compileUnit = #di_cu, scope = {file}, \
              name = \"{}\", file = {file}, line = {line}, scopeLine = {line}, \
              subprogramFlags = Definition, type = {ty}>",
-            escape(name),
+            // An item in a block by its own name (spec 3.9.1).
+            escape(&rokc_core::local::unmangle(name)),
         );
         Some(FnDebug {
             file: escape(&self.path(id)?.to_string_lossy()),

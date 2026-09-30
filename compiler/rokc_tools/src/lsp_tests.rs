@@ -514,3 +514,85 @@ fn unsaved_submodule_buffer() {
     assert_eq!(published[1], Json::Arr(Vec::new()), "{published:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+const LOCAL: &str = "\
+fn f() -> i32 {
+    struct L { v: i32; }
+    impl L {
+        fn get(self) -> i32 { self.v }
+    }
+    let l = L { v: 1 };
+    l.get()
+}
+println(f\"{f()}\");
+";
+
+/// Hover and definition of an item declared in a function body
+/// (spec 3.9.1) go by the name as written.
+#[test]
+fn block_local_items() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bootstrap = workspace.join("library/core/src/lib.rok");
+    let dir = std::env::temp_dir().join(format!("rokc-lsp-local-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let uri = path_to_uri(&dir.join("local.rok").display().to_string(), cfg!(windows));
+    let uri = uri.as_str();
+    let script = [
+        request(
+            1,
+            "initialize",
+            Json::obj([("capabilities", Json::obj([]))]),
+        ),
+        notify(
+            "textDocument/didOpen",
+            Json::obj([(
+                "textDocument",
+                Json::obj([
+                    ("uri", Json::str(uri)),
+                    ("languageId", Json::str("rok")),
+                    ("version", Json::num(1)),
+                    ("text", Json::str(LOCAL)),
+                ]),
+            )]),
+        ),
+        // `l` and `get` in `l.get()`, `L` in `L { v: 1 }`.
+        request(2, "textDocument/hover", at(uri, 6, 4)),
+        request(3, "textDocument/hover", at(uri, 6, 7)),
+        request(4, "textDocument/definition", at(uri, 6, 7)),
+        request(5, "textDocument/definition", at(uri, 5, 12)),
+        request(6, "shutdown", Json::Null),
+        notify("exit", Json::Null),
+    ];
+    let input: String = script.iter().map(frame).collect();
+    let mut out = Vec::new();
+    let code = serve(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        vec![bootstrap],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let msgs = messages(&out);
+    let result = |id: u32| {
+        msgs.iter()
+            .find(|m| m.get("id") == &Json::num(id))
+            .unwrap_or_else(|| panic!("no reply {id}"))
+            .get("result")
+            .clone()
+    };
+    let hover = |id| {
+        result(id)
+            .get("contents")
+            .get("value")
+            .as_str()
+            .unwrap_or("")
+            .to_owned()
+    };
+    let line = |id| result(id).get("range").get("start").get("line").clone();
+    assert!(hover(2).contains("l: L"), "{}", hover(2));
+    assert!(hover(3).contains("fn get(self: L) -> i32"), "{}", hover(3));
+    assert_eq!(line(4), Json::num(3), "{}", result(4));
+    assert_eq!(line(5), Json::num(1), "{}", result(5));
+    let _ = std::fs::remove_dir_all(&dir);
+}

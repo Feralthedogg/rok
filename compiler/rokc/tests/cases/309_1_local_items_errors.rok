@@ -1,0 +1,50 @@
+// spec: §3.9.1
+// expect-error: 22:40: this `impl` is declared inside `f` and can't use `x`, a local of `f`; pass it as a parameter instead (spec 3.9.1)
+// expect-error: 24:21: `S` is declared inside `f` and can't use `x`, a local of `f`; a `static` is made once, so its value can use only items (spec 3.9.1)
+// expect-error: 25:31: `B` is declared inside `f` and can't use `x`, a local of `f`; pass it as a field or a parameter instead (spec 3.9.1)
+// expect-error: 30:24: `Holder` is declared inside `g` and can't use `T`, a generic parameter of `g`; declare its own instead: `struct Holder<T>` (spec 3.9.1)
+// expect-error: 31:16: `Q` is declared inside `g` and can't use `T`, a generic parameter of `g`; declare its own instead: `enum Q<T>` (spec 3.9.1)
+// expect-error: 32:33: this `impl` is declared inside `g` and can't use `T`, a generic parameter of `g`; declare it on the impl instead: `impl<T>` (spec 3.9.1)
+// expect-error: 37:20: `K` is declared inside `h` and can't use `n`, a local of `h`; a `const` is computed at compile time, so it can use only items (spec 3.9.1)
+// expect-error: 42:22: `M` is declared inside `c` and can't use `N`, a generic parameter of `c`; it has one value, whatever `c` is called with (spec 3.9.1)
+// expect-error: 47:13: cannot find struct `P` in this scope
+// expect-error: `P` is declared inside `f` and visible only in its block; move it to module level to use it here (spec 3.9.1)
+// expect-error: 48:12: cannot find type `Holder` in this scope
+// expect-error: `Holder` is declared inside `g` and visible only in its block; move it to module level to use it here (spec 3.9.1)
+// forbid-error: cannot find value `x`
+// forbid-error: cannot find type `T`
+
+// An item in a block sees no local or generic parameter of the code
+// around it, and nothing outside the block sees it.
+fn f(x: i32) -> i32 {
+    struct P { a: i32; }
+    impl P {
+        fn get(self) -> i32 { self.a + x }
+    }
+    static S: i32 = x;
+    struct B { a: [i32; 1] = [x]; }
+    P { a: 1 }.get()
+}
+
+fn g<T>(t: T) -> i32 {
+    struct Holder { v: T; }
+    enum Q { A(T) }
+    impl Holder { fn n(self) -> T { self.v } }
+    0
+}
+
+fn h(n: i32) -> i32 {
+    const K: i32 = n;
+    0
+}
+
+fn c<const N: usize>() -> usize {
+    const M: usize = N * 2;
+    M
+}
+
+fn main() {
+    let p = P { a: 1 };
+    let q: Holder = Holder { v: 1 };
+    println(f"{f(1)} {g(1)} {h(1)} {c::<1>()}");
+}

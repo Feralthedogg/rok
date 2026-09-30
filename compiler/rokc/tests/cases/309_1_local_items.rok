@@ -1,0 +1,80 @@
+// spec: §3.9.1 §4.10 §5.3.3
+// expect-exit: 0
+// expect-stdout:
+// 3
+// S(1, 2) Only 3 S
+// Outer(7)
+// Outer(1)
+// 10
+// S { a: 1 }
+// 9
+
+// Items in a block: a local `S` shadows the module's in its block, an
+// inner block's shadows that; one `static` serves every instantiation
+// of a generic fn; a local `impl` of an outer trait for an outer type
+// holds everywhere; items in closures and `async` bodies.
+#[derive(Debug)]
+struct S { a: i32; }
+
+trait Describe { fn describe(self) -> str; }
+
+struct Outer { n: i32; }
+
+fn count<T>(t: T) -> i32 {
+    static CALLS: Atomic<i32> = Atomic::new(0i32);
+    struct Tag;
+    impl Tag { fn id(self) -> i32 { 42 } }
+    CALLS.fetch_add(1i32);
+    CALLS.load() + Tag.id() - 42
+}
+
+fn shadow() -> str {
+    #[derive(Debug)]
+    struct S(i32, i32);
+    let inner = {
+        #[derive(Debug)]
+        enum S { Only }
+        f"{S::Only:?}"
+    };
+    let s = S(1, 2);
+    let S(a, b) = s;
+    f"{s:?} {inner} {a + b} {S::type_name()}"
+}
+
+fn uses_outer() -> str {
+    impl Describe for Outer {
+        fn describe(self) -> str { f"Outer({self.n})" }
+    }
+    type Pair = (i32, i32);
+    let p: Pair = (3, 4);
+    f"{Outer { n: p.0 + p.1 }.describe()}"
+}
+
+fn closures() -> i32 {
+    trait Twice { fn twice(self) -> i32; }
+    impl Twice for i32 { fn twice(self) -> i32 { self * 2 } }
+    let f = |x: i32| -> i32 {
+        struct Acc { v: i32; }
+        impl Acc { fn get(self) -> i32 { self.v.twice() } }
+        Acc { v: x }.get()
+    };
+    f(5)
+}
+
+async fn later() -> i32 {
+    struct Fut { v: i32; }
+    let x = Fut { v: 9 };
+    x.v
+}
+
+fn main() {
+    count(1);
+    count("x");
+    println(f"{count(2.0)}");
+    println(shadow());
+    println(uses_outer());
+    println(f"{Outer { n: 1 }.describe()}");
+    println(f"{closures()}");
+    println(f"{S { a: 1 }:?}");
+    println(f"{task::block_on(later())}");
+}

@@ -78,9 +78,9 @@ pub struct Parser<'a> {
     literals: std::sync::Arc<literal::LiteralTable>,
     /// The last `parse_item` consumed an item that expanded to nothing.
     vanished: bool,
-    /// Nested `fn`s (spec 4.10), lifted to module items once the
-    /// enclosing item is parsed.
-    lifted: Vec<FnDef>,
+    /// Nested `fn`s (spec 4.10) and block-local items (3.9.1), lifted
+    /// to module items once the enclosing item is parsed.
+    lifted: Vec<Item>,
     /// Names of the `fn`s being parsed, outermost first (`Type.m` for
     /// a method).
     fn_names: Vec<String>,
@@ -799,7 +799,7 @@ impl<'a> Parser<'a> {
                 while let Some(extra) = self.pending_stmts.pop() {
                     stmts.push(extra);
                 }
-                items.extend(self.lifted.drain(..).map(Item::Fn));
+                items.append(&mut self.lifted);
             } else {
                 self.pending_stmts.clear();
                 self.recover(from, Recover::Stmt);
@@ -991,8 +991,10 @@ impl<'a> Parser<'a> {
             return false;
         }
         self.pending_stmts.truncate(pending);
-        for f in self.lifted.drain(lifted..) {
-            self.lifted_names.remove(&f.name);
+        for it in self.lifted.drain(lifted..) {
+            if let Some(n) = it.name() {
+                self.lifted_names.remove(n);
+            }
         }
         true
     }
@@ -1321,7 +1323,7 @@ impl<'a> Parser<'a> {
     fn parse_item(&mut self) -> Option<Item> {
         let lifted = self.lifted.len();
         let item = self.parse_item_lifting();
-        let nested: Vec<Item> = self.lifted.drain(lifted..).map(Item::Fn).collect();
+        let nested: Vec<Item> = self.lifted.drain(lifted..).collect();
         self.pending_items.extend(nested);
         item
     }
@@ -1355,7 +1357,7 @@ impl<'a> Parser<'a> {
         // Spec 6.3.7: cfg runs before meta expansion. A cfg-false item
         // expands nothing (the driver drops it); its cfg-false members
         // were dropped as they were parsed.
-        if self.cfg_off(meta::item_attrs(&item)) {
+        if self.cfg_off(item.attrs()) {
             return Some(item);
         }
         if !self.meta.is_empty() {
@@ -3714,9 +3716,10 @@ impl<'a> Parser<'a> {
 
     fn parse_block_inner(&mut self) -> Option<Block> {
         let lifted = self.lifted.len();
-        let block = self.parse_block_stmts()?;
-        // Spec 4.10.5: a nested fn is visible in its whole block — in
-        // the bodies of the fns lifted from inside it too.
+        let mut block = self.parse_block_stmts()?;
+        self.rename_local_items(&mut block, lifted);
+        // Spec 4.10.5 / 3.9.1: a nested fn and a `use` hold in their whole
+        // block — in the bodies of the fns lifted from inside it too.
         let markers: Vec<Stmt> = block
             .stmts
             .iter()
@@ -3727,12 +3730,41 @@ impl<'a> Parser<'a> {
                         span: s.span,
                     })
                 }
+                StmtKind::Item(Item::Use(u)) => {
+                    let mut u = u.clone();
+                    u.attrs.push(Attribute {
+                        path: vec![rokc_ast::INHERITED_USE_ATTR.to_owned()],
+                        body: AttrBody::Empty,
+                        inner: false,
+                        span: u.span,
+                    });
+                    Some(Stmt {
+                        kind: StmtKind::Item(Item::Use(u)),
+                        span: s.span,
+                    })
+                }
                 _ => None,
             })
             .collect();
         if !markers.is_empty() {
-            for f in &mut self.lifted[lifted..] {
-                if let Some(b) = &mut f.body {
+            for item in &mut self.lifted[lifted..] {
+                let bodies: Vec<&mut FnDef> = match item {
+                    Item::Fn(f) => vec![f],
+                    Item::Impl(i) => (i.items.iter_mut())
+                        .filter_map(|ii| match ii {
+                            ImplItem::Method(m) => Some(m),
+                            _ => None,
+                        })
+                        .collect(),
+                    Item::Trait(t) => (t.items.iter_mut())
+                        .filter_map(|ti| match ti {
+                            TraitItem::Method(m) => Some(m),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                for b in bodies.into_iter().filter_map(|f| f.body.as_mut()) {
                     b.stmts.splice(0..0, markers.iter().cloned());
                 }
             }
@@ -3753,25 +3785,215 @@ impl<'a> Parser<'a> {
             );
         }
         let mut def = self.parse_fn(Visibility::Private, Vec::new())?;
-        let outer = if self.fn_names.is_empty() {
+        let lifted = self.lift_name(&def.name);
+        let marker = nested_marker(&def, &lifted, false);
+        def.name = lifted;
+        self.lifted.push(Item::Fn(def));
+        Some(Stmt {
+            kind: StmtKind::Item(Item::Fn(marker)),
+            span: start,
+        })
+    }
+
+    /// The lifted path of the fn being parsed (`f`, `f/g`, `Type.m`).
+    fn lift_outer(&self) -> String {
+        if self.fn_names.is_empty() {
             "main".to_owned()
         } else {
             self.fn_names.join("/")
-        };
-        let base = format!("{outer}/{}", def.name);
+        }
+    }
+
+    /// The unique module item name `outer/name` for `name` declared in
+    /// the body of the fn being parsed (`rokc_core::local`).
+    fn lift_name(&mut self, name: &str) -> String {
+        let base = format!("{}/{name}", self.lift_outer());
         let mut lifted = base.clone();
         let mut n = 1;
         while !self.lifted_names.insert(lifted.clone()) {
             n += 1;
             lifted = format!("{base}/{n}");
         }
-        let marker = nested_marker(&def, &lifted, false);
-        def.name = lifted;
-        self.lifted.push(def);
-        Some(Stmt {
-            kind: StmtKind::Item(Item::Fn(marker)),
-            span: start,
-        })
+        lifted
+    }
+
+    /// Does a block-local item (spec 3.9.1) start here: attributes and
+    /// `pub` before `struct`, `enum`, `union`, `trait`, `[unsafe] impl`,
+    /// `type`, `static` or `const`?
+    fn at_local_item(&mut self) -> bool {
+        let save = self.pos;
+        self.pos = self.past_attrs(save);
+        if self.eat(&TokenKind::Pub) && matches!(self.peek(), TokenKind::LParen) {
+            self.pos += 3;
+        }
+        if matches!(self.peek(), TokenKind::Unsafe)
+            && matches!(self.peek_next(), Some(TokenKind::Impl | TokenKind::Trait))
+        {
+            self.bump();
+        }
+        let at = matches!(
+            self.peek(),
+            TokenKind::Struct | TokenKind::Enum | TokenKind::Trait | TokenKind::Impl
+        ) || self.at_union_item()
+            || (self.at_kw("type") || self.at_kw("static")) && self.at_ctx_item()
+            || self.at_kw("const") && matches!(self.peek_next(), Some(TokenKind::Ident(_)));
+        self.pos = save;
+        at
+    }
+
+    /// A block-local item (spec 3.9.1) and the items it expands to
+    /// (derives, meta attributes): each lifted to a private module item
+    /// named by `lift_name`, a copy left in the block as a statement
+    /// (its scope, renamed at the block's end; HIR checks that it
+    /// captures nothing). `None` after an error; no statements when cfg
+    /// drops it.
+    fn parse_local_item(&mut self) -> Option<Vec<Stmt>> {
+        let start = self.peek_span();
+        let (pending, lifted) = (self.pending_items.len(), self.lifted.len());
+        let first = self.parse_item_lifting();
+        if first.is_none() && !std::mem::take(&mut self.vanished) {
+            return None;
+        }
+        let items: Vec<Item> = first
+            .into_iter()
+            .chain(self.pending_items.drain(pending..))
+            .collect();
+        let attrs = items.first().map_or(&[][..], |i| i.attrs().as_slice());
+        if self.cfg_drops(attrs, (self.pending_stmts.len(), lifted)) {
+            return Some(Vec::new());
+        }
+        let mut stmts = Vec::new();
+        for mut item in items {
+            let span = item.span();
+            let (vis, name) = match &mut item {
+                Item::Struct(x) => (x.vis, Some(&mut x.name)),
+                Item::Enum(x) => (x.vis, Some(&mut x.name)),
+                Item::Union(x) => (x.vis, Some(&mut x.name)),
+                Item::Trait(x) => (x.vis, Some(&mut x.name)),
+                Item::TypeAlias(x) => (x.vis, Some(&mut x.name)),
+                Item::Static(x) => (x.vis, Some(&mut x.name)),
+                Item::Fn(x) => (x.vis, Some(&mut x.name)),
+                Item::Const(x) => (x.vis, Some(&mut x.name)),
+                Item::Impl(x) => (x.vis, None),
+                Item::Mod(_) | Item::Use(_) | Item::Extern(_) => {
+                    self.error(
+                        span,
+                        "a meta expansion in a function body gives only `struct`, `enum`, \
+                         `union`, `trait`, `impl`, `type`, `static`, `fn` and `const` items \
+                         (spec 3.9.1)",
+                    );
+                    continue;
+                }
+            };
+            if vis != Visibility::Private {
+                self.error(
+                    start,
+                    "`pub` is meaningless on an item in a function body: it is visible only \
+                     in its block (spec 3.9.1)",
+                );
+            }
+            if let Some(name) = name {
+                *name = self.lift_name(name);
+            }
+            item.attrs_mut().push(Attribute {
+                path: vec![rokc_ast::LOCAL_ITEM_ATTR.to_owned()],
+                body: AttrBody::Args(vec![AttrArg::Lit(Literal::Str(self.lift_outer()))]),
+                inner: false,
+                span,
+            });
+            stmts.push(Stmt {
+                kind: StmtKind::Item(item.clone()),
+                span,
+            });
+            self.lifted.push(item);
+        }
+        Some(stmts)
+    }
+
+    /// Spec 3.9.1: the local items of `block` are visible in all of it
+    /// and in the items lifted from it, over outer names of their
+    /// namespace (inner blocks renamed theirs already).
+    fn rename_local_items(&mut self, block: &mut Block, lifted: usize) {
+        let mut r = rokc_ast::rename::Renames::default();
+        for s in &block.stmts {
+            let StmtKind::Item(item) = &s.kind else {
+                continue;
+            };
+            let Some(name) = item.name().filter(|_| item.is_local()) else {
+                continue;
+            };
+            let (ty, value) = match item {
+                Item::Struct(x) => (true, !matches!(x.kind, StructKind::Named(_))),
+                Item::Enum(_) | Item::Union(_) | Item::Trait(_) | Item::TypeAlias(_) => {
+                    (true, false)
+                }
+                _ => (false, true),
+            };
+            let source = rokc_core::local::leaf(name).into_owned();
+            let twice = ty && r.types.insert(source.clone(), name.to_owned()).is_some()
+                || value && r.values.insert(source.clone(), name.to_owned()).is_some();
+            if twice {
+                self.error(s.span, format!("`{source}` is defined twice in this block"));
+            }
+        }
+        for s in &block.stmts {
+            let StmtKind::Item(Item::Use(u)) = &s.kind else {
+                continue;
+            };
+            let mut used = Vec::new();
+            rokc_ast::rename::use_names(&u.tree, &mut used);
+            for n in used {
+                if r.types.contains_key(n) || r.values.contains_key(n) {
+                    self.error(s.span, format!("`{n}` is defined twice in this block"));
+                }
+            }
+        }
+        if !r.is_empty() {
+            r.block(block);
+            for item in &mut self.lifted[lifted..] {
+                r.item(item);
+            }
+        }
+        // The block's `use`s hold in its items too: fn bodies get copies
+        // (`parse_block_inner`), the rest the paths.
+        let mut uses = rokc_ast::rename::Renames {
+            headers_only: true,
+            ..Default::default()
+        };
+        for s in &block.stmts {
+            let StmtKind::Item(Item::Use(u)) = &s.kind else {
+                continue;
+            };
+            let (mut named, mut globs) = (Vec::new(), Vec::new());
+            rokc_ast::rename::use_paths(&u.tree, &[], &mut named, &mut globs);
+            // `use E::*` of a local enum: its variants.
+            for prefix in globs {
+                let variants = block.stmts.iter().find_map(|s| match &s.kind {
+                    StmtKind::Item(Item::Enum(e)) if prefix == [e.name.clone()] => Some(
+                        e.variants
+                            .iter()
+                            .map(|v| v.name.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                });
+                for v in variants.into_iter().flatten() {
+                    named.push((v.clone(), vec![prefix[0].clone(), v]));
+                }
+            }
+            for (name, mut path) in named {
+                // `use a::b; use b::c;`
+                if let Some(head) = uses.paths.get(&path[0]).cloned() {
+                    path.splice(0..1, head);
+                }
+                uses.paths.insert(name, path);
+            }
+        }
+        if !uses.is_empty() {
+            for item in &mut self.lifted[lifted..] {
+                uses.item(item);
+            }
+        }
     }
 
     /// Does a nested `fn` (`pub`, `unsafe` / `async` / `yield`) start here?
@@ -3802,6 +4024,13 @@ impl<'a> Parser<'a> {
             let from = self.pos;
             // An empty statement (`;;`).
             if self.eat(&TokenKind::Semi) {
+                continue;
+            }
+            if self.at_local_item() {
+                match self.parse_local_item() {
+                    Some(items) => stmts.extend(items),
+                    None => self.recover(from, Recover::Stmt),
+                }
                 continue;
             }
             let attrs = self.cfg_only_attrs("a statement");
@@ -3854,17 +4083,9 @@ impl<'a> Parser<'a> {
         if self.at_nested_fn() {
             return Some((self.parse_nested_fn()?, false));
         }
-        // Spec 5.3.3 / 5.4.10 / 5.9.8: module-level only. A block holds
-        // only `fn` (4.10), `const` (5.2) and `use` items.
+        // Spec 5.4.10 / 5.9.8: module-level only (other items: 3.9.1).
         let module_only = match self.peek() {
             TokenKind::Mod => Some("a `mod` (spec 5.4.10)"),
-            TokenKind::Struct => Some("a `struct`"),
-            TokenKind::Enum => Some("an `enum`"),
-            TokenKind::Trait => Some("a `trait`"),
-            TokenKind::Impl => Some("an `impl`"),
-            _ if self.at_union_item() => Some("a `union`"),
-            _ if self.at_kw("type") && self.at_ctx_item() => Some("a `type` alias"),
-            _ if self.at_kw("static") && self.at_ctx_item() => Some("a `static` (spec 5.3.3)"),
             _ if self.at_kw("extern") && self.at_ctx_item() => {
                 Some("an `extern` block (spec 5.9.8)")
             }
@@ -3876,12 +4097,6 @@ impl<'a> Parser<'a> {
                 format!("{what} is declared only at module level, not in a function body"),
             );
             return None;
-        }
-        // Spec 5.2.2: `const NAME: T = e;` in a body.
-        if self.at_kw("const") && matches!(self.peek_next(), Some(TokenKind::Ident(_))) {
-            let c = self.parse_const(Visibility::Private, Vec::new())?;
-            let kind = StmtKind::Item(Item::Const(c));
-            return Some((Stmt { kind, span: start }, false));
         }
         match self.peek() {
             TokenKind::Use => {

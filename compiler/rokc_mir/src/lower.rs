@@ -132,7 +132,10 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             .iter()
             .map(|s| {
                 let fields = s.fields.iter().map(|f| f.name.clone()).collect();
-                (s.id.0, (s.name.clone(), fields))
+                (
+                    s.id.0,
+                    (rokc_core::local::unmangle(&s.name).into_owned(), fields),
+                )
             })
             .collect(),
         struct_keys: module

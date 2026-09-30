@@ -1,9 +1,36 @@
-// spec: refs-lang §4.10 / §5.2.2
-// expect-error: 8:5: an `impl` is declared only at module level, not in a function body
+// spec: §3.9.1 §2.9.5
+// expect-exit: 0
+// expect-stdout:
+// Q(1) Q(1) 7
+// local 5
 
-// A block declares only `fn`, `const` and `use` items.
-struct Q {}
+// An `impl` in a function body is coherent as if declared at module
+// level: its methods and trait impl hold everywhere, not only in the
+// block. A local trait and its impl for a local type work too.
+trait Show { fn show(self) -> str; }
+struct Q { n: i32; }
+
+fn install() {
+    impl Show for Q {
+        fn show(self) -> str { f"Q({self.n})" }
+    }
+    impl Q {
+        fn plus(self, k: i32) -> i32 { self.n + k }
+    }
+}
+
+fn local() -> str {
+    trait Name { fn name(self) -> str; }
+    struct L { v: i32; }
+    impl Name for L {
+        fn name(self) -> str { f"local {self.v}" }
+    }
+    L { v: 5 }.name()
+}
 
 fn main() {
-    impl Q { fn f(self) {} }
+    install();
+    let q = Q { n: 1 };
+    println(f"{q.show()} {Q { n: 1 }.show()} {q.plus(6)}");
+    println(local());
 }

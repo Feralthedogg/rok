@@ -1,0 +1,108 @@
+// spec: §3.9.1 §4.10.5 §5.3.3
+// expect-exit: 0
+// expect-stdout:
+// top 1
+// 5 7 13 2 105 4 B 6
+// 57 13
+
+// Where an item in a block is seen: in a method and a trait default, in
+// a top-level block; before its declaration (hoisted); a nested fn of
+// the block from a local impl; a `let` shadowing a local `static`; a
+// cfg-dropped item; `use` of a local enum's variants; an inner `use`
+// shadowing a local name or a nested fn; the block's `use`s and
+// `const`s in its nested fn, field defaults, `static` and impl.
+mod m {
+    pub const fn three() -> i32 { 3 }
+    pub struct Pt { pub x: i32; }
+}
+
+struct X { n: i32; }
+impl X {
+    fn m(self) -> i32 {
+        struct S { v: i32; }
+        S { v: self.n }.v
+    }
+}
+trait Tr {
+    fn d(self) -> i32 {
+        enum E { A }
+        match E::A { E::A => 7 }
+    }
+}
+impl Tr for X {}
+
+fn g<T>(t: T) -> i32 {
+    struct B<T> { v: T; }
+    let b = B { v: 3 };
+    fn helper() -> i32 { 10 }
+    impl B<i32> { fn h(self) -> i32 { helper() + self.v } }
+    b.h()
+}
+
+fn hoist() -> i32 {
+    let a = A { b: B { v: 2 } };
+    struct A { b: B; }
+    struct B { v: i32; }
+    a.b.v
+}
+
+fn shadow_static() -> i32 {
+    static LIMIT: i32 = 5;
+    let r = LIMIT;
+    let LIMIT = 100;
+    r + LIMIT
+}
+
+fn cfgs() -> i32 {
+    #[cfg(nope)]
+    struct C { v: i32; }
+    #[cfg(not(nope))]
+    struct C { w: i32; }
+    C { w: 4 }.w
+}
+
+fn variants() -> str {
+    #[derive(Debug)]
+    enum Pick { A, B }
+    use Pick::B;
+    f"{B:?}"
+}
+
+fn inner_use() -> i32 {
+    struct three(i32);
+    let x = {
+        use m::three;
+        three()
+    };
+    x * 2
+}
+
+fn uses_in_items() -> i32 {
+    use m::three;
+    use m::{Pt, three as tri};
+    const BASE: i32 = 10;
+    fn mk() -> Pt { Pt { x: 1 } }
+    fn helper() -> i32 { three() + BASE + mk().x - 1 }
+    struct W { k: [i32; 2] = [tri(), BASE]; p: Pt = Pt { x: 1 }; }
+    static S: i32 = three() * BASE;
+    impl W { fn sum(self) -> i32 { self.k[0] + self.k[1] + self.p.x + helper() } }
+    W {}.sum() + S
+}
+
+fn nested_shadow() -> i32 {
+    fn three() -> i32 { 1 }
+    let a = three();
+    let b = {
+        use m::three;
+        three()
+    };
+    a * 10 + b
+}
+
+if true {
+    struct Top { v: i32; }
+    println(f"top {Top { v: 1 }.v}");
+}
+let x = X { n: 5 };
+println(f"{x.m()} {x.d()} {g(1)} {hoist()} {shadow_static()} {cfgs()} {variants()} {inner_use()}");
+println(f"{uses_in_items()} {nested_shadow()}");

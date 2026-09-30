@@ -1,0 +1,14 @@
+// spec: §3.9.1
+// expect-error: 9:5: `pub` is meaningless on an item in a function body: it is visible only in its block (spec 3.9.1)
+// expect-error: 11:5: `D` is defined twice in this block
+// expect-error: 13:5: `K` is defined twice in this block
+
+// A block's item is visible only there, so `pub` says nothing; a block
+// declares a name once per namespace.
+fn main() {
+    pub struct V {}
+    struct D {}
+    struct D {}
+    const K: i32 = 1;
+    const K: i32 = 2;
+}

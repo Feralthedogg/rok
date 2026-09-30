@@ -27,9 +27,28 @@ use crate::{
 #[must_use]
 pub fn print_file(attrs: &[Attribute], items: &[Item], stmts: &[Stmt]) -> String {
     let mut p = Printer::default();
+    // Block-local items (spec 3.9.1) print from the copy their block
+    // keeps, every name as written.
+    let mut back = crate::rename::Renames::default();
+    for n in items.iter().filter(|i| i.is_local()).filter_map(Item::name) {
+        let leaf = rokc_core::local::leaf(n).into_owned();
+        back.types.insert(n.to_owned(), leaf.clone());
+        back.values.insert(n.to_owned(), leaf);
+    }
+    let renamed;
+    let (items, stmts) = if back.is_empty() {
+        (items, stmts)
+    } else {
+        let (mut items, mut stmts) = (items.to_vec(), stmts.to_vec());
+        items.iter_mut().for_each(|i| back.item(i));
+        stmts.iter_mut().for_each(|s| back.stmt(s));
+        renamed = (items, stmts);
+        (renamed.0.as_slice(), renamed.1.as_slice())
+    };
     // Lifted nested fns print where they were written.
     let (lifted, items): (Vec<&Item>, Vec<&Item>) = items
         .iter()
+        .filter(|i| !i.is_local())
         .partition(|i| matches!(i, Item::Fn(f) if f.name.contains('/')));
     for i in lifted {
         if let Item::Fn(f) = i {
@@ -208,6 +227,7 @@ impl Printer {
                     crate::EXTERN_FN_ATTR,
                     crate::C_VARIADIC_ATTR,
                     crate::CONST_FN_ATTR,
+                    crate::LOCAL_ITEM_ATTR,
                 ]
                 .contains(&a.path[0].as_str())
             {
@@ -933,6 +953,11 @@ impl Printer {
                     }
                 }
             }
+            // A block's `use` copied into a lifted fn's body (spec 3.9.1).
+            StmtKind::Item(Item::Use(u))
+                if u.attrs
+                    .iter()
+                    .any(|a| a.path == [crate::INHERITED_USE_ATTR]) => {}
             StmtKind::Item(item) => self.item(item),
             StmtKind::Expr(e) => {
                 self.stmt_expr(e);

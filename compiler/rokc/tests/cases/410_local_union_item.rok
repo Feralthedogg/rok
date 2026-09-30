@@ -1,7 +1,11 @@
-// spec: refs-lang §4.10 / §5.2.2
-// expect-error: 6:5: a `union` is declared only at module level, not in a function body
+// spec: §3.9.1 §2.5
+// expect-exit: 0
+// expect-stdout:
+// 1065353216
 
-// `union Name` starts an item here too (spec 1.5.4).
+// `union Name` starts an item in a block too (spec 1.5.4).
 fn main() {
-    union U { a: i32; }
+    union U { f: f32; i: u32; }
+    let u = U { f: 1.0f32 };
+    println(f"{unsafe { u.i }}");
 }

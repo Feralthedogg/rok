@@ -206,7 +206,7 @@ pub fn any_variants(module: &HirModule, target: &Target) -> Vec<(u32, String, De
 fn debug_name(ty: &HirTy, module: &HirModule) -> String {
     let short = |n: &str| {
         let n = n.rsplit("::").next().unwrap_or(n);
-        n.split("__").next().unwrap_or(n).to_owned()
+        rokc_core::local::leaf(n.split("__").next().unwrap_or(n)).into_owned()
     };
     let list = |ts: &[HirTy]| {
         ts.iter()

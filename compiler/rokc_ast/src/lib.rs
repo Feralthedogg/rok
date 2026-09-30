@@ -8,6 +8,7 @@ mod codec;
 pub mod defs;
 pub mod escape;
 pub mod print;
+pub mod rename;
 
 pub use defs::*;
 
@@ -131,5 +132,76 @@ impl Item {
             Self::Use(x) => x.span,
             Self::Extern(x) => x.span,
         }
+    }
+
+    #[must_use]
+    pub const fn attrs(&self) -> &Vec<Attribute> {
+        match self {
+            Self::Fn(x) => &x.attrs,
+            Self::Struct(x) => &x.attrs,
+            Self::Enum(x) => &x.attrs,
+            Self::Union(x) => &x.attrs,
+            Self::Trait(x) => &x.attrs,
+            Self::Impl(x) => &x.attrs,
+            Self::Const(x) => &x.attrs,
+            Self::Static(x) => &x.attrs,
+            Self::TypeAlias(x) => &x.attrs,
+            Self::Mod(x) => &x.attrs,
+            Self::Use(x) => &x.attrs,
+            Self::Extern(x) => &x.attrs,
+        }
+    }
+
+    pub const fn attrs_mut(&mut self) -> &mut Vec<Attribute> {
+        match self {
+            Self::Fn(x) => &mut x.attrs,
+            Self::Struct(x) => &mut x.attrs,
+            Self::Enum(x) => &mut x.attrs,
+            Self::Union(x) => &mut x.attrs,
+            Self::Trait(x) => &mut x.attrs,
+            Self::Impl(x) => &mut x.attrs,
+            Self::Const(x) => &mut x.attrs,
+            Self::Static(x) => &mut x.attrs,
+            Self::TypeAlias(x) => &mut x.attrs,
+            Self::Mod(x) => &mut x.attrs,
+            Self::Use(x) => &mut x.attrs,
+            Self::Extern(x) => &mut x.attrs,
+        }
+    }
+
+    /// The name it declares (`None` for an `impl`, `use` or `extern`).
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            Self::Fn(x) => Some(&x.name),
+            Self::Struct(x) => Some(&x.name),
+            Self::Enum(x) => Some(&x.name),
+            Self::Union(x) => Some(&x.name),
+            Self::Trait(x) => Some(&x.name),
+            Self::Const(x) => Some(&x.name),
+            Self::Static(x) => Some(&x.name),
+            Self::TypeAlias(x) => Some(&x.name),
+            Self::Mod(x) => Some(&x.name),
+            Self::Impl(_) | Self::Use(_) | Self::Extern(_) => None,
+        }
+    }
+
+    /// Lifted from a block (spec 3.9.1): see [`LOCAL_ITEM_ATTR`].
+    #[must_use]
+    pub fn is_local(&self) -> bool {
+        self.local_outer().is_some()
+    }
+
+    /// The lifted path of the fn a local item is declared in (`f`,
+    /// `Type.m`).
+    #[must_use]
+    pub fn local_outer(&self) -> Option<&str> {
+        self.attrs().iter().find_map(|a| match &a.body {
+            AttrBody::Args(args) if a.path == [LOCAL_ITEM_ATTR] => match args.as_slice() {
+                [AttrArg::Lit(Literal::Str(s))] => Some(s.as_str()),
+                _ => None,
+            },
+            _ => None,
+        })
     }
 }

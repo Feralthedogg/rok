@@ -333,23 +333,6 @@ fn levels_of(
     levels
 }
 
-fn item_attrs(item: &Item) -> &[Attribute] {
-    match item {
-        Item::Fn(x) => &x.attrs,
-        Item::Struct(x) => &x.attrs,
-        Item::Enum(x) => &x.attrs,
-        Item::Union(x) => &x.attrs,
-        Item::Trait(x) => &x.attrs,
-        Item::Impl(x) => &x.attrs,
-        Item::Const(x) => &x.attrs,
-        Item::Static(x) => &x.attrs,
-        Item::TypeAlias(x) => &x.attrs,
-        Item::Mod(x) => &x.attrs,
-        Item::Use(x) => &x.attrs,
-        Item::Extern(x) => &x.attrs,
-    }
-}
-
 /// Where an item's text starts: its first attribute or its first token.
 fn item_start(attrs: &[Attribute], span: Span) -> u32 {
     attrs
@@ -388,7 +371,7 @@ fn file_regions(f: &SourceFile, user: &[&SourceFile], out: &mut Vec<RokDiagnosti
     let spans: Vec<(u32, &[Attribute])> = f
         .items
         .iter()
-        .map(|i| (item_start(item_attrs(i), i.span()), item_attrs(i)))
+        .map(|i| (item_start(i.attrs(), i.span()), i.attrs().as_slice()))
         .collect();
     item_regions(f.file_id, &f.items, &spans, u32::MAX, &mut regions, out);
     regions
@@ -443,7 +426,7 @@ fn item_regions(
                 if let Some(inner) = &m.items {
                     let s: Vec<(u32, &[Attribute])> = inner
                         .iter()
-                        .map(|i| (item_start(item_attrs(i), i.span()), item_attrs(i)))
+                        .map(|i| (item_start(i.attrs(), i.span()), i.attrs().as_slice()))
                         .collect();
                     item_regions(file, inner, &s, next, regions, out);
                 }
@@ -692,6 +675,8 @@ impl<'a> Cx<'a> {
     }
 
     fn name_lint(&mut self, what: &str, name: &str, span: Span, kind: u8) {
+        // An item in a block by its own name (spec 3.9.1).
+        let name = &*rokc_core::local::leaf(name);
         let (ok, lint, fixed, style) = match kind {
             0 => (
                 is_snake(name),
@@ -756,7 +741,7 @@ impl<'a> Cx<'a> {
     }
 
     fn item(&mut self, item: &Item) {
-        for a in item_attrs(item) {
+        for a in item.attrs() {
             self.attr_names(a);
         }
         match item {
@@ -962,16 +947,18 @@ impl<'a> Cx<'a> {
             "literal",
             "keyword",
         ];
+        // A fn in a block by its own name (spec 4.10).
+        let name = rokc_core::local::leaf(&f.name);
         if f.vis != Visibility::Pub
-            && f.name != "main"
-            && !f.name.starts_with('_')
+            && name != "main"
+            && !name.starts_with('_')
             && !has_attr(&f.attrs, ROOTS)
-            && !self.all_names.contains(&f.name)
+            && !self.all_names.contains(&*name)
         {
             self.hit(
                 "dead_code",
                 f.span,
-                format!("function `{}` is never used", f.name),
+                format!("function `{name}` is never used"),
             );
         }
     }

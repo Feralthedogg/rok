@@ -29,9 +29,11 @@ const INTS: [PrimTy; 10] = [
 ];
 
 /// `ty`'s name as `type_name` reports it: `ty_name` without module paths
-/// (`List<i64>`, not `rok::core::collections::list::List<i64>`).
+/// (`List<i64>`, not `rok::core::collections::list::List<i64>`), a
+/// block-local item by its own name (`S`, spec 3.9.1).
 pub(super) fn type_name(ctx: &LowerCtx<'_>, ty: &HirTy) -> String {
     let full = ctx.ty_name(ty);
+    let full = rokc_core::local::unmangle(&full);
     let mut out = String::with_capacity(full.len());
     let mut word = String::new();
     let mut chars = full.chars().peekable();

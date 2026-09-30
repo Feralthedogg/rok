@@ -1,12 +1,12 @@
 // spec: 005.02-const
-// expect-error: 13:20: const `A` cannot be evaluated at compile time: reads a run-time variable
+// expect-error: 13:20: `A` is declared inside `main` and can't use `n`, a local of `main`; a `const` is computed at compile time, so it can use only items (spec 3.9.1)
 // expect-error: 14:20: const `B` cannot be evaluated at compile time: calls `g`, which is not a `const fn`
 // expect-error: 16:5: cannot assign to const `C` (spec 5.2)
-// expect-error: 17:5: `C` is already declared in this scope
-// expect-error: 18:19: const `D` cannot be evaluated at compile time: attempt to multiply with overflow
+// expect-error: 17:19: const `D` cannot be evaluated at compile time: attempt to multiply with overflow
 
-// Spec 5.2.4: a body `const` reads no `let` variable, calls only
-// `const fn`s and never overflows; it is not assignable (5.2.3).
+// Spec 5.2.4 / 3.9.1: a body `const` is an item: it reads no `let`
+// variable, calls only `const fn`s and never overflows; it is not
+// assignable (5.2.3).
 fn g() -> i32 { 3 }
 fn main() -> i32 {
     let n = 3;
@@ -14,7 +14,6 @@ fn main() -> i32 {
     const B: i32 = g();
     const C: i32 = 1;
     C = 2;
-    const C: i32 = 2;
     const D: u8 = 200 * 2;
     return 0;
 }

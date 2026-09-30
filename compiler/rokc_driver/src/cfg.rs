@@ -59,7 +59,7 @@ pub fn filter_items(items: Vec<Item>, env: &CfgEnv) -> Vec<Item> {
 }
 
 fn item_passes(item: &Item, env: &CfgEnv) -> bool {
-    let attrs = item_attrs(item);
+    let attrs = item.attrs();
     // Spec 6.2.5: `#[test]` implies `#[cfg(test)]`; so does `#[bench]`
     // (a bench build is a test build, as with cargo).
     (env.has_flag("test")
@@ -70,21 +70,4 @@ fn item_passes(item: &Item, env: &CfgEnv) -> bool {
 /// Whether every `#[cfg(..)]` among `attrs` holds.
 pub fn attrs_pass(attrs: &[Attribute], env: &CfgEnv) -> bool {
     env.attrs_pass(attrs)
-}
-
-fn item_attrs(item: &Item) -> &[Attribute] {
-    match item {
-        Item::Fn(f) => &f.attrs,
-        Item::Struct(s) => &s.attrs,
-        Item::Enum(e) => &e.attrs,
-        Item::Union(u) => &u.attrs,
-        Item::Trait(t) => &t.attrs,
-        Item::Impl(i) => &i.attrs,
-        Item::Const(c) => &c.attrs,
-        Item::Static(s) => &s.attrs,
-        Item::TypeAlias(a) => &a.attrs,
-        Item::Mod(m) => &m.attrs,
-        Item::Use(u) => &u.attrs,
-        Item::Extern(e) => &e.attrs,
-    }
 }

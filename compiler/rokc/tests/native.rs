@@ -423,6 +423,47 @@ fn debug_info_names_functions_lines_and_locals() {
     }
 }
 
+/// `-g`, both back ends: an item declared in a function body (spec
+/// 3.9.1) and its method and `static` read as written, not by their
+/// lifted names.
+// spec: §3.9.1
+#[test]
+fn debug_info_names_block_local_items() {
+    let Some(env) = setup() else { return };
+    let Some(dump) = ["llvm-dwarfdump", "dwarfdump"]
+        .into_iter()
+        .find(|t| Command::new(t).arg("--version").output().is_ok())
+    else {
+        return;
+    };
+    let src = "fn f() -> i32 {\n    static HITS: i32 = 2;\n    struct L { v: i32; }\n    \
+               impl L { fn get(self) -> i32 { self.v + HITS } }\n    let l = L { v: 1 };\n    \
+               l.get()\n}\nfn main() { println(f\"{f()}\"); }\n";
+    for backend in ["llvm", "native"] {
+        let dir = scratch(&format!("debug_local_{backend}"));
+        fs::write(dir.join("main.rok"), src).unwrap();
+        let exe = dir.join("out");
+        let be = format!("backend={backend}");
+        ok(&build(
+            &env,
+            &dir.join("main.rok"),
+            &["-g", "-C", &be, "-o", exe.to_str().unwrap()],
+        ));
+        let dsym = dir.join("out.dSYM");
+        let target = if dsym.exists() { dsym } else { exe };
+        let info = Command::new(dump)
+            .arg("--debug-info")
+            .arg(&target)
+            .output()
+            .unwrap();
+        let info = text(&info.stdout);
+        for name in ["(\"L\")", "(\"L__get\")"] {
+            assert!(info.contains(name), "{backend}: no {name}:\n{info}");
+        }
+        assert!(!info.contains("(\"f/"), "{backend}: a lifted name:\n{info}");
+    }
+}
+
 fn check_debuggee(dump: &str, target: &Path, backend: &str) {
     let info = Command::new(dump)
         .arg("--debug-info")

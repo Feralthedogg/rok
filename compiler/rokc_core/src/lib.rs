@@ -4,6 +4,7 @@ pub mod codec;
 pub mod def;
 pub mod hash;
 pub mod lint;
+pub mod local;
 
 use std::path::{Path, PathBuf};
 

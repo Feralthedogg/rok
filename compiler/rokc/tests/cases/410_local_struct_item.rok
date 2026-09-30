@@ -1,8 +1,24 @@
-// spec: refs-lang §4.10 / §5.2.2
-// expect-error: 6:5: a `struct` is declared only at module level, not in a function body
+// spec: §3.9.1 §4.10
+// expect-exit: 0
+// expect-stdout:
+// P { x: 1 } P 3
+// S(2) Unit B(4)
 
-// A block declares only `fn`, `const` and `use` items.
+// A block declares `struct`s, `enum`s and their impls like a module
+// does; `Debug` and `type_name` show the name as written.
 fn main() {
+    #[derive(Debug)]
     struct P { x: i32; }
+    impl P {
+        fn twice(self) -> i32 { self.x * 2 }
+    }
     let p = P { x: 1 };
+    println(f"{p:?} {P::type_name()} {p.twice() + 1}");
+    #[derive(Debug)]
+    struct S(i32);
+    #[derive(Debug)]
+    struct Unit;
+    #[derive(Debug)]
+    enum E { A, B(i32) }
+    println(f"{S(2):?} {Unit:?} {E::B(4):?}");
 }

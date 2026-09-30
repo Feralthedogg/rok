@@ -1306,7 +1306,7 @@ impl Parser<'_> {
     /// Expand the first user attribute (`#[impl_attribute]`) on the item
     /// parsed from `self.tokens[from..self.pos]`; `None` if it has none.
     pub(crate) fn expand_user_attribute(&mut self, item: &Item, from: usize) -> Option<Vec<Item>> {
-        let attrs = item_attrs(item);
+        let attrs = item.attrs();
         let (def, a) = attrs.iter().find_map(|a| {
             let d = self.meta.find(MetaKind::Attribute, a.name())?;
             Some((d.clone(), a.clone()))
@@ -1337,7 +1337,7 @@ impl Parser<'_> {
         if !matches!(item, Item::Struct(_) | Item::Enum(_) | Item::Union(_)) {
             return (item, out);
         }
-        let users: Vec<(MetaDef, Span)> = crate::derive::derive_names(item_attrs(&item))
+        let users: Vec<(MetaDef, Span)> = crate::derive::derive_names(item.attrs())
             .into_iter()
             .filter_map(|(n, at)| Some((self.meta.find(MetaKind::Derive, &n)?.clone(), at)))
             .collect();
@@ -1351,7 +1351,7 @@ impl Parser<'_> {
             }
         }
         {
-            let attrs = item_attrs_mut(&mut item);
+            let attrs = item.attrs_mut();
             for a in attrs.iter_mut().filter(|a| a.path == ["derive"]) {
                 if let AttrBody::Args(args) = &mut a.body {
                     args.retain(
@@ -1611,12 +1611,9 @@ impl Parser<'_> {
         }
         // 6.9.8: `#[cfg]` runs before expansion — what the item's cfg
         // removes, its expansion goes with it.
-        let cfgs: Vec<&Attribute> = item_attrs(item)
-            .iter()
-            .filter(|a| a.name() == "cfg")
-            .collect();
+        let cfgs: Vec<&Attribute> = item.attrs().iter().filter(|a| a.name() == "cfg").collect();
         for i in &mut items {
-            item_attrs_mut(i).extend(cfgs.iter().map(|a| (*a).clone()));
+            i.attrs_mut().extend(cfgs.iter().map(|a| (*a).clone()));
         }
         items
     }
@@ -1741,40 +1738,6 @@ fn render(tokens: &[Token]) -> String {
     }
     out.push('\n');
     out
-}
-
-pub(crate) const fn item_attrs(item: &Item) -> &Vec<Attribute> {
-    match item {
-        Item::Fn(x) => &x.attrs,
-        Item::Struct(x) => &x.attrs,
-        Item::Enum(x) => &x.attrs,
-        Item::Union(x) => &x.attrs,
-        Item::Trait(x) => &x.attrs,
-        Item::Impl(x) => &x.attrs,
-        Item::Const(x) => &x.attrs,
-        Item::Static(x) => &x.attrs,
-        Item::TypeAlias(x) => &x.attrs,
-        Item::Mod(x) => &x.attrs,
-        Item::Use(x) => &x.attrs,
-        Item::Extern(x) => &x.attrs,
-    }
-}
-
-const fn item_attrs_mut(item: &mut Item) -> &mut Vec<Attribute> {
-    match item {
-        Item::Fn(x) => &mut x.attrs,
-        Item::Struct(x) => &mut x.attrs,
-        Item::Enum(x) => &mut x.attrs,
-        Item::Union(x) => &mut x.attrs,
-        Item::Trait(x) => &mut x.attrs,
-        Item::Impl(x) => &mut x.attrs,
-        Item::Const(x) => &mut x.attrs,
-        Item::Static(x) => &mut x.attrs,
-        Item::TypeAlias(x) => &mut x.attrs,
-        Item::Mod(x) => &mut x.attrs,
-        Item::Use(x) => &mut x.attrs,
-        Item::Extern(x) => &mut x.attrs,
-    }
 }
 
 rokc_core::codec_enum!(MetaKind { Derive, Attribute });

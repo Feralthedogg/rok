@@ -293,13 +293,14 @@ fn ty_text(hir: &HirModule, ty: &HirTy, full: bool) -> String {
     // the REPL shows them (907.7).
     let generic = |name: &str, args: &[HirTy]| {
         let base = name.split("__").next().unwrap_or(name);
+        // An item in a block by its own name (spec 3.9.1).
         let base = if full {
-            base
+            std::borrow::Cow::Borrowed(base)
         } else {
-            base.rsplit("::").next().unwrap_or(base)
+            rokc_core::local::leaf(base.rsplit("::").next().unwrap_or(base))
         };
         if args.is_empty() {
-            base.to_owned()
+            base.into_owned()
         } else {
             format!("{base}<{}>", list(args))
         }
@@ -359,11 +360,19 @@ pub fn signature(hir: &HirModule, f: &HirFunction) -> String {
     )
 }
 
-/// The name a user writes for a HIR function: the last `::` segment,
-/// and the method name of an `<Type>__method` impl function (a
-/// dependency's: `<module>::<Type>.method[__by_Trait]`).
+/// The name a user writes for a HIR function.
+///
+/// The last `::` segment, and the method name of an `<Type>__method`
+/// impl function (a dependency's: `<module>::<Type>.method[__by_Trait]`);
+/// a fn in a block (`f/g`, spec 4.10) by its own name.
 pub fn short_name(name: &str) -> &str {
     let last = name.rsplit("::").next().unwrap_or(name);
+    let mut segs = last.rsplit('/');
+    let mut last = segs.next().unwrap_or(last);
+    // `f/g/2`: a repeated name's counter.
+    if last.bytes().all(|b| b.is_ascii_digit()) {
+        last = segs.next().unwrap_or(last);
+    }
     if let Some((_, method)) = last.split_once('.') {
         return method.split("__").next().unwrap_or(method);
     }

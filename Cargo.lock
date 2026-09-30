@@ -58,6 +58,7 @@ name = "rokc_codegen_native"
 version = "0.1.0"
 dependencies = [
  "rokc_codegen_mlir",
+ "rokc_core",
  "rokc_diagnostic",
  "rokc_ir_common",
  "rokc_mir",

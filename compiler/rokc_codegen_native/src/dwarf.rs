@@ -929,7 +929,8 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
             (true, false) => A_SUB_RET_LEAF,
             (false, false) => A_SUB_LEAF,
         });
-        cstr(&mut info.b, &d.name);
+        // An item in a block by its own name (spec 3.9.1).
+        cstr(&mut info.b, &rokc_core::local::unmangle(&d.name));
         uleb(&mut info.b, u64::from(fid(d.file)));
         uleb(&mut info.b, u64::from(d.line));
         info.addr(f.sym, f.start);

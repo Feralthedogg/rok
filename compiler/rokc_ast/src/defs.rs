@@ -62,6 +62,17 @@ pub fn inline_wanted(attrs: &[crate::Attribute]) -> bool {
 /// an enclosing block rather than one declared here.
 pub const NESTED_FN_ATTR: &str = "#nested_fn";
 
+/// Marker attribute of an item lifted from a block (spec 3.9.1).
+///
+/// Its string is the lifted path of the fn around it. The item is named
+/// `outer/name` (`rokc_core::local`), every use in its scope renamed
+/// (`rename`); a copy stays in the block as a statement.
+pub const LOCAL_ITEM_ATTR: &str = "#local_item";
+
+/// Marker attribute of a block's `use` copied into the bodies of the fns
+/// lifted from the block (spec 3.9.1).
+pub const INHERITED_USE_ATTR: &str = "#inherited_use";
+
 /// Marker attribute of a `const fn` (spec 5.2.5): callable in const
 /// contexts, evaluated at compile time there.
 pub const CONST_FN_ATTR: &str = "#const_fn";

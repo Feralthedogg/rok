@@ -144,6 +144,10 @@ fn page(pkg: &str, rel: &[String]) -> String {
 }
 
 fn item_info(item: &Item) -> Option<(&'static str, &str, Visibility, &[Attribute])> {
+    // An item in a function body is no API (spec 3.9.1).
+    if item.is_local() {
+        return None;
+    }
     Some(match item {
         Item::Fn(x) => ("fn", &x.name, x.vis, &x.attrs),
         Item::Struct(x) => ("struct", &x.name, x.vis, &x.attrs),
@@ -377,8 +381,9 @@ impl Docs {
                 members,
             });
         }
-        // Impl blocks attach to their type in this module.
-        for item in items {
+        // Impl blocks attach to their type in this module (not one in a
+        // function body: spec 3.9.1).
+        for item in items.iter().filter(|i| !i.is_local()) {
             let Item::Impl(im) = item else { continue };
             let TyKind::Path(p) = &im.self_ty.kind else {
                 continue;
@@ -1026,5 +1031,22 @@ mod tests {
         let Item::Fn(f) = &p.items[0] else { panic!() };
         assert_eq!(doc_text(&f.attrs), "Adds.\nTwice.");
         assert_eq!(summary("\n`a` b\nc"), "a b");
+    }
+
+    /// Items in a function body (spec 3.9.1) are not the package's API.
+    #[test]
+    fn block_local_items_are_not_documented() {
+        let src = "pub trait Show { fn show(self) -> str; }\npub struct P {}\n\
+                   pub fn f() {\n    pub struct Q {}\n    impl Show for P { fn show(self) -> str { \"\" } }\n    \
+                   impl P { pub fn m(self) {} }\n}\n";
+        let (tokens, _) = rokc_lexer::Lexer::new(src, "a.rok").lex_all();
+        let (p, _) = rokc_parser::parse_program(&tokens, "a.rok");
+        let mut d = docs();
+        d.module("app", &[], &p.items);
+        let m = &d.modules[&("app".to_owned(), Vec::new())];
+        let names: Vec<&str> = m.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Show", "P", "f"]);
+        let p = m.entries.iter().find(|e| e.name == "P").unwrap();
+        assert!(p.members.is_empty(), "{:?}", p.members);
     }
 }
