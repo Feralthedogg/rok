@@ -22,7 +22,7 @@
 // `Dir::read_dir_async` is a `Stream` of entries read in batches, while
 // the free `read_dir_async` lists the whole directory at once (301).
 
-use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, AsBytes, check, region, read_all, write_region, text_of, byte_buf, list_of};
+use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, AsBytes, check, region, read_all, take_handle, write_region, text_of, byte_buf, list_of};
 pub use rok::std::io::SeekFrom;
 use rok::std::path::{Path, AsPath, Component};
 use rok::std::env;
@@ -202,9 +202,8 @@ impl File {
     /// Close now; later calls fail with `InvalidInput`. Closing twice is a no-op.
     pub fn close(self) throws (IoError) {
         unsafe {
-            let fd = self.fd[0];
+            let fd = take_handle(self.fd, 0, -1);
             if fd < 0 { return; }
-            self.fd[0] = -1;
             try check(rok_os_close(fd) as i64, self.path);
         }
     }
@@ -348,9 +347,8 @@ impl Mmap {
 
     pub fn unmap(self) {
         unsafe {
-            let addr = self.addr[0];
+            let addr = take_handle(self.addr, 0, 0);
             if addr != 0 {
-                self.addr[0] = 0;
                 rok_os_munmap(addr, self.len);
             }
         }
@@ -587,9 +585,8 @@ impl Seek for File {
 impl Drop for File {
     fn drop(ref self) {
         unsafe {
-            let fd = self.fd[0];
+            let fd = take_handle(self.fd, 0, -1);
             if fd >= 0 {
-                self.fd[0] = -1;
                 rok_os_close(fd);
             }
         }
@@ -813,9 +810,8 @@ impl Dir {
     /// Release the handle (`root()` has none).
     pub fn close(self) throws (IoError) {
         unsafe {
-            let fd = self.fd();
+            let fd = take_handle(self.fd, 0, -1);
             if fd < 0 { return; }
-            self.fd[0] = -1;
             try check(rok_os_close(fd) as i64, self.path);
         }
     }
@@ -824,9 +820,8 @@ impl Dir {
 impl Drop for Dir {
     fn drop(ref self) {
         unsafe {
-            let fd = self.fd[0];
+            let fd = take_handle(self.fd, 0, -1);
             if fd >= 0 {
-                self.fd[0] = -1;
                 rok_os_close(fd);
             }
         }
@@ -902,9 +897,8 @@ impl Drop for ReadDir {
 
 fn close_dir(cell: GcBuf<isize>) {
     unsafe {
-        let d = cell[0];
+        let d = take_handle(cell, 0, 0);
         if d != 0 {
-            cell[0] = 0;
             rok_os_closedir(d);
         }
     }

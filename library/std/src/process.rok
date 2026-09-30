@@ -23,7 +23,7 @@
 // anything. A burst that fills the pipe drops signals.
 
 use rok::std::fs::File;
-use rok::std::io::{IoError, RawFd, Reader, Writer, check, byte_buf, read_more};
+use rok::std::io::{IoError, RawFd, Reader, Writer, check, byte_buf, read_more, take_handle};
 use rok::std::path::Path;
 use rok::std::path::AsPath;
 use rok::std::env;
@@ -385,9 +385,9 @@ impl Child {
     unsafe fn reaped(self, raw: i32) {
         self.state[0] = 1;
         self.state[1] = raw;
-        if self.state[2] >= 0 {
-            rok_os_close(self.state[2]);
-            self.state[2] = -9;
+        let fd = take_handle(self.state, 2, -9);
+        if fd >= 0 {
+            rok_os_close(fd);
         }
     }
 

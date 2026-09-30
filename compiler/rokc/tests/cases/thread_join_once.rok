@@ -1,0 +1,26 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 7
+// thread join failed: the handle was already joined or detached
+// true
+// thread join failed: the handle was already joined or detached
+
+// spec: std 304 §3.4
+// A `JoinHandle` copy shares the handle: the OS thread is joined or
+// detached once. A second `join` (through any copy), or a `join` after
+// `detach`, throws `JoinError` with `JOIN_TAKEN`; a second `detach` does
+// nothing.
+use rok::std::thread;
+
+fn main() {
+    let h = thread::spawn(|| 7);
+    let copy = h;
+    println(f"{try! h.join()}");
+    let code = try copy.join() catch e: thread::JoinError { println(f"{e}"); e.code };
+    println(f"{code == thread::JOIN_TAKEN}");
+    let d = thread::spawn(|| 1);
+    d.detach();
+    d.detach();
+    try d.join() catch e: thread::JoinError { println(f"{e}"); 0 };
+}

@@ -197,6 +197,16 @@ pub const fn byte_buf(n: usize) -> List<u8> {
     out
 }
 
+#[intrinsic("rok.atomic.xchg")]
+fn atomic_xchg<T>(buf: GcBuf<T>, i: usize, v: T, o: AtomicOrdering) -> T;
+
+/// The OS handle in `cell[i]`, leaving `empty` there. Copies of a handle
+/// share its cell, so of any that release it, even at once from several
+/// threads, exactly one gets the handle; the rest get `empty`.
+pub(pkg) fn take_handle<T>(cell: GcBuf<T>, i: usize, empty: T) -> T {
+    unsafe { atomic_xchg(cell, i, empty, SeqCst) }
+}
+
 /// The region `(buf, off, len)` holding `b`'s bytes.
 pub(pkg) const fn region<B: AsBytes>(b: B) -> (GcBuf<u8>, usize, usize) {
     unsafe { b.byte_slice().raw_parts() }

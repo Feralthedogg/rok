@@ -85,8 +85,8 @@ impl Thread {
     }
 }
 
-/// The OS could not join the thread: `pthread_join`'s error number, or
-/// [`JOIN_LOST`].
+/// The OS could not join the thread: `pthread_join`'s error number,
+/// [`JOIN_LOST`] or [`JOIN_TAKEN`].
 #[derive(Debug)]
 pub struct JoinError {
     pub code: i32;
@@ -96,10 +96,16 @@ pub struct JoinError {
 /// (the session went back to before the cell; the thread is gone).
 pub const JOIN_LOST: i32 = -1;
 
+/// `JoinError::code` of a handle already joined or detached, through it
+/// or a copy of it: the OS thread handle is released once.
+pub const JOIN_TAKEN: i32 = -2;
+
 impl Display for JoinError {
     const fn fmt(self, ref f: Formatter) throws (FmtError) {
         if self.code == JOIN_LOST {
             try f.write_str("thread join failed: the thread ended with a failed REPL cell")
+        } else if self.code == JOIN_TAKEN {
+            try f.write_str("thread join failed: the handle was already joined or detached")
         } else {
             try f.write_str(f"thread join failed (error {self.code})")
         }
@@ -113,6 +119,8 @@ pub struct JoinHandle<T> {
     handle: usize;
     result: GcBuf<T>;
     thread: Thread;
+    /// Set by the first `join` / `detach`; copies share it.
+    taken: Atomic<bool>;
 }
 
 impl<T> JoinHandle<T> {
@@ -121,6 +129,9 @@ impl<T> JoinHandle<T> {
         unsafe {
             if rok_thread_lost(self.thread.rec.id) != 0 {
                 throw JoinError { code: JOIN_LOST };
+            }
+            if self.taken.swap(true) {
+                throw JoinError { code: JOIN_TAKEN };
             }
             let code = rok_thread_join(self.handle);
             if code != 0 { throw JoinError { code }; }
@@ -131,9 +142,12 @@ impl<T> JoinHandle<T> {
     pub const fn thread(self) -> Thread { self.thread }
 
     /// Let the thread run on its own; its OS resources are released when
-    /// it ends. The handle must not be joined afterwards.
+    /// it ends. A later `join` throws `JoinError` (`JOIN_TAKEN`); a
+    /// handle already joined or detached is left alone.
     pub fn detach(self) {
-        unsafe { rok_thread_detach(self.handle) };
+        if !self.taken.swap(true) {
+            unsafe { rok_thread_detach(self.handle) };
+        }
     }
 }
 
@@ -193,7 +207,7 @@ impl Builder {
                 }
                 throw IoError::new("could not create an OS thread");
             }
-            JoinHandle { handle: h, result: result, thread: Thread { rec: rec } }
+            JoinHandle { handle: h, result: result, thread: Thread { rec: rec }, taken: Atomic::new(false) }
         }
     }
 }

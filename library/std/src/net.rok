@@ -20,7 +20,7 @@
 // `MSG_ZEROCOPY` (302.7). `set_*_timeout` applies to the blocking calls only
 // (`task::timeout` covers async).
 
-use rok::std::io::{IoError, IoErrorKind, RawFd, Reader, Writer, AsBytes, check, would_block, region};
+use rok::std::io::{IoError, IoErrorKind, RawFd, Reader, Writer, AsBytes, check, would_block, region, take_handle};
 use rok::std::time::Duration;
 use rok::std::fs::File;
 use rok::std::path::{AsPath, Path};
@@ -461,9 +461,8 @@ impl Sock {
     /// closed (the kernel sends no event for a closed fd).
     fn close(self) {
         unsafe {
-            let fd = self.fd[0];
+            let fd = take_handle(self.fd, 0, -1);
             if fd >= 0 {
-                self.fd[0] = -1;
                 rok_os_close(fd);
                 task::wake_io(fd);
             }
