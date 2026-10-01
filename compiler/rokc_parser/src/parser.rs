@@ -91,6 +91,13 @@ pub struct Parser<'a> {
     /// The next primary starts a statement: if it is block-like, `(` / `[`
     /// after it begin a new statement (`while c {} (a, b)`), not a call.
     stmt_head: bool,
+    /// `(token, inner)` whose doc comments became attributes.
+    docs_used: std::collections::HashSet<(usize, bool)>,
+    /// Doc comments (by start) on what keeps no doc (a statement, a
+    /// match arm, ..): what, and whether that is an error.
+    docs_dropped: std::collections::HashMap<u32, (&'static str, bool)>,
+    /// Token ranges no parse looks into (meta block bodies).
+    unparsed: Vec<std::ops::Range<usize>>,
 }
 
 /// Nesting limit for expressions, types, patterns and blocks.
@@ -274,6 +281,9 @@ impl<'a> Parser<'a> {
             fn_names: Vec::new(),
             fn_owner: None,
             lifted_names: std::collections::HashSet::new(),
+            docs_used: std::collections::HashSet::new(),
+            docs_dropped: std::collections::HashMap::new(),
+            unparsed: Vec::new(),
         }
     }
 
@@ -981,6 +991,7 @@ impl<'a> Parser<'a> {
         // Untyped `throws` in fn types that no `rethrows` claimed keep the
         // marker; HIR reads it as `any Error` (spec 4.14).
         self.untyped_throws.clear();
+        self.misplaced_docs();
         Program {
             attrs,
             items,
@@ -1137,8 +1148,16 @@ impl<'a> Parser<'a> {
     /// The outer attributes of a statement, match arm, struct literal
     /// field, parameter or tuple variant field (`what`), which keeps
     /// none: only `#[cfg]` may be there (spec 6.1.3).
-    fn cfg_only_attrs(&mut self, what: &str) -> Vec<Attribute> {
+    fn cfg_only_attrs(&mut self, what: &'static str) -> Vec<Attribute> {
         let attrs = self.parse_outer_attrs();
+        // A nested `fn` is a statement here; like a local item, it may
+        // have a doc comment (not part of the package's API).
+        let item = what == "a statement" && self.at_item_start();
+        for a in attrs.iter().filter(|a| a.name() == "doc" && !item) {
+            // As in Rust, a parameter's is an error.
+            self.docs_dropped
+                .insert(a.span.start, (what, what == "a parameter"));
+        }
         for a in &attrs {
             let why = match a.name() {
                 "doc" => None,
@@ -1188,32 +1207,105 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The next token's `///` (or `//!`) lines as `#[doc = ".."]`
-    /// attributes (the text escaped, as a string literal holds it). Doc
-    /// comments where no attribute can go are dropped.
-    fn doc_attrs(&self, inner: bool, out: &mut Vec<Attribute>) {
+    /// Report the doc comments that document nothing, as Rust does: an
+    /// inner one past the start of its file, module or function body,
+    /// an outer one before a closing bracket or the end, or on a
+    /// parameter (errors), and an outer one on what is not an item (the
+    /// `unused_doc_comments` warning). Not after a syntax error.
+    fn misplaced_docs(&mut self) {
+        if self.diagnostics.iter().any(RokDiagnostic::is_error) {
+            return;
+        }
+        let plain = "use `//` for a plain comment";
+        let mut out = Vec::new();
+        for (i, t) in self.tokens.iter().enumerate() {
+            if t.docs.is_empty() || self.unparsed.iter().any(|r| r.contains(&i)) {
+                continue;
+            }
+            let closing = matches!(
+                t.kind,
+                TokenKind::RBrace | TokenKind::RParen | TokenKind::RBracket | TokenKind::Eof
+            );
+            for d in &t.docs {
+                let used = self.docs_used.contains(&(i, d.inner));
+                let dropped = self.docs_dropped.get(&d.span.start);
+                let (msg, error) = match (d.inner, used, dropped) {
+                    (true, true, _) | (false, true, None) => continue,
+                    (true, false, _) => (
+                        "expected outer doc comment: an inner doc comment (`//!`, `/*!`) \
+                         documents the file, module or function body it starts; use `///` for \
+                         the next item, or `//` for a plain comment"
+                            .to_owned(),
+                        true,
+                    ),
+                    (false, _, Some(&(what, true))) => (
+                        format!("a doc comment cannot document {what}; {plain}"),
+                        true,
+                    ),
+                    (false, _, Some(&(what, false))) => (
+                        format!("unused doc comment: {what} is not documented; {plain}"),
+                        false,
+                    ),
+                    (false, false, None) if closing => (
+                        format!(
+                            "doc comment documents nothing: it must come before an item; {plain}"
+                        ),
+                        true,
+                    ),
+                    (false, false, None) => (
+                        format!("unused doc comment: only items are documented; {plain}"),
+                        false,
+                    ),
+                };
+                let span = Span {
+                    file: t.span.file,
+                    ..d.span
+                };
+                out.push(if error {
+                    RokDiagnostic::error(ErrorKind::Parse, span, msg)
+                } else {
+                    RokDiagnostic::warning(ErrorKind::Parse, span, msg)
+                });
+            }
+        }
+        let file = self.file.clone();
+        self.diagnostics
+            .extend(out.into_iter().map(|d| d.with_file(file.clone())));
+    }
+
+    /// The next token's doc comments (`///`, `/** */`; inner: `//!`,
+    /// `/*! */`) as `#[doc = ".."]` attributes (the text escaped, as a
+    /// string literal holds it).
+    fn doc_attrs(&mut self, inner: bool, out: &mut Vec<Attribute>) {
+        self.doc_attrs_at(self.pos, inner, out);
+    }
+
+    fn doc_attrs_at(&mut self, at: usize, inner: bool, out: &mut Vec<Attribute>) {
         if self.pending.is_some() {
             return;
         }
-        let Some(t) = self.tokens.get(self.pos) else {
+        let Some(t) = self.tokens.get(at) else {
             return;
         };
-        out.extend(
-            t.docs
-                .iter()
-                .filter(|d| d.inner == inner)
-                .map(|d| Attribute {
-                    path: vec!["doc".to_owned()],
-                    body: AttrBody::Value(Literal::Str(
-                        d.text.replace('\\', "\\\\").replace('"', "\\\""),
-                    )),
-                    inner,
-                    span: Span {
-                        file: t.span.file,
-                        ..d.span
-                    },
-                }),
-        );
+        if t.docs.iter().any(|d| d.inner == inner) {
+            self.docs_used.insert((at, inner));
+        }
+        out.extend(t.docs.iter().filter(|d| d.inner == inner).map(|d| {
+            Attribute {
+                path: vec!["doc".to_owned()],
+                body: AttrBody::Value(Literal::Str(
+                    d.text
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n"),
+                )),
+                inner,
+                span: Span {
+                    file: t.span.file,
+                    ..d.span
+                },
+            }
+        }));
     }
 
     fn parse_attr(&mut self, inner: bool) -> Option<Attribute> {
@@ -3015,6 +3107,8 @@ impl<'a> Parser<'a> {
                 _ => name.clone(),
             };
             self.fn_names.push(owned);
+            // `//!` at the start of the body documents the function.
+            self.doc_attrs_at(self.pos + 1, true, &mut attrs);
             let b = self.parse_block();
             self.fn_names.pop();
             Some(b?)

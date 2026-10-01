@@ -959,3 +959,61 @@ fn compound_expr_spans_cover_all_tokens() {
     assert_eq!(text(lhs.span), "a.b(1, 2)");
     assert_eq!(text(rhs.span), "-c[3] as i64");
 }
+
+/// `<E|W>:<line>:<message up to its first colon>` of parsing `src`.
+fn doc_diags(src: &str) -> Vec<String> {
+    let (tokens, lex) = Lexer::new(src, "test").lex_all();
+    assert!(lex.is_empty(), "{lex:?}");
+    let (_, diags) = parse_program(&tokens, "test");
+    diags
+        .iter()
+        .map(|d| {
+            let head = if d.is_error() { "E" } else { "W" };
+            let line = d.primary.as_ref().map_or(0, |p| p.span.line);
+            let word = d.message.split(':').next().unwrap_or("");
+            format!("{head}:{line}:{word}")
+        })
+        .collect()
+}
+
+#[test]
+fn block_doc_comments_are_doc_attributes() {
+    let p =
+        parse("/*! Mod. */\n/**\n * Adds \"one\".\n * More.\n */\nfn f() {\n    //! Body.\n}\n");
+    assert!(matches!(&p.attrs[0].body, AttrBody::Value(Literal::Str(s)) if s == "Mod."));
+    let Item::Fn(f) = &p.items[0] else { panic!() };
+    let docs: Vec<&str> = f
+        .attrs
+        .iter()
+        .filter_map(|a| match &a.body {
+            AttrBody::Value(Literal::Str(s)) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(docs, ["Adds \\\"one\\\".\\nMore.", "Body."]);
+}
+
+#[test]
+fn misplaced_doc_comments() {
+    assert_eq!(
+        doc_diags("/// a\nfn f() {}\nmod m { //! b\n}\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        doc_diags("/// s\nlet x = /** e */ 1;\nmatch x {\n    /// arm\n    _ => {}\n}\n"),
+        [
+            "W:1:unused doc comment",
+            "W:2:unused doc comment",
+            "W:4:unused doc comment"
+        ]
+    );
+    assert_eq!(
+        doc_diags("fn f(/// p\n x: i32) {\n    /// none\n}\n//! late\nfn g() {}\n/// end\n"),
+        [
+            "E:1:a doc comment cannot document a parameter; use `//` for a plain comment",
+            "E:3:doc comment documents nothing",
+            "E:5:expected outer doc comment",
+            "E:7:doc comment documents nothing"
+        ]
+    );
+}

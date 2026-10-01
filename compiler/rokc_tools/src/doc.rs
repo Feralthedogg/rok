@@ -1031,6 +1031,14 @@ mod tests {
         let Item::Fn(f) = &p.items[0] else { panic!() };
         assert_eq!(doc_text(&f.attrs), "Adds.\nTwice.");
         assert_eq!(summary("\n`a` b\nc"), "a b");
+        let src =
+            "/*! Module\n    doc. */\n/**\n * Adds \"1\".\n *\n * \\n\n */\npub fn add() {}\n";
+        let (tokens, _) = rokc_lexer::Lexer::new(src, "a.rok").lex_all();
+        let (p, diags) = rokc_parser::parse_program(&tokens, "a.rok");
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(doc_text(&p.attrs), "Module\n   doc.");
+        let Item::Fn(f) = &p.items[0] else { panic!() };
+        assert_eq!(doc_text(&f.attrs), "Adds \"1\".\n\n\\n");
     }
 
     /// Items in a function body (spec 3.9.1) are not the package's API.

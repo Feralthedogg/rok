@@ -97,6 +97,7 @@ impl<'src> Lexer<'src> {
         if self.src.starts_with('\u{FEFF}') {
             self.pos = '\u{FEFF}'.len_utf8();
         }
+        self.advance(rokc_core::shebang_len(&self.src[self.pos..]));
         self.check_bidi();
         let mut tokens = Vec::new();
         loop {
@@ -1111,8 +1112,16 @@ impl<'src> Lexer<'src> {
         }
     }
 
+    /// A (nested) block comment; `/** .. */` and `/*! .. */` are doc
+    /// comments, but `/**/`, `/***/` and `/*** ..` are not (as in Rust).
     fn skip_block_comment(&mut self) {
         let start = self.pos;
+        let (line, col) = (self.line, self.col);
+        let doc = match (self.bytes.get(start + 2), self.bytes.get(start + 3)) {
+            (Some(b'!'), _) => Some(true),
+            (Some(b'*'), Some(c)) if !matches!(c, b'*' | b'/') => Some(false),
+            _ => None,
+        };
         self.advance(2);
         let mut depth = 1usize;
         while depth > 0 {
@@ -1131,6 +1140,13 @@ impl<'src> Lexer<'src> {
                 }
                 _ => self.advance(1),
             }
+        }
+        if let Some(inner) = doc {
+            self.docs.push(DocLine {
+                inner,
+                text: block_doc_text(&self.src[start + 3..self.pos - 2]),
+                span: Self::make_span(start, self.pos, line, col),
+            });
         }
     }
 
@@ -1201,6 +1217,41 @@ impl<'src> Lexer<'src> {
     }
 }
 
+/// The text of a block doc comment whose inside is `body` (spec 1.2.3).
+///
+/// A blank first line and a blank last line go; when every later line
+/// starts with optional whitespace and `*`, that prefix goes; then the
+/// indentation common to the non-blank lines and the whitespace before
+/// `*/` go. Line breaks become LF.
+fn block_doc_text(body: &str) -> String {
+    let body = body.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines: Vec<&str> = body.split('\n').collect();
+    if lines.len() > 1 && lines[0].trim().is_empty() {
+        lines.remove(0);
+    }
+    if lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let starred = |l: &&str| l.trim_start().starts_with('*');
+    let from = usize::from(!lines.first().is_some_and(starred));
+    if body.contains('\n') && lines.len() > from && lines[from..].iter().all(starred) {
+        for l in &mut lines[from..] {
+            *l = &l.trim_start()[1..];
+        }
+    }
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start_matches([' ', '\t']).len())
+        .min()
+        .unwrap_or(0);
+    let text: Vec<&str> = lines
+        .iter()
+        .map(|l| l.get(indent..).unwrap_or(""))
+        .collect();
+    text.join("\n").trim_end().to_owned()
+}
+
 /// Spec 1.10.3 Unicode math operators. `÷ ≡ ≠ ≤ ≥` are synonyms of
 /// `/ == != <= >=` and lex as those tokens.
 const fn math_op(c: char) -> Option<TokenKind> {
@@ -1243,6 +1294,49 @@ mod tests {
     fn err(src: &str) {
         let (_, d) = lex(src);
         assert!(!d.is_empty(), "{src:?} should be rejected");
+    }
+
+    /// `(inner, text)` of the doc comments before the first token.
+    fn docs(src: &str) -> Vec<(bool, String)> {
+        let (toks, diags) = Lexer::new(src, "t").lex_all();
+        assert!(diags.is_empty(), "{src:?}: {diags:?}");
+        toks[0]
+            .docs
+            .iter()
+            .map(|d| (d.inner, d.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn shebang_line() {
+        assert_eq!(ok("#!/usr/bin/env rok\nx"), [T::Ident("x".into()), T::Eof]);
+        assert_eq!(ok("\u{FEFF}#!rok -q\r\nx"), [T::Ident("x".into()), T::Eof]);
+        assert_eq!(ok("#!rok"), [T::Eof]);
+        assert_eq!(ok("#![a]")[0], T::HashBangLBracket);
+        // Only the first line.
+        err("x\n#!/usr/bin/env rok\n");
+        let (toks, _) = Lexer::new("#!/bin/rok\nx", "t").lex_all();
+        assert_eq!((toks[0].span.line, toks[0].span.col), (2, 1));
+    }
+
+    #[test]
+    fn block_doc_comments() {
+        let d = |s: &str| (false, s.to_owned());
+        assert_eq!(docs("/** One. */x"), [d("One.")]);
+        assert_eq!(docs("/*! Mod. */x"), [(true, "Mod.".to_owned())]);
+        assert_eq!(
+            docs("/**\n * A.\n *\n *     code\n */x"),
+            [d("A.\n\n    code")]
+        );
+        assert_eq!(docs("/**\r\n    A.\r\n      B.\r\n*/x"), [d("A.\n  B.")]);
+        assert_eq!(docs("/** a /* b */ c */x"), [d("a /* b */ c")]);
+        assert_eq!(docs("/**/x"), []);
+        assert_eq!(docs("/***/x"), []);
+        assert_eq!(docs("/*** no */x"), []);
+        assert_eq!(docs("/**/ /*!*/x"), [(true, String::new())]);
+        assert_eq!(docs("//// no\n/// yes\nx"), [d("yes")]);
+        assert_eq!(docs("r\"/// no\"")[..], []);
+        err("/** open");
     }
 
     #[test]

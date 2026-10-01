@@ -1,0 +1,45 @@
+/*! A file documented with a block doc comment. */
+// spec: refs-lang §1.2.3
+// expect-exit: 0
+// expect-lint: 37:5 unused doc comment: a statement is not documented; use `//` for a plain comment
+// expect-lint: 38:13 unused doc comment: only items are documented; use `//` for a plain comment
+// expect-lint: 40:9 unused doc comment: a match arm is not documented; use `//` for a plain comment
+// expect-warning: unused doc comment: a statement is not documented
+// expect-stdout:
+// 3 7
+// three
+
+// `/** */` documents the next item and `/*! */` the enclosing one; they
+// nest like other block comments. `/**/`, `/***/`, `/*** ..` and `////`
+// are plain comments. A doc comment on what is not an item is the
+// `unused_doc_comments` warning.
+
+/**
+ * Adds one.
+ *
+ * Nested: /* a comment */ inside.
+ */
+fn inc(x: i32) -> i32 {
+    /*! Also documents `inc`. */
+    x + 1
+}
+
+/** Seven. */
+const SEVEN: i32 = 7;
+
+/**/
+/***/
+/*** plain */
+//// plain
+
+fn main() {
+    let a = inc(2);
+    /// not documented
+    let b = /** nor this */ SEVEN;
+    match a {
+        /// nor an arm
+        3 => println(f"{a} {b}"),
+        _ => println("other"),
+    }
+    println(if a == 3 { "three" } else { "?" });
+}

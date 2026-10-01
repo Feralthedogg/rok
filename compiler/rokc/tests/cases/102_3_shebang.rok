@@ -1,0 +1,10 @@
+#!/usr/bin/env rok
+// spec: refs-lang §1.2.3
+// expect-exit: 0
+// expect-stdout:
+// after #!
+
+// A first line starting with `#!` (and not `#![`) is a shebang line,
+// skipped like a comment, so `./script.rok` runs with `rok`.
+let s = "after #!";
+println(s);

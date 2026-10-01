@@ -1,0 +1,6 @@
+// spec: refs-lang §1.2.3
+// expect-error: 5:1: stray `#` (expected `#[` or `#![`)
+
+// Only the first line can be a shebang line.
+#!/usr/bin/env rok
+println("x");

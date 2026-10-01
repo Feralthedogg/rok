@@ -109,6 +109,10 @@ pub const LINTS: &[Lint] = &[
         "a local holding a `Drop` resource (file, socket, child) that is never closed",
     ),
     warn(
+        "unused_doc_comments",
+        "a doc comment on what is not documented (a statement, an expression, a match arm)",
+    ),
+    warn(
         "missing_f_prefix",
         "a plain string holds `{name}` of a local in scope: it needs `f\"..\"`",
     ),
@@ -128,6 +132,7 @@ const GROUPS: &[(&str, &[&str])] = &[
             "dead_code",
             "unreachable_code",
             "unused_must_use",
+            "unused_doc_comments",
         ],
     ),
     (
@@ -238,9 +243,14 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
     for w in &result.warnings {
         let confusable = w.kind == ErrorKind::Lexical
             && (w.message.contains("confusable") || w.message.contains("mixes Cyrillic"));
-        match (confusable, &w.primary) {
+        let doc = w.kind == ErrorKind::Parse && w.message.starts_with("unused doc comment");
+        match (confusable || doc, &w.primary) {
             (true, Some(p)) => cx.findings.push(Finding {
-                lint: "confusable_idents",
+                lint: if doc {
+                    "unused_doc_comments"
+                } else {
+                    "confusable_idents"
+                },
                 span: p.span,
                 msg: w.message.clone(),
                 notes: Vec::new(),
@@ -1702,7 +1712,7 @@ mod tests {
         assert!(is_upper("MAX_N") && !is_upper("Max"));
         assert_eq!(to_snake("myVarName"), "my_var_name");
         assert_eq!(to_camel("my_type"), "MyType");
-        assert_eq!(expand("unused").unwrap().len(), 5);
+        assert_eq!(expand("unused").unwrap().len(), 6);
         assert_eq!(expand("all").unwrap().len(), LINTS.len());
         assert!(expand("nope").is_none());
         assert_eq!(Level::parse("deny"), Some(Level::Deny));

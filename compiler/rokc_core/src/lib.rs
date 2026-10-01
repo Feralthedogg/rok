@@ -145,8 +145,73 @@ pub fn command_help(usage: &str, cmd: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
+/// The length of the shebang line `src` starts with (spec 1.2.3).
+///
+/// Without its line terminator; 0 when there is none. A first line
+/// starting with `#!` is one unless the next token past whitespace and
+/// plain comments is `[`: `#![attr]` stays an inner attribute.
+#[must_use]
+pub fn shebang_len(src: &str) -> usize {
+    let Some(mut rest) = src.strip_prefix("#!") else {
+        return 0;
+    };
+    let b = |s: &str, i: usize| s.as_bytes().get(i).copied();
+    loop {
+        rest = rest.trim_start_matches(['\t', '\n', '\u{b}', '\u{c}', '\r', ' ']);
+        if rest.starts_with("//") && !rest.starts_with("///") && !rest.starts_with("//!")
+            || rest.starts_with("////")
+        {
+            rest = rest.find(['\n', '\r']).map_or("", |i| &rest[i..]);
+        } else if rest.starts_with("/*")
+            && b(rest, 2) != Some(b'!')
+            && (b(rest, 2) != Some(b'*') || matches!(b(rest, 3), Some(b'*' | b'/')))
+        {
+            let mut depth = 0usize;
+            let mut i = 0;
+            while i + 1 < rest.len() {
+                match &rest.as_bytes()[i..i + 2] {
+                    b"/*" => (depth, i) = (depth + 1, i + 2),
+                    b"*/" => (depth, i) = (depth - 1, i + 2),
+                    _ => i += 1,
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+            if depth > 0 {
+                break;
+            }
+            rest = &rest[i..];
+        } else {
+            break;
+        }
+    }
+    if rest.starts_with('[') {
+        return 0;
+    }
+    src.find(['\n', '\r']).unwrap_or(src.len())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shebang_lines() {
+        let s = super::shebang_len;
+        assert_eq!(s("#!/usr/bin/env rok\nprintln(1);"), 18);
+        assert_eq!(s("#!/usr/bin/env rok"), 18);
+        assert_eq!(s("#!rok\r\nx"), 5);
+        assert_eq!(s("#![allow(unused)]\n"), 0);
+        assert_eq!(s("#! [allow(unused)]\n"), 0);
+        assert_eq!(s("#!\n// c\n/* d /* e */ */ [x]"), 0);
+        // A doc comment is a token: not `[`.
+        assert_eq!(s("#!/// d\n[x]"), 7);
+        assert_eq!(s("#!/** d */[x]"), 13);
+        assert_eq!(s("#!/**/[x]"), 0);
+        assert_eq!(s("#!/* open"), 9);
+        assert_eq!(s(" #!/bin/rok"), 0);
+        assert_eq!(s("x\n#!/bin/rok"), 0);
+    }
+
     #[test]
     fn verbatim_windows_paths_get_their_plain_spelling() {
         let u = super::unverbatim;

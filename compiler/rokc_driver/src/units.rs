@@ -138,16 +138,25 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), RokDiagnostic> {
         .map_err(|e| err(format!("cannot write {}: {e}", path.display())))
 }
 
-/// Deletes the unit entries of `dir` other than `keep`.
+/// Deletes the unit entries of `dir` other than `keep`, and scratch
+/// files left for a minute.
 fn prune(dir: &Path, keep: &[PathBuf]) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for e in entries.flatten() {
         let p = e.path();
-        let unit = p
-            .extension()
-            .is_some_and(|x| x == "o" || x == "bc" || x.to_string_lossy().starts_with("tmp"));
+        // Another build of this directory may be writing a scratch file.
+        let stale = || {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 60)
+        };
+        let unit = p.extension().is_some_and(|x| {
+            x == "o" || x == "bc" || x.to_string_lossy().starts_with("tmp") && stale()
+        });
         if unit && !keep.contains(&p) {
             let _ = std::fs::remove_file(&p);
         }

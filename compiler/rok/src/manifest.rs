@@ -861,8 +861,10 @@ pub fn remove_dep(
 /// to a ```` ``` ```` line: a `rok.rokon` value, without the `//!`
 /// prefixes.
 pub fn script_block(src: &str) -> Option<String> {
+    // After a shebang line.
     let mut lines = src
         .lines()
+        .skip(usize::from(rokc_core::shebang_len(src) > 0))
         .map_while(|l| l.strip_prefix("//!"))
         .map(|l| l.strip_prefix(' ').unwrap_or(l));
     if !lines.by_ref().any(|l| l.trim() == "```rokon") {
@@ -1138,6 +1140,11 @@ mod tests {
     fn script_blocks() {
         let src = "//! ```rokon\n//! Package { deps: {} }\n//! ```\nprintln(\"hi\");\n";
         assert_eq!(script_block(src).as_deref(), Some("Package { deps: {} }\n"));
+        let shebang = format!("#!/usr/bin/env rok\n{src}");
+        assert_eq!(
+            script_block(&shebang).as_deref(),
+            Some("Package { deps: {} }\n")
+        );
         assert_eq!(script_block("//! ```rokon\n//! x\nfn main() {}"), None);
         assert_eq!(script_block("println(1);\n//! ```rokon\n//! ```"), None);
         assert_eq!(script_block("//! ```rok\n//! let x = 1;\n//! ```\n"), None);

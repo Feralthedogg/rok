@@ -1042,7 +1042,173 @@ fn script_dependencies() {
     if llvm() {
         let out = rok(&home, &root, &["-q", "run", "s.rok"]);
         assert_eq!(ok(&out), "1\n");
+        // A dependency's change is a new build of the script.
+        write(&root.join("lib1/src/lib.rok"), LIB_V2);
+        let out = rok(&home, &root, &["-q", "run", "s.rok"]);
+        assert_eq!(ok(&out), "2\n");
     }
+}
+
+const ECHO: &str = "#!/usr/bin/env rok\nuse rok::std::env;\nuse rok::std::io;\n\
+                    let line = try! io::stdin().read_line();\n\
+                    println(f\"{env::args()[1..]:?} {line.trim()}\");\n\
+                    eprintln(\"err\");\nenv::exit(3);\n";
+
+/// The cached executable `rok run -v` ran, and whether it compiled.
+fn ran(out: &Output) -> (String, bool) {
+    let err = text(&out.stderr);
+    let exe = err
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Running `"))
+        .unwrap_or_else(|| panic!("no Running line: {err}"));
+    (
+        exe.trim_end_matches('`').to_owned(),
+        err.contains("Compiling"),
+    )
+}
+
+// spec: §1.2.3 §9.10.1 §9.10.7
+#[test]
+fn scripts_run_directly() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("direct");
+    let home = root.join("home");
+    write(&root.join("echo.rok"), ECHO);
+    // `rok <file> args..`: every argument after the file is the
+    // program's, stdin / stdout / stderr are its own, and so is the
+    // exit code.
+    for (file, args) in [("echo.rok", ["-q", "--x"]), ("./echo.rok", ["--", "a b"])] {
+        let mut child = rok_cmd(&home, &root, &[file, args[0], args[1]])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"in\n").unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+        assert_eq!(
+            text(&out.stdout),
+            format!("[{:?}, {:?}] in\n", args[0], args[1])
+        );
+        assert_eq!(text(&out.stderr), "err\n");
+    }
+    // A file named like a command is a command unless it is a path.
+    write(&root.join("version"), "println(\"no\");\n");
+    assert!(ok(&rok(&home, &root, &["version"])).starts_with("rok "));
+    // Compile errors are reported as by `rok run`.
+    write(&root.join("bad.rok"), "let x: i32 = \"s\";\n");
+    fails(&rok(&home, &root, &["bad.rok"]), "error[E");
+    // Through the shebang line.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let file = root.join("echo.rok");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = Path::new(ROK).parent().unwrap();
+        let path = std::env::join_paths(std::iter::once(bin.to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let out = Command::new(&file)
+            .arg("z")
+            .current_dir(&root)
+            .env("PATH", path)
+            .env("ROK_HOME", &home)
+            .env_remove("ROK_ENV")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+        assert_eq!(text(&out.stdout), "[\"z\"] \n");
+    }
+}
+
+// spec: §9.10.7
+#[test]
+fn script_executables_are_cached_by_content() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("script-cache");
+    let home = root.join("home");
+    let file = root.join("t.rok");
+    write(&file, "println(\"one\");\n");
+    let run = |args: &[&str]| {
+        let mut all = vec!["run", "-v", "t.rok"];
+        all.splice(1..1, args.iter().copied());
+        let out = rok(&home, &root, &all);
+        ok(&out);
+        (text(&out.stdout), ran(&out))
+    };
+    let (out, (one, compiled)) = run(&[]);
+    assert_eq!((out.as_str(), compiled), ("one\n", true));
+    let entry = Path::new(&one).parent().unwrap().to_path_buf();
+    assert!(entry.starts_with(home.join("envs/default/target/debug/scripts")));
+    // The second run compiles nothing.
+    assert_eq!(run(&[]), ("one\n".to_owned(), (one.clone(), false)));
+    // An edit is a new key; the old entry stays and serves the old text.
+    write(&file, "println(\"two\");\n");
+    let (out, (two, compiled)) = run(&[]);
+    assert_eq!((out.as_str(), compiled), ("two\n", true));
+    assert_ne!(one, two);
+    write(&file, "println(\"one\");\n");
+    assert_eq!(run(&[]), ("one\n".to_owned(), (one, false)));
+    // Options before the file, and their own key.
+    let (out, (rel, compiled)) = run(&["--release"]);
+    assert_eq!((out.as_str(), compiled), ("one\n", true));
+    assert!(rel.contains("release"), "{rel}");
+    // Unused for a day, an entry goes when another is built.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+    fs::File::options()
+        .write(true)
+        .open(entry.join("used"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    write(&file, "println(\"three\");\n");
+    assert_eq!(run(&[]).0, "three\n");
+    assert!(!entry.exists());
+}
+
+// spec: §9.10.7
+#[test]
+fn concurrent_script_runs_share_one_entry() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("script-race");
+    let home = root.join("home");
+    write(&root.join("t.rok"), "println(\"ok\");\n");
+    // The environment's directory first: the runs race on the script.
+    ok(&rok(&home, &root, &["-q", "check", "t.rok"]));
+    let runs: Vec<_> = (0..6)
+        .map(|_| {
+            rok_cmd(&home, &root, &["t.rok"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for r in runs {
+        let out = r.wait_with_output().unwrap();
+        assert_eq!(ok(&out), "ok\n", "{}", text(&out.stderr));
+    }
+    let scripts = home.join("envs/default/target/debug/scripts");
+    let entries: Vec<_> = fs::read_dir(&scripts).unwrap().flatten().collect();
+    assert_eq!(entries.len(), 1);
+    let left: Vec<String> = fs::read_dir(entries[0].path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.ends_with(".dSYM"))
+        .collect();
+    let mut left = left;
+    left.sort();
+    assert_eq!(left, [".t.fp".to_owned(), exe("t"), "used".to_owned()]);
 }
 
 // spec: §9.10.1

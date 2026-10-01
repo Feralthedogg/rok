@@ -110,6 +110,25 @@ impl Fingerprint {
         self
     }
 
+    /// The hash of everything the build is made from.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The same build into `out` instead (its record beside it), with
+    /// `also` to exist.
+    #[must_use]
+    pub fn moved_to(self, out: &Path, also: Vec<PathBuf>) -> Self {
+        let name = out.file_name().unwrap_or_default().to_string_lossy();
+        Self {
+            file: out.with_file_name(format!(".{name}.fp")),
+            out: out.to_path_buf(),
+            also,
+            ..self
+        }
+    }
+
     fn head(&self) -> String {
         format!("{}\n{}\n", self.key, identity(&self.out))
     }

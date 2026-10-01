@@ -44,6 +44,9 @@ pub const VERSION_LINE: &str = concat!(env!("CARGO_PKG_VERSION"), env!("ROK_COMM
 
 const USAGE: &str = "\
 usage: rok [options] <command> [args]
+       rok [options] <file> [args]  run a script, the arguments its own: `rok
+                                    run -q <file> -- args` (<file> has a
+                                    `/` or ends in .rok)
        rok [options]                same as `rok repl`
 
 packages:
@@ -261,6 +264,19 @@ pub fn main_with(args: Vec<String>) -> i32 {
             t if t.len() > 1 && t.starts_with('+') && rest.iter().all(|r| r.starts_with('-')) => {
                 g.toolchain = Some(t[1..].to_owned());
             }
+            // `rok <file> [args..]` is `rok run -q <file> -- args..`: the
+            // file is a path (it has a `/` or ends in `.rok`; no command
+            // does), and every argument after it is the program's.
+            p if is_script(p)
+                && rest.iter().all(|r| r.starts_with('-'))
+                && rest
+                    .last()
+                    .is_none_or(|l| !VALUE_OPTIONS.contains(&l.as_str())) =>
+            {
+                let mut post = vec![a, "-q".to_owned(), "--".to_owned()];
+                post.extend(it.by_ref());
+                return run(&g, "run", &rest, &post);
+            }
             _ => rest.push(a),
         }
     }
@@ -290,6 +306,13 @@ pub fn main_with(args: Vec<String>) -> i32 {
         return help(&g, cmd);
     }
     run(&g, cmd, &rest[..i], post)
+}
+
+/// Whether command-line word `w` names a script, not a command.
+fn is_script(w: &str) -> bool {
+    Path::new(w).extension().is_some_and(|x| x == "rok")
+        || w.contains('/')
+        || cfg!(windows) && w.contains('\\')
 }
 
 /// The commands `rok` passes to `rokc`.
@@ -553,14 +576,13 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
     } else {
         post.to_vec()
     };
-    // The path, when given, is the first argument after the command.
-    let path = post
-        .first()
-        .map(String::as_str)
-        .filter(|p| !p.starts_with('-') && Path::new(p).exists());
+    // The path, when given, is the first argument after the command
+    // that is not an option or an option's value.
+    let first = positional(post);
+    let path = first.filter(|p| *p != "-" && Path::new(p).exists());
     // Commands on a package say so here, before resolving anything.
     let start = Path::new(path.unwrap_or("."));
-    let stdin = post.first().is_some_and(|p| p == "-");
+    let stdin = first == Some("-");
     let package = package_dir(start);
     if matches!(
         cmd,
@@ -645,6 +667,59 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
         c.env("ROK_ENV", e);
     }
     Ok(exec(c, &rokc))
+}
+
+/// rokc's options that take a separate value (`--target x86_64-..`).
+const VALUE_OPTIONS: [&str; 35] = [
+    "--color",
+    "--cwd",
+    "--message-format",
+    "-o",
+    "--out",
+    "--output",
+    "--bootstrap",
+    "--cfg",
+    "--print",
+    "--extern",
+    "--extern-feature",
+    "--name",
+    "--target-dir",
+    "--target",
+    "--rokr",
+    "-L",
+    "-l",
+    "--native-runtime",
+    "--load-mlir-plugin",
+    "--load-mlir-pass-plugin",
+    "--mlir-pass",
+    "--emit",
+    "-C",
+    "--codegen",
+    "--topn",
+    "--connection-file",
+    "-A",
+    "-W",
+    "-D",
+    "--allow",
+    "--warn",
+    "--deny",
+    "--iters",
+    "--samples",
+    "--threads",
+];
+
+/// The first of rokc's arguments `args` before `--` that is neither an
+/// option nor an option's value (`-` included: stdin).
+fn positional(args: &[String]) -> Option<&str> {
+    let mut it = args.iter().take_while(|a| *a != "--");
+    while let Some(a) = it.next() {
+        if VALUE_OPTIONS.contains(&a.as_str()) {
+            it.next();
+        } else if a == "-" || !a.starts_with('-') {
+            return Some(a);
+        }
+    }
+    None
 }
 
 /// `--extern=<name>=<lib.rok>` and its `--extern-feature=<name>=<f>`s.

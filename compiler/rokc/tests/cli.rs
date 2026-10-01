@@ -921,6 +921,10 @@ fn anonymous_file_reuses_its_units() {
         text(&out.stderr)
     };
     assert!(!run().contains(" 0 compiled"));
+    // The cached executable runs again without a build (spec 9.10.7).
+    assert!(run().contains("Fresh hello"));
+    // Built again, it reuses every unit.
+    fs::remove_dir_all(cache.join("debug/scripts")).unwrap();
     assert!(run().contains(" 0 compiled"));
     let units = fs::read_dir(cache.join("debug/incremental")).unwrap();
     let names: Vec<String> = units

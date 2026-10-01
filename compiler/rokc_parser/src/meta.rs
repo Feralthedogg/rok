@@ -1241,6 +1241,7 @@ impl Parser<'_> {
             return Some(None);
         };
         self.pos = end + 1;
+        self.unparsed.push(body_start..self.pos);
         if starter != want {
             self.diagnostics.push(meta_err(
                 ma.span,

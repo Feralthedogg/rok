@@ -45,7 +45,9 @@ fn format_source(src: &str) -> Result<String, String> {
     // Multi-line regions whose inside must stay byte-for-byte: tokens
     // (strings), whole f-strings and block comments that span a newline.
     let mut verbatim: Vec<(usize, usize)> = Vec::new();
-    let mut prev_end = 0;
+    // A shebang line (spec 1.2.3) is not trivia to scan.
+    let bom = if src.starts_with('\u{FEFF}') { 3 } else { 0 };
+    let mut prev_end = bom + rokc_core::shebang_len(&src[bom..]);
     let mut fstrings = Vec::new();
     for t in &tokens {
         let (mut start, end) = (t.span.start as usize, t.span.end as usize);
@@ -244,6 +246,13 @@ mod tests {
         let want = "fn f() {\n    // c\n    let x = foo(\n        1,\n        2);\n\n    /* a\n  b */\n}\n";
         assert_eq!(format_source(src).unwrap(), want);
         assert_eq!(format_source(want).unwrap(), want);
+    }
+
+    #[test]
+    fn keeps_shebang_and_doc_comment_forms() {
+        let src = "#!/usr/bin/env rok /*\n/** A.\n * B.\n */\nfn f() {\n    /*! C */\n}\n\
+                   /// D\n//! E\n";
+        assert_eq!(format_source(src).unwrap(), src);
     }
 
     #[test]

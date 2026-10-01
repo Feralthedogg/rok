@@ -1123,7 +1123,7 @@ fn cmd_build(mut a: Args) {
             exe_file(&a, &pkg.name)
         })
     });
-    build_fresh(&a, &pkg, &out, |a, result| {
+    build_fresh(&a, &pkg, fingerprint(&a, &pkg, &out), |a, result| {
         if !a.quiet {
             eprintln!("    Building {}", out.display());
         }
@@ -1139,8 +1139,7 @@ fn cmd_build(mut a: Args) {
 
 /// Build `pkg` into `out` with `link` unless the record says it is up to
 /// date (then its warnings are printed again).
-fn build_fresh(a: &Args, pkg: &Package, out: &Path, link: impl FnOnce(&Args, &CompileResult)) {
-    let fp = fingerprint(a, pkg, out);
+fn build_fresh(a: &Args, pkg: &Package, fp: Fingerprint, link: impl FnOnce(&Args, &CompileResult)) {
     if let Some(warnings) = fp.fresh() {
         print_rendered(&warnings);
         if !a.quiet {
@@ -1242,7 +1241,13 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     // An executable's shared libraries are copied beside it: a missing
     // copy rebuilds.
     stamped.extend(a.opts.runtime_files.iter().cloned());
-    let also = if pkg.lib {
+    Fingerprint::new(out, also(a, pkg, out), &words, &inputs, &stamped)
+}
+
+/// The files besides `out` a build of `pkg` makes (a library's ROKHIR,
+/// an executable's shared libraries).
+fn also(a: &Args, pkg: &Package, out: &Path) -> Vec<PathBuf> {
+    if pkg.lib {
         vec![rokc_interface::rokhir::companions(out).0]
     } else {
         let dir = out.parent().unwrap_or_else(|| Path::new("."));
@@ -1251,8 +1256,68 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
             .iter()
             .map(|f| dir.join(f.file_name().unwrap_or_default()))
             .collect()
-    };
-    Fingerprint::new(out, also, &words, &inputs, &stamped)
+    }
+}
+
+/// Lone-file executables unused this long go when another is built.
+const SCRIPT_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// The executable of lone file `pkg`, built unless cached (spec
+/// 9.10.7): `<target>/scripts/<key>/<name>` under the out directory
+/// without a package, `<key>` the hash of everything the build is made
+/// from (`fingerprint` without the output path: the compiler, options,
+/// target, sources, the `--extern`s and their prebuilt files). A hit
+/// compiles nothing. A build links to a scratch name and renames it into
+/// place, so runs racing on one key end with one complete executable.
+fn script_exe(a: &Args, pkg: &Package) -> PathBuf {
+    let root = out_dir(a, None).join("scripts");
+    let name = exe_file(a, &pkg.name);
+    let fp = fingerprint(a, pkg, Path::new(&name));
+    let dir = root.join(fp.key());
+    let exe = dir.join(&name);
+    let fp = fp.moved_to(&exe, also(a, pkg, &exe));
+    let mut built = false;
+    build_fresh(a, pkg, fp, |a, result| {
+        create_dir(&dir);
+        let tmp = dir.join(format!(".{name}.{}", process::id()));
+        link_exe(a, pkg, result, &tmp, &pkg.name);
+        // On Windows a running executable cannot be replaced: one that
+        // is there is this one already.
+        if std::fs::rename(&tmp, &exe).is_err() && exe.is_file() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        // Apple debug info (a `.dSYM` beside the executable): another
+        // run's, if there, is as good.
+        let dsym = |p: &Path| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            p.with_file_name(format!("{name}.dSYM"))
+        };
+        if dsym(&tmp).exists() && std::fs::rename(dsym(&tmp), dsym(&exe)).is_err() {
+            let _ = std::fs::remove_dir_all(dsym(&tmp));
+        }
+        built = true;
+    });
+    let _ = std::fs::write(dir.join("used"), "");
+    if built {
+        sweep_scripts(&root, &dir);
+    }
+    exe
+}
+
+/// Remove the entries of `root` but `keep` unused for `SCRIPT_KEPT`.
+fn sweep_scripts(root: &Path, keep: &Path) {
+    for e in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let p = e.path();
+        let old = std::fs::metadata(p.join("used"))
+            .or_else(|_| e.metadata())
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > SCRIPT_KEPT);
+        if p != keep && old {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
 }
 
 /// `rokc check` (with codegen) and `rokc lint` (without): the check
@@ -1339,28 +1404,21 @@ fn cmd_run(mut a: Args) {
         ));
     }
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
-    // An anonymous file builds in a scratch directory (no `target/` next
-    // to a loose script); a package builds into its `target/`.
-    let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
     let exe = match &a.output {
-        Some(o) => o.clone(),
-        None if pkg.anonymous => tmp.path().join(exe_file(&a, &pkg.name)),
-        None => {
-            let target = out_dir(&a, Some(&pkg));
-            create_dir(&target);
-            target.join(exe_file(&a, &pkg.name))
+        None if pkg.anonymous => script_exe(&a, &pkg),
+        o => {
+            let exe = o.clone().unwrap_or_else(|| {
+                let target = out_dir(&a, Some(&pkg));
+                create_dir(&target);
+                target.join(exe_file(&a, &pkg.name))
+            });
+            let fp = fingerprint(&a, &pkg, &exe);
+            build_fresh(&a, &pkg, fp, |a, result| {
+                link_exe(a, &pkg, result, &exe, &pkg.name);
+            });
+            exe
         }
     };
-    let link = |a: &Args, result: &CompileResult| link_exe(a, &pkg, result, &exe, &pkg.name);
-    if a.output.is_some() || !pkg.anonymous {
-        build_fresh(&a, &pkg, &exe, link);
-    } else {
-        let (result, _, started) = compile(&a, &pkg, Mode::Build);
-        let t = Instant::now();
-        link(&a, &result);
-        stage(&a, "codegen + link", t);
-        finished(&a, started);
-    }
     if !a.quiet {
         eprintln!("     Running `{}`", exe.display());
     }
@@ -1368,7 +1426,6 @@ fn cmd_run(mut a: Args) {
         .args(&a.run_args)
         .status()
         .unwrap_or_else(|e| fail(&format!("cannot run {}: {e}", exe.display())));
-    drop(tmp);
     #[cfg(unix)]
     if let Some(sig) = std::os::unix::process::ExitStatusExt::signal(&status) {
         process::exit(128 + sig);
