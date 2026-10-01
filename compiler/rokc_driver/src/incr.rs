@@ -160,14 +160,20 @@ impl Store {
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
-        let tmp = self
-            .path
-            .with_extension(format!("tmp{}", std::process::id()));
+        let tmp = self.path.with_extension(format!(
+            "tmp{}.{}",
+            std::process::id(),
+            TMP.fetch_add(1, Ordering::Relaxed)
+        ));
         if std::fs::write(&tmp, &e.buf).is_ok() && std::fs::rename(&tmp, &self.path).is_err() {
             let _ = std::fs::remove_file(&tmp);
         }
     }
 }
+
+/// Numbers each store write's temporary file: builds on other threads of
+/// the process write the same store too.
+static TMP: AtomicUsize = AtomicUsize::new(0);
 
 fn header(magic: &str) -> Vec<u8> {
     format!("{magic}\n{}\n", crate::rokhir::producer()).into_bytes()

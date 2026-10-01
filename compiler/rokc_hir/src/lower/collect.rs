@@ -4,6 +4,7 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use rokc_ir_common::{Abi, FnRole, Linkage};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// An `extern` block marked `#[link(.., kind = "static")]` (spec 6.2.3):
 /// its statics are in the image, not imported from a DLL.
@@ -280,16 +281,9 @@ pub fn lower_full(
     // The library's stage: kept for the next compile with the same
     // library (`HirInput::library`), its items leaked to live as long.
     let key = input.library;
-    let kept = key.and_then(|k| {
-        let kept = LIBRARY
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let found = kept
-            .as_ref()
-            .filter(|(at, _)| *at == k)
-            .map(|(_, l)| (l.c.clone(), l.lib, l.type_names.clone()));
-        drop(kept);
-        found
+    let kept = key.and(input.stage.as_ref()).map(|l| {
+        let l = stage(l);
+        (l.c.clone(), l.lib, l.type_names.clone())
     });
     let mut lib_items: Program;
     let (base, lib): (Collected<'_>, &Program) = if let Some((mut c, lib, type_names)) = kept {
@@ -316,9 +310,7 @@ pub fn lower_full(
             lib,
             type_names: crate::type_names(),
         };
-        *LIBRARY
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, kept));
+        keep_library(k, kept);
         (c, lib)
     } else {
         lib_items = lib;
@@ -359,36 +351,35 @@ pub fn lower_full(
 mod stage;
 pub use stage::LibraryStage;
 
-static LIBRARY: std::sync::Mutex<Option<(u64, LibraryStage)>> = std::sync::Mutex::new(None);
+/// The last library stage collected or read back, by key. A compile
+/// holds the one it takes (`HirInput::stage`): another compile's may
+/// replace it here meanwhile.
+static LIBRARY: Mutex<Option<(u64, KeptLibrary)>> = Mutex::new(None);
 
-/// Whether the library's stage of key `library` is kept
-/// (`HirInput::library`): a compile with it needs none of the library's
-/// items.
+/// A kept library stage, shared by the compiles that take it.
+pub type KeptLibrary = Arc<Mutex<LibraryStage>>;
+
+/// The stage of `kept`, locked.
+pub fn stage(kept: &KeptLibrary) -> MutexGuard<'_, LibraryStage> {
+    kept.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The library's stage of key `library`, if it is kept.
 #[must_use]
-pub fn library_kept(library: u64) -> bool {
+pub fn kept_library(library: u64) -> Option<KeptLibrary> {
     LIBRARY
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(PoisonError::into_inner)
         .as_ref()
-        .is_some_and(|(k, _)| *k == library)
-}
-
-/// Keep `stage` as the library's stage of key `library` (read back from
-/// an earlier build).
-pub fn keep_library(library: u64, stage: LibraryStage) {
-    *LIBRARY
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((library, stage));
-}
-
-/// `f` of the library's stage of key `library`, if it is kept.
-pub fn with_library<R>(library: u64, f: impl FnOnce(&LibraryStage) -> R) -> Option<R> {
-    let kept = LIBRARY
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    kept.as_ref()
         .filter(|(k, _)| *k == library)
-        .map(|(_, s)| f(s))
+        .map(|(_, s)| Arc::clone(s))
+}
+
+/// Keep `stage` as the library's stage of key `library`.
+pub fn keep_library(library: u64, stage: LibraryStage) -> KeptLibrary {
+    let stage = Arc::new(Mutex::new(stage));
+    *LIBRARY.lock().unwrap_or_else(PoisonError::into_inner) = Some((library, Arc::clone(&stage)));
+    stage
 }
 
 /// What every stage of a compile shares.

@@ -783,7 +783,9 @@ fn compile_unit_in(
     );
     let stage_key = ((!config.keep_ast || config.library_items) && lib.is_none())
         .then(|| library_key(&flags, &roots, &root_dir_kw, &metas, &ext, &prec, files));
-    let kept_parts = stage_key.and_then(|k| kept_library(k, incr.as_deref(), &ids));
+    let (kept_parts, kept_stage) = stage_key
+        .and_then(|k| kept_library(k, incr.as_deref(), &ids))
+        .unzip();
     if kept_parts.is_some() && !verify {
         let pkgs = package_roots(&root_dir_kw, &roots);
         PREPASSED.with(|p| {
@@ -862,8 +864,10 @@ fn compile_unit_in(
     // compile its items with the user's; HIR gives every module an
     // implicit `use rok::core::**;` (stdlib spec 0.1).
     let key = format!(
-        "{roots:?}|{:?}|{}|{}|{ext:?}|{user_metas}|{keywords:?}",
-        config.cfg_flags, config.test, config.bench
+        "{roots:?}|{}|{}|{}|{ext:?}|{user_metas}|{keywords:?}",
+        incr::target_key(&cfg_env, &config.target),
+        config.test,
+        config.bench
     );
     let parse_libs = rokc_diagnostic::time_passes().then(std::time::Instant::now);
     // A kept library stage holds what HIR collected of the library's
@@ -978,6 +982,7 @@ fn compile_unit_in(
         bodies: incr::current().map(|i| incr::bodies(i, files)),
         lints: config.keep_ast,
         library,
+        stage: kept_stage.clone(),
     };
     let program = rokc_ast::Program {
         attrs: Vec::new(),
@@ -1020,6 +1025,7 @@ fn compile_unit_in(
                     &rokc_hir::HirInput {
                         bodies: None,
                         library: None,
+                        stage: None,
                         ..input.clone()
                     },
                 );
@@ -1046,8 +1052,11 @@ fn compile_unit_in(
     } else {
         Vec::new()
     };
-    let library_items =
-        library.and_then(|k| rokc_hir::with_library(k, rokc_hir::LibraryStage::items));
+    let library_items = library.and_then(|k| {
+        kept_stage
+            .or_else(|| rokc_hir::kept_library(k))
+            .map(|s| rokc_hir::stage(&s).items())
+    });
     if library_items.is_some() {
         sources.retain(|f| f.package.is_empty());
     }
@@ -2062,9 +2071,15 @@ rokc_core::codec_struct!(LibParts {
 /// The parts of the library stage kept in this process, by key.
 static LIB_PARTS: std::sync::Mutex<Option<(u64, LibParts)>> = std::sync::Mutex::new(None);
 
-/// The library stage of key `k`: kept in this process, or read back from
-/// the store (and kept); its parts.
-fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<LibParts> {
+/// The library stage of key `k` and its parts: kept in this process, or
+/// read back from the store (and kept). The compile holds the stage it
+/// gets: a concurrent compile of another library may replace the kept
+/// one.
+fn kept_library(
+    k: u64,
+    incr: Option<&incr::Incr>,
+    ids: &incr::Ids,
+) -> Option<(LibParts, rokc_hir::KeptLibrary)> {
     let lock = || {
         LIB_PARTS
             .lock()
@@ -2072,10 +2087,11 @@ fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<Li
     };
     let here = lock()
         .as_ref()
-        .filter(|(at, _)| *at == k && rokc_hir::library_kept(k))
-        .map(|(_, p)| p.clone());
-    let parts = if let Some(p) = here {
-        p
+        .filter(|(at, _)| *at == k)
+        .map(|(_, p)| p.clone())
+        .zip(rokc_hir::kept_library(k));
+    let kept = if let Some(kept) = here {
+        kept
     } else {
         let (parts, stage) = rokc_diagnostic::time("hir library read", || {
             incr::library_get(k, ids, |d| {
@@ -2085,15 +2101,15 @@ fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<Li
                 ))
             })
         })?;
-        rokc_hir::keep_library(k, stage);
+        let stage = rokc_hir::keep_library(k, stage);
         *lock() = Some((k, parts.clone()));
-        parts
+        (parts, stage)
     };
     if let Some(i) = incr {
         i.library_reused
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    Some(parts)
+    Some(kept)
 }
 
 /// Keep the library stage of key `k` HIR collected (with `parts`) for
@@ -2101,12 +2117,12 @@ fn kept_library(k: u64, incr: Option<&incr::Incr>, ids: &incr::Ids) -> Option<Li
 fn keep_library(k: u64, parts: LibParts, files: &SourceMap) {
     let ids = incr::Ids::of(files);
     rokc_diagnostic::time("hir library write", || {
-        rokc_hir::with_library(k, |s| {
+        if let Some(s) = rokc_hir::kept_library(k) {
             incr::library_put(k, &ids, |e| {
                 rokc_core::codec::Codec::enc(&parts, e);
-                s.enc(e)
+                rokc_hir::stage(&s).enc(e)
             });
-        });
+        }
     });
     *LIB_PARTS
         .lock()
@@ -2755,6 +2771,21 @@ mod tests {
         };
         assert!(boxed(&compile(src, "i686-unknown-linux-gnu")));
         assert!(!boxed(&compile(src, "x86_64-unknown-linux-gnu")));
+    }
+
+    /// Builds of two targets in one process each keep the library stage
+    /// they took, whichever the other keeps meanwhile.
+    #[test]
+    fn concurrent_targets_keep_their_library_stage() {
+        let src = "#[cfg(target_pointer_width = \"32\")]\nfn narrow() {}\nfn main() {}\n";
+        let has = |m: &super::CompiledModule| m.hir.functions.iter().any(|f| f.name == "narrow");
+        let runs = |t| move || (0..4).map(|_| has(&compile(src, t))).collect::<Vec<_>>();
+        std::thread::scope(|s| {
+            let narrow = s.spawn(runs("i686-unknown-linux-gnu"));
+            let wide = s.spawn(runs("x86_64-unknown-linux-gnu"));
+            assert_eq!(narrow.join().unwrap(), [true; 4]);
+            assert_eq!(wide.join().unwrap(), [false; 4]);
+        });
     }
 
     #[test]

@@ -25,6 +25,12 @@ pub struct LibraryStage {
     pub(super) type_names: [Vec<String>; 2],
 }
 
+impl std::fmt::Debug for LibraryStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LibraryStage").finish_non_exhaustive()
+    }
+}
+
 impl LibraryStage {
     /// The library's items (spans by this compile's file ids).
     #[must_use]

@@ -24,7 +24,8 @@ pub use lower::FN_BLOCK_LABEL;
 pub use lower::type_visible;
 pub use lower::{Bodies, BodyCache, BodyReuse, Unit};
 pub use lower::{
-    LibraryStage, keep_library, library_kept, lower, lower_full, lower_with_uses, with_library,
+    KeptLibrary, LibraryStage, keep_library, kept_library, lower, lower_full, lower_with_uses,
+    stage,
 };
 pub use print::{instance, print_hir};
 
@@ -90,6 +91,9 @@ pub struct HirInput {
     /// this process that gave this key (a REPL session's cells): what
     /// collecting them made is taken from it.
     pub library: Option<u64>,
+    /// The stage of `library`, when the driver took it: what collecting
+    /// the library's items made is taken from it.
+    pub stage: Option<KeptLibrary>,
 }
 
 /// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
