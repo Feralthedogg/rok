@@ -1,0 +1,11 @@
+// `-> T throws` (Swift, Java order): `throws` comes first.
+// expect-error: 6:28: `throws` goes before the return type
+// expect-error: help: write `fn parse_it(s: str) throws -> i32`
+// expect-error: 9:31: `throws` goes before the return type
+// expect-error: help: write `fn read_it(s: str) throws (ParseError) -> i32`
+fn parse_it(s: str) -> i32 throws {
+    try s.parse()
+}
+pub fn read_it(s: str) -> i32 throws (ParseError) {
+    try s.parse()
+}

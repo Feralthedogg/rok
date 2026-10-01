@@ -601,7 +601,16 @@ impl Resolver<'_> {
             Source::Path(p) => {
                 let dir = base.join(p);
                 let dir = rokc_core::real_path(&dir).map_err(|e| {
-                    format!("dependency `{}`: path {}: {e}", dep.name, dir.display())
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        format!(
+                            "dependency `{}`: no directory `{p}` ({}); a `Dep::path` is \
+                             relative to the directory of the `rok.rokon` that names it",
+                            dep.name,
+                            dir.display()
+                        )
+                    } else {
+                        format!("dependency `{}`: path {}: {e}", dep.name, dir.display())
+                    }
                 })?;
                 return Ok((dir.clone(), Id::Path(dir), None));
             }

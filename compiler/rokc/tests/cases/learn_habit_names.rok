@@ -1,0 +1,22 @@
+// Names other languages have and rok spells differently: an optional is
+// `T | none` holding the value itself, a range is `a..b`. The unknown
+// `Option` is reported once, not again at `{:?}`.
+// expect-error: 15:27: cannot find type `Option` in this scope
+// expect-error: help: rok has no `Option`: an optional is `T | none`; write `usize | none`
+// expect-error: 16:28: cannot find function `Some` in this scope
+// expect-error: help: rok has no `Some`: a `T | none` holds the value itself; write `i`
+// expect-error: 17:5: cannot find value `None` in this scope
+// expect-error: help: use `none`
+// expect-error: 21:10: cannot find function `range` in this scope
+// expect-error: help: use a range: `0..3`
+// expect-error: 22:10: cannot find function `range` in this scope
+// expect-error: help: use a range: `1..n + 1`
+// forbid-error: cannot be formatted
+fn find(xs: List<i32>) -> Option<usize> {
+    for i in 0..2 { return Some(i); }
+    None
+}
+println(f"{find([1, 2]):?}");
+let n = 3;
+for i in range(3) {}
+for i in range(1, n + 1) {}

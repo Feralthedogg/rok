@@ -2473,7 +2473,7 @@ fn finish<'a>(
     module
         .diagnostics
         .extend(sink.instance_warns.into_inner().agreed());
-    check_unresolved_types(&mut module, &names.unknown_spans.into_inner());
+    check_unresolved_types(&mut module, &names.unknown_spans.into_inner(), sources);
     check_value_types(&mut module);
     check_packed(&mut module);
     // The same root cause can be reached from several passes (e.g. a
@@ -2909,6 +2909,35 @@ pub(super) fn collect_field_visibility(
     out
 }
 
+/// What rok writes for `Option<T>`: `T | none`, `T` as written at
+/// `span`.
+fn habit_type_help(
+    name: &str,
+    span: rokc_diagnostic::Span,
+    sources: &rokc_diagnostic::SourceMap,
+) -> Option<String> {
+    let (_, text) = sources.file(span.file)?;
+    let rest = text.get(span.start as usize..)?.strip_prefix(name)?;
+    let args = rest.strip_prefix('<').and_then(|r| {
+        let mut depth = 1;
+        let end = r.find(|c| {
+            depth += match c {
+                '<' => 1,
+                '>' => -1,
+                _ => 0,
+            };
+            depth == 0
+        })?;
+        Some(r[..end].trim())
+    });
+    (name == "Option").then(|| {
+        format!(
+            "rok has no `Option`: an optional is `T | none`; write `{} | none`",
+            args.unwrap_or("T")
+        )
+    })
+}
+
 /// Safety net: no expression or binding may leave lowering with an
 /// unresolved type unless an error was already reported. A leftover
 /// `HirTy::Path` is an unknown type name; a leftover `Unknown` /
@@ -2917,6 +2946,7 @@ pub(super) fn collect_field_visibility(
 pub(super) fn check_unresolved_types(
     module: &mut HirModule,
     spans: &HashMap<String, rokc_diagnostic::Span>,
+    sources: &rokc_diagnostic::SourceMap,
 ) {
     // Each unknown name is reported at the first item that mentions it.
     // The thread-local "current span" is whatever pass ran last (usually
@@ -2971,7 +3001,11 @@ pub(super) fn check_unresolved_types(
             span,
             format!("cannot find type `{t}` in this scope"),
         );
-        if let Some(s) = rokc_diagnostic::suggest(leaf_name(&t), known.iter().map(String::as_str)) {
+        if let Some(h) = habit_type_help(&t, span, sources) {
+            d = d.with_help(h);
+        } else if let Some(s) =
+            rokc_diagnostic::suggest(leaf_name(&t), known.iter().map(String::as_str))
+        {
             d = d.with_help(format!("did you mean `{s}`?"));
         }
         module.diagnostics.push(d);

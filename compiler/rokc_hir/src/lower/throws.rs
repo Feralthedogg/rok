@@ -415,15 +415,32 @@ pub(super) fn raise(
             out.push(HirStmt::Return(Some(c)));
             return out;
         }
-        ctx.emit_error(
-            rokc_diagnostic::ErrorKind::Type,
-            format!(
-                "error `{}` is not covered by the enclosing function's `throws ({})` — \
-                 catch it or add it to the `throws` list (spec 4.14)",
-                ctx.ty_name(&ety),
-                ctx.ty_name(&decl)
-            ),
-        );
+        // An untyped `throws` takes any `Error`; `throw "msg"` (Python,
+        // JS) throws a `str`, which is none.
+        if any_error(&decl) {
+            let name = ctx.ty_name(&ety);
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!("`{name}` can't be thrown: it does not implement `Error` (spec 4.14)"),
+            );
+            // A `str`'s help quotes it (`lower_throw`).
+            if ety != HirTy::Prim(PrimTy::Str) {
+                ctx.help_last(Some(format!(
+                    "add `impl Error for {name} {{}}` (it needs `Display` and `Debug`), or \
+                     throw a `ValueError`: `throw ValueError {{ msg: .. }};`"
+                )));
+            }
+        } else {
+            ctx.emit_error(
+                rokc_diagnostic::ErrorKind::Type,
+                format!(
+                    "error `{}` is not covered by the enclosing function's `throws ({})` — \
+                     catch it or add it to the `throws` list (spec 4.14)",
+                    ctx.ty_name(&ety),
+                    ctx.ty_name(&decl)
+                ),
+            );
+        }
     } else {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
@@ -997,6 +1014,11 @@ pub(super) fn jump_index(ctx: &LowerCtx<'_>, label: Option<&str>, needs_loop: bo
 
 /// `throw value;` — the value's type must be one the enclosing catch /
 /// function `throws` accepts (checked when it is routed).
+/// An untyped `throws`: `any Error`.
+fn any_error(t: &HirTy) -> bool {
+    matches!(t, HirTy::AnyTrait(b) if b.iter().any(|t| t.path == "rok::core::error::Error"))
+}
+
 pub(super) fn lower_throw(
     ctx: &mut LowerCtx<'_>,
     value: &Expr,
@@ -1012,7 +1034,15 @@ pub(super) fn lower_throw(
         ctx.fn_throws.clone().unwrap_or(HirTy::Unknown)
     };
     let v = lower_expected(ctx, value, expected);
+    let since = ctx.env.sink.diagnostics.borrow().len();
+    let is_str = v.ty == HirTy::Prim(PrimTy::Str) && ctx.fn_throws.as_ref().is_some_and(any_error);
     let stmts = raise(ctx, v, span);
+    if let (true, Some(msg)) = (is_str, ctx.src(value.span)) {
+        ctx.help_since(
+            since,
+            format!("throw a `ValueError`: `throw ValueError {{ msg: {msg} }};`"),
+        );
+    }
     HirStmt::Expr(block_expr(stmts, span))
 }
 
@@ -1144,7 +1174,17 @@ pub(super) fn lower_try(
     };
     catch_all_frame(ctx);
     ctx.try_depth += 1;
+    let since = ctx.env.sink.diagnostics.borrow().len();
     let body = lower_expected(ctx, operand, inner_expected);
+    // `try? f() ?? 0`: `try?` reaches to the end, over the `??` too.
+    if let (TryKind::Optional, ExprKind::NullishCoalesce(l, r)) = (kind, &operand.kind) {
+        if let (Some(l), Some(r)) = (ctx.src(l.span), ctx.src(r.span)) {
+            ctx.help_since(
+                since,
+                format!("`try?` covers everything after it; write `(try? {l}) ?? {r}`"),
+            );
+        }
+    }
     ctx.try_depth -= 1;
     warn_if_idle(ctx);
     let frame = pop_catch(ctx);

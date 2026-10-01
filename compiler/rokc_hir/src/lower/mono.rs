@@ -1498,7 +1498,26 @@ fn check_fn_body(ctx: &mut LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> 
         }
         None => {
             if !matches!(ret, HirTy::Unit | HirTy::Unknown) && !hir_block_diverges(&block) {
-                ctx.emit_error(rokc_diagnostic::ErrorKind::Type, falls_off());
+                // `fn f() -> i32 { a + b; }`: the `;` drops the value.
+                let last = match block.stmts.last() {
+                    Some(HirStmt::Expr(e)) if e.ty == ret => ctx.src(e.span).map(|t| (e.span, t)),
+                    _ => None,
+                };
+                if let Some((at, text)) = last {
+                    ctx.emit_error_at(
+                        rokc_diagnostic::ErrorKind::Type,
+                        at,
+                        format!(
+                            "function `{}` returns `{}`, but the `;` after its last expression \
+                             drops the value",
+                            leaf_name(fn_name),
+                            ctx.ty_name(&ret)
+                        ),
+                    );
+                    ctx.help_last(Some(format!("remove the `;` to return it: `{text}`")));
+                } else {
+                    ctx.emit_error(rokc_diagnostic::ErrorKind::Type, falls_off());
+                }
             }
         }
     }

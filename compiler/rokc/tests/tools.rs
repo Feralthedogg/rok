@@ -1150,6 +1150,8 @@ error[E200]: mismatched types: the right operand of `+` expects `str`, found `i3
    |
  2 |   2); println(p); f() + p
    |                   ^^^^^^^
+   |
+   = help: `+` joins two `str`s; put the value in an f-string: `f\"{f()}{p}\"`
 error[E100]: cannot find value `a` in this scope
   --> <repl>:1:1
    |

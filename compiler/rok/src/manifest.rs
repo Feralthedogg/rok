@@ -513,8 +513,22 @@ pub fn load(path: &Path) -> Result<Manifest, String> {
 
 /// Parse manifest text; `file` names it in errors.
 pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
-    let doc = Doc::parse(text, file)?;
-    let pkg = doc.root().record("Package")?;
+    // TOML (`name = "app"`) or JSON (`{"name": ..}`): show the one value.
+    let example = |e: String| {
+        rokc_rokon::with_help(
+            &e,
+            "a `rok.rokon` holds one `Package { .. }`: `Package { name: \"app\", version: \
+             \"0.1.0\", deps: {} }`",
+        )
+    };
+    let doc = Doc::parse(text, file).map_err(|e| {
+        if e.contains("holds one value") {
+            example(e)
+        } else {
+            e
+        }
+    })?;
+    let pkg = doc.root().record("Package").map_err(example)?;
     pkg.only(&FIELDS)?;
     let string = |f: &str| pkg.opt(f).map(|d| d.string()).transpose();
     let deps = |f: &str| {
@@ -704,7 +718,14 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
 /// `source`, with the feature arguments when `flags` (the name is
 /// left empty).
 fn dep(d: Decoder<'_>, flags: bool) -> Result<Dep, String> {
-    if d.string().is_ok() {
+    if let Ok(s) = d.string() {
+        // `"geom": "../geom"`: a path where a requirement goes.
+        if s.starts_with(['.', '/', '~']) || s.contains(['/', '\\']) {
+            return Err(rokc_rokon::with_help(
+                &d.error(&format!("`{s}` is a path, not a version requirement")),
+                &format!("a path dependency is `Dep::path(\"{s}\")`"),
+            ));
+        }
         return Ok(Dep::new(
             String::new(),
             Source::Registry {

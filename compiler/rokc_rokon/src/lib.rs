@@ -153,6 +153,8 @@ impl PartialEq for Value {
 pub struct Error {
     pub span: Span,
     pub message: String,
+    /// What to write instead, as a `= help:` line.
+    pub help: Option<String>,
 }
 
 impl Error {
@@ -160,12 +162,17 @@ impl Error {
         Self {
             span,
             message: message.into(),
+            help: None,
         }
     }
 
     /// The syntax error as `rokc` prints diagnostics (spec 9.1.8).
     pub fn render(&self, text: &str, file: &str) -> String {
-        render(text, file, self.span, "E002", &self.message)
+        let r = render(text, file, self.span, "E002", &self.message);
+        match &self.help {
+            Some(h) => with_help(&r, h),
+            None => r,
+        }
     }
 }
 
@@ -194,6 +201,17 @@ pub fn render(src: &str, file: &str, span: Span, code: &str, message: &str) -> S
         " ".repeat(col - 1),
         "^".repeat(width)
     )
+}
+
+/// A rendered error (`render`) with a `= help:` line under its caret.
+#[must_use]
+pub fn with_help(rendered: &str, help: &str) -> String {
+    let pad = rendered
+        .lines()
+        .nth(1)
+        .map_or(0, |l| l.len() - l.trim_start().len());
+    let pad = " ".repeat(pad);
+    format!("{rendered}\n{pad} |\n{pad} = help: {help}")
 }
 
 /// Lex `text` (rok tokens, comments dropped); the first lexical error.
@@ -230,7 +248,12 @@ pub(crate) fn parse_tokens(tokens: &[Token]) -> Result<Value, Error> {
         } else {
             d.message.clone()
         };
-        return Err(Error::new(span, message));
+        let mut e = Error::new(span, message);
+        e.help = d
+            .notes
+            .iter()
+            .find_map(|n| n.strip_prefix("help: ").map(str::to_owned));
+        return Err(e);
     }
     let expr = expr.ok_or_else(|| Error::new(eof, "expected a value"))?;
     Conv { tokens }.value(&expr)

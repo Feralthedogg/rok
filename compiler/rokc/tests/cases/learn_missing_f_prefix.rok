@@ -1,0 +1,20 @@
+// A plain string holding `{name}` of a local in scope lacks its `f`
+// prefix; that counts as a use, so `name` is not also unused. A `{..}`
+// naming nothing in scope (a template, a route) is left alone, as is
+// a name bound only later.
+// expect-lint: 15:13 `{name}` is plain text here: the string has no `f` prefix
+// expect-exit: 0
+// expect-stdout:
+// hello {name}
+// /users/{id}
+// {later}
+// 1
+
+fn main() {
+    let name = "ada";
+    println("hello {name}");
+    println("/users/{id}");
+    println("{later}");
+    let later = 1;
+    println(f"{later}");
+}

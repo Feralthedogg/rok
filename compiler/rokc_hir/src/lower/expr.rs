@@ -1691,10 +1691,12 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             if let ExprKind::Path(p) = &callee.kind {
                 check_direct_drop_path(ctx, p);
             }
+            let since = ctx.env.sink.diagnostics.borrow().len();
             let call = match &callee.kind {
                 ExprKind::QPath(q) => qpath_call(ctx, q, &all_args, span),
                 _ => lower_call(ctx, callee, &all_args, span),
             };
+            print_args_help(ctx, callee, &all_args, since);
             unpack_call(ctx, call)
         }
         ExprKind::MethodCall {
@@ -1886,10 +1888,14 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
                 HirTy::Array(t, _) => (**t).clone(),
                 HirTy::Unknown => return arr_h,
                 other => {
-                    return ctx.error_expr(
+                    let e = ctx.error_expr(
                         span,
                         format!("cannot index into a value of type `{}`", ctx.ty_name(other)),
                     );
+                    if *other == HirTy::Prim(PrimTy::Str) {
+                        str_index_help(ctx, arr, idx);
+                    }
+                    return e;
                 }
             };
             HirExpr {
@@ -1941,8 +1947,9 @@ fn lower_expr_inner(ctx: &mut LowerCtx<'_>, expr: &Expr) -> HirExpr {
             desugar_question_dot(ctx, recv_h, tails, span)
         }
         ExprKind::TryQ(inner) => {
+            let since = ctx.env.sink.diagnostics.borrow().len();
             let inner_h = lower_expected(ctx, inner, HirTy::Unknown);
-            desugar_try_q(ctx, inner_h, span)
+            lower_try_q(ctx, inner, inner_h, since, span)
         }
         ExprKind::NullishCoalesce(lhs, rhs) => {
             let lhs_h = lower_expected(ctx, lhs, HirTy::Unknown);
@@ -5142,6 +5149,128 @@ fn sum_min_max(
     with_lets(stmts, value)
 }
 
+/// `inner?`, `inner_h` its lowering. Rust's `f()?` on a throwing call:
+/// its errors (an unmarked throwing call, or a type `?` hid from
+/// inference) come after the one that says `?` is not for errors.
+fn lower_try_q(
+    ctx: &mut LowerCtx<'_>,
+    inner: &Expr,
+    inner_h: HirExpr,
+    since: usize,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let call = matches!(
+        inner.kind,
+        ExprKind::Call { .. } | ExprKind::MethodCall { .. }
+    );
+    match ctx.src(inner.span).filter(|_| call) {
+        Some(text) if try_q_errors(ctx, text, inner.span, since) => poison(span),
+        _ => desugar_try_q(ctx, inner_h, span),
+    }
+}
+
+fn try_q_errors(ctx: &LowerCtx<'_>, text: &str, at: rokc_diagnostic::Span, since: usize) -> bool {
+    let mut diags = ctx.env.sink.diagnostics.borrow_mut();
+    // The two errors a throwing call under `?` gets, by message.
+    let hit = diags[since..].iter().any(|d| {
+        d.is_error()
+            && (d.message.starts_with("this call can throw")
+                || d.message.starts_with("type annotations needed"))
+    });
+    if hit {
+        let d = rokc_diagnostic::RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Type,
+            at,
+            "`?` only works on `T | none`; it does not pass errors on (spec 3.14 / 4.14)",
+        )
+        .with_help(format!("in a `throws` function, write `try {text}`"));
+        diags.insert(since, d);
+    }
+    hit
+}
+
+/// Python's `s[0]` on a `str`: its characters.
+fn str_index_help(ctx: &LowerCtx<'_>, s: &Expr, i: &Expr) {
+    if let (Some(s), Some(i)) = (ctx.src(s.span), ctx.src(i.span)) {
+        ctx.help_last(Some(format!(
+            "a `str` is UTF-8 text, not an array of characters; take one with \
+             `{s}.chars().nth({i})`"
+        )));
+    }
+}
+
+/// Python's `println("x =", x)` as one f-string, `println(f"x = {x}")`.
+fn print_args_help(ctx: &LowerCtx<'_>, callee: &Expr, args: &[CallArg], since: usize) {
+    if let Some(help) = print_args_text(ctx, callee, args) {
+        ctx.help_since(since, help);
+    }
+}
+
+fn print_args_text(ctx: &LowerCtx<'_>, callee: &Expr, args: &[CallArg]) -> Option<String> {
+    let ExprKind::Path(p) = &callee.kind else {
+        return None;
+    };
+    let [seg] = p.segments.as_slice() else {
+        return None;
+    };
+    if args.len() < 2
+        || !matches!(
+            seg.name.as_str(),
+            "print" | "println" | "eprint" | "eprintln"
+        )
+    {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for a in args {
+        let CallArg::Positional(e) = a else {
+            return None;
+        };
+        let t = ctx.src(e.span)?;
+        parts.push(match &e.kind {
+            ExprKind::Literal(AstLit::Str(_)) if t.len() >= 2 && t.starts_with('"') => {
+                t[1..t.len() - 1].replace('{', "{{").replace('}', "}}")
+            }
+            _ => format!("{{{t}}}"),
+        });
+    }
+    Some(format!(
+        "`{}` takes one string; put the values in an f-string: `{}(f\"{}\")`",
+        seg.name,
+        seg.name,
+        parts.join(" ")
+    ))
+}
+
+/// Python's `"a {} b".format(x)` as an f-string, `f"a {x} b"`.
+fn format_help(ctx: &LowerCtx<'_>, args: &[CallArg], span: rokc_diagnostic::Span) -> String {
+    let lit = ctx
+        .src(span)
+        .and_then(|t| t.rsplit_once(".format(").map(|(r, _)| r.trim()))
+        .filter(|r| r.len() >= 2 && r.starts_with('"') && r.ends_with('"'));
+    let vals: Vec<&str> = args
+        .iter()
+        .filter_map(|a| match a {
+            CallArg::Positional(e) => ctx.src(e.span),
+            _ => None,
+        })
+        .collect();
+    let filled = lit.and_then(|l| {
+        let parts: Vec<&str> = l[1..l.len() - 1].split("{}").collect();
+        (parts.len() == vals.len() + 1).then(|| {
+            let mut out = parts[0].to_owned();
+            for (v, p) in vals.iter().zip(&parts[1..]) {
+                out.push_str(&format!("{{{v}}}{p}"));
+            }
+            out
+        })
+    });
+    match filled {
+        Some(f) => format!("use an f-string: `f\"{f}\"`"),
+        None => "use an f-string: `f\"..{x}..\"` puts `x` in the text".to_owned(),
+    }
+}
+
 pub(super) fn method_call_on(
     ctx: &mut LowerCtx<'_>,
     recv_h: HirExpr,
@@ -5276,12 +5405,16 @@ pub(super) fn method_call_on(
             return super::bounds::no_method(ctx, p, method, span);
         }
         let e = ctx.error_expr(span, format!("no method `{method}` found for type `{ty}`"));
-        let help = ctx.method_help(&recv_h.ty, method).unwrap_or_else(|| {
-            format!(
-                "add `fn {method}(self, ..)` in an `impl {ty} {{ .. }}` block, or import a \
+        let format = (method == "format" && recv_h.ty == HirTy::Prim(PrimTy::Str))
+            .then(|| format_help(ctx, args, span));
+        let help = format
+            .or_else(|| ctx.method_help(&recv_h.ty, method))
+            .unwrap_or_else(|| {
+                format!(
+                    "add `fn {method}(self, ..)` in an `impl {ty} {{ .. }}` block, or import a \
                  trait that provides it"
-            )
-        });
+                )
+            });
         ctx.help_last(Some(help));
         return e;
     };
@@ -7399,12 +7532,32 @@ pub(super) fn lower_call(
     }
 
     discard_args(ctx, args);
-    let help = ctx.value_help(&segs);
+    let help = habit_call_help(ctx, &segs, args).or_else(|| ctx.value_help(&segs));
     ctx.unknown_name(
         span,
         format!("cannot find function `{display}` in this scope"),
         help,
     )
+}
+
+/// What rok writes for a call another language has: `Some(x)`,
+/// `range(n)`.
+fn habit_call_help(ctx: &LowerCtx<'_>, segs: &[&str], args: &[CallArg]) -> Option<String> {
+    let texts: Vec<&str> = args
+        .iter()
+        .filter_map(|a| match a {
+            CallArg::Positional(e) => ctx.src(e.span),
+            _ => None,
+        })
+        .collect();
+    match (segs, texts.as_slice()) {
+        (["Some"], [x]) => Some(format!(
+            "rok has no `Some`: a `T | none` holds the value itself; write `{x}`"
+        )),
+        (["range"], [n]) => Some(format!("use a range: `0..{n}`")),
+        (["range"], [a, b]) => Some(format!("use a range: `{a}..{b}`")),
+        _ => None,
+    }
 }
 
 /// `Box::<f64>::f()` — the named instantiation's (generic-impl) method
@@ -9169,6 +9322,98 @@ pub(super) fn lower_infix(
     if lhs_h.ty == HirTy::Unknown || rhs_h.ty == HirTy::Unknown {
         return poison(span);
     }
+    let since = ctx.env.sink.diagnostics.borrow().len();
+    let tys = (lhs_h.ty.clone(), rhs_h.ty.clone());
+    let e = lower_infix_typed(ctx, op, lhs_h, rhs_h, rhs, span);
+    if ctx.env.sink.diagnostics.borrow().len() > since {
+        if let Some(help) = operand_help(ctx, op, (lhs, &tys.0), (rhs, &tys.1)) {
+            ctx.help_since(since, help);
+        }
+    }
+    e
+}
+
+/// What to write instead of `lhs op rhs` whose operand types don't fit:
+/// the user's own operands, converted, unwrapped, awaited or put in an
+/// f-string.
+fn operand_help(
+    ctx: &LowerCtx<'_>,
+    op: &str,
+    lhs: (&Expr, &HirTy),
+    rhs: (&Expr, &HirTy),
+) -> Option<String> {
+    let src = |e: &Expr| ctx.src(e.span).map(str::to_owned);
+    let (l, r) = (src(lhs.0)?, src(rhs.0)?);
+    let numeric = |t: &HirTy| match t {
+        HirTy::Prim(p) => p.is_int() || p.is_float(),
+        _ => super::bignum::big_of(ctx, t).is_some(),
+    };
+    let is_str = |t: &HirTy| *t == HirTy::Prim(PrimTy::Str);
+    let optional = |t: &HirTy| match t {
+        HirTy::Sum(vs) if vs.contains(&HirTy::None) => {
+            let rest: Vec<&HirTy> = vs.iter().filter(|v| **v != HirTy::None).collect();
+            Some(match rest[..] {
+                [one] => one.clone(),
+                _ => HirTy::Sum(rest.into_iter().cloned().collect()),
+            })
+        }
+        _ => None,
+    };
+    let future = |t: &HirTy| {
+        matches!(t, HirTy::Struct(_)) && matches!(pick_method(ctx, t, "poll", None), Ok(Some(_)))
+    };
+    if op == "+" && (is_str(lhs.1) != is_str(rhs.1)) {
+        // A plain literal's text goes in as is; anything else as `{..}`.
+        let piece = |e: &Expr, s: &str| match &e.kind {
+            ExprKind::Literal(AstLit::Str(_))
+                if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 =>
+            {
+                s[1..s.len() - 1].replace('{', "{{").replace('}', "}}")
+            }
+            _ => format!("{{{s}}}"),
+        };
+        let (a, b) = (piece(lhs.0, &l), piece(rhs.0, &r));
+        return Some(format!(
+            "`+` joins two `str`s; put the value in an f-string: `f\"{a}{b}\"`"
+        ));
+    }
+    for (side, t) in [(&l, lhs.1), (&r, rhs.1)] {
+        if let Some(inner) = optional(t) {
+            let inner_name = ctx.ty_name(&inner);
+            let default = match inner {
+                HirTy::Prim(p) if p.is_float() => "0.0",
+                HirTy::Prim(p) if p.is_int() => "0",
+                HirTy::Prim(PrimTy::Str) => "\"\"",
+                _ => "..",
+            };
+            return Some(format!(
+                "`{side}` may be `none`; unwrap it first: `{side} ?? {default}`, `if let n: \
+                 {inner_name} = {side} {{ .. }}`, or `{side}?`"
+            ));
+        }
+        if future(t) {
+            return Some(format!(
+                "`{side}` is a future, not its value; did you forget `await`? `await {side}`"
+            ));
+        }
+    }
+    if numeric(lhs.1) && numeric(rhs.1) && lhs.1 != rhs.1 {
+        return Some(format!(
+            "rok never converts numbers implicitly; convert one side: `{l} {op} ({r} as {})`",
+            ctx.ty_name(lhs.1)
+        ));
+    }
+    None
+}
+
+fn lower_infix_typed(
+    ctx: &mut LowerCtx<'_>,
+    op: &str,
+    lhs_h: HirExpr,
+    rhs_h: HirExpr,
+    rhs: &Expr,
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
     if matches!(lhs_h.ty, HirTy::AnyTrait(_)) || matches!(rhs_h.ty, HirTy::AnyTrait(_)) {
         return dyn_op(ctx, op, lhs_h, Some(rhs_h), span);
     }

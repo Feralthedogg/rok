@@ -21,11 +21,18 @@ pub(super) fn lower_match(
         .filter(|t| *t != HirTy::Unknown);
     let mut arm_h: Vec<HirMatchArm> = Vec::with_capacity(arms.len());
     let mut ended = Vec::new();
+    // A pattern that failed to lower stands in as `_`: reachability
+    // over it would report errors of its own.
+    let mut bad_pattern = false;
     for arm in arms {
         let mark = ctx.unnarrowed.len();
         ctx.push_scope();
+        let since = ctx.env.sink.diagnostics.borrow().len();
         let pat = inner_layer_binding(ctx, &arm.pat, &scrut_ty, &arm_h)
             .unwrap_or_else(|| lower_pattern(ctx, &arm.pat, &scrut_ty));
+        bad_pattern |= ctx.env.sink.diagnostics.borrow()[since..]
+            .iter()
+            .any(rokc_diagnostic::RokDiagnostic::is_error);
         let guard = arm.guard.as_ref().map(|g| lower_cond(ctx, g));
         let cells = ctx.take_cells(arm.body.span);
         let body = super::expr::with_lets(cells, lower_expr(ctx, &arm.body));
@@ -42,7 +49,7 @@ pub(super) fn lower_match(
             if name == "__letelse_v"
     );
     // Spec 3.12.5 / 3.12.6: exhaustiveness and unreachable arms.
-    if !is_let_else {
+    if !is_let_else && !bad_pattern {
         // `if let` / `while let` desugar to `match { pat => .., _ => .. }`
         // with the `_` at the `if` / `while` span; an irrefutable `pat`
         // makes that arm unreachable by construction, not by mistake.
@@ -1124,7 +1131,11 @@ pub(super) fn lower_pattern_inner(
             let (enum_id, idx) = match resolve_enum_variant(ctx, &segs, Some(scrut_ty), None) {
                 EnumRes::Found(e, i) => (e, i),
                 EnumRes::Error => return HirPattern::Wildcard,
-                EnumRes::NotEnum => return tuple_struct_pattern(ctx, &segs, args, scrut_ty),
+                EnumRes::NotEnum => {
+                    return ctx.at_span(pat.span, |ctx| {
+                        tuple_struct_pattern(ctx, &segs, args, scrut_ty)
+                    });
+                }
             };
             if *scrut_ty != HirTy::Enum(enum_id) {
                 return mismatch(ctx, format!("pattern `{}`", segs.join("::")));
@@ -1330,6 +1341,20 @@ fn tuple_struct_pattern(
             rokc_diagnostic::ErrorKind::Type,
             format!("cannot find enum variant `{}`", segs.join("::")),
         );
+        // Rust's `Some(x)` on a `T | none`: a type-test pattern.
+        if let (["Some"], [arg], HirTy::Sum(vs)) = (segs, args, scrut_ty) {
+            let inner: Vec<String> = vs
+                .iter()
+                .filter(|v| **v != HirTy::None)
+                .map(|v| ctx.ty_name(v))
+                .collect();
+            if let (Some(x), true) = (ctx.src(arg.span), vs.contains(&HirTy::None)) {
+                ctx.help_last(Some(format!(
+                    "rok has no `Some`: match on the type; write `{x}: {} => ..` and `none => ..`",
+                    inner.join(" | ")
+                )));
+            }
+        }
         return HirPattern::Wildcard;
     };
     let def = ctx.struct_def(*sid);

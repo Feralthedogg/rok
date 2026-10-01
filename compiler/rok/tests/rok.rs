@@ -422,6 +422,70 @@ fn manifest_errors_and_reserved_forms() {
     );
 }
 
+// spec: §9.10.3
+#[test]
+fn manifest_errors_say_what_to_write() {
+    let root = scratch("manifest-help");
+    let home = root.join("home");
+    let app = root.join("app");
+    write(&app.join("src/main.rok"), "println(\"x\");\n");
+    let example = "   = help: a `rok.rokon` holds one `Package { .. }`: `Package { name: \"app\", \
+                   version: \"0.1.0\", deps: {} }`";
+    // TOML, JSON.
+    write(&app.join("rok.rokon"), "name = \"app\"\n");
+    let out = rok(&home, &app, &["deps"]);
+    fails(
+        &out,
+        "error[E002]: expected the end of the file: a ROKON file holds one value",
+    );
+    fails(&out, example);
+    write(&app.join("rok.rokon"), "{\"name\": \"app\"}\n");
+    let out = rok(&home, &app, &["deps"]);
+    fails(&out, "error[E200]: expected `Package { .. }`, found a dict");
+    fails(&out, example);
+    // A path where a version requirement goes.
+    write(
+        &app.join("rok.rokon"),
+        "Package { deps: { \"geom\": \"../geom\" } }\n",
+    );
+    let out = rok(&home, &app, &["deps"]);
+    fails(
+        &out,
+        "error[E200]: `../geom` is a path, not a version requirement",
+    );
+    fails(
+        &out,
+        "   = help: a path dependency is `Dep::path(\"../geom\")`",
+    );
+    // A field without its `,`.
+    write(
+        &app.join("rok.rokon"),
+        "Package { name: \"app\" version: \"0.1.0\" }\n",
+    );
+    let out = rok(&home, &app, &["deps"]);
+    fails(
+        &out,
+        "error[E002]: expected `,` or `}`, found field `version`",
+    );
+    fails(
+        &out,
+        "   = help: separate the fields with `,`: `name: \"app\", version: ..`",
+    );
+    // A path dependency that is not there.
+    write(
+        &app.join("rok.rokon"),
+        "Package { deps: { \"geom\": Dep::path(\"../nope\") } }\n",
+    );
+    fails(
+        &rok(&home, &app, &["deps"]),
+        "dependency `geom`: no directory `../nope` (",
+    );
+    fails(
+        &rok(&home, &app, &["deps"]),
+        "); a `Dep::path` is relative to the directory of the `rok.rokon` that names it",
+    );
+}
+
 // spec: §9.10.2
 #[test]
 fn new_and_init_write_a_manifest() {

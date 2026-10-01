@@ -424,6 +424,10 @@ fn formattable(ctx: &LowerCtx<'_>, ty: &HirTy, debug: bool) -> bool {
     if kind_of(ctx, ty) != Kind::Other || ctx.has_trait(ty, tr) {
         return true;
     }
+    // An unknown type name is reported on its own.
+    if matches!(ty, HirTy::Path(_)) {
+        return false;
+    }
     let shown = ctx.ty_name(ty);
     let culprit = match ty {
         HirTy::Sum(vs) => vs

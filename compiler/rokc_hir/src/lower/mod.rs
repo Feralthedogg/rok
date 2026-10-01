@@ -2022,6 +2022,14 @@ fn coerce(
                 ctx.ty_name(&v.ty)
             ),
         );
+        // `let d: Dict<K, V> = {};` (Python, JS): `{}` is an empty block.
+        let slot_name = ctx.ty_name(slot);
+        let base = slot_name.split('<').next().unwrap_or_default();
+        if v.ty == HirTy::Unit && matches!(base, "Dict" | "Set") && ctx.src(v.span) == Some("{}") {
+            ctx.help_last(Some(format!(
+                "`{{}}` is an empty block, not an empty `{base}`; write `{base}::new()`"
+            )));
+        }
         if let (Some(note), Some(d)) = (
             ctx.closure_bound_note(&v),
             ctx.env.sink.diagnostics.borrow_mut().last_mut(),
@@ -2842,6 +2850,23 @@ impl<'a> LowerCtx<'a> {
         r
     }
 
+    /// The source text under `span`, for help that quotes the user's code.
+    fn src(&self, span: Span) -> Option<&str> {
+        let (_, text) = self.env.sources.file(span.file)?;
+        text.get(span.start as usize..span.end as usize)
+    }
+
+    /// Add `help` to the last diagnostic if it is an error pushed after
+    /// the sink held `since` of them.
+    fn help_since(&self, since: usize, help: String) {
+        let mut diags = self.env.sink.diagnostics.borrow_mut();
+        if diags.len() > since {
+            if let Some(d) = diags.last_mut().filter(|d| d.is_error()) {
+                d.notes.push(format!("help: {help}"));
+            }
+        }
+    }
+
     /// Push a lowering-time diagnostic onto the shared sink.
     fn emit_error(&self, kind: rokc_diagnostic::ErrorKind, msg: String) {
         self.emit_error_at(kind, self.here(), msg);
@@ -2936,8 +2961,22 @@ impl<'a> LowerCtx<'a> {
                 self.ty_name(&HirTy::Struct(sid))
             ),
         );
-        let help = rokc_diagnostic::suggest(name, fields.iter().copied())
-            .map(|s| format!("did you mean `{s}`?"))
+        // `xs.length` / `.size` / `.count` (JS, Java, C#): the `len` method.
+        let recv = self
+            .src(span)
+            .and_then(|t| t.strip_suffix(name)?.strip_suffix('.'));
+        let len = matches!(name, "length" | "size" | "count")
+            && matches!(
+                expr::pick_method(self, &HirTy::Struct(sid), "len", None),
+                Ok(Some(_))
+            );
+        let help = recv
+            .filter(|_| len)
+            .map(|r| format!("the length is a method: `{r}.len()`"))
+            .or_else(|| {
+                rokc_diagnostic::suggest(name, fields.iter().copied())
+                    .map(|s| format!("did you mean `{s}`?"))
+            })
             .or_else(|| {
                 (!fields.is_empty() && fields.len() <= 8).then(|| {
                     let list: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();

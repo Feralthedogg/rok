@@ -109,6 +109,10 @@ pub const LINTS: &[Lint] = &[
         "a local holding a `Drop` resource (file, socket, child) that is never closed",
     ),
     warn(
+        "missing_f_prefix",
+        "a plain string holds `{name}` of a local in scope: it needs `f\"..\"`",
+    ),
+    warn(
         "use_after_handoff",
         "a value used after `Mutex::new` / `send` / `Handoff::new` took it, or a guard's value after its lock is released",
     ),
@@ -1035,6 +1039,42 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// `"hello {name}"` with a local `name` in scope: the `f` is missing.
+    /// The hole counts as a use, so `name` is not also unused.
+    fn missing_f(&mut self, text: &str, span: Span) {
+        let bound = |cx: &Self, n: &str| {
+            cx.scopes
+                .iter()
+                .any(|s| s.bindings.iter().any(|b| b.name == n))
+        };
+        let Some(name) = text
+            .split('{')
+            .skip(1)
+            .filter_map(|h| h.split_once('}').map(|(n, _)| n.trim()))
+            .find(|n| {
+                n.chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && n.chars().all(|c| c.is_alphanumeric() || c == '_')
+                    && bound(self, n)
+            })
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        self.mark_used(&name);
+        let raw = text.replace('\n', "\\n").replace('"', "\\\"");
+        self.findings.push(Finding {
+            lint: "missing_f_prefix",
+            span,
+            msg: format!("`{{{name}}}` is plain text here: the string has no `f` prefix"),
+            notes: vec![format!(
+                "help: to put the value of `{name}` in the text, write `f\"{raw}\"`"
+            )],
+            secondary: None,
+        });
+    }
+
     fn mark_used(&mut self, name: &str) {
         for s in self.scopes.iter_mut().rev() {
             if let Some(b) = s.bindings.iter_mut().rev().find(|b| b.name == name) {
@@ -1609,6 +1649,7 @@ impl AstVisitor for Cx<'_> {
                     self.casts.insert(key(e.span));
                 }
             }
+            ExprKind::Literal(Literal::Str(text)) => self.missing_f(text, e.span),
             ExprKind::OpInfix { op, lhs, rhs } => self.comparison(e, op, lhs, rhs),
             ExprKind::While { cond, body, .. } => {
                 if matches!(cond.kind, ExprKind::Literal(Literal::Bool(true))) {
