@@ -1,7 +1,7 @@
 // spec: 003.08.8-short-circuit-evaluation-of-optional-chaining
 // Parentheses end an optional chain: the link after them applies to
 // the `T | none` value.
-// expect-error: no method `len` found for type `str | none`
+// expect-error: this value is a `str | none`, and only a `str` has the method `len`
 
 fn get(b: bool) -> str | none { if b { "hi" } else { none } }
 

@@ -1,0 +1,13 @@
+// expect-error: diag_trait_impl_signature.rok:11:5: `fmt` does not match its declaration in trait `Display`: `f` must be `ref f`, and it returns `str` where the trait's returns nothing
+// expect-error: help: write `fn fmt(self, ref f: Formatter) throws (FmtError)`
+// forbid-error: fmt.rok
+// forbid-error: covers no throwing call
+
+// A trait impl method unlike the trait's declaration is reported at the
+// impl, with the declaration to write; library code calling it reports
+// nothing more.
+struct P { x: i32; }
+impl Display for P {
+    fn fmt(self, f: Formatter) -> str { f"P({self.x})" }
+}
+println(f"{P { x: 1 }}");

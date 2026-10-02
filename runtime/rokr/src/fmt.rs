@@ -37,6 +37,13 @@ impl core::fmt::Write for Buf {
     }
 }
 
+/// Panic at `at` with `msg` rendered (cut at the buffer's size).
+pub fn panic_with(msg: &dyn core::fmt::Display, at: Option<&[u8]>) -> ! {
+    let mut m = Buf::new();
+    let _ = core::fmt::write(&mut m, format_args!("{msg}"));
+    crate::panic_at(&m.b[..m.n], at)
+}
+
 fn fail(spec: &str, why: &str) -> ! {
     let mut m = Buf::new();
     fmt_text::bad_spec(&mut m, spec, why);

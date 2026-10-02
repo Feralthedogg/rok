@@ -3,17 +3,52 @@
 //! for compiled code and the compiler's constant evaluator (`rokc_hir`,
 //! through `#[path]`) calls them directly. Uses `core` only.
 
+/// Why `b[start..end]` is not a `str` slice; `Display` is the panic
+/// message.
+pub enum SliceError<'a> {
+    Range,
+    /// Byte `at` falls inside `ch`, which starts at byte `from`.
+    Boundary {
+        at: usize,
+        from: usize,
+        ch: &'a [u8],
+    },
+}
+
+impl core::fmt::Display for SliceError<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Range => f.write_str("string slice out of range"),
+            Self::Boundary { at, from, ch } => write!(
+                f,
+                "string slice is not on a char boundary: byte {at} is inside `{}` \
+                 (bytes {from}..{})\nstring offsets count bytes; to work by character, \
+                 use `chars()` or `char_indices()`",
+                core::str::from_utf8(ch).unwrap_or("?"),
+                from + ch.len()
+            ),
+        }
+    }
+}
+
 /// Whether `b[start..end]` is a `str` slice: in range, on char
-/// boundaries; else the panic message.
-pub fn slice_check(b: &[u8], start: usize, end: usize) -> Result<(), &'static str> {
+/// boundaries.
+pub fn slice_check(b: &[u8], start: usize, end: usize) -> Result<(), SliceError<'_>> {
     if start > end || end > b.len() {
-        return Err("string slice out of range");
+        return Err(SliceError::Range);
     }
-    let boundary = |i: usize| i == b.len() || (b[i] & 0xC0) != 0x80;
-    if !boundary(start) || !boundary(end) {
-        return Err("string slice is not on a char boundary");
-    }
-    Ok(())
+    let inside = |i: usize| i < b.len() && (b[i] & 0xC0) == 0x80;
+    let Some(at) = [start, end].into_iter().find(|&i| inside(i)) else {
+        return Ok(());
+    };
+    let from = (0..at).rev().find(|&i| !inside(i)).unwrap_or(0);
+    let len = match b[from] {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        _ => 2,
+    };
+    let ch = &b[from..b.len().min(from + len)];
+    Err(SliceError::Boundary { at, from, ch })
 }
 
 /// Byte offset of the first `n` in `h`.

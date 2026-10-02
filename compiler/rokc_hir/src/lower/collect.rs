@@ -442,6 +442,7 @@ fn collect<'a>(
         key_of: base_key_of,
         infer_ret: base_infer_ret,
         implicit_main: _,
+        main_lets: _,
         harness_main: _,
         may_diverge: base_may_diverge,
         method_info,
@@ -1482,6 +1483,11 @@ fn collect<'a>(
         t: Tables {
             infer_ret: base_infer_ret,
             implicit_main: input.root_main == crate::RootMain::Implicit,
+            main_lets: if input.root_main == crate::RootMain::Implicit {
+                main_lets(program)
+            } else {
+                HashMap::new()
+            },
             harness_main: input.root_main == crate::RootMain::Harness,
             may_diverge: base_may_diverge
                 .into_iter()
@@ -1684,6 +1690,10 @@ fn collect<'a>(
                             ),
                         );
                     }
+                    // A method unlike the trait's: reported here, and left
+                    // out so callers of the trait method report nothing
+                    // more.
+                    Some(tm) if sig_mismatch(m, tm, &td.name, &mut pre_diags) => continue,
                     Some(_) => {}
                 }
             }
@@ -2210,6 +2220,16 @@ fn finish<'a>(
         ..
     } = c;
     let env = Env { sources, prec, t };
+    // The files of the package's declarations, and of the library's.
+    let decl_files = {
+        let files = |lib: bool| -> std::collections::HashSet<u32> {
+            (env.decls.iter().zip(&lib_decl))
+                .filter(|(_, l)| **l == lib)
+                .map(|(d, _)| d.def().span.file)
+                .collect()
+        };
+        (files(false), files(true))
+    };
     // Coherence and impl rules for the package's impls (a dependency's
     // when it is built), every library's with `--check-library`.
     let own = |module: &str| {
@@ -2474,6 +2494,20 @@ fn finish<'a>(
     module
         .diagnostics
         .retain(|d| seen.insert((d.primary.as_ref().map(|l| l.span), d.message.clone())));
+    // An error inside the library, next to one in the package, follows
+    // from it (a library body calling into the package's wrong impl):
+    // drop it.
+    if !check_library && lib_pkg.is_none() {
+        let (own, lib) = &decl_files;
+        let file_of = |d: &rokc_diagnostic::RokDiagnostic| d.primary.as_ref().map(|l| l.span.file);
+        let in_own =
+            |d: &rokc_diagnostic::RokDiagnostic| file_of(d).is_some_and(|f| own.contains(&f));
+        if module.diagnostics.iter().any(|d| d.is_error() && in_own(d)) {
+            module.diagnostics.retain(|d| {
+                !d.is_error() || in_own(d) || !file_of(d).is_some_and(|f| lib.contains(&f))
+            });
+        }
+    }
     // A derive that failed its field check leaves its generated impl's
     // errors (located at the attribute) as a cascade: drop them.
     module.diagnostics.retain(|d| {
@@ -2942,65 +2976,109 @@ pub(super) fn check_unresolved_types(
     // Each unknown name is reported at the first item that mentions it.
     // The thread-local "current span" is whatever pass ran last (usually
     // a library item), so it must not be the default here.
-    let mut unknown_types: Vec<(String, rokc_diagnostic::Span)> = Vec::new();
-    let mut note = |ty: &HirTy, span: rokc_diagnostic::Span| {
+    // (name, where, the module of the item that mentions it)
+    let mut unknown_types: Vec<(String, rokc_diagnostic::Span, String)> = Vec::new();
+    let mut note = |ty: &HirTy, span: rokc_diagnostic::Span, item: &str| {
         let mut names = Vec::new();
         collect_unknown_paths(ty, &mut names);
         for n in names {
-            if !unknown_types.iter().any(|(t, _)| *t == n) {
-                unknown_types.push((n, span));
+            if !unknown_types.iter().any(|(t, ..)| *t == n) {
+                unknown_types.push((n, span, owner_module(item)));
             }
         }
     };
     for s in &module.structs {
         for f in &s.fields {
-            note(&f.ty, s.span);
+            note(&f.ty, s.span, &s.name);
         }
     }
     for e in &module.enums {
         for v in &e.variants {
             if let Some(t) = &v.payload_ty {
-                note(t, e.span);
+                note(t, e.span, &e.name);
             }
         }
     }
     for st in &module.statics {
-        note(&st.ty, st.span);
+        note(&st.ty, st.span, &st.name);
     }
     for f in &module.functions {
-        note(&f.ret_ty, f.span);
+        note(&f.ret_ty, f.span, &f.name);
         for p in &f.params {
-            note(&p.ty, f.span);
+            note(&p.ty, f.span, &f.name);
         }
         for l in &f.locals {
-            note(&l.ty, f.span);
+            note(&l.ty, f.span, &f.name);
         }
     }
     unknown_types.sort_by(|a, b| a.0.cmp(&b.0));
-    let known: Vec<String> = module
+    // Type keys a user may name: the package's own, and the library's
+    // `pub` ones.
+    let named: Vec<&str> = module
         .structs
         .iter()
         .map(|s| s.name.as_str())
         .chain(module.enums.iter().map(|e| e.name.as_str()))
-        .map(|n| leaf_name(n).split("__").next().unwrap_or(n).to_owned())
-        .chain(super::PRIM_NAMES.iter().map(|p| (*p).to_owned()))
+        .map(|n| n.split("__").next().unwrap_or(n))
+        .filter(|n| {
+            !n.starts_with("rok::") || module.type_visibility.get(*n) == Some(&Visibility::Pub)
+        })
         .collect();
-    for (t, span) in unknown_types {
+    let known: Vec<&str> = named
+        .iter()
+        .map(|n| leaf_name(n))
+        .chain(super::PRIM_NAMES.iter().copied())
+        .collect();
+    let mut diags = Vec::new();
+    for (t, span, at) in unknown_types {
         let span = spans.get(&t).copied().unwrap_or(span);
-        let mut d = rokc_diagnostic::RokDiagnostic::error(
-            rokc_diagnostic::ErrorKind::Resolve,
-            span,
-            format!("cannot find type `{t}` in this scope"),
-        );
-        if let Some(h) = habit_type_help(&t, span, sources) {
-            d = d.with_help(h);
-        } else if let Some(s) =
-            rokc_diagnostic::suggest(leaf_name(&t), known.iter().map(String::as_str))
-        {
-            d = d.with_help(format!("did you mean `{s}`?"));
-        }
-        module.diagnostics.push(d);
+        let elsewhere = named
+            .iter()
+            .filter(|k| !k.starts_with("rok::") && leaf_name(k) == t && module_of(k) != at)
+            .min();
+        let d = if let (Some(k), false) = (elsewhere, at.is_empty()) {
+            let def = module_of(k);
+            let depth = |m: &str| m.split("::").filter(|s| !s.is_empty()).count();
+            let up = depth(&at).saturating_sub(depth(&def));
+            let (where_, path) = if def.is_empty() || at.starts_with(&format!("{def}::")) {
+                let whose = if up == 1 {
+                    "parent".to_owned()
+                } else {
+                    format!("{up} levels up")
+                };
+                (
+                    format!("the {whose} module"),
+                    format!("{}{t}", "sup::".repeat(up)),
+                )
+            } else {
+                (format!("module `{def}`"), format!("pkg::{k}"))
+            };
+            rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Resolve,
+                span,
+                format!(
+                    "cannot find type `{t}` in module `{at}`: it is defined in {where_}, \
+                     and a module sees only its own items and what it imports"
+                ),
+            )
+            .with_help(format!("add `use {path};` inside `mod {}`", leaf_name(&at)))
+        } else {
+            let d = rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Resolve,
+                span,
+                format!("cannot find type `{t}` in this scope"),
+            );
+            if let Some(h) = habit_type_help(&t, span, sources) {
+                d.with_help(h)
+            } else if let Some(s) = rokc_diagnostic::suggest(leaf_name(&t), known.iter().copied()) {
+                d.with_help(format!("did you mean `{s}`?"))
+            } else {
+                d
+            }
+        };
+        diags.push(d);
     }
+    module.diagnostics.extend(diags);
     if module
         .diagnostics
         .iter()
@@ -3971,6 +4049,71 @@ fn ast_ty_needs(ty: &rokc_ast::Ty, params: &[&str], assoc: &[&str], out: &mut Ve
     }
 }
 
+/// Report trait impl method `m` when its parameter count, `ref` modes or
+/// return differ from the trait's declaration `tm`; the declaration is
+/// the fix.
+fn sig_mismatch(
+    m: &FnDef,
+    tm: &FnDef,
+    trait_name: &str,
+    diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) -> bool {
+    let mut why = Vec::new();
+    if m.params.len() == tm.params.len() {
+        // The receiver may differ: `self` fills a `ref self` slot.
+        for (p, tp) in m
+            .params
+            .iter()
+            .zip(&tm.params)
+            .filter(|(p, _)| p.name != "self")
+        {
+            match (p.by_ref, tp.by_ref) {
+                (false, true) => why.push(format!("`{}` must be `ref {}`", p.name, p.name)),
+                (true, false) => why.push(format!("`{}` must not be `ref`", p.name)),
+                _ => {}
+            }
+        }
+    } else {
+        why.push(format!(
+            "it takes {} parameters where the trait's takes {}",
+            m.params.len(),
+            tm.params.len()
+        ));
+    }
+    let ret = |f: &FnDef| {
+        f.ret_ty
+            .as_ref()
+            .filter(|t| !matches!(&t.kind, AstTyKind::Tuple(v) if v.is_empty()))
+            .map(rokc_ast::print::print_ty)
+    };
+    match (ret(m), ret(tm)) {
+        (Some(r), None) => why.push(format!(
+            "it returns `{r}` where the trait's returns nothing"
+        )),
+        (None, Some(r)) => why.push(format!(
+            "it returns nothing where the trait's returns `{r}`"
+        )),
+        _ => {}
+    }
+    if why.is_empty() {
+        return false;
+    }
+    let name = leaf_name(&m.name);
+    diags.push(
+        rokc_diagnostic::RokDiagnostic::error(
+            rokc_diagnostic::ErrorKind::Type,
+            m.span,
+            format!(
+                "`{name}` does not match its declaration in trait `{}`: {}",
+                leaf_name(trait_name),
+                why.join(", and ")
+            ),
+        )
+        .with_help(format!("write `{}`", rokc_ast::print::print_fn_sig(tm))),
+    );
+    true
+}
+
 fn is_throwing(t: &rokc_ast::ThrowsKind) -> bool {
     match t {
         rokc_ast::ThrowsKind::None => false,
@@ -4033,21 +4176,28 @@ fn generic_trait_impl(
         }
     };
     let mut methods: HashMap<String, GenericMethod> = HashMap::new();
+    // Methods unlike the trait's: reported, not missing.
+    let mut mismatched = std::collections::HashSet::new();
     for ii in &impl_def.items {
         let AstImplItem::Method(m) = ii else {
             continue;
         };
         let leaf = leaf_name(&m.name).to_owned();
         if let Some(td) = trait_def {
-            let in_trait = td
-                .items
-                .iter()
-                .any(|ti| matches!(ti, rokc_ast::TraitItem::Method(tm) if tm.name == leaf));
-            if !in_trait {
-                err(
+            let tm = td.items.iter().find_map(|ti| match ti {
+                rokc_ast::TraitItem::Method(tm) if tm.name == leaf => Some(tm),
+                _ => None,
+            });
+            match tm {
+                None => err(
                     diags,
                     format!("method `{leaf}` is not a member of trait `{}`", td.name),
-                );
+                ),
+                Some(tm) if sig_mismatch(m, tm, &td.name, diags) => {
+                    mismatched.insert(leaf);
+                    continue;
+                }
+                Some(_) => {}
             }
         }
         if methods.insert(leaf.clone(), template(m, module)).is_some() {
@@ -4063,7 +4213,7 @@ fn generic_trait_impl(
             let rokc_ast::TraitItem::Method(tm) = ti else {
                 continue;
             };
-            if methods.contains_key(&tm.name) {
+            if methods.contains_key(&tm.name) || mismatched.contains(&tm.name) {
                 continue;
             }
             if tm.body.is_none() {
@@ -7164,6 +7314,52 @@ fn literal_handlers(
                 span: attr.span,
             });
         }
+    }
+    out
+}
+
+/// The module of item `name` (`m::f`, `m::T`, or a method `m::T::f`):
+/// type segments are `UpperCamelCase`, module segments are not.
+fn owner_module(name: &str) -> String {
+    let mut m = module_of(name);
+    while leaf_name(&m).starts_with(|c: char| c.is_ascii_uppercase()) {
+        m = module_of(&m);
+    }
+    m
+}
+
+/// `Tables::main_lets` of the implicit `main`.
+fn main_lets(program: &Program) -> HashMap<String, String> {
+    let main = program.items.iter().find_map(|i| match i {
+        Item::Fn(f) if f.name == "main" => f.body.as_ref(),
+        _ => None,
+    });
+    let mut out = HashMap::new();
+    for s in main.iter().flat_map(|b| &b.stmts) {
+        let StmtKind::Let { name, ty, init } = &s.kind else {
+            continue;
+        };
+        if name.starts_with(['#', '_']) {
+            continue;
+        }
+        let ty = match (ty, &init.kind) {
+            (Some(t), _) => rokc_ast::print::print_ty(t),
+            (None, ExprKind::Literal(rokc_ast::Literal::Int(t)))
+                if t.bytes().all(|b| b.is_ascii_digit() || b == b'_') =>
+            {
+                "i32".to_owned()
+            }
+            (None, ExprKind::Literal(rokc_ast::Literal::Float(_))) => "f64".to_owned(),
+            (None, ExprKind::Literal(rokc_ast::Literal::Str(_))) => "str".to_owned(),
+            (None, ExprKind::Literal(rokc_ast::Literal::Bool(_))) => "bool".to_owned(),
+            (None, _) => "..".to_owned(),
+        };
+        let konst = format!(
+            "const {}: {ty} = {};",
+            name.to_uppercase(),
+            super::expr::snippet(init)
+        );
+        out.insert(name.clone(), konst);
     }
     out
 }

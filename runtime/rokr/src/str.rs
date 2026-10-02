@@ -112,7 +112,7 @@ pub extern "C" fn rok_str_hash(s: RokStr) -> u64 {
 pub extern "C" fn rok_str_slice(s: RokStr, start: usize, end: usize, at: RokStr) -> RokStr {
     let b = s.bytes();
     if let Err(m) = str_ops::slice_check(b, start, end) {
-        crate::panic_at(m.as_bytes(), Some(at.bytes()));
+        crate::fmt::panic_with(&m, Some(at.bytes()));
     }
     sub(&s, &b[start..end])
 }
@@ -376,7 +376,7 @@ pub unsafe extern "C" fn rok_buf_slice_str(
     // SAFETY: caller contract.
     let b = unsafe { core::slice::from_raw_parts(buf.add(HEADER_SIZE), len) };
     if let Err(m) = str_ops::slice_check(b, start, end) {
-        crate::panic_at(m.as_bytes(), Some(at.bytes()));
+        crate::fmt::panic_with(&m, Some(at.bytes()));
     }
     // `build` may collect before copying; the caller's frame roots `buf`.
     build(&[&b[start..end]])

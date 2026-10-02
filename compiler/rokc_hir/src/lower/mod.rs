@@ -1185,6 +1185,9 @@ struct Tables<'a> {
     infer_ret: std::collections::HashSet<FunctionId>,
     /// `RootMain::Implicit`.
     implicit_main: bool,
+    /// The implicit `main`'s top-level `let`s: name → the `const` that
+    /// would make it visible to a `fn` (a hint for a `fn` that names one).
+    main_lets: HashMap<String, String>,
     /// `RootMain::Harness`.
     harness_main: bool,
     /// Bodies without `-> T` that may diverge on every path
@@ -1522,6 +1525,7 @@ impl Tables<'_> {
             key_of: HashMap::new(),
             infer_ret: std::collections::HashSet::new(),
             implicit_main: false,
+            main_lets: HashMap::new(),
             harness_main: false,
             may_diverge: std::collections::HashSet::new(),
             method_info: HashMap::new(),
@@ -2947,7 +2951,7 @@ impl<'a> LowerCtx<'a> {
                     .iter()
                     .flat_map(|u| u.aliases.iter().map(|(n, _)| n.as_str())),
             )
-            .filter(|n| !n.starts_with("__"))
+            .filter(|n| !n.starts_with("__") && self.field_hidden(sid, n).is_none())
             .collect();
         let kind = if def.union_kind.is_some() {
             "union"
@@ -3023,7 +3027,7 @@ impl<'a> LowerCtx<'a> {
     /// scope, then functions / constants / statics of the current module.
     fn value_help(&self, segs: &[&str]) -> Option<String> {
         let [name] = segs else {
-            return None;
+            return self.import_help(segs);
         };
         let name = *name;
         if let Some(k) = match name {
@@ -3052,6 +3056,25 @@ impl<'a> LowerCtx<'a> {
             .chain(self.env.statics.keys())
             .filter_map(in_module);
         rokc_diagnostic::suggest(name, locals.chain(items)).map(|s| format!("did you mean `{s}`?"))
+    }
+
+    /// `m::f` naming an item of a module `m` that is not imported: the
+    /// `use` that brings `m` in.
+    fn import_help(&self, segs: &[&str]) -> Option<String> {
+        let tail = format!("::{}", segs.join("::"));
+        let env = self.env;
+        let found = env
+            .fn_table
+            .keys()
+            .chain(env.generic_fns.keys())
+            .chain(env.consts.keys())
+            .chain(env.statics.keys())
+            .filter_map(|k| k.strip_suffix(&tail))
+            .min()?;
+        Some(format!(
+            "add `use {found}::{};` at the top of the file",
+            segs[0]
+        ))
     }
 
     /// User-facing type name (no internal `Struct0` / mangled names).
@@ -3968,24 +3991,23 @@ impl<'a> LowerCtx<'a> {
         false
     }
 
-    /// Report access to a private field from outside its struct's module.
-    fn check_field_visible(&self, sid: StructId, field: &str) {
+    /// The module defining `sid`, when the current module may not see
+    /// its field `field`.
+    fn field_hidden(&self, sid: StructId, field: &str) -> Option<String> {
         let def = self.struct_def(sid);
         let base = if def.generic_args.is_empty() {
             def.name
         } else {
             def.name.split("__").next().unwrap_or(&def.name).to_owned()
         };
-        let Some(vis) = self
-            .env
-            .fields_vis(&base)
-            .and_then(|m| m.get(field))
-            .copied()
-        else {
-            return;
-        };
+        let vis = self.env.fields_vis(&base)?.get(field).copied()?;
         let def_module = module_of(&base);
-        if !self.is_visible(&def_module, vis) {
+        (!self.is_visible(&def_module, vis)).then_some(def_module)
+    }
+
+    /// Report access to a private field from outside its struct's module.
+    fn check_field_visible(&self, sid: StructId, field: &str) {
+        if let Some(def_module) = self.field_hidden(sid, field) {
             self.emit_error(
                 rokc_diagnostic::ErrorKind::Module,
                 format!(

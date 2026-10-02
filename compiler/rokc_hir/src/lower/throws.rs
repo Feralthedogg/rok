@@ -1154,8 +1154,19 @@ pub(super) fn lower_try(
     use rokc_ast::TryKind;
     let expected = ctx.current_expected().cloned().unwrap_or(HirTy::Unknown);
     let calls = ctx.throwing_calls;
-    let warn_if_idle = |ctx: &LowerCtx<'_>| {
-        if ctx.throwing_calls == calls {
+    let mark = ctx.env.sink.diagnostics.borrow().len();
+    // An operand that failed to lower (an error, or a poisoned value) may
+    // hide its throwing call.
+    let warn_if_idle = |ctx: &LowerCtx<'_>, e: &HirExpr| {
+        let failed = ctx
+            .env
+            .sink
+            .diagnostics
+            .borrow()
+            .iter()
+            .skip(mark)
+            .any(|d| d.severity == rokc_diagnostic::Severity::Error);
+        if ctx.throwing_calls == calls && !failed && e.ty != HirTy::Unknown {
             ctx.emit_warning("this `try` covers no throwing call (spec 3.14.2)".to_owned());
         }
     };
@@ -1163,7 +1174,7 @@ pub(super) fn lower_try(
         ctx.try_depth += 1;
         let e = lower_expected(ctx, operand, expected);
         ctx.try_depth -= 1;
-        warn_if_idle(ctx);
+        warn_if_idle(ctx, &e);
         return e;
     }
     // `let x: i32 | none = try? f()` — the operand's slot is the payload.
@@ -1186,7 +1197,7 @@ pub(super) fn lower_try(
         }
     }
     ctx.try_depth -= 1;
-    warn_if_idle(ctx);
+    warn_if_idle(ctx, &body);
     let frame = pop_catch(ctx);
     if kind == TryKind::Force {
         if !frame.hit {

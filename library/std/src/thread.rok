@@ -115,6 +115,7 @@ impl Display for JoinError {
 impl Error for JoinError {}
 
 /// The running thread's result, once joined.
+#[must_use("thread is never joined, so the program may end before it finishes: join it with `try {}.join()`, or write `{}.detach()` to let it run on its own")]
 pub struct JoinHandle<T> {
     handle: usize;
     result: GcBuf<T>;

@@ -80,6 +80,7 @@ impl<F: Future> IntoFuture for F {
 /// the body to its next pending `await` (its env is the coroutine frame).
 // One library type per coroutine kind, not a fresh anonymous type per
 // coroutine (refs-lang 4.1.11).
+#[must_use("future is never awaited, so its body never runs: write `await {}`")]
 pub struct AsyncFuture<T> {
     resume: fn(Context) -> Poll<T>;
 }

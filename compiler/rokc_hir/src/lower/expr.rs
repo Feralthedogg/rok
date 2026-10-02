@@ -516,11 +516,19 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
-                        "`{name}` is already declared in this scope. rok forbids \
-                         redeclaration with `let`; use `=` to reassign or pick a \
-                         different name (spec variant 238)"
+                        "`{name}` is already declared in this scope, and rok does not \
+                         let a second `let` hide it"
                     ),
                 );
+                let rhs = snippet(init);
+                let ann = ty
+                    .as_ref()
+                    .map(|t| format!(": {}", rokc_ast::print::print_ty(t)))
+                    .unwrap_or_default();
+                ctx.help_last(Some(format!(
+                    "to change its value write `{name} = {rhs};`, or give the new value its \
+                     own name: `let {name}2{ann} = {rhs};`"
+                )));
             }
             // The declared type (if any) is the init's expected type, so
             // literals and generic-enum leaves (`Box::None`) pick it up.
@@ -835,6 +843,16 @@ pub(super) fn rejoin_unnarrowings(ctx: &mut LowerCtx<'_>, ended: Vec<(String, Lo
     }
 }
 
+/// `e` as source for a diagnostic's suggested fix; `..` when long.
+pub(super) fn snippet(e: &Expr) -> String {
+    let s = rokc_ast::print::print_expr(e);
+    if s.len() > 40 || s.contains('\n') {
+        "..".to_owned()
+    } else {
+        s
+    }
+}
+
 /// A loop whose body ends a narrowing made outside it is lowered again
 /// with that narrowing ended from its entry: the loop head joins the
 /// entry with the back edge (spec 2.2.6).
@@ -912,15 +930,16 @@ pub(super) fn lower_assign(
                 );
                 return None;
             }
-            // Only `let` declares; assigning an undeclared name is an error.
+            // Only `let` declares; assigning an undeclared name is an
+            // error. It is declared from here on, so its later uses report
+            // nothing more.
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
-                format!(
-                    "`{name}` is not declared. Use `let` to introduce a new \
-                     binding (typo guard, spec variant 234)"
-                ),
+                format!("`{name}` is not declared; a variable is created only by `let`"),
             );
-            None
+            ctx.help_last(Some(format!("write `let {name} = {};`", snippet(value))));
+            let v = lower_expected(ctx, value, HirTy::Unknown);
+            Some(ctx.declare_var(name, v.ty.clone(), v, span))
         }
         // Spec 4.7: `ref self` names the caller's slot; `self = v` writes it.
         ExprKind::SelfLower
@@ -2707,6 +2726,15 @@ pub(super) fn lower_field(
         )));
         return r;
     }
+    if !has_field && name == "await" {
+        let recv = rokc_ast::print::print_expr(target);
+        let r = ctx.error_expr(
+            span,
+            "`await` goes before the expression, not after it".to_owned(),
+        );
+        ctx.help_last(Some(format!("write `await {recv}`")));
+        return r;
+    }
     field_access(ctx, target_h, name, span)
 }
 
@@ -2720,6 +2748,8 @@ pub(super) fn field_access(
     let struct_id = match &target_h.ty {
         HirTy::Struct(id) => *id,
         HirTy::Unknown => return target_h,
+        // An unknown type name: reported where it is written.
+        HirTy::Path(_) => return poison(span),
         other => {
             return ctx.error_expr(
                 span,
@@ -5149,6 +5179,74 @@ fn sum_min_max(
     with_lets(stmts, value)
 }
 
+/// `x` / `x.f.g` for a local or a field chain on one.
+fn place_text(ctx: &LowerCtx<'_>, e: &HirExpr) -> Option<String> {
+    match &e.kind {
+        HirExprKind::Local(l) => ctx.locals.get(l.0 as usize)?.name.clone(),
+        HirExprKind::FieldRead {
+            target,
+            struct_id,
+            field_index,
+            ..
+        } => {
+            let base = place_text(ctx, target)?;
+            let def = ctx.struct_def(*struct_id);
+            Some(format!("{base}.{}", def.fields[*field_index as usize].name))
+        }
+        _ => None,
+    }
+}
+
+/// `method` on a sum value that only some of its cases have: name the
+/// case and show the `if let` that reaches it.
+fn sum_no_method(
+    ctx: &LowerCtx<'_>,
+    recv: &HirExpr,
+    method: &str,
+    no_args: bool,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let HirTy::Sum(cases) = &recv.ty else {
+        return None;
+    };
+    let case = cases
+        .iter()
+        .find(|c| matches!(pick_method(ctx, c, method, None), Ok(Some(_))))?;
+    let (ty, case) = (ctx.ty_name(&recv.ty), ctx.ty_name(case));
+    let place = place_text(ctx, recv).filter(|p| !p.starts_with('#'));
+    let what = place
+        .as_deref()
+        .map_or("this value".to_owned(), |p| format!("`{p}`"));
+    let an = |t: &str| {
+        if t.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        }
+    };
+    let e = ctx.error_expr(
+        span,
+        format!(
+            "{what} is {} `{ty}`, and only {} `{case}` has the method `{method}`",
+            an(&ty),
+            an(&case)
+        ),
+    );
+    let src = place.as_deref().unwrap_or("value");
+    let bind = match src.rsplit_once('.') {
+        Some((_, field)) => field.to_owned(),
+        None => case.chars().next().unwrap_or('v').to_lowercase().collect(),
+    };
+    let call = if no_args { "()" } else { "(..)" };
+    let fix = format!("`if let {bind}: {case} = {src} {{ {bind}.{method}{call} }}`");
+    ctx.help_last(Some(if src.contains('.') {
+        format!("`is` narrows local variables only, not fields; bind the field first: {fix}")
+    } else {
+        format!("check which case it holds first: {fix}")
+    }));
+    Some(e)
+}
+
 /// `inner?`, `inner_h` its lowering. Rust's `f()?` on a throwing call:
 /// its errors (an unmarked throwing call, or a type `?` hid from
 /// inference) come after the one that says `?` is not for errors.
@@ -5403,6 +5501,9 @@ pub(super) fn method_call_on(
         let ty = ctx.ty_name(&recv_h.ty);
         if let HirTy::Param(p) = recv_h.ty {
             return super::bounds::no_method(ctx, p, method, span);
+        }
+        if let Some(e) = sum_no_method(ctx, &recv_h, method, args.is_empty(), span) {
+            return e;
         }
         let e = ctx.error_expr(span, format!("no method `{method}` found for type `{ty}`"));
         let format = (method == "format" && recv_h.ty == HirTy::Prim(PrimTy::Str))
@@ -7532,6 +7633,16 @@ pub(super) fn lower_call(
     }
 
     discard_args(ctx, args);
+    if let Some(help) = (segs.len() > 1).then(|| ctx.import_help(&segs)).flatten() {
+        return ctx.unknown_name(
+            span,
+            format!(
+                "cannot find function `{display}`: module `{}` is not imported here",
+                segs[0]
+            ),
+            Some(help),
+        );
+    }
     let help = habit_call_help(ctx, &segs, args).or_else(|| ctx.value_help(&segs));
     ctx.unknown_name(
         span,
@@ -10662,6 +10773,24 @@ pub(super) fn lower_path(
                 span,
             };
         }
+    }
+    let top_let = ctx
+        .env
+        .main_lets
+        .get(segs[0])
+        .filter(|_| !ctx.implicit_main);
+    if let (Some(konst), [name]) = (top_let, segs.as_slice()) {
+        return ctx.unknown_name(
+            span,
+            format!(
+                "cannot find value `{name}`: it is a top-level `let`, a variable of the \
+                 program's statements, and a `fn` cannot see those"
+            ),
+            Some(format!(
+                "make it a constant and use that name, `{konst}`, or pass `{name}` to the \
+                 function as an argument"
+            )),
+        );
     }
     let help = ctx.value_help(&segs);
     ctx.unknown_name(

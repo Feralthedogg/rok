@@ -1,0 +1,29 @@
+// expect-exit: 0
+// spec: §6.2.11
+// needs: threads
+// expect-lint: 21:1 this future is never awaited, so its body never runs
+// expect-lint: 23:1 `f` is never used: the future is never awaited, so its body never runs
+// expect-lint: 24:1 this thread is never joined, so the program may end before it finishes
+// expect-lint: 25:1 `h` is never used: the thread is never joined, so the program may end before it finishes
+// expect-stdout:
+// ran
+// 1
+
+// `#[must_use]` on a type (`AsyncFuture`, `JoinHandle`): a value of it
+// left unused, as a statement or an unused `let`, is reported. Awaiting,
+// joining, detaching or `let _ =` is not.
+use rok::std::thread;
+
+async fn work() -> i32 { println("ran"); 1 }
+fn one() -> i32 { 1 }
+
+let _ = work();
+work();
+let x = await work();
+let f = work();
+thread::spawn(one);
+let h = thread::spawn(one);
+let g = thread::spawn(one);
+g.detach();
+let j = thread::spawn(one);
+println(f"{x + try j.join() - 1}");

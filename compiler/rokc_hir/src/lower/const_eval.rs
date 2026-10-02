@@ -1179,7 +1179,7 @@ fn run_extern(name: &str, args: &[Value]) -> Result<Value, Ext> {
         // The caller's position comes last (`#[track_caller]`).
         ("rok_str_slice", [s, a, b, ..]) => {
             let (s, a, b) = (str_of(s)?, usize_of(a)?, usize_of(b)?);
-            str_ops::slice_check(s.as_bytes(), a, b).map_err(|m| Ext::Panic(m.to_owned()))?;
+            str_ops::slice_check(s.as_bytes(), a, b).map_err(|m| Ext::Panic(m.to_string()))?;
             Value::Str(s.get(a..b).ok_or(Ext::No)?.into())
         }
         ("rok_str_replace", [s, from, to]) => {
@@ -1253,7 +1253,7 @@ fn run_extern(name: &str, args: &[Value]) -> Result<Value, Ext> {
         ("rok_buf_slice_str", [buf, len, a, b, ..]) => {
             let bytes = bytes_of(buf, 0, usize_of(len)?)?;
             let (a, b) = (usize_of(a)?, usize_of(b)?);
-            str_ops::slice_check(&bytes, a, b).map_err(|m| Ext::Panic(m.to_owned()))?;
+            str_ops::slice_check(&bytes, a, b).map_err(|m| Ext::Panic(m.to_string()))?;
             text_value(bytes[a..b].to_vec())?
         }
         ("rok_char_props", [c]) => Value::Int(

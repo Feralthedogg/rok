@@ -85,6 +85,28 @@ pub fn print_expr(e: &Expr) -> String {
     p.out
 }
 
+/// One statement.
+#[must_use]
+pub fn print_stmt(s: &Stmt) -> String {
+    let mut p = Printer::default();
+    p.stmt(s);
+    p.out
+}
+
+/// A function's signature: no attributes, visibility or body.
+#[must_use]
+pub fn print_fn_sig(f: &FnDef) -> String {
+    let sig = FnDef {
+        vis: Visibility::Private,
+        attrs: Vec::new(),
+        body: None,
+        ..f.clone()
+    };
+    let mut p = Printer::default();
+    p.fn_def(&sig);
+    p.out.trim_end_matches(';').to_owned()
+}
+
 /// One type.
 #[must_use]
 pub fn print_ty(t: &Ty) -> String {

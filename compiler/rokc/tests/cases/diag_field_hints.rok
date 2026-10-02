@@ -1,0 +1,31 @@
+// expect-error: diag_field_hints.rok:21:13: `await` goes before the expression, not after it
+// expect-error: help: write `await get()`
+// expect-error: diag_field_hints.rok:23:13: struct `List<i32>` has no field `length`
+// expect-error: help: the length is a method: `xs.len()`
+// expect-error: diag_field_hints.rok:24:13: struct `List<i32>` has no field `items`
+// expect-error: diag_field_hints.rok:27:20: `u.nick` is a `str | none`, and only a `str` has the method `len`
+// expect-error: help: `is` narrows local variables only, not fields; bind the field first: `if let nick: str = u.nick { nick.len() }`
+// expect-error: diag_field_hints.rok:30:13: `v` is an `i32 | str`, and only a `str` has the method `len`
+// expect-error: help: check which case it holds first: `if let s: str = v { s.len() }`
+// forbid-error: available fields
+// forbid-error: impl str | none
+
+// Field and method hints: a postfix `.await`, `.length`, a library
+// type's private fields (never listed), and a method only one case of a
+// sum has.
+struct U { nick: str | none; }
+
+async fn get() -> i32 { 1 }
+
+fn main() {
+    let a = get().await;
+    let xs = [1, 2];
+    let b = xs.length;
+    let c = xs.items;
+    let u = U { nick: "bob" };
+    if u.nick is str {
+        println(f"{u.nick.len()}");
+    }
+    let v: i32 | str = 5;
+    let d = v.len();
+}

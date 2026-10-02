@@ -857,6 +857,30 @@ pub(super) fn lower_pattern_inner(
             };
             lower_pattern(ctx, &variant, scrut_ty)
         }
+        // A bare name that is a variant of the scrutinee's enum, not
+        // imported: a binding would match every value. It is an error,
+        // matched as the variant so no arm after it reads unreachable.
+        AstPatternKind::Binding { name, sub: None }
+            if variant_named(ctx, scrut_ty, name).is_some() =>
+        {
+            let (enum_id, idx, base) = variant_named(ctx, scrut_ty, name).expect("guard");
+            ctx.emit_error_at(
+                rokc_diagnostic::ErrorKind::Type,
+                pat.span,
+                format!(
+                    "`{name}` here is a new variable that matches every value, not the \
+                     variant `{base}::{name}`"
+                ),
+            );
+            let args = ctx.enum_def(enum_id).variants[idx].arity;
+            let rest = if args == 0 { "" } else { "(..)" };
+            ctx.help_last(Some(format!("did you mean `{base}::{name}{rest}`?")));
+            HirPattern::EnumVariant {
+                enum_id,
+                variant_index: u32::try_from(idx).expect("variant overflow"),
+                args: vec![HirPattern::Wildcard; args],
+            }
+        }
         AstPatternKind::Binding { name, sub } => {
             // `name @ sub`: bind the whole value, match like `sub`.
             let at = |ctx: &mut LowerCtx<'_>, local: LocalId| match sub {
@@ -1504,4 +1528,19 @@ pub(super) fn int_fits(v: i128, p: PrimTy) -> bool {
     } else {
         (0..(1i128 << bits)).contains(&v)
     }
+}
+
+/// The variant of enum `scrut_ty` named `name`: its enum, index, and the
+/// enum's name as a pattern writes it.
+fn variant_named(
+    ctx: &LowerCtx<'_>,
+    scrut_ty: &HirTy,
+    name: &str,
+) -> Option<(EnumId, usize, String)> {
+    let HirTy::Enum(id) = scrut_ty else {
+        return None;
+    };
+    let def = ctx.enum_def(*id);
+    let idx = def.variants.iter().position(|v| v.name == name)?;
+    Some((*id, idx, enum_base_name(&def.name).to_owned()))
 }

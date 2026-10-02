@@ -1,0 +1,11 @@
+// expect-error: diag_missing_import.rok:9:14: cannot find function `fs::read_to_str`: module `fs` is not imported here
+// expect-error: help: add `use rok::std::fs;` at the top of the file
+// expect-error: diag_missing_import.rok:10:9: cannot find function `thread::spawn`: module `thread` is not imported here
+// expect-error: help: add `use rok::std::thread;` at the top of the file
+// forbid-error: covers no throwing call
+
+// A path into a module that is not imported names the `use` to add; the
+// `try`s over the failed calls say nothing more.
+let t = try! fs::read_to_str("x.txt");
+let h = thread::spawn(|| 1);
+println(f"{t} {try h.join()}");

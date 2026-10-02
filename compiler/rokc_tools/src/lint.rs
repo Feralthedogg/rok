@@ -109,6 +109,10 @@ pub const LINTS: &[Lint] = &[
         "a local holding a `Drop` resource (file, socket, child) that is never closed",
     ),
     warn(
+        "write_to_copy",
+        "a field set on a copy (a by-value parameter or `self`, a `for` binding, a `let` of `xs[i]`) that nothing reads afterwards",
+    ),
+    warn(
         "unused_doc_comments",
         "a doc comment on what is not documented (a statement, an expression, a match arm)",
     ),
@@ -556,6 +560,44 @@ fn marked_fns(items: &[&[Item]], attr: &str) -> HashMap<String, String> {
     marked
 }
 
+/// The structs and enums of `items` with an `attr` attribute, by short
+/// name: its message.
+fn marked_types(items: &[&[Item]], attr: &str) -> HashMap<String, String> {
+    fn walk(items: &[Item], attr: &str, out: &mut HashMap<String, String>) {
+        for i in items {
+            let (name, attrs) = match i {
+                Item::Struct(s) => (&s.name, &s.attrs),
+                Item::Enum(e) => (&e.name, &e.attrs),
+                Item::Mod(m) => {
+                    walk(m.items.as_deref().unwrap_or(&[]), attr, out);
+                    continue;
+                }
+                _ => continue,
+            };
+            if let Some(m) = attr_msg(attrs, attr) {
+                out.insert(leaf(name).to_owned(), m);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for i in items {
+        walk(i, attr, &mut out);
+    }
+    out
+}
+
+/// `e` as source for a fix: a long call shows its arguments as `..`.
+fn short_expr(e: &Expr) -> String {
+    let s = rokc_ast::print::print_expr(e);
+    if s.len() <= 40 {
+        return s;
+    }
+    match &e.kind {
+        ExprKind::Call { callee, .. } => format!("{}(..)", rokc_ast::print::print_expr(callee)),
+        _ => "..".to_owned(),
+    }
+}
+
 fn is_snake(n: &str) -> bool {
     !n.chars().any(|c| c.is_ascii_uppercase())
 }
@@ -636,6 +678,12 @@ struct Cx<'a> {
     /// `(file, start)` of user-written `x.clone()` calls.
     clones: HashSet<(u32, u32)>,
     must_use: HashMap<String, String>,
+    /// `#[must_use]` structs and enums by short name: the message.
+    must_use_types: HashMap<String, String>,
+    /// `(file, start)` of statement expressions: the expression as source.
+    stmt_exprs: HashMap<(u32, u32), String>,
+    /// `(file, start)` of a `let` initializer: the binding's span and name.
+    let_inits: HashMap<(u32, u32), (Span, String)>,
     deprecated: HashMap<String, String>,
     traits: HashSet<String>,
 }
@@ -673,6 +721,9 @@ impl<'a> Cx<'a> {
             casts: HashSet::new(),
             clones: HashSet::new(),
             must_use: marked_fns(&all, "must_use"),
+            must_use_types: marked_types(&all, "must_use"),
+            stmt_exprs: HashMap::new(),
+            let_inits: HashMap::new(),
             deprecated: marked_fns(&all, "deprecated"),
             traits,
         }
@@ -737,6 +788,7 @@ impl<'a> Cx<'a> {
                 walk_stmt(self, s);
             }
             self.pop_scope();
+            self.lost_writes(crate::copy_write::check_stmts(&f.stmts));
         }
         self.unused_imports(&f.items);
         let names = std::mem::take(&mut self.file_names);
@@ -863,8 +915,21 @@ impl<'a> Cx<'a> {
     fn func(&mut self, f: &FnDef, fixed: bool) {
         self.exempt_next = fixed || f.body.is_none();
         walk_fn(self, f);
+        self.lost_writes(crate::copy_write::check_fn(f));
         if let Some(b) = &f.body {
             self.unreachable(&b.stmts, b.trailing.as_deref());
+        }
+    }
+
+    fn lost_writes(&mut self, lost: Vec<crate::copy_write::Lost>) {
+        for l in lost {
+            self.findings.push(Finding {
+                lint: "write_to_copy",
+                span: l.span,
+                msg: l.msg,
+                notes: vec![format!("help: {}", l.help)],
+                secondary: None,
+            });
         }
     }
 
@@ -1031,6 +1096,15 @@ impl<'a> Cx<'a> {
         {
             unclosed(hir, f, &files, &mut hits);
         }
+        for f in hir
+            .functions
+            .iter()
+            .filter(|f| !f.name.contains("__mono__"))
+        {
+            if let Some(body) = &f.body {
+                self.must_use_values(hir, body);
+            }
+        }
         for (lint, span, msg) in hits {
             self.hit(lint, span, msg);
         }
@@ -1046,6 +1120,84 @@ impl<'a> Cx<'a> {
                 notes: vec![h.note.clone()],
                 secondary: h.secondary.clone(),
             });
+        }
+    }
+
+    /// Values of a `#[must_use]` type left unused: a statement whose value
+    /// has the type (`unused_must_use`), and an unused `let` of it (its
+    /// `unused_variables` finding says why that matters). The message
+    /// is `noun phrase: fix`, `{}` in the fix standing for the value.
+    fn must_use_values(&mut self, hir: &rokc_hir::HirModule, body: &rokc_hir::HirBlock) {
+        let msg_of = |t: &HirTy| {
+            match t {
+                HirTy::Struct(id) => hir
+                    .structs
+                    .iter()
+                    .find(|s| s.id == *id)
+                    .map(|s| s.name.as_str()),
+                HirTy::Enum(id) => hir
+                    .enums
+                    .iter()
+                    .find(|e| e.id == *id)
+                    .map(|e| e.name.as_str()),
+                _ => None,
+            }
+            .and_then(|n| {
+                self.must_use_types
+                    .get(leaf(n.split("__").next().unwrap_or(n)))
+            })
+            .cloned()
+        };
+        let mut blocks = vec![body];
+        each_block(body, &mut |e| match &e.kind {
+            HirExprKind::Block(b)
+            | HirExprKind::Loop { body: b, .. }
+            | HirExprKind::While { body: b, .. }
+            | HirExprKind::If { then_block: b, .. } => blocks.push(b),
+            _ => {}
+        });
+        let split = |msg: &str, what: &str| match msg.split_once(": ") {
+            Some((head, fix)) => (
+                head.to_owned(),
+                Some(format!("help: {}", fix.replace("{}", what))),
+            ),
+            None => (msg.to_owned(), None),
+        };
+        for s in blocks.iter().flat_map(|b| &b.stmts) {
+            match s {
+                rokc_hir::HirStmt::Expr(e) => {
+                    let (Some(msg), Some(src)) = (msg_of(&e.ty), self.stmt_exprs.get(&key(e.span)))
+                    else {
+                        continue;
+                    };
+                    let (head, fix) = split(&msg, src);
+                    let msg = format!("this {head}");
+                    self.findings.push(Finding {
+                        lint: "unused_must_use",
+                        span: e.span,
+                        msg,
+                        notes: fix.into_iter().collect(),
+                        secondary: None,
+                    });
+                }
+                rokc_hir::HirStmt::Let { init, .. } => {
+                    let (Some(msg), Some((at, name))) =
+                        (msg_of(&init.ty), self.let_inits.get(&key(init.span)))
+                    else {
+                        continue;
+                    };
+                    let (head, fix) = split(&msg, name);
+                    let unused = self
+                        .findings
+                        .iter_mut()
+                        .find(|f| f.lint == "unused_variables" && f.span == *at);
+                    if let Some(f) = unused {
+                        f.msg = format!("`{name}` is never used: the {head}");
+                        f.notes.splice(0..0, fix);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1589,7 +1741,14 @@ impl AstVisitor for Cx<'_> {
                     }
                 }
             }
-            StmtKind::Expr(e) => self.discarded(e),
+            StmtKind::Expr(e) => {
+                self.stmt_exprs.insert(key(e.span), short_expr(e));
+                self.discarded(e);
+            }
+            StmtKind::Let { name, init, .. } => {
+                self.let_inits
+                    .insert(key(init.span), (s.span, name.clone()));
+            }
             StmtKind::LetPattern { pat, .. } => pat_names(pat, &mut self.file_names),
             StmtKind::LetStruct { path, .. } => {
                 self.file_names

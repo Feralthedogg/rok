@@ -1,6 +1,7 @@
 // expect-exit: 101
-// expect-stderr: thread 'main' panicked at tests/cases/str_slice_clamp_boundary_panics.rok:11:13:
-// expect-stderr: string slice is not on a char boundary
+// expect-stderr: thread 'main' panicked at tests/cases/str_slice_clamp_boundary_panics.rok:12:13:
+// expect-stderr: string slice is not on a char boundary: byte 2 is inside `세` (bytes 1..4)
+// expect-stderr: string offsets count bytes; to work by character, use `chars()` or `char_indices()`
 // expect-stdout: a세b
 
 // stdlib 2.15.3: `str` bounds are byte offsets clamped to the length;

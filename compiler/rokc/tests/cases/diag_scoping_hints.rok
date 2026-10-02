@@ -1,0 +1,19 @@
+// expect-error: diag_scoping_hints.rok:17:20: cannot find type `Point` in module `util`: it is defined in the parent module, and a module sees only its own items and what it imports
+// expect-error: help: add `use sup::Point;` inside `mod util`
+// expect-error: diag_scoping_hints.rok:15:33: cannot find value `base`: it is a top-level `let`, a variable of the program's statements, and a `fn` cannot see those
+// expect-error: help: make it a constant and use that name, `const BASE: i32 = 10;`, or pass `base` to the function as an argument
+// forbid-error: no field `x`
+// forbid-error: EdPoint
+
+// Scoping hints: a parent module's type needs a `use sup::..`, and a
+// top-level `let` is a local of the program's statements, not a global.
+// Neither cascades.
+struct Point { x: i32; }
+
+let base = 10;
+
+fn shifted(x: i32) -> i32 { x + base }
+mod util {
+    pub fn show(p: Point) -> i32 { p.x }
+}
+println(f"{util::show(Point { x: 1 })} {shifted(1)}");

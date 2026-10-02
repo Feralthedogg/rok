@@ -1,0 +1,23 @@
+// expect-exit: 0
+// expect-stdout:
+// red green 7
+
+// spec 3.11 / 5.5.7: an imported variant is a variant pattern, and a
+// binding whose name is no variant of the scrutinee's enum binds.
+
+enum Color { Red, Green, Custom(i32) }
+
+use Color::{Red, Green};
+
+fn name(c: Color) -> str {
+    match c {
+        Red => "red",
+        Green => "green",
+        other => match other {
+            Color::Custom(n) => f"{n}",
+            _ => "?",
+        },
+    }
+}
+
+println(f"{name(Color::Red)} {name(Color::Green)} {name(Color::Custom(7))}");
