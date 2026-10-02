@@ -1,0 +1,32 @@
+//! The library of a package that also has `src/main.rok` (spec 0.3.1):
+//! dependents and the executable use it as `app` (the `--name`).
+
+pub mod shapes;
+
+pub fn add(a: i32, b: i32) -> i32 {
+    return a + b;
+}
+
+pub struct Point {
+    pub x: i32;
+    pub y: i32;
+}
+
+pub fn origin() -> Point {
+    return Point { x: secret(), y: inside() };
+}
+
+fn secret() -> i32 {
+    return 0;
+}
+
+pub(pkg) fn inside() -> i32 {
+    return 0;
+}
+
+#[test]
+fn adds() {
+    if add(2, 2) != 4 {
+        panic("add(2, 2) != 4");
+    }
+}

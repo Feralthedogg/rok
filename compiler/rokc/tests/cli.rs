@@ -89,15 +89,106 @@ fn files_outside_src_are_not_the_package() {
         "{}",
         text(&out.stderr)
     );
-    // Both roots is an error.
-    put(app.join("src/lib.rok"), "").unwrap();
-    let out = rokc(None, &app, &["build"]);
-    assert_exit(&out, 1);
-    assert!(
-        text(&out.stderr).contains("has both `src/main.rok` and `src/lib.rok`"),
-        "{}",
-        text(&out.stderr)
+}
+
+/// 0.3.1: a package with `src/lib.rok` and `src/main.rok` is a library
+/// and an executable that uses it by the package's name. `build` makes
+/// both, `test` runs the library's tests and then the executable's,
+/// `check` checks both, `doc` documents the library.
+// spec: §0.3.1 §9.1.2 §9.2.15 §9.2.16
+#[test]
+fn lib_and_main_package() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("libmain");
+    let app = new_package(&dir, "app", true);
+    put(
+        app.join("src/main.rok"),
+        "use app::add;\n\nprintln(f\"{add(2, 3)}\");\n\n#[test]\nfn main_adds() {\n    if \
+         add(1, 1) != 2 {\n        panic(\"main\");\n    }\n}\n",
+    )
+    .unwrap();
+
+    let out = rokc(Some(&env), &app, &["build"]);
+    assert_exit(&out, 0);
+    let debug = app.join("target/debug");
+    for f in [exe_name("app"), "libapp.a".into(), "app.rokhir".into()] {
+        assert!(debug.join(&f).is_file(), "{f}");
+    }
+    // Each target keeps its own front-end and codegen-unit state.
+    let incr: Vec<String> = fs::read_dir(debug.join("incremental"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(incr.len(), 4, "{incr:?}");
+    for unit in ["app", "libapp"] {
+        assert!(incr.iter().any(|n| n == unit), "{incr:?}");
+    }
+    let out = rokc(Some(&env), &app, &["build"]);
+    assert_eq!(text(&out.stderr).matches("Fresh app").count(), 2);
+
+    let out = rokc(Some(&env), &app, &["-q", "run"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "5\n");
+
+    let out = rokc(Some(&env), &app, &["test"]);
+    assert_exit(&out, 0);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    let lib_at = stdout.find("test adds ... ok").expect(&stdout);
+    let main_at = stdout.find("test main_adds ... ok").expect(&stdout);
+    assert!(lib_at < main_at, "{stdout}");
+    let (lib_run, main_run) = (
+        stderr.find("Running src/lib.rok").expect(&stderr),
+        stderr.find("Running src/main.rok").expect(&stderr),
     );
+    assert!(lib_run < main_run, "{stderr}");
+    // A failing library test stops before the executable's.
+    let lib = fs::read_to_string(app.join("src/lib.rok")).unwrap();
+    put(
+        app.join("src/lib.rok"),
+        lib.replace("add(2, 2) != 4", "add(2, 2) != 5"),
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["test"]);
+    assert_exit(&out, 1);
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("test adds ... FAILED"), "{stdout}");
+    assert!(!stdout.contains("main_adds"), "{stdout}");
+    put(app.join("src/lib.rok"), &lib).unwrap();
+
+    // `check`: the library's lints and the executable's, once each.
+    put(
+        app.join("src/lib.rok"),
+        format!("{lib}\nfn lib_unused() {{}}\n"),
+    )
+    .unwrap();
+    put(
+        app.join("src/main.rok"),
+        "use app::add;\n\nfn main_unused() {}\n\nprintln(f\"{add(2, 3)}\");\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["check"]);
+    assert_exit(&out, 0);
+    let stderr = text(&out.stderr);
+    assert_eq!(
+        stderr.matches("`lib_unused` is never used").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("`main_unused` is never used").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Checked app: 0 errors, 2 warnings"),
+        "{stderr}"
+    );
+
+    // `doc`: the library.
+    let out = rokc(Some(&env), &app, &["doc"]);
+    assert_exit(&out, 0);
+    let index = fs::read_to_string(app.join("target/doc/app/index.html")).unwrap();
+    assert!(index.contains("add"), "{index}");
 }
 
 /// `--emit=ast` (9.9.10): the package after meta expansion, as rok

@@ -1,0 +1,30 @@
+pub mod shapes {
+    pub struct Square {
+        pub side: i32;
+    }
+
+    pub fn area(s: Square) -> i32 {
+        return s.side * s.side;
+    }
+}
+
+pub fn add(a: i32, b: i32) -> i32 {
+    return a + b + secret() + inside();
+}
+
+fn secret() -> i32 {
+    return 0;
+}
+
+pub(pkg) fn inside() -> i32 {
+    return 0;
+}
+
+struct Hidden {
+    v: i32;
+}
+
+pub fn hidden_v() -> i32 {
+    let h = Hidden { v: 1 };
+    return h.v;
+}

@@ -52,6 +52,10 @@ pub struct HirInput {
     /// in a dependency is the dependency, and a path starting with a
     /// dependency's name reaches it from any module.
     pub packages: Vec<String>,
+    /// The dependency of `packages` that is this package's own library
+    /// (`src/lib.rok` beside the `src/main.rok` being built, spec
+    /// 0.3.1): errors about its items say how the executable sees it.
+    pub own_library: Option<String>,
     /// The dependency package this build compiles as a prebuilt library
     /// (`lib<name>.a` + `<name>.rokhir`): every body of it is lowered.
     pub lib: Option<String>,

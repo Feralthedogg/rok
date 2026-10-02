@@ -515,6 +515,104 @@ fn unsaved_submodule_buffer() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A package with both root files (spec 0.3.1): a file the library
+/// reaches is checked as the library's (its unsaved text included); the
+/// executable's own files see the library as the package's name, its
+/// `pub` items only.
+#[test]
+fn library_and_executable_package() {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bootstrap = workspace.join("library/core/src/lib.rok");
+    let dir = std::env::temp_dir()
+        .join(format!("rokc-lsp-both-{}", std::process::id()))
+        .join("app");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    let lib = "pub fn v() -> i32 {\n    1\n}\n\nfn hidden() -> i32 {\n    2\n}\n";
+    std::fs::write(dir.join("src/lib.rok"), lib).unwrap();
+    let main = "mod cli;\n\nuse app::v;\n\nlet x: i32 = v() + app::hidden() + cli::w();\n";
+    std::fs::write(dir.join("src/main.rok"), main).unwrap();
+    std::fs::write(dir.join("src/cli.rok"), "pub fn w() -> i32 {\n    v()\n}\n").unwrap();
+    let uri = |f: &str| path_to_uri(&dir.join(f).display().to_string(), cfg!(windows));
+    let open = |f: &str, text: &str| {
+        notify(
+            "textDocument/didOpen",
+            Json::obj([(
+                "textDocument",
+                Json::obj([
+                    ("uri", Json::str(uri(f))),
+                    ("languageId", Json::str("rok")),
+                    ("version", Json::num(1)),
+                    ("text", Json::str(text)),
+                ]),
+            )]),
+        )
+    };
+    let script = [
+        open("src/main.rok", main),
+        request(1, "textDocument/hover", at(&uri("src/main.rok"), 2, 9)),
+        open("src/cli.rok", "pub fn w() -> i32 {\n    v()\n}\n"),
+        request(2, "textDocument/hover", at(&uri("src/cli.rok"), 0, 7)),
+        open("src/lib.rok", &lib.replace("    1", "    true")),
+        request(3, "textDocument/hover", at(&uri("src/lib.rok"), 0, 7)),
+        request(4, "shutdown", Json::Null),
+        notify("exit", Json::Null),
+    ];
+    let input: String = script.iter().map(frame).collect();
+    let mut out = Vec::new();
+    let code = serve(
+        Cursor::new(input.into_bytes()),
+        &mut out,
+        vec![bootstrap],
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(code, 0);
+    let published: Vec<(String, Vec<String>)> = messages(&out)
+        .into_iter()
+        .filter(|m| m.get("method").as_str() == Some("textDocument/publishDiagnostics"))
+        .map(|m| {
+            let p = m.get("params");
+            let Json::Arr(d) = p.get("diagnostics") else {
+                panic!("{p:?}")
+            };
+            let msgs = d
+                .iter()
+                .map(|d| d.get("message").as_str().unwrap_or_default().to_owned())
+                .collect();
+            (p.get("uri").as_str().unwrap_or_default().to_owned(), msgs)
+        })
+        .collect();
+    let of = |f: &str| {
+        published
+            .iter()
+            .find(|(u, _)| *u == uri(f))
+            .unwrap_or_else(|| panic!("no diagnostics for {f}: {published:?}"))
+            .1
+            .clone()
+    };
+    assert_eq!(
+        of("src/main.rok"),
+        [
+            "function `app::hidden` is private to module `app` and cannot be used from `<root>` \
+             (spec 5.6 — add `pub` to expose it)\nhelp: `src/main.rok` uses its package's \
+             library `src/lib.rok` as the package `app`, like a dependency: it sees only the \
+             library's `pub` items"
+        ]
+    );
+    let lib_diags = of("src/lib.rok");
+    assert!(
+        lib_diags.len() == 1 && lib_diags[0].contains("bool"),
+        "{lib_diags:?}"
+    );
+    // `cli` is the executable's: `v` is not in its scope.
+    let cli = of("src/cli.rok");
+    assert!(
+        cli.len() == 1 && cli[0].contains("cannot find function `v`"),
+        "{cli:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
 const LOCAL: &str = "\
 fn f() -> i32 {
     struct L { v: i32; }

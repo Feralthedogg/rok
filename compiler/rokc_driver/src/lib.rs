@@ -91,6 +91,9 @@ pub struct CompilerConfig {
     /// top-level path `name`; a `<name>.rokhir` (spec 904) is a prebuilt
     /// one, linked from the `lib<name>.a` beside it.
     pub externs: Vec<(String, PathBuf)>,
+    /// The extern that is the package's own library (`src/lib.rok` of
+    /// the `src/main.rok` being built, spec 0.3.1).
+    pub own_library: Option<String>,
     /// Build the library package as prebuilt dependency `name`: it is
     /// mounted as `name` (as its users will see it), every body is
     /// compiled, and `CompiledModule::interface` holds its ROKHIR.
@@ -969,6 +972,7 @@ fn compile_unit_in(
     let (item_modules, items): (Vec<String>, Vec<rokc_ast::Item>) = all_items.into_iter().unzip();
     let input = rokc_hir::HirInput {
         packages: config.externs.iter().map(|(n, _)| n.clone()).collect(),
+        own_library: config.own_library.clone(),
         lib: lib.map(str::to_owned),
         prebuilt: prebuilt.iter().map(|p| p.rokhir.name.clone()).collect(),
         check_library: config.check_library,

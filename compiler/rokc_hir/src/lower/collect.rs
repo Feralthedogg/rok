@@ -237,6 +237,7 @@ pub fn lower_full(
 ) -> HirModule {
     let collect_started = rokc_diagnostic::time_passes().then(std::time::Instant::now);
     resolve::set_packages(input.packages.clone());
+    resolve::set_own_library(input.own_library.clone());
     resolve::set_no_implicit(input.no_implicit_rok.clone());
     super::const_eval::set_pointer_width(input.pointer_width);
     super::const_eval::set_stdcall_system(input.stdcall_system);
@@ -3077,7 +3078,13 @@ pub(super) fn check_unresolved_types(
                 span,
                 format!("cannot find type `{t}` in this scope"),
             );
+            let public = named
+                .iter()
+                .copied()
+                .filter(|n| module.type_visibility.get(*n) == Some(&Visibility::Pub));
             if let Some(h) = habit_type_help(&t, span, sources) {
+                d.with_help(h)
+            } else if let Some(h) = resolve::own_library_import(&t, public) {
                 d.with_help(h)
             } else if let Some(s) = rokc_diagnostic::suggest(leaf_name(&t), known.iter().copied()) {
                 d.with_help(format!("did you mean `{s}`?"))

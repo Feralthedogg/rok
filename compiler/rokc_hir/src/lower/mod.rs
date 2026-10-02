@@ -460,15 +460,16 @@ impl TypeNames {
         if let Some(vis) = self.type_vis(&full) {
             let def_module = module_of(&full);
             if !visible_from(module, &def_module, vis) {
-                self.error(
-                    at,
-                    format!(
-                        "type `{full}` is private to module `{}` and cannot be used from \
-                     `{}` (spec 5.6 — add `pub` to expose it)",
-                        module_display(&def_module),
-                        module_display(module)
-                    ),
+                let msg = format!(
+                    "type `{full}` is private to module `{}` and cannot be used from `{}` \
+                     (spec 5.6 — add `pub` to expose it)",
+                    module_display(&def_module),
+                    module_display(module)
                 );
+                match resolve::own_library_privacy(&def_module) {
+                    Some(help) => self.error_help(at, msg, help),
+                    None => self.error(at, msg),
+                }
             }
         }
         Some(full)
@@ -3047,14 +3048,21 @@ impl<'a> LowerCtx<'a> {
             .scopes
             .iter()
             .flat_map(|s| s.keys().map(String::as_str));
-        let items = self
-            .env
-            .fn_table
-            .keys()
-            .chain(self.env.generic_fns.keys())
-            .chain(self.env.consts.keys())
-            .chain(self.env.statics.keys())
-            .filter_map(in_module);
+        let all = || {
+            self.env
+                .fn_table
+                .keys()
+                .chain(self.env.generic_fns.keys())
+                .chain(self.env.consts.keys())
+                .chain(self.env.statics.keys())
+        };
+        let public = all()
+            .filter(|k| self.env.item_vis(k).unwrap_or(Visibility::Pub) == Visibility::Pub)
+            .map(String::as_str);
+        if let Some(help) = resolve::own_library_import(name, public) {
+            return Some(help);
+        }
+        let items = all().filter_map(in_module);
         rokc_diagnostic::suggest(name, locals.chain(items)).map(|s| format!("did you mean `{s}`?"))
     }
 
@@ -3977,6 +3985,7 @@ impl<'a> LowerCtx<'a> {
                     module_display(package_of(&def_module))
                 ),
             );
+            self.help_last(resolve::own_library_privacy(&def_module));
             return false;
         }
         self.emit_error(
@@ -3988,6 +3997,7 @@ impl<'a> LowerCtx<'a> {
                 module_display(&self.current_module)
             ),
         );
+        self.help_last(resolve::own_library_privacy(&def_module));
         false
     }
 

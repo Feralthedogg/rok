@@ -1,0 +1,3 @@
+pub fn banner() -> str {
+    return f"v{pkg::VERSION}";
+}

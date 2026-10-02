@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub use deps::DepBuild;
 pub use fresh::Fingerprint;
-pub use package::{Package, STDIN, discover, root_file, source_files};
+pub use package::{Package, STDIN, code_name, discover, root_file, source_files};
 pub use std_cache::{StdKey, prebuilt_std};
 
 use rokc_driver::{CompiledModule, CompilerConfig, compile_file, compile_source};
@@ -51,6 +51,12 @@ impl Session {
     /// `lib.rok` is compiled with this build and mounted at `name`.
     pub fn add_extern(&mut self, name: String, root: PathBuf) {
         self.config.externs.push((name, root));
+    }
+
+    /// Extern `name` is the package's own library, which the executable
+    /// being built uses (spec 0.3.1).
+    pub fn set_own_library(&mut self, name: Option<String>) {
+        self.config.own_library = name;
     }
 
     /// Add a `--cfg` flag (either `"flag"` or `"key=value"`). Consulted

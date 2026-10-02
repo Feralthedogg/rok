@@ -2,18 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// A package to build: a directory holding `src/main.rok` (executable)
-/// or `src/lib.rok` (library), or a lone file outside any package's
+/// A package to build: a directory holding `src/main.rok` (executable),
+/// `src/lib.rok` (library) or both, or a lone file outside any package's
 /// `src/` (the anonymous executable package, 4.16.8).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Package {
-    /// `src/main.rok` / `src/lib.rok` / the anonymous file.
+    /// `src/main.rok` when there, else `src/lib.rok`; or the anonymous
+    /// file.
     pub root: PathBuf,
     pub dir: PathBuf,
     /// Artifact name: the directory name, or the anonymous file's stem.
     pub name: String,
     pub lib: bool,
     pub anonymous: bool,
+    /// `src/lib.rok` when `root` is `src/main.rok`: the executable uses
+    /// that library as dependency `name` (0.3.1).
+    pub library: Option<PathBuf>,
 }
 
 /// The root file name standing for standard input (`check -`, 901.9).
@@ -29,7 +33,19 @@ impl Package {
             name: "stdin".to_owned(),
             lib: false,
             anonymous: true,
+            library: None,
         }
+    }
+
+    /// The library of a package that also has `src/main.rok`.
+    #[must_use]
+    pub fn library_target(&self) -> Option<Self> {
+        Some(Self {
+            root: self.library.clone()?,
+            lib: true,
+            library: None,
+            ..self.clone()
+        })
     }
 
     /// `target/` (spec 902.15); `ROKC_TARGET_DIR` overrides (901.7).
@@ -39,21 +55,29 @@ impl Package {
     }
 }
 
-/// The root file of the package at `dir`: `src/main.rok` or
-/// `src/lib.rok` (spec 0.3.1); both is an error.
-pub fn root_file(dir: &Path) -> Result<Option<PathBuf>, String> {
-    let main = dir.join("src/main.rok");
-    let lib = dir.join("src/lib.rok");
-    match (main.is_file(), lib.is_file()) {
-        (true, true) => Err(format!(
-            "`{}` has both `src/main.rok` and `src/lib.rok`; a package is one or the other \
-             (spec 0.3.1)",
-            shown(dir).display()
-        )),
-        (true, false) => Ok(Some(main)),
-        (false, true) => Ok(Some(lib)),
-        (false, false) => Ok(None),
+/// Package name `name` as code and symbols spell it: `my-app` is
+/// `my_app`.
+#[must_use]
+pub fn code_name(name: &str) -> String {
+    let n: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    if n.starts_with(|c: char| c.is_ascii_digit()) {
+        format!("_{n}")
+    } else {
+        n
     }
+}
+
+/// The root file of the package at `dir`: `src/main.rok`, else
+/// `src/lib.rok` (spec 0.3.1).
+#[must_use]
+pub fn root_file(dir: &Path) -> Option<PathBuf> {
+    ["src/main.rok", "src/lib.rok"]
+        .into_iter()
+        .map(|f| dir.join(f))
+        .find(|f| f.is_file())
 }
 
 /// Find the package `path` belongs to: the nearest directory at or
@@ -71,18 +95,21 @@ pub fn discover(path: &Path) -> Result<Package, String> {
         &abs
     };
     for dir in start.ancestors() {
-        let Some(root) = root_file(dir)? else {
+        let Some(root) = root_file(dir) else {
             continue;
         };
         if is_file && !abs.starts_with(dir.join("src")) {
             break;
         }
+        let lib = root.ends_with("lib.rok");
+        let library = Some(dir.join("src/lib.rok")).filter(|l| !lib && l.is_file());
         return Ok(Package {
-            lib: root.ends_with("lib.rok"),
+            lib,
             root: shown(&root),
             dir: shown(dir),
             name: dir_name(dir),
             anonymous: false,
+            library: library.as_deref().map(shown),
         });
     }
     if !is_file {
@@ -107,6 +134,7 @@ pub fn discover(path: &Path) -> Result<Package, String> {
             .to_owned(),
         lib: false,
         anonymous: true,
+        library: None,
     })
 }
 

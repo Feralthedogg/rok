@@ -353,7 +353,7 @@ fn transitive_dependencies_and_conflicts() {
     write(&root.join("tool/src/main.rok"), "println(\"t\");\n");
     fails(
         &rok(&home, &app, &["add", "tool", "--path", "../tool"]),
-        "not a library package",
+        "is an executable package (src/main.rok, no src/lib.rok): a dependency must be a library",
     );
     ok(&rok(
         &home,
@@ -3059,4 +3059,165 @@ fn install_stones() {
     assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
     ok(&rok(&home, &root, &["uninstall", "num"]));
     assert!(locked_stones(&read(&env.join("rok.lock"))).is_empty());
+}
+
+/// A package with `src/lib.rok` and `src/main.rok` (spec 0.3.1): `rok new
+/// --lib --bin` makes one, a dependent gets its library, `rok install`
+/// installs its executable (`--lib`: its library), and `rok publish`
+/// takes it, as it takes an executable-only package; a stone without a
+/// library is not a dependency.
+// spec: §0.3.1 §9.10.2 §9.10.4a §9.10.5
+#[test]
+fn lib_and_main_packages() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("lib-and-main");
+    let home = root.join("home");
+    let out = rok(&home, &root, &["new", "--lib", "--bin", "both"]);
+    ok(&out);
+    assert!(
+        text(&out.stderr).contains("Created library and executable package"),
+        "{}",
+        text(&out.stderr)
+    );
+    let both = root.join("both");
+    assert!(read(&both.join("src/lib.rok")).contains("pub fn add"));
+    assert_eq!(
+        read(&both.join("src/main.rok")),
+        "use both::add;\n\nprintln(f\"2 + 2 = {add(2, 2)}\");\n"
+    );
+    assert_eq!(script_out(&home, &both, &["run"]), "2 + 2 = 4\n");
+    let tests = script_out(&home, &both, &["test"]);
+    assert!(tests.contains("test adds ... ok"), "{tests}");
+    assert!(both.join("target/debug/libboth.a").is_file());
+
+    // A dependent sees the library.
+    let user = root.join("user");
+    write(
+        &user.join("rok.rokon"),
+        "Package { name: \"user\", deps: { \"both\": Dep::path(\"../both\") } }\n",
+    );
+    write(
+        &user.join("src/main.rok"),
+        "use both::add;\nprintln(f\"{add(1, 2)}\");\n",
+    );
+    assert_eq!(script_out(&home, &user, &["run"]), "3\n");
+
+    // `rok install`: the executable, with a note on the library; `--lib`
+    // installs the library instead.
+    let out = rok(&home, &root, &["install", "--path", "both"]);
+    ok(&out);
+    assert!(
+        text(&out.stderr).contains(
+            "note: `both` also has a library (src/lib.rok); `rok install --lib ..` puts that \
+             into environment `default` instead"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
+    let installed = Command::new(home.join("bin").join(exe("both")))
+        .output()
+        .unwrap();
+    assert_eq!(ok(&installed), "2 + 2 = 4\n");
+    ok(&rok(&home, &root, &["install", "--lib", "--path", "both"]));
+    assert!(read(&home.join("envs/default/rok.rokon")).contains("\"both\": Dep::path("));
+    write(
+        &root.join("s.rok"),
+        "use both::add;\nprintln(f\"{add(3, 4)}\");\n",
+    );
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "7\n");
+    let list = ok(&rok(&home, &root, &["install", "--list"]));
+    assert_eq!(list.matches("  both ").count(), 2, "{list}");
+    let hello = root.join("hello");
+    write(&hello.join("src/main.rok"), "println(\"hello\");\n");
+    fails(
+        &rok(&home, &root, &["install", "--lib", "--path", "hello"]),
+        "`hello` has no library (src/lib.rok) for --lib; without --lib, its executable \
+         (src/main.rok) goes into",
+    );
+    fails(
+        &rok(&home, &root, &["install", "--lib", "--path", "s.rok"]),
+        "`s.rok` is a script: --lib installs a package's library (src/lib.rok)",
+    );
+
+    // Stones: one with both, and one with only an executable.
+    let index = root.join("index");
+    commit(
+        &index,
+        &[("config.rokon", "Config { api: \"https://rokstones.io\" }\n")],
+    );
+    for kv in [
+        ["user.name", "t"],
+        ["user.email", "t@t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        git(&index, &["config", kv[0], kv[1]]);
+    }
+    let reg = index.display().to_string();
+    write(
+        &home.join("config.rokon"),
+        &format!("Config {{ registry: {} }}\n", q(&reg)),
+    );
+    let calc = root.join("calc");
+    let main = "use calc::one;\nprintln(f\"calc {one()}\");\n";
+    stone(
+        &calc,
+        "calc",
+        "1.0.0",
+        "",
+        &[("src/lib.rok", ONE), ("src/main.rok", main)],
+    );
+    let tool = root.join("tool");
+    stone(
+        &tool,
+        "tool",
+        "0.1.0",
+        "",
+        &[("src/main.rok", "println(\"tool\");\n")],
+    );
+    for dir in [&calc, &tool] {
+        let line = ok(&rok(&home, dir, &["publish", "--index", &reg]));
+        assert!(line.starts_with("Stone { name: "), "{line}");
+        ok(&rok(&home, dir, &["publish", "--index", &reg, "--commit"]));
+    }
+    let empty = root.join("empty");
+    stone(&empty, "empty", "0.1.0", "", &[("README", "")]);
+    fails(
+        &rok(&home, &empty, &["publish"]),
+        "`empty` is not a package: no src/lib.rok (a library) or src/main.rok (an executable)",
+    );
+    ok(&rok(&home, &root, &["install", "tool"]));
+    ok(&rok(&home, &root, &["install", "calc"]));
+    for (name, want) in [("tool", "tool\n"), ("calc", "calc 1\n")] {
+        let out = Command::new(home.join("bin").join(exe(name)))
+            .output()
+            .unwrap();
+        assert_eq!(ok(&out), want);
+    }
+    ok(&rok(&home, &root, &["install", "--lib", "calc"]));
+    assert!(
+        read(&home.join("envs/default/rok.rokon")).contains("\"calc\": Dep::version(\"^1.0.0\")")
+    );
+    write(
+        &root.join("c.rok"),
+        "use calc::one;\nprintln(f\"{one()}\");\n",
+    );
+    assert_eq!(script_out(&home, &root, &["c.rok"]), "1\n");
+    fails(
+        &rok(&home, &root, &["install", "--lib", "tool"]),
+        "`tool` has no library (src/lib.rok) for --lib",
+    );
+    // An executable-only stone is no dependency.
+    let app = root.join("app");
+    write(
+        &app.join("rok.rokon"),
+        "Package { name: \"app\", deps: { \"tool\": Dep::version(\"^0.1\") } }\n",
+    );
+    write(&app.join("src/main.rok"), "println(\"app\");\n");
+    fails(
+        &rok(&home, &app, &["build"]),
+        "is an executable package (src/main.rok, no src/lib.rok): a dependency must be a \
+         library; a program is installed with `rok install`",
+    );
 }

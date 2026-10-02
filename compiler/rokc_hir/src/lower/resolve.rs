@@ -291,6 +291,50 @@ pub fn is_dependency(name: &str) -> bool {
     PACKAGES.with(|p| p.borrow().iter().any(|n| n == name))
 }
 
+thread_local! {
+    /// The dependency that is the package's own library
+    /// (`HirInput::own_library`).
+    static OWN_LIBRARY: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_own_library(name: Option<String>) {
+    OWN_LIBRARY.with(|l| *l.borrow_mut() = name);
+}
+
+/// The help for an item of `def_module` the executable may not see,
+/// when that is in its package's own library (spec 0.3.1).
+pub(super) fn own_library_privacy(def_module: &str) -> Option<String> {
+    OWN_LIBRARY.with(|l| {
+        let l = l.borrow();
+        let lib = l.as_deref().filter(|lib| package_of(def_module) == *lib)?;
+        Some(format!(
+            "`src/main.rok` uses its package's library `src/lib.rok` as the package `{lib}`, \
+             like a dependency: it sees only the library's `pub` items"
+        ))
+    })
+}
+
+/// The help for `name`, which the executable does not know, when one of
+/// `paths` (full item paths) is an item of its package's own library
+/// (spec 0.3.1): the `use` that brings it in.
+pub(super) fn own_library_import<'a>(
+    name: &str,
+    paths: impl Iterator<Item = &'a str>,
+) -> Option<String> {
+    OWN_LIBRARY.with(|l| {
+        let l = l.borrow();
+        let lib = l.as_deref()?;
+        let tail = format!("::{name}");
+        let found = paths
+            .filter(|p| p.ends_with(&tail) && p.split("::").next() == Some(lib))
+            .min_by_key(|p| (p.len(), *p))?;
+        Some(format!(
+            "the library `src/lib.rok` has `{found}`, and `src/main.rok` sees it by the \
+             package's name: add `use {found};`"
+        ))
+    })
+}
+
 /// The package `module` belongs to: `rok::<tier>` (each library tier is
 /// its own package, spec 5.7), a dependency's name, or `""` — the
 /// package being compiled.

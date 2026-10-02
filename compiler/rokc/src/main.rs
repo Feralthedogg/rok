@@ -23,13 +23,17 @@ const USAGE: &str = "\
 usage: rokc [global options] <command> [options] [args]
 
 commands:
-  build [path]           build the package (executable target/<profile>/<name>,
-                         or target/<profile>/lib<name>.a + <name>.rokhir for a
-                         `src/lib.rok` package; <profile> is debug, or release at
-                         -O2+ / -Os; a --target build goes under target/<target>/)
+  build [path]           build the package: the executable
+                         target/<profile>/<name> of `src/main.rok`, the
+                         library target/<profile>/lib<name>.a + <name>.rokhir
+                         of `src/lib.rok`, or both (the executable uses the
+                         library as `<name>`); <profile> is debug, or release
+                         at -O2+ / -Os; a --target build goes under
+                         target/<target>/
   run [path] [-- args]   build, then run; args after `--` are forwarded
-  test [path] [filter]   build and run the `#[test]` functions (filter: regex
-                         with ^ $ . * + ?, or a substring)
+  test [path] [filter]   build and run the `#[test]` functions, the library's
+                         then the executable's (filter: regex with ^ $ . * + ?,
+                         or a substring)
   bench [path] [filter]  build (-O2 unless -O given) and time the `#[bench]`
                          functions; prints ns/iter (+/- deviation)
   check [path | -]       front end, lints and codegen, no native build
@@ -45,8 +49,9 @@ commands:
                          Jupyter kernel (Jupyter starts it; `rok jupyter
                          install` writes its kernelspec)
   fmt [path]             format .rok / .rokon files in place (file or directory)
-  doc [path]             HTML API docs of the package (and its --extern
-                         dependencies) in target/doc/
+  doc [path]             HTML API docs of the package's library (else of its
+                         executable) and its --extern dependencies in
+                         target/doc/
   clean [path]           remove the package's target/
   bindgen <header> [-- <clang args>]
                          rok declarations of a C header (stdout, or -o) for
@@ -704,8 +709,8 @@ fn real_main() {
             ));
         }
         "run" => cmd_run(with_defaults(a)),
-        "test" => cmd_test(with_defaults(a)),
-        "bench" => cmd_bench(with_defaults(a)),
+        "test" => cmd_harness(with_defaults(a), Mode::Test),
+        "bench" => cmd_harness(with_defaults(a), Mode::Bench),
         "doc" => cmd_doc(with_defaults(a)),
         "fmt" => cmd_fmt(&a),
         "clean" => {
@@ -933,6 +938,7 @@ fn session(a: &Args, pkg: &Package) -> Session {
         session.add_extern(n.clone(), p.clone());
     }
     session.set_anonymous(pkg.anonymous);
+    session.set_own_library(pkg.library.as_ref().map(|_| lib_name(pkg)));
     session.set_target(a.spec());
     session.set_std_prebuilt(a.std_prebuilt.clone());
     session.set_incremental(incremental_dir(a, pkg));
@@ -979,8 +985,8 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
     );
     let mut session = session(a, pkg);
     // A library's `build` is a prebuilt library: `lib<name>.a` + ROKHIR.
-    if pkg.lib && matches!(a.cmd.as_str(), "build" | "emit") {
-        session.set_lib_name(Some(lib_name(a, pkg)));
+    if pkg.lib && mode == Mode::Build {
+        session.set_lib_name(Some(lib_name(pkg)));
     }
     session.set_test(mode == Mode::Test);
     session.set_bench(mode == Mode::Bench);
@@ -1040,22 +1046,53 @@ fn incremental_dir(a: &Args, pkg: &Package) -> Option<PathBuf> {
     Some(root.join(format!("{}-{h:016x}", pkg.name)))
 }
 
-/// A library's package name: `--name`, else its directory's (made an
-/// identifier).
-fn lib_name(a: &Args, pkg: &Package) -> String {
-    // `my-app` is `my_app` in code and symbols.
-    let n: String = a
-        .name
-        .as_ref()
-        .unwrap_or(&pkg.name)
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '_' })
-        .collect();
-    if n.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("_{n}")
+/// A library's package name (`--name`, else its directory's) as code
+/// spells it.
+fn lib_name(pkg: &Package) -> String {
+    rokc_interface::code_name(&pkg.name)
+}
+
+/// The codegen-unit name of `pkg`'s build (`unit_opts`): a library's is
+/// `lib<name>`, apart from the executable of a package with both.
+fn unit_name(pkg: &Package) -> String {
+    if pkg.lib {
+        format!("lib{}", pkg.name)
     } else {
-        n
+        pkg.name.clone()
     }
+}
+
+/// A package with both root files: build its library (`build_lib`) and
+/// mount it as dependency `<name>` of the executable (spec 0.3.1).
+fn mount_library(a: &mut Args, pkg: &Package) {
+    let Some(lib) = pkg.library_target() else {
+        return;
+    };
+    let archive = build_lib(a, &lib, None);
+    a.externs.push((
+        lib_name(&lib),
+        rokc_interface::rokhir::companions(&archive).0,
+    ));
+}
+
+/// Build library `pkg` into `out` (default:
+/// `target/<profile>/lib<name>.a`, `<name>.rokhir` beside it) unless up
+/// to date; the archive.
+fn build_lib(a: &Args, pkg: &Package, out: Option<PathBuf>) -> PathBuf {
+    let out = out.unwrap_or_else(|| {
+        let target = out_dir(a, Some(pkg));
+        create_dir(&target);
+        target.join(format!("lib{}.a", lib_name(pkg)))
+    });
+    build_fresh(a, pkg, fingerprint(a, pkg, &out), |a, result| {
+        if !a.quiet {
+            eprintln!("    Building {}", out.display());
+        }
+        let opts = unit_opts(a, pkg, &unit_name(pkg));
+        let counts = fail_on(result.archive(&opts, &out), &result.source_map);
+        report_units(a, counts);
+    });
+    out
 }
 
 /// `-v`: per-stage timing (909.5).
@@ -1103,12 +1140,19 @@ fn exe_file(a: &Args, name: &str) -> String {
 
 /// Layout: `target/<profile>/<name>` (executable, `<name>.exe` for Windows,
 /// `<name>.wasm` for wasm32),
-/// `target/<profile>/lib<name>.a` + `<name>.rokhir` (library),
-/// `target/<profile>/build/<name>.<ext>` (`--emit`).
+/// `target/<profile>/lib<name>.a` + `<name>.rokhir` (library; a package
+/// with both builds both, `-o` naming the executable),
+/// `target/<profile>/build/<name>.<ext>` (`--emit`, of the executable when
+/// there is one).
 fn cmd_build(mut a: Args) {
     let pkg = discover_arg(&a);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let target = out_dir(&a, Some(&pkg));
+    if pkg.lib && a.emit.is_empty() {
+        build_lib(&a, &pkg, a.output.clone());
+        return;
+    }
+    mount_library(&mut a, &pkg);
     if !a.emit.is_empty() {
         let (result, _, started) = compile(&a, &pkg, Mode::Build);
         if a.output.is_some() && a.emit.len() > 1 {
@@ -1135,23 +1179,13 @@ fn cmd_build(mut a: Args) {
     }
     let out = a.output.clone().unwrap_or_else(|| {
         create_dir(&target);
-        target.join(if pkg.lib {
-            format!("lib{}.a", lib_name(&a, &pkg))
-        } else {
-            exe_file(&a, &pkg.name)
-        })
+        target.join(exe_file(&a, &pkg.name))
     });
     build_fresh(&a, &pkg, fingerprint(&a, &pkg, &out), |a, result| {
         if !a.quiet {
             eprintln!("    Building {}", out.display());
         }
-        if pkg.lib {
-            let opts = unit_opts(a, &pkg, &pkg.name);
-            let counts = fail_on(result.archive(&opts, &out), &result.source_map);
-            report_units(a, counts);
-        } else {
-            link_exe(a, &pkg, result, &out, &pkg.name);
-        }
+        link_exe(a, &pkg, result, &out, &pkg.name);
     });
 }
 
@@ -1233,7 +1267,7 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
         std::env::var("ROK_CC").unwrap_or_default(),
     ];
     words.extend(a.cfg.iter().cloned());
-    words.extend(pkg.lib.then(|| lib_name(a, pkg)));
+    words.extend(pkg.lib.then(|| lib_name(pkg)));
     // A package's sources are its `src/`.
     let mut inputs = vec![if pkg.anonymous {
         pkg.root.clone()
@@ -1355,7 +1389,10 @@ fn sweep_scripts(root: &Path, keep: &Path) {
 }
 
 /// `rokc check` (with codegen) and `rokc lint` (without): the check
-/// pipeline over the package; exit 1 on an error or a `deny` lint.
+/// pipeline over the package; exit 1 on an error or a `deny` lint. A
+/// package with both root files: its library, then (when that has no
+/// error) its executable with the library compiled in as dependency
+/// `<name>`.
 fn cmd_check(mut a: Args, codegen: bool) {
     // `check -`: the source is stdin (901.9), an anonymous package.
     let stdin = a.positional.first().is_some_and(|p| p == "-");
@@ -1374,19 +1411,29 @@ fn cmd_check(mut a: Args, codegen: bool) {
         }
         src
     });
-    let mut session = session(&a, &pkg);
-    session.set_check_library(a.check_library);
-    let (result, diags) = rokc_tools::analysis::check(
-        &mut session,
-        source.as_deref(),
-        &pkg.root,
-        &a.lint_levels,
-        codegen.then_some(&a.opts),
-    );
-    reused(&a, &result);
-    diags.iter().for_each(|d| result.report(d));
-    let errors = diags.iter().filter(|d| d.is_error()).count();
-    let warnings = diags.len() - errors;
+    let (mut errors, mut warnings) = (0, 0);
+    for target in pkg.library_target().into_iter().chain([pkg.clone()]) {
+        if errors > 0 {
+            break;
+        }
+        if let Some(lib) = target.library.as_ref() {
+            a.externs.push((lib_name(&target), lib.clone()));
+        }
+        let mut session = session(&a, &target);
+        session.set_check_library(a.check_library);
+        let (result, diags) = rokc_tools::analysis::check(
+            &mut session,
+            source.as_deref(),
+            &target.root,
+            &a.lint_levels,
+            codegen.then_some(&a.opts),
+        );
+        reused(&a, &result);
+        diags.iter().for_each(|d| result.report(d));
+        let e = diags.iter().filter(|d| d.is_error()).count();
+        errors += e;
+        warnings += diags.len() - e;
+    }
     if !a.quiet && !a.json {
         eprintln!(
             "     Checked {}: {errors} error{}, {warnings} warning{}",
@@ -1405,10 +1452,15 @@ fn cmd_repl(mut a: Args) {
         usage_error("`rokc repl -`: standard input is the cell input; give a path or none");
     }
     // `repl <path>`: a library is a dependency of the session, and its
-    // first cell is `use <name>::*;` (901.2); a program is loaded into it.
+    // first cell is `use <name>::*;` (901.2); a program is loaded into it,
+    // its package's library (0.3.1) a dependency.
     let pkg = a.positional.first().map(|p| discover_at(&a, p));
+    if let Some(lib) = pkg.as_ref().and_then(|p| p.library.clone()) {
+        a.externs
+            .push((lib_name(pkg.as_ref().expect("checked")), lib));
+    }
     let prelude = pkg.as_ref().filter(|p| p.lib).map(|p| {
-        let name = lib_name(&a, p);
+        let name = lib_name(p);
         a.externs.push((name.clone(), p.root.clone()));
         format!("use {name}::*;")
     });
@@ -1438,6 +1490,7 @@ fn cmd_run(mut a: Args) {
         ));
     }
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    mount_library(&mut a, &pkg);
     let exe = match &a.output {
         None if pkg.anonymous => script_exe(&a, &pkg),
         o => {
@@ -1479,19 +1532,52 @@ fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
     }
 }
 
-/// `rokc test [path] [filter]`.
-fn cmd_test(mut a: Args) {
+/// `rokc test [path] [filter]` and `rokc bench [path] [filter]` (an
+/// optimized build, `-O2` unless an `-O` level was given): the harness
+/// of `#[test]` / `#[bench]` functions built and run. A package with
+/// both root files runs its library's, then, when they pass, its
+/// executable's.
+fn cmd_harness(mut a: Args, mode: Mode) {
+    if mode == Mode::Bench && !a.opt_set {
+        "2".clone_into(&mut a.opts.opt_level);
+    }
     let (path, filter) = path_and_filter(&a);
     let filter = filter.map(str::to_owned);
     let pkg = discover_at(&a, path);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
-    let (result, _, started) = compile(&a, &pkg, Mode::Test);
+    for target in pkg.library_target().into_iter().chain([pkg.clone()]) {
+        mount_library(&mut a, &target);
+        if !run_harness(&a, &target, mode, filter.as_deref()) {
+            process::exit(1);
+        }
+    }
+}
+
+/// Build and run `pkg`'s test or bench harness; whether all passed.
+fn run_harness(a: &Args, pkg: &Package, mode: Mode, filter: Option<&str>) -> bool {
+    let kind = if mode == Mode::Bench { "bench" } else { "test" };
+    let (result, _, started) = compile(a, pkg, mode);
     let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
-    let exe = tmp.path().join(exe_file(&a, &format!("{}-test", pkg.name)));
+    let unit = format!("{}-{kind}", unit_name(pkg));
+    let exe = tmp.path().join(exe_file(a, &unit));
     let t = Instant::now();
-    link_exe(&a, &pkg, &result, &exe, &format!("{}-test", pkg.name));
-    stage(&a, "codegen + link", t);
-    finished(&a, started);
+    link_exe(a, pkg, &result, &exe, &unit);
+    stage(a, "codegen + link", t);
+    finished(a, started);
+    if !a.quiet {
+        eprintln!("     Running {}", pkg.root.display());
+    }
+    if mode == Mode::Bench {
+        return bench_runner::run(
+            &exe,
+            &result.tests,
+            &bench_runner::Options {
+                filter,
+                iters: a.iters,
+                samples: a.samples.unwrap_or(10),
+            },
+        );
+    }
     let threads = a
         .threads
         .or_else(|| {
@@ -1500,50 +1586,15 @@ fn cmd_test(mut a: Args) {
             })
         })
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
-    let ok = test_runner::run(
+    test_runner::run(
         &exe,
         &result.tests,
         &test_runner::Options {
-            filter: filter.as_deref(),
+            filter,
             threads,
             show_output: a.show_output,
         },
-    );
-    drop(tmp);
-    process::exit(i32::from(!ok));
-}
-
-/// `rokc bench [path] [filter]`: an optimized build (`-O2` unless an
-/// `-O` level was given) of the `#[bench]` harness, then
-/// `bench_runner`.
-fn cmd_bench(mut a: Args) {
-    if !a.opt_set {
-        "2".clone_into(&mut a.opts.opt_level);
-    }
-    let (path, filter) = path_and_filter(&a);
-    let filter = filter.map(str::to_owned);
-    let pkg = discover_at(&a, path);
-    prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
-    let (result, _, started) = compile(&a, &pkg, Mode::Bench);
-    let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
-    let exe = tmp
-        .path()
-        .join(exe_file(&a, &format!("{}-bench", pkg.name)));
-    let t = Instant::now();
-    link_exe(&a, &pkg, &result, &exe, &format!("{}-bench", pkg.name));
-    stage(&a, "codegen + link", t);
-    finished(&a, started);
-    let ok = bench_runner::run(
-        &exe,
-        &result.tests,
-        &bench_runner::Options {
-            filter: filter.as_deref(),
-            iters: a.iters,
-            samples: a.samples.unwrap_or(10),
-        },
-    );
-    drop(tmp);
-    process::exit(i32::from(!ok));
+    )
 }
 
 /// `rokc doc [path]`: HTML into `target/doc/` (see `rokc_tools::doc`).
@@ -1559,7 +1610,9 @@ fn cmd_doc(mut a: Args) {
         a.positional.push(main.display().to_string());
         a.name.get_or_insert_with(|| "rok".to_owned());
     }
+    // A package with both root files: its library (0.3.1).
     let pkg = discover_arg(&a);
+    let pkg = pkg.library_target().unwrap_or(pkg);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
     let (result, _, started) = compile(&a, &pkg, Mode::Doc);
     let out = a
@@ -1596,7 +1649,7 @@ fn cmd_fmt(a: &Args) {
     };
     let mut files = Vec::new();
     for r in &roots {
-        if rokc_interface::root_file(r).is_ok_and(|f| f.is_some()) {
+        if rokc_interface::root_file(r).is_some() {
             files.extend(rokc_interface::source_files(&r.join("src")));
             files.extend(rokc_interface::source_files(&r.join("tests")));
             files.extend(Some(r.join("rok.rokon")).filter(|m| m.is_file()));

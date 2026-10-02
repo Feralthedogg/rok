@@ -1,0 +1,32 @@
+// spec: §0.3.1 §5.7.14 §9.2.3
+// rokc-arg: --name app
+// expect-exit: 0
+// expect-stdout:
+// 3 12 5 (0, 0) v2
+
+// A package with `src/lib.rok` and `src/main.rok`: the executable sees
+// its library as the package `app` (`use app::..`), a separate package,
+// while `pkg::` is the executable's own root. Both may compile the same
+// file (`shapes.rok`) as a module of their own.
+mod cli;
+mod shapes;
+
+use app::{Point, add};
+
+pub(pkg) const VERSION: i32 = 2;
+
+fn show(p: Point) -> str {
+    return f"({p.x}, {p.y})";
+}
+
+fn main() {
+    let o = app::origin();
+    println(f"{add(1, 2)} {app::shapes::area(3, 4)} {shapes::area(1, 5)} {show(o)} {cli::banner()}");
+}
+
+#[test]
+fn main_adds() {
+    if add(1, 1) != 2 {
+        panic("add(1, 1) != 2");
+    }
+}

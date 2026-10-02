@@ -562,6 +562,14 @@ impl<'a> Resolver<'a> {
                 ));
             }
             let root = dir.join("src/lib.rok");
+            if !root.is_file() && dir.join("src/main.rok").is_file() {
+                return Err(format!(
+                    "dependency `{}` ({id}) is an executable package (src/main.rok, no \
+                     src/lib.rok): a dependency must be a library; a program is installed with \
+                     `rok install`",
+                    dep.name
+                ));
+            }
             if !root.is_file() {
                 return Err(format!(
                     "dependency `{}` ({id}) is not a library package: no src/lib.rok in {}",

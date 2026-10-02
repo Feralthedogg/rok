@@ -52,9 +52,10 @@ usage: rok [options] <command> [args]
        rok [options]                same as `rok repl`
 
 packages:
-  new [--lib|--bin] <name>     create a package (src/main.rok or src/lib.rok,
-                               rok.rokon)
-  init [--lib|--bin] [dir]     make a directory a package
+  new [--lib] [--bin] <name>   create a package: src/main.rok (--bin, the
+                               default), src/lib.rok (--lib) or both, and
+                               rok.rokon
+  init [--lib] [--bin] [dir]   make a directory a package
   add <name>[@<req>] [--registry <url>]
                                add a stone (default: ^ the newest version)
   add <name> --path <dir>      add a dependency (--dev: to dev_deps)
@@ -82,10 +83,11 @@ packages:
 
 scripts and installs:
   install <name>[@<req>] [--registry <url>]
-                               a stone: a library goes into the active
-                               environment (scripts outside packages can
-                               `use` it), an executable package (src/main.rok)
-                               is built --release into $ROK_HOME/bin
+                               a stone: an executable package (src/main.rok)
+                               is built --release into $ROK_HOME/bin; a
+                               library (src/lib.rok only, or with --lib)
+                               goes into the active environment (scripts
+                               outside packages can `use` it)
   install [<name>] --path <dir | file.rok>
                                the same from a directory; a script file is
                                built into $ROK_HOME/bin
@@ -890,26 +892,28 @@ fn adds() {
 }
 ";
 
-/// `rok new [--lib|--bin] <name>`: a new directory with `src/main.rok`
-/// (or `src/lib.rok`) and `rok.rokon`. `init [--lib|--bin] [dir]`: the
-/// directory may exist, but not its root file.
+/// `rok new [--lib] [--bin] <name>`: a new directory with `src/main.rok`
+/// (`--bin`, the default), `src/lib.rok` (`--lib`) or both, and
+/// `rok.rokon`. `init [--lib] [--bin] [dir]`: the directory may exist,
+/// but not its root files.
 fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
-    let mut lib = false;
+    let (mut lib, mut bin) = (false, false);
     let mut pos = Vec::new();
     for a in args {
         match a.as_str() {
             "--lib" => lib = true,
-            "--bin" => lib = false,
+            "--bin" => bin = true,
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             p => pos.push(p),
         }
     }
+    let bin = bin || !lib;
     let init = cmd == "init";
     let dir = match (init, pos.as_slice()) {
         (false, [name]) => PathBuf::from(name),
         (true, []) => PathBuf::from("."),
         (true, [d]) => PathBuf::from(d),
-        _ => return Err(format!("usage: rok {cmd} [--lib | --bin] <name>")),
+        _ => return Err(format!("usage: rok {cmd} [--lib] [--bin] <name>")),
     };
     if init {
         for f in ["src/main.rok", "src/lib.rok"] {
@@ -949,13 +953,24 @@ fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
     };
     let src = dir.join("src");
     std::fs::create_dir_all(&src).map_err(|e| format!("{}: {e}", src.display()))?;
-    let (file, text) = if lib {
-        ("src/lib.rok", LIB_TEMPLATE)
+    // With both, the executable uses the library by the package's name.
+    let main = if lib {
+        format!(
+            "use {}::add;\n\nprintln(f\"2 + 2 = {{add(2, 2)}}\");\n",
+            manifest::code_name(&name)
+        )
     } else {
-        ("src/main.rok", MAIN_TEMPLATE)
+        MAIN_TEMPLATE.to_owned()
     };
-    let root = dir.join(file);
-    std::fs::write(&root, text).map_err(|e| format!("{}: {e}", root.display()))?;
+    for (file, text, on) in [
+        ("src/lib.rok", LIB_TEMPLATE, lib),
+        ("src/main.rok", main.as_str(), bin),
+    ] {
+        let root = dir.join(file);
+        if on {
+            std::fs::write(&root, text).map_err(|e| format!("{}: {e}", root.display()))?;
+        }
+    }
     if manifest::find(&dir).is_none() {
         let value = Value::record(
             Some("Package"),
@@ -986,7 +1001,11 @@ fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
             .status();
     }
     if !g.quiet {
-        let what = if lib { "library" } else { "executable" };
+        let what = match (lib, bin) {
+            (true, true) => "library and executable",
+            (true, false) => "library",
+            _ => "executable",
+        };
         eprintln!("     Created {what} package ({})", dir.display());
     }
     Ok(0)
@@ -1392,12 +1411,13 @@ const PROXIES: [&str; 3] = ["rok", "rokc", "rokls"];
 
 const INSTALL_USAGE: &str = "usage: rok install <name>[@<req>] [--registry <url>] | [<name>] --path \
                              <dir | file.rok> | [<name>] --git <url> [--rev|--tag|--branch <r>] \
-                             [--features <f,..>] [--no-default-features] | --native \
+                             [--features <f,..>] [--no-default-features] [--lib] | --native \
                              <name>[@<req>] | --list";
 
-/// `rok install`: a library package into the active environment (scripts
-/// `use` it), or an executable (a package with `src/main.rok`, or a
-/// script file) built `--release` into `$ROK_HOME/bin`.
+/// `rok install`: an executable (a package with `src/main.rok`, or a
+/// script file) built `--release` into `$ROK_HOME/bin`, or a library
+/// package (`src/lib.rok` only, or with `--lib`) into the active
+/// environment (scripts `use` it).
 fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     if args.iter().any(|a| a == "--list") {
         return match args {
@@ -1409,10 +1429,12 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     if args.iter().any(|a| a == "--native") {
         return add_native(g, args, Some(&env));
     }
+    let lib = args.iter().any(|a| a == "--lib");
+    let args: Vec<String> = args.iter().filter(|a| *a != "--lib").cloned().collect();
     if args.is_empty() {
         return Err(INSTALL_USAGE.into());
     }
-    let (mut dep, dev) = parse_dep_args(args)?;
+    let (mut dep, dev) = parse_dep_args(&args)?;
     if dev || dep.optional {
         return Err(
             "`rok install` takes no --dev / --optional: they are for a package's rok.rokon (`rok \
@@ -1424,6 +1446,11 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     if let Source::Path(p) = &dep.source {
         let file = Path::new(p);
         if file.is_file() {
+            if lib {
+                return Err(format!(
+                    "`{p}` is a script: --lib installs a package's library (src/lib.rok)"
+                ));
+            }
             if !named {
                 file.file_stem()
                     .and_then(|s| s.to_str())
@@ -1462,19 +1489,38 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
         }
     }
     manifest::check_name(&dep.name)?;
-    if dir.join("src/main.rok").is_file() {
+    let has_lib = dir.join("src/lib.rok").is_file();
+    if dir.join("src/main.rok").is_file() && !lib {
         if let Source::Path(p) = &dep.source {
             let abs = rokc_core::real_path(p).map_err(|e| format!("--path {p}: {e}"))?;
             dep.source = Source::Path(abs.display().to_string().replace('\\', "/"));
         }
         let copy = !matches!(dep.source, Source::Path(_));
-        return install_bin(g, &dep, &dir, copy, None);
+        let name = dep.name.clone();
+        let code = install_bin(g, &dep, &dir, copy, None)?;
+        if has_lib && !g.quiet {
+            eprintln!(
+                "note: `{name}` also has a library (src/lib.rok); `rok install --lib ..` puts \
+                 that into environment `{env}` instead"
+            );
+        }
+        return Ok(code);
     }
-    if !dir.join("src/lib.rok").is_file() {
-        return Err(format!(
-            "`{}` is not a package: no src/lib.rok (a library) or src/main.rok (an executable)",
-            dir.display()
-        ));
+    if !has_lib {
+        return Err(if lib {
+            format!(
+                "`{}` has no library (src/lib.rok) for --lib; without --lib, its executable \
+                 (src/main.rok) goes into {}",
+                dep.name,
+                home().join("bin").display()
+            )
+        } else {
+            format!(
+                "`{}` is not a package: no src/lib.rok (a library) or src/main.rok (an \
+                 executable)",
+                dir.display()
+            )
+        });
     }
     let (path, _) = manifest_to_edit(Some(&env))?;
     let old = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;

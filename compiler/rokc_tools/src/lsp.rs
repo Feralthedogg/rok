@@ -278,28 +278,54 @@ impl<W: Write> Server<W> {
     /// (902.2) with this buffer's text when it is the root, else the
     /// root as open or on disk; a file outside any package is anonymous.
     /// Every open buffer stands for its file.
+    /// A package with both root files (0.3.1): a file its library reaches
+    /// is the library's, any other the executable's, which mounts the
+    /// library's sources (as edited) as dependency `<name>`.
     fn compile(&self, path: &Path, text: &str) -> Analysis {
-        let root = rokc_interface::discover(path)
-            .ok()
-            .filter(|p| !p.anonymous)
-            .and_then(|p| std::path::absolute(&p.root).ok());
-        let levels = &self.levels;
-        match root {
-            Some(root) if root != path => {
-                // By path: the editor's URI spelling may differ from ours.
-                let open = self
-                    .docs
-                    .iter()
-                    .find(|(uri, _)| uri_path(uri) == root)
-                    .map(|(_, d)| d.text.clone());
-                let root_text = open
-                    .or_else(|| std::fs::read_to_string(&root).ok())
-                    .unwrap_or_default();
-                analyze(self.session(false), &root_text, &root, levels)
+        let Some(pkg) = rokc_interface::discover(path).ok().filter(|p| !p.anonymous) else {
+            return analyze(self.session(true), text, path, &self.levels);
+        };
+        let abs = |p: &Path| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        if let Some(lib) = pkg.library_target().filter(|_| abs(&pkg.root) != path) {
+            let a = self.compile_root(&abs(&lib.root), path, text, None);
+            let key = path.display().to_string();
+            if a.source_map.files().iter().any(|(p, _)| *p == key) {
+                return a;
             }
-            Some(_) => analyze(self.session(false), text, path, levels),
-            None => analyze(self.session(true), text, path, levels),
         }
+        let library = pkg.library.as_deref().map(|l| (pkg.name.as_str(), abs(l)));
+        self.compile_root(&abs(&pkg.root), path, text, library)
+    }
+
+    /// Check package root `root` for the buffer `path` (its text `text`
+    /// when it is the root, else the root as open or on disk), with
+    /// `library` (the package's name and `src/lib.rok`) as a dependency.
+    fn compile_root(
+        &self,
+        root: &Path,
+        path: &Path,
+        text: &str,
+        library: Option<(&str, PathBuf)>,
+    ) -> Analysis {
+        let mut session = self.session(false);
+        if let Some((name, lib)) = library {
+            let name = rokc_interface::code_name(name);
+            session.add_extern(name.clone(), lib);
+            session.set_own_library(Some(name));
+        }
+        if root == path {
+            return analyze(session, text, path, &self.levels);
+        }
+        // By path: the editor's URI spelling may differ from ours.
+        let open = self
+            .docs
+            .iter()
+            .find(|(uri, _)| uri_path(uri) == root)
+            .map(|(_, d)| d.text.clone());
+        let root_text = open
+            .or_else(|| std::fs::read_to_string(root).ok())
+            .unwrap_or_default();
+        analyze(session, &root_text, root, &self.levels)
     }
 
     /// Recompile a buffer and publish its diagnostics.
