@@ -24,10 +24,10 @@ pub struct Lost {
 }
 
 enum Kind {
-    /// `self`, with the signature that takes `ref self`.
-    Receiver(String),
-    /// A parameter, with the signature that takes it by `ref`.
-    Param(String),
+    /// `self`, the parameter of that index.
+    Receiver(usize),
+    /// The parameter of that index.
+    Param(usize),
     /// A `for` binding over `iter` (as written).
     Loop(String),
     /// A `let` of an element read (`xs[i]`, as written).
@@ -57,9 +57,10 @@ struct Var {
 
 #[derive(Default)]
 struct V {
-    /// The function walked: its name, and its by-value parameters by
-    /// span.
+    /// The function walked: its name, its signature, and its by-value
+    /// parameters by span.
     fn_name: String,
+    sig: Option<FnDef>,
     params: HashMap<(u32, u32), Kind>,
     loop_binds: HashMap<(u32, u32), String>,
     element_lets: HashMap<(u32, u32), String>,
@@ -83,6 +84,7 @@ pub fn check_fn(f: &FnDef) -> Vec<Lost> {
     }
     let mut v = V {
         fn_name: rokc_core::local::leaf(&f.name).into_owned(),
+        sig: Some(f.signature()),
         ..V::default()
     };
     for (i, p) in f
@@ -91,18 +93,27 @@ pub fn check_fn(f: &FnDef) -> Vec<Lost> {
         .enumerate()
         .filter(|(_, p)| !p.by_ref && !p.variadic)
     {
-        let mut by_ref = f.clone();
-        by_ref.params[i].by_ref = true;
-        let sig = rokc_ast::print::print_fn_sig(&by_ref).replace(&f.name, &v.fn_name);
         let kind = if p.name == "self" {
-            Kind::Receiver(sig)
+            Kind::Receiver(i)
         } else {
-            Kind::Param(sig)
+            Kind::Param(i)
         };
         v.params.insert(key(p.span), kind);
     }
     walk_fn(&mut v, f);
     v.out
+}
+
+impl V {
+    /// The signature taking parameter `i` by `ref`.
+    fn by_ref(&self, i: usize) -> String {
+        let Some(mut sig) = self.sig.clone() else {
+            return String::new();
+        };
+        sig.params[i].by_ref = true;
+        sig.name.clone_from(&self.fn_name);
+        rokc_ast::print::print_fn_sig(&sig)
+    }
 }
 
 /// The lost writes of top-level statements.
@@ -230,21 +241,25 @@ impl V {
         };
         let (name, f, target) = (&v.name, &self.fn_name, &w.target);
         let (msg, help) = match kind {
-            Kind::Receiver(sig) => (
+            Kind::Receiver(param) => (
                 format!(
                     "`{target}` is set on a copy of the receiver, so the change is lost when \
                      `{f}` returns"
                 ),
-                format!("take `ref self` to change the caller's value: `{sig}`"),
+                format!(
+                    "take `ref self` to change the caller's value: `{}`",
+                    self.by_ref(*param)
+                ),
             ),
-            Kind::Param(sig) => (
+            Kind::Param(param) => (
                 format!(
                     "`{target}` is set on a copy of the argument, so the change is lost when \
                      `{f}` returns"
                 ),
                 format!(
-                    "take `ref {name}` to change the caller's value: `{sig}`, and call it \
-                     with `ref` before the argument; or return `{name}`"
+                    "take `ref {name}` to change the caller's value: `{}`, and call it \
+                     with `ref` before the argument; or return `{name}`",
+                    self.by_ref(*param)
                 ),
             ),
             Kind::Loop(iter) => {

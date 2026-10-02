@@ -96,12 +96,7 @@ pub fn print_stmt(s: &Stmt) -> String {
 /// A function's signature: no attributes, visibility or body.
 #[must_use]
 pub fn print_fn_sig(f: &FnDef) -> String {
-    let sig = FnDef {
-        vis: Visibility::Private,
-        attrs: Vec::new(),
-        body: None,
-        ..f.clone()
-    };
+    let sig = f.signature();
     let mut p = Printer::default();
     p.fn_def(&sig);
     p.out.trim_end_matches(';').to_owned()

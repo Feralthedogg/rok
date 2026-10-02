@@ -92,7 +92,7 @@ fn run_case(
         }
         return check_expect_error(&source, &stderr);
     }
-    check_lints(env, &source, path, &case_dir)?;
+    check_lints(env, &source, path, &case_dir, &stderr)?;
     let Some(expected) = parse_expect_exit(&source) else {
         return Err("missing `// expect-exit: N` (or `// expect-error:`) directive".into());
     };
@@ -192,19 +192,35 @@ fn run_case(
 }
 
 /// `// expect-lint:`: the `E503` diagnostics of `rokc lint`, as
-/// `line:col headline`, are exactly the directives.
+/// `line:col headline`, are exactly the directives, and so are those
+/// the build printed (`build_err`).
 fn check_lints(
     env: &Env,
     source: &str,
     path: &std::path::Path,
     dir: &std::path::Path,
+    build_err: &str,
 ) -> Result<(), String> {
     let want: Vec<&str> = directives(source, "expect-lint:").collect();
     if want.is_empty() {
         return Ok(());
     }
     let out = rokc_lint(env, path, &dir.join("lint")).map_err(|e| format!("rokc lint: {e}"))?;
-    let err = String::from_utf8_lossy(&out.stderr);
+    let got = lint_lines(&String::from_utf8_lossy(&out.stderr));
+    if got != want {
+        return Err(format!("lints mismatch\n  want: {want:?}\n  got:  {got:?}"));
+    }
+    let built = lint_lines(build_err);
+    if built != want {
+        return Err(format!(
+            "build lints mismatch\n  want: {want:?}\n  got:  {built:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// The `E503` diagnostics of `err` as `line:col headline`.
+fn lint_lines(err: &str) -> Vec<String> {
     let mut got = Vec::new();
     let mut lines = err.lines();
     while let Some(l) = lines.next() {
@@ -221,10 +237,7 @@ fn check_lints(
             .unwrap_or_default();
         got.push(format!("{at} {msg}"));
     }
-    if got != want {
-        return Err(format!("lints mismatch\n  want: {want:?}\n  got:  {got:?}"));
-    }
-    Ok(())
+    got
 }
 
 /// Run `exe` (with the case's `run-env` and `env`) and check its exit

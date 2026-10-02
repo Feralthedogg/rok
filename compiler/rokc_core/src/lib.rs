@@ -83,6 +83,31 @@ pub fn real_path(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     Ok(real)
 }
 
+/// What changes when the file at `p` is written or replaced.
+///
+/// For a big file not worth reading: its size, its mtime, and its inode
+/// and status change time (Windows: its creation time), so a copy that
+/// keeps the mtime is another file. `-` when it is missing.
+#[must_use]
+pub fn file_stamp(p: &Path) -> String {
+    let Ok(m) = std::fs::metadata(p) else {
+        return "-".to_owned();
+    };
+    let nanos = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos())
+    };
+    #[cfg(unix)]
+    let made = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{:x}-{:x}.{:x}", m.ino(), m.ctime(), m.ctime_nsec())
+    };
+    #[cfg(not(unix))]
+    let made = format!("{:x}", nanos(m.created()));
+    format!("{:x}-{:x}-{made}", m.len(), nanos(m.modified()))
+}
+
 /// A Windows verbatim path without its `\\?\` prefix, when it has an
 /// ordinary spelling.
 fn unverbatim(s: &str) -> Option<String> {

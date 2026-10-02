@@ -83,7 +83,7 @@ global options:
   --message-format=human|json  diagnostics as JSON lines on stdout
   -A|-W|-D <lint|group>        allow / warn / deny a lint (repeatable, later
                                wins; `#[allow(..)]` etc. in the source
-                               override); check, lint and lsp
+                               override)
 
 build options:
   -o, --out, --output <path>   output file
@@ -984,16 +984,34 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
     }
     session.set_test(mode == Mode::Test);
     session.set_bench(mode == Mode::Bench);
-    session.set_keep_ast(
-        mode == Mode::Doc
-            || a.emit.contains(&EmitKind::Expanded)
-            || a.emit.contains(&EmitKind::Ast),
-    );
+    // A build lints as `check` does (6.2.9): the library stage stands
+    // for the library's files unless `doc` / `--emit` reads them.
+    let lints = mode != Mode::Doc;
+    let library_files = a.emit.contains(&EmitKind::Expanded) || a.emit.contains(&EmitKind::Ast);
+    session.set_keep_ast(true);
+    session.set_library_items(lints && !library_files);
     let result = session.compile_file(&pkg.root);
-    let warnings: String = result.warnings.iter().map(|w| result.render(w)).collect();
-    print_rendered(&warnings);
     if result.has_errors() {
+        print_rendered(
+            &result
+                .warnings
+                .iter()
+                .map(|w| result.render(w))
+                .collect::<String>(),
+        );
         result.report_errors();
+        process::exit(1);
+    }
+    let diags = if lints {
+        rokc_tools::lint::run(&result, &a.lint_levels)
+    } else {
+        result.warnings.clone()
+    };
+    let (errors, warnings): (Vec<_>, Vec<_>) = diags.iter().partition(|d| d.is_error());
+    let warnings: String = warnings.iter().map(|w| result.render(w)).collect();
+    print_rendered(&warnings);
+    if !errors.is_empty() {
+        errors.iter().for_each(|d| result.report(d));
         process::exit(1);
     }
     stage(a, "front end", started);
@@ -1207,6 +1225,7 @@ fn link_exe(a: &Args, pkg: &Package, result: &CompileResult, out: &Path, unit: &
 fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
     let mut words = vec![
         format!("{:?}", a.opts),
+        format!("lints {:?}", a.lint_levels),
         format!("target {:016x}", a.spec().hash()),
         out.display().to_string(),
         pkg.root.display().to_string(),
@@ -1224,6 +1243,19 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
             .map_or_else(|| pkg.dir.clone(), Path::to_path_buf)
     }];
     let mut stamped = vec![PathBuf::from(&a.opts.rokr)];
+    // The C runtime objects, C library and linker the toolchain ships
+    // for the target, all in its directory.
+    if let Some(dir) = &a.opts.libc {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        stamped.extend(files);
+    }
     stamped.extend(a.opts.profile_rt.clone());
     stamped.extend(a.opts.profile.used().map(Path::to_path_buf));
     stamped.extend(a.opts.mlir_dialect_plugins.iter().cloned());
@@ -1266,9 +1298,11 @@ const SCRIPT_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 360
 /// 9.10.7): `<target>/scripts/<key>/<name>` under the out directory
 /// without a package, `<key>` the hash of everything the build is made
 /// from (`fingerprint` without the output path: the compiler, options,
-/// target, sources, the `--extern`s and their prebuilt files). A hit
-/// compiles nothing. A build links to a scratch name and renames it into
-/// place, so runs racing on one key end with one complete executable.
+/// lint levels, target, sources, the `--extern`s and their prebuilt
+/// files, the runtime and the target's C library). A hit compiles
+/// nothing and prints the warnings the build printed. A build links to
+/// a scratch name and renames it into place, so runs racing on one key
+/// end with one complete executable.
 fn script_exe(a: &Args, pkg: &Package) -> PathBuf {
     let root = out_dir(a, None).join("scripts");
     let name = exe_file(a, &pkg.name);

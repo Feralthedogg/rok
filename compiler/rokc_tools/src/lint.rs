@@ -229,20 +229,25 @@ pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic
     }
 
     let texts = result.source_map.files();
-    let user: Vec<&SourceFile> = result
-        .sources
-        .iter()
-        .filter(|f| f.package.is_empty())
-        .collect();
+    // A prebuilt library's build: its files are the dependency it is
+    // mounted as.
+    let own = result
+        .modules
+        .first()
+        .and_then(|m| m.interface.as_ref())
+        .map_or("", |i| i.name.as_str());
+    let user: Vec<&SourceFile> = result.sources.iter().filter(|f| f.package == own).collect();
     let mut cx = Cx::new(&result.sources, result.library, texts);
     let mut regions = Vec::new();
-    for f in &user {
-        regions.extend(file_regions(f, &user, &mut out));
-        cx.file(f);
-    }
-    cx.dead_code(&user);
+    rokc_diagnostic::time("lints", || {
+        for f in &user {
+            regions.extend(file_regions(f, &user, &mut out));
+            cx.file(f);
+        }
+        cx.dead_code(&user);
+    });
     if let Some(m) = result.modules.first() {
-        cx.hir(&m.hir, &user);
+        rokc_diagnostic::time("lints hir", || cx.hir(&m.hir, &user));
     }
     for w in &result.warnings {
         let confusable = w.kind == ErrorKind::Lexical
@@ -501,7 +506,7 @@ fn has_attr(attrs: &[Attribute], names: &[&str]) -> bool {
 
 /// Every function in `items`, impl / trait methods and inline modules
 /// included.
-fn each_fn(items: &[Item], visit: &mut dyn FnMut(&FnDef)) {
+fn each_fn<'i>(items: &'i [Item], visit: &mut dyn FnMut(&'i FnDef)) {
     for i in items {
         match i {
             Item::Fn(f) => visit(f),
@@ -540,23 +545,31 @@ fn collect_traits(items: &[Item], out: &mut HashSet<String>) {
 }
 
 /// Every function of `items` (impl / trait methods too), by short name:
-/// the message of the `attr` attribute, for names no function without it
-/// shares.
-fn marked_fns(items: &[&[Item]], attr: &str) -> HashMap<String, String> {
-    let mut marked: HashMap<String, String> = HashMap::new();
-    let mut plain: HashSet<String> = HashSet::new();
-    let mut visit = |f: &FnDef| match attr_msg(&f.attrs, attr) {
-        Some(m) => {
-            marked.insert(leaf(&f.name).to_owned(), m);
-        }
-        None => {
-            plain.insert(leaf(&f.name).to_owned());
-        }
-    };
+/// for each of `attrs`, the attribute's message, for names no function
+/// without it shares.
+fn marked_fns<const N: usize>(items: &[&[Item]], attrs: [&str; N]) -> [HashMap<String, String>; N] {
+    let mut marked: [HashMap<String, String>; N] = std::array::from_fn(|_| HashMap::new());
     for i in items {
-        each_fn(i, &mut visit);
+        each_fn(i, &mut |f| {
+            for (k, a) in attrs.iter().enumerate() {
+                if let Some(m) = attr_msg(&f.attrs, a) {
+                    marked[k].insert(leaf(&f.name).to_owned(), m);
+                }
+            }
+        });
     }
-    marked.retain(|n, _| !plain.contains(n));
+    if marked.iter().all(HashMap::is_empty) {
+        return marked;
+    }
+    for i in items {
+        each_fn(i, &mut |f| {
+            for (k, a) in attrs.iter().enumerate() {
+                if !marked[k].is_empty() && !f.attrs.iter().any(|x| x.name() == *a) {
+                    marked[k].remove(leaf(&f.name));
+                }
+            }
+        });
+    }
     marked
 }
 
@@ -692,6 +705,9 @@ const fn key(s: Span) -> (u32, u32) {
     (s.file, s.start)
 }
 
+/// `#[must_use]` HIR types by (is an enum, id): the message.
+type MustUse = HashMap<(bool, u32), String>;
+
 impl<'a> Cx<'a> {
     /// `all`: the parsed files; `library`: the items of the library
     /// files `all` leaves out.
@@ -709,6 +725,7 @@ impl<'a> Cx<'a> {
         for items in &all {
             collect_traits(items, &mut traits);
         }
+        let [must_use, deprecated] = marked_fns(&all, ["must_use", "deprecated"]);
         Self {
             texts,
             findings: Vec::new(),
@@ -720,11 +737,11 @@ impl<'a> Cx<'a> {
             all_names: HashSet::new(),
             casts: HashSet::new(),
             clones: HashSet::new(),
-            must_use: marked_fns(&all, "must_use"),
+            must_use,
             must_use_types: marked_types(&all, "must_use"),
             stmt_exprs: HashMap::new(),
             let_inits: HashMap::new(),
-            deprecated: marked_fns(&all, "deprecated"),
+            deprecated,
             traits,
         }
     }
@@ -1049,13 +1066,25 @@ impl<'a> Cx<'a> {
         let files: HashSet<u32> = user.iter().map(|f| f.file_id).collect();
         let mut hits: Vec<(&'static str, Span, String)> = Vec::new();
         let mut cloned: HashSet<(u32, u32)> = HashSet::new();
-        for f in hir
+        // The package's own bodies.
+        let own: Vec<&rokc_hir::HirFunction> = hir
             .functions
             .iter()
-            .filter(|f| !f.name.contains("__mono__"))
-        {
+            .filter(|f| files.contains(&f.span.file) && !f.name.contains("__mono__"))
+            .collect();
+        // Every statement list of the bodies, for `must_use_values`.
+        let mut blocks: Vec<&rokc_hir::HirBlock> = Vec::new();
+        for f in &own {
             let Some(body) = &f.body else { continue };
+            blocks.push(body);
             each_block(body, &mut |e| {
+                if let HirExprKind::Block(b)
+                | HirExprKind::Loop { body: b, .. }
+                | HirExprKind::While { body: b, .. }
+                | HirExprKind::If { then_block: b, .. } = &e.kind
+                {
+                    blocks.push(b);
+                }
                 if !files.contains(&e.span.file) {
                     return;
                 }
@@ -1089,21 +1118,24 @@ impl<'a> Cx<'a> {
                 }
             });
         }
-        for f in hir
-            .functions
-            .iter()
-            .filter(|f| !f.name.contains("__mono__"))
-        {
-            unclosed(hir, f, &files, &mut hits);
+        let resources = Resources::new(hir);
+        for f in &own {
+            unclosed(&resources, f, &files, &mut hits);
         }
-        for f in hir
-            .functions
+        let types: MustUse = hir
+            .structs
             .iter()
-            .filter(|f| !f.name.contains("__mono__"))
-        {
-            if let Some(body) = &f.body {
-                self.must_use_values(hir, body);
-            }
+            .map(|s| ((false, s.id.0), s.name.as_str()))
+            .chain(hir.enums.iter().map(|e| ((true, e.id.0), e.name.as_str())))
+            .filter_map(|(k, n)| {
+                let m = self
+                    .must_use_types
+                    .get(leaf(n.split("__").next().unwrap_or(n)))?;
+                Some((k, m.clone()))
+            })
+            .collect();
+        if !types.is_empty() {
+            self.must_use_values(&types, &blocks);
         }
         for (lint, span, msg) in hits {
             self.hit(lint, span, msg);
@@ -1127,35 +1159,15 @@ impl<'a> Cx<'a> {
     /// has the type (`unused_must_use`), and an unused `let` of it (its
     /// `unused_variables` finding says why that matters). The message
     /// is `noun phrase: fix`, `{}` in the fix standing for the value.
-    fn must_use_values(&mut self, hir: &rokc_hir::HirModule, body: &rokc_hir::HirBlock) {
+    fn must_use_values(&mut self, types: &MustUse, blocks: &[&rokc_hir::HirBlock]) {
         let msg_of = |t: &HirTy| {
             match t {
-                HirTy::Struct(id) => hir
-                    .structs
-                    .iter()
-                    .find(|s| s.id == *id)
-                    .map(|s| s.name.as_str()),
-                HirTy::Enum(id) => hir
-                    .enums
-                    .iter()
-                    .find(|e| e.id == *id)
-                    .map(|e| e.name.as_str()),
+                HirTy::Struct(id) => types.get(&(false, id.0)),
+                HirTy::Enum(id) => types.get(&(true, id.0)),
                 _ => None,
             }
-            .and_then(|n| {
-                self.must_use_types
-                    .get(leaf(n.split("__").next().unwrap_or(n)))
-            })
             .cloned()
         };
-        let mut blocks = vec![body];
-        each_block(body, &mut |e| match &e.kind {
-            HirExprKind::Block(b)
-            | HirExprKind::Loop { body: b, .. }
-            | HirExprKind::While { body: b, .. }
-            | HirExprKind::If { then_block: b, .. } => blocks.push(b),
-            _ => {}
-        });
         let split = |msg: &str, what: &str| match msg.split_once(": ") {
             Some((head, fix)) => (
                 head.to_owned(),
@@ -1358,6 +1370,67 @@ impl<'a> Cx<'a> {
     }
 }
 
+/// What `unclosed` needs of the whole module, made once: function names
+/// by id and the resource types (name, HIR method prefix).
+struct Resources<'h> {
+    names: HashMap<rokc_ir_common::FunctionId, &'h str>,
+    types: HashMap<rokc_hir::StructId, (&'h str, String)>,
+}
+
+impl<'h> Resources<'h> {
+    fn new(hir: &'h rokc_hir::HirModule) -> Self {
+        // The std descriptor holders; any other type whose `drop` the
+        // program reaches counts too.
+        const STD: &[&str] = &[
+            "rok::std::fs::File",
+            "rok::std::fs::Dir",
+            "rok::std::fs::ReadDir",
+            "rok::std::net::TcpStream",
+            "rok::std::net::TcpListener",
+            "rok::std::net::UdpSocket",
+            "rok::std::process::Child",
+        ];
+        // Methods are named `Struct<id>__<method>`, a prebuilt library's
+        // `<type>.<method>`.
+        let drops: HashSet<&str> = hir
+            .functions
+            .iter()
+            .filter_map(|g| {
+                let n = g.name.as_str();
+                n.strip_suffix(".drop").or_else(|| {
+                    n.strip_suffix("__drop")
+                        .map(|_| n.split("__").next().unwrap_or(n))
+                })
+            })
+            .collect();
+        let types = hir
+            .structs
+            .iter()
+            .filter_map(|s| {
+                let own = format!("Struct{}", s.id.0);
+                let n = s.name.as_str();
+                (STD.contains(&n) || drops.contains(own.as_str()) || drops.contains(n))
+                    .then_some((s.id, (n, own)))
+            })
+            .collect();
+        let names = hir
+            .functions
+            .iter()
+            .map(|g| (g.id, g.name.as_str()))
+            .collect();
+        Self { names, types }
+    }
+
+    /// The method of resource type `ty` (HIR prefix `own`) `callee` is.
+    fn method(&self, callee: rokc_ir_common::FunctionId, ty: &str, own: &str) -> Option<&'h str> {
+        let n = self.names.get(&callee)?;
+        n.strip_prefix(own)
+            .filter(|m| m.starts_with("__") || m.starts_with('.'))
+            .and_then(|m| m.rsplit("__").next())
+            .or_else(|| n.strip_prefix(ty)?.strip_prefix('.'))
+    }
+}
+
 /// `unclosed_resource`: a named local of a type with a `Drop` impl whose
 /// every use is a call of its own non-closing methods. The GC never
 /// closes it (stdlib 2.13), so the descriptor leaks. Any other use
@@ -1365,45 +1438,25 @@ impl<'a> Cx<'a> {
 /// Ownership follows the value: a local and its aliases are judged
 /// together, and nothing a param holds is this function's to close.
 fn unclosed(
-    hir: &rokc_hir::HirModule,
+    res: &Resources<'_>,
     f: &rokc_hir::HirFunction,
     files: &HashSet<u32>,
     hits: &mut Vec<(&'static str, Span, String)>,
 ) {
     const CLOSERS: &[&str] = &["close", "drop", "wait", "wait_with_output"];
-    // The std descriptor holders; any other type whose `drop` the
-    // program reaches counts too.
-    const RESOURCES: &[&str] = &[
-        "rok::std::fs::File",
-        "rok::std::fs::Dir",
-        "rok::std::fs::ReadDir",
-        "rok::std::net::TcpStream",
-        "rok::std::net::TcpListener",
-        "rok::std::net::UdpSocket",
-        "rok::std::process::Child",
-    ];
-    let Some(body) = &f.body else { return };
-    let (root, form) = aliases(body);
-    let root_of = |l: LocalId| *root.get(&l).unwrap_or(&l);
-    // Methods are named `Struct<id>__<method>`.
     let resource = |t: &HirTy| match t {
-        HirTy::Struct(id) => {
-            let own = format!("Struct{}", id.0);
-            let drop = format!("{own}__drop");
-            hir.structs
-                .iter()
-                .find(|s| s.id == *id)
-                .map(|s| s.name.as_str())
-                .filter(|n| RESOURCES.contains(n) || hir.functions.iter().any(|g| g.name == drop))
-                .map(|n| (n, own))
-        }
+        HirTy::Struct(id) => res.types.get(id).map(|(n, own)| (*n, own.as_str())),
         _ => None,
     };
-    let names: HashMap<_, &str> = hir
-        .functions
-        .iter()
-        .map(|g| (g.id, g.name.as_str()))
-        .collect();
+    let Some(body) = f
+        .body
+        .as_ref()
+        .filter(|_| f.locals.iter().any(|l| resource(&l.ty).is_some()))
+    else {
+        return;
+    };
+    let (root, form) = aliases(body);
+    let root_of = |l: LocalId| *root.get(&l).unwrap_or(&l);
     // Each value's holders: its first local and that one's aliases.
     let mut groups: HashMap<_, HashMap<_, _>> = HashMap::new();
     for l in &f.locals {
@@ -1433,12 +1486,8 @@ fn unclosed(
             let HirExprKind::Call { callee, args } = &e.kind else {
                 return;
             };
-            if let Some(Some((_, own))) = args.first().and_then(member) {
-                let own = names
-                    .get(callee)
-                    .and_then(|n| n.strip_prefix(own.as_str()))
-                    .filter(|m| m.starts_with("__") || m.starts_with('.'))
-                    .and_then(|m| m.rsplit("__").next());
+            if let Some(Some((ty, own))) = args.first().and_then(member) {
+                let own = res.method(*callee, ty, own);
                 if own.is_some_and(|m| !CLOSERS.contains(&m) && !m.starts_with("into_")) {
                     kept += 1;
                 }

@@ -193,6 +193,109 @@ fn unchanged_package_is_fresh() {
     assert_eq!(built(&["run"]), (true, "2\n".to_owned()));
 }
 
+/// 6.2.9: `build` / `run` / `test` lint as `check` does: warnings do not
+/// fail the build, `-D` and `#[deny]` do, `-A` and `#[allow]` silence
+/// them, and a fresh build or cached script prints them again.
+// spec: §6.2.9 §9.1.5 §9.10.7
+#[test]
+fn builds_print_lints() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("build-lints");
+    let app = new_package(&dir, "app", false);
+    let src = "fn main() {\n    let x = 1;\n    println(\"hi\");\n}\n";
+    put(app.join("src/main.rok"), src).unwrap();
+    let warn = "warning[E503]: unused variable `x`";
+    let out = rokc(Some(&env), &app, &["run"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "hi\n");
+    assert!(text(&out.stderr).contains(warn), "{}", text(&out.stderr));
+    let out = rokc(Some(&env), &app, &["run"]);
+    let err = text(&out.stderr);
+    assert!(err.contains("Fresh app") && err.contains(warn), "{err}");
+    let out = rokc(Some(&env), &app, &["-D", "unused", "build"]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("error[E503]: unused variable `x`")
+            && err.contains("`-D unused` on the command line"),
+        "{err}"
+    );
+    let out = rokc(Some(&env), &app, &["-A", "unused_variables", "build"]);
+    assert_exit(&out, 0);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("Compiling app") && !err.contains("E503"),
+        "{err}"
+    );
+    put(
+        app.join("src/main.rok"),
+        format!("#![allow(unused_variables)]\n{src}"),
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["build"]);
+    assert!(!text(&out.stderr).contains("E503"), "{}", text(&out.stderr));
+    put(
+        app.join("src/main.rok"),
+        format!("#![deny(unused_variables)]\n{src}"),
+    )
+    .unwrap();
+    assert_exit(&rokc(Some(&env), &app, &["build"]), 1);
+    // A test build.
+    put(
+        app.join("src/main.rok"),
+        "fn main() {}\n\n#[test]\nfn t() {\n    let y = 2;\n}\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["test"]);
+    assert_exit(&out, 0);
+    let err = text(&out.stderr);
+    assert!(err.contains("warning[E503]: unused variable `y`"), "{err}");
+    // A lone file's cached executable.
+    put(dir.join("s.rok"), src).unwrap();
+    let run = || rokc(Some(&env), &dir, &["--target-dir", "t", "run", "s.rok"]);
+    let first = text(&run().stderr);
+    let second = text(&run().stderr);
+    assert!(
+        first.contains("Compiling s") && first.contains(warn),
+        "{first}"
+    );
+    assert!(
+        second.contains("Fresh s") && second.contains(warn),
+        "{second}"
+    );
+}
+
+/// 9.10.7: a cached script is linked again when the runtime changes.
+// spec: §9.10.7 §9.2.16
+#[test]
+fn runtime_change_relinks_script() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("script-runtime");
+    let rokr = dir.join("rt").join(env.rokr.file_name().unwrap());
+    fs::create_dir_all(rokr.parent().unwrap()).unwrap();
+    fs::copy(&env.rokr, &rokr).unwrap();
+    put(dir.join("s.rok"), "println(\"hi\");\n").unwrap();
+    let run = || {
+        let out = Command::new(ROKC)
+            .current_dir(&dir)
+            .env("ROK_HOME", workspace())
+            .args(["--target-dir", "t", "run", "s.rok", "--rokr"])
+            .arg(&rokr)
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "hi\n");
+        text(&out.stderr).contains("Compiling s")
+    };
+    assert!(run());
+    assert!(!run());
+    // A rebuilt runtime: same bytes, a new file.
+    fs::remove_file(&rokr).unwrap();
+    fs::copy(&env.rokr, &rokr).unwrap();
+    assert!(run());
+    assert!(!run());
+}
+
 /// 902.15: the `debug` profile has debug info and symbols; the `release`
 /// one neither (unless `-g`), and a panic still names its location.
 #[test]

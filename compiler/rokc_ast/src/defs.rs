@@ -28,6 +28,28 @@ pub struct FnDef {
     pub span: Span,
 }
 
+impl FnDef {
+    /// A copy without the body and attributes, private.
+    #[must_use]
+    pub fn signature(&self) -> Self {
+        Self {
+            vis: Visibility::Private,
+            attrs: Vec::new(),
+            name: self.name.clone(),
+            generics: self.generics.clone(),
+            params: self.params.clone(),
+            ret_ty: self.ret_ty.clone(),
+            body: None,
+            is_async: self.is_async,
+            is_generator: self.is_generator,
+            is_unsafe: self.is_unsafe,
+            throws: self.throws.clone(),
+            where_clause: self.where_clause.clone(),
+            span: self.span,
+        }
+    }
+}
+
 /// Marker attribute of an `extern "ABI" fn f(..) { .. }` definition
 /// (spec 5.9.10), its value the ABI string.
 pub const EXTERN_FN_ATTR: &str = "#extern_fn";

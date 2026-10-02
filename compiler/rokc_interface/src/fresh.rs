@@ -1,8 +1,8 @@
 //! Incremental builds (902.16) at package granularity: a build is skipped
 //! when its output is there and nothing it was made from changed. The
 //! record (`.<out>.fp` next to the output) holds the key, the output's
-//! size and mtime (a replaced output rebuilds) and the build's rendered
-//! warnings, which a skipped build prints again.
+//! stamp (`file_stamp`: a replaced output rebuilds) and the build's
+//! rendered warnings, which a skipped build prints again.
 //!
 //! The key covers the compiler, the report style, the build words
 //! (options, paths), every source file the build can read and the
@@ -13,24 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
+use rokc_core::file_stamp;
 use rokc_core::hash::{FNV_OFFSET, fnv_add};
 
 use crate::package::source_files;
-
-/// `size-mtime` of a file, or `-` when it is missing.
-fn identity(p: &Path) -> String {
-    std::fs::metadata(p).map_or_else(
-        |_| "-".to_owned(),
-        |m| {
-            let t = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            format!("{}-{t}", m.len())
-        },
-    )
-}
 
 /// A build's fingerprint and where it is kept.
 pub struct Fingerprint {
@@ -53,7 +39,7 @@ fn content_hash(p: &Path) -> String {
 impl Fingerprint {
     /// `words`: what the build is (options, paths); `inputs`: files it
     /// reads (a directory: its source files); `stamped`: big files known
-    /// by size and mtime (the runtime, prebuilt archives).
+    /// by `file_stamp` (the runtime, prebuilt archives).
     #[must_use]
     pub fn new(
         out: &Path,
@@ -71,7 +57,10 @@ impl Fingerprint {
             h = fnv_add(fnv_add(h, w.as_bytes()), b"\0");
         }
         for p in stamped {
-            h = fnv_add(h, format!("{}\0{}\0", p.display(), identity(p)).as_bytes());
+            h = fnv_add(
+                h,
+                format!("{}\0{}\0", p.display(), file_stamp(p)).as_bytes(),
+            );
         }
         let mut files = Vec::new();
         let covered = inputs
@@ -130,7 +119,7 @@ impl Fingerprint {
     }
 
     fn head(&self) -> String {
-        format!("{}\n{}\n", self.key, identity(&self.out))
+        format!("{}\n{}\n", self.key, file_stamp(&self.out))
     }
 
     /// The recorded warnings when the output is up to date.

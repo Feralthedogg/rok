@@ -55,18 +55,10 @@ pub struct Rokhir {
 
 /// This compiler: a ROKHIR from any other one is stale.
 pub fn producer() -> String {
-    // Size and mtime stand for the build: a content hash would survive
-    // `touch` but costs a read of rokc.
+    // The file's stamp stands for the build: a content hash would
+    // survive `touch` but costs a read of rokc.
     let id = std::env::current_exe()
-        .and_then(std::fs::metadata)
-        .map(|m| {
-            let t = m
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map_or(0, |d| d.as_nanos());
-            format!("{:x}-{t:x}", m.len())
-        })
+        .map(|e| rokc_core::file_stamp(&e))
         .unwrap_or_default();
     format!("rokc {} ({id})", env!("CARGO_PKG_VERSION"))
 }
