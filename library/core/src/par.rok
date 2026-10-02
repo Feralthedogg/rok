@@ -130,6 +130,8 @@ pub fn filter<T: Send>(iter: List<T>, pred: fn(T) -> bool + Send + Sync) -> List
                 keep[i] = pred(iter[i]);
             }
         });
+        // The chunks are done: the list is the caller's again.
+        let iter = shared.get();
         let out: List<T> = [];
         for i in 0..n {
             if keep[i] {

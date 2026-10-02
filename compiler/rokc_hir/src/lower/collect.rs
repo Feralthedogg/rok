@@ -2360,11 +2360,12 @@ fn finish<'a>(
         *env.auto_memo.borrow_mut() = None;
     });
     super::frame_ptr::check(&env, &functions);
-    let lint_hits = if input.lints {
-        rokc_diagnostic::time("hir lints", || super::handoff::check(&env, &functions))
-    } else {
-        Vec::new()
-    };
+    let summaries = rokc_diagnostic::time("hir handoff check", || {
+        *env.auto_memo.borrow_mut() = Some(HashMap::new());
+        let s = super::handoff::check(&env, &functions, &input.summaries, lib_pkg.is_some());
+        *env.auto_memo.borrow_mut() = None;
+        s
+    });
     let (any_seeds, any_exports) = super::expr::any_link(&env, lib_pkg.as_deref());
     let any_types = super::expr::any_types(&env);
     if lib_pkg.is_some() || !prebuilt.is_empty() {
@@ -2487,7 +2488,7 @@ fn finish<'a>(
         any_tags: sink.any_tags.take(),
         type_visibility: names.visibility.clone(),
         reuse,
-        lint_hits,
+        summaries,
     };
     module.diagnostics.extend(names.diags.into_inner());
     module.diagnostics.extend(sink.diagnostics.into_inner());

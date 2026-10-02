@@ -8,6 +8,7 @@
 //!          varint gc type offset | varint gc type count
 //!          varint n | n × str feature
 //! body     varint n | n × (str path | str text)   (at body_offset)
+//!          varint n | n × (str function | str summary)
 //! ```
 //!
 //! `str` is a `PrefixVarInt` length + UTF-8 (904.7). The body is the
@@ -16,7 +17,9 @@
 //! downstream code needs (signatures, types, traits, impls, generic and
 //! `async` / `#[inline]` bodies, trait defaults) and nothing it can link;
 //! then the `.wit` files its `ffi::wit` items read, whole (paths may
-//! leave the source dir through `..`).
+//! leave the source dir through `..`). Then the use-after-hand-off
+//! summaries of its bodies (stdlib 2.13.9): what each function does
+//! with its parameters, which a dependent cannot see in a cut body.
 // The body is rok source rather than 904.9-11's type / item / body
 // sections: monomorphization consumes AST and the parser reads it; a
 // binary tree would only save the (cheap) parse.
@@ -29,7 +32,7 @@ use crate::SourceFile;
 use rokc_diagnostic::SourceMap;
 
 /// Bumped on any change to the layout or to what the body holds.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 const MAGIC: &[u8; 4] = b"ROKH";
 
 #[derive(Clone, Debug, Default)]
@@ -51,6 +54,8 @@ pub struct Rokhir {
     pub features: Vec<String>,
     /// `(path relative to src_dir, interface text)`.
     pub files: Vec<(String, String)>,
+    /// `(function, summary)` (`rokc_hir::HirModule::summaries`).
+    pub summaries: Vec<(String, String)>,
 }
 
 /// This compiler: a ROKHIR from any other one is stale.
@@ -154,6 +159,11 @@ impl Rokhir {
             put_str(&mut out, path);
             put_str(&mut out, text);
         }
+        put_varint(&mut out, self.summaries.len() as u64);
+        for (f, s) in &self.summaries {
+            put_str(&mut out, f);
+            put_str(&mut out, s);
+        }
         out
     }
 
@@ -180,6 +190,7 @@ impl Rokhir {
             type_count: u32::try_from(r.varint()?).map_err(|_| "bad type count")?,
             features: Vec::new(),
             files: Vec::new(),
+            summaries: Vec::new(),
         };
         for _ in 0..r.varint()? {
             out.features.push(r.str()?);
@@ -187,6 +198,9 @@ impl Rokhir {
         r.pos = body;
         for _ in 0..r.varint()? {
             out.files.push((r.str()?, r.str()?));
+        }
+        for _ in 0..r.varint()? {
+            out.summaries.push((r.str()?, r.str()?));
         }
         Ok(out)
     }
@@ -235,6 +249,15 @@ impl Rokhir {
             s.push_str(&format!("\n--- {path}\n{text}"));
             if !text.ends_with('\n') {
                 s.push('\n');
+            }
+        }
+        if !self.summaries.is_empty() {
+            s.push_str("\n--- summaries\n");
+        }
+        for (f, sum) in &self.summaries {
+            s.push_str(&format!("{f}\n"));
+            for line in sum.lines() {
+                s.push_str(&format!("    {}\n", line.replace('\t', " ")));
             }
         }
         s
@@ -598,6 +621,7 @@ mod tests {
             type_count: 4,
             features: vec!["json".into(), "tls".into()],
             files: vec![("lib.rok".into(), "pub fn f() -> i32;\n".into())],
+            summaries: vec![("dep::f".into(), "g\t0\tmutex\t3\tf\tlib.rok\n".into())],
         };
         let mut b = r.encode();
         let back = Rokhir::decode(&b).unwrap();

@@ -208,7 +208,7 @@ impl Builder {
                 }
                 throw IoError::new("could not create an OS thread");
             }
-            JoinHandle { handle: h, result: result, thread: Thread { rec: rec }, taken: Atomic::new(false) }
+            JoinHandle { handle: h, result: cell.get(), thread: Thread { rec: rec }, taken: Atomic::new(false) }
         }
     }
 }

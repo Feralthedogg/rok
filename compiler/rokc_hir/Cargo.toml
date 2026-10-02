@@ -11,10 +11,8 @@ rokc_ast = { workspace = true }
 rokc_core = { workspace = true }
 rokc_diagnostic = { workspace = true }
 rokc_ir_common = { workspace = true }
+rokc_lexer = { workspace = true }
 rokc_parser = { workspace = true }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-rokc_lexer = { workspace = true }

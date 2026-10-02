@@ -120,10 +120,6 @@ pub const LINTS: &[Lint] = &[
         "missing_f_prefix",
         "a plain string holds `{name}` of a local in scope: it needs `f\"..\"`",
     ),
-    warn(
-        "use_after_handoff",
-        "a value used after `Mutex::new` / `send` / `Handoff::new` took it, or a guard's value after its lock is released",
-    ),
 ];
 
 /// Lint groups usable wherever a lint name is (`all`: every lint).
@@ -1139,19 +1135,6 @@ impl<'a> Cx<'a> {
         }
         for (lint, span, msg) in hits {
             self.hit(lint, span, msg);
-        }
-        for h in hir
-            .lint_hits
-            .iter()
-            .filter(|h| files.contains(&h.span.file))
-        {
-            self.findings.push(Finding {
-                lint: h.lint,
-                span: h.span,
-                msg: h.msg.clone(),
-                notes: vec![h.note.clone()],
-                secondary: h.secondary.clone(),
-            });
         }
     }
 

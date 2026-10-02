@@ -2157,6 +2157,79 @@ fn prebuilt_dependency_sums_keep_their_tags() {
     assert_eq!(text(&out.stdout), "list 3\ndict 1\nzebra 4\ndict 0\n");
 }
 
+/// A prebuilt dependency's bodies are cut from its ROKHIR, their
+/// use-after-hand-off summaries kept (stdlib 2.13.9): a value its
+/// function hands to a `Mutex` (through another of its functions, a
+/// method or a struct it builds) is gone in the app, one it only reads,
+/// or a clone, is not.
+#[test]
+fn prebuilt_dependency_keeps_handoff_summaries() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("prebuilt-handoff");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    put(
+        dir.join("dep/src/lib.rok"),
+        "pub struct Bag { pub items: List<i32>; }\n\
+         fn lock(xs: List<i32>) -> Mutex<List<i32>> {\n\
+             return Mutex::new(xs);\n\
+         }\n\
+         pub fn store(xs: List<i32>) -> Mutex<List<i32>> { return lock(xs); }\n\
+         pub fn count(xs: List<i32>) -> usize { return xs.len(); }\n\
+         pub fn bag(xs: List<i32>) -> Bag { return Bag { items: xs }; }\n\
+         impl Bag {\n\
+             pub fn share(self) -> Mutex<List<i32>> { return Mutex::new(self.items); }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    let app = |body: &str| {
+        put(
+            dir.join("app/src/main.rok"),
+            format!("let xs: List<i32> = [1];\n{body}\nprintln(f\"{{xs.len()}}\");\n"),
+        )
+        .unwrap();
+    };
+    let out = rokc(Some(&env), &dir, &["build", "dep"]);
+    assert_exit(&out, 0);
+    let rokhir = dir.join("dep/target/debug/dep.rokhir");
+    let ext = format!("dep={}", rokhir.display());
+    let dump = text(&rokc(None, &dir, &["rokhir-text", "dep/target/debug/dep.rokhir"]).stdout);
+    assert!(dump.contains("--- summaries\ndep::lock\n"), "{dump}");
+    assert!(
+        !dump.contains("pub fn store(xs: List<i32>) -> Mutex<List<i32>> { return"),
+        "{dump}"
+    );
+
+    app("let n = dep::count(xs);\nlet _m = dep::store(xs.clone());\nxs.push(n as i32);");
+    let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "2\n");
+
+    app("let _m = dep::store(xs);\nxs.push(2);");
+    let out = rokc(Some(&env), &dir, &["build", "app", "--extern", &ext]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains(
+            "error[E202]: `xs` was moved into a `Mutex` by `dep::store(xs)` at line 2 (inside \
+             `lock`, lib.rok:3)"
+        ),
+        "{err}"
+    );
+
+    app("let b = dep::bag(xs);\nlet _m = b.share();\nxs.push(2);");
+    let out = rokc(Some(&env), &dir, &["build", "app", "--extern", &ext]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains(
+            "error[E202]: `xs` shares what `b.share()` moved into a `Mutex` at line 3 (inside \
+             `Bag::share`, lib.rok:9)"
+        ),
+        "{err}"
+    );
+}
+
 /// Aggregates over 64 bytes cross a prebuilt dependency by address
 /// (spec 8.6.6), both ways and through function values, whichever
 /// backend built each side (`-O0`: native, `-O2`: LLVM).
@@ -2306,7 +2379,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "ROKHIR version: 4\n",
+        "ROKHIR version: 5\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
@@ -2389,14 +2462,15 @@ fn stale_rokhir_is_rejected() {
 
     let good = fs::read(&rokhir).unwrap();
     // The layout (9.4.3 - 9.4.7): a 16-byte little-endian header (`ROKH`,
-    // version 4, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
+    // version 5, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
     // the producer, then the meta (mount name, package hash — 0.3.3: the
     // SHA-256 of `path \0 text \0` per file, 8 hex digits — and source
     // directory, GC type range, features); at the body offset, the files
-    // with concrete function bodies cut to `;`.
+    // with concrete function bodies cut to `;`, then the hand-off
+    // summaries (none: `one` has no value that is not `Sync`).
     let word = |i: usize| u32::from_le_bytes(good[i..i + 4].try_into().unwrap());
     assert_eq!(&good[..4], b"ROKH");
-    assert_eq!((word(4), word(8)), (4, 0));
+    assert_eq!((word(4), word(8)), (5, 0));
     let varint = |at: &mut usize| -> usize {
         let extra = good[*at].leading_ones() as usize;
         let mut v = usize::from(good[*at] & 0xffu8.checked_shr(extra as u32 + 1).unwrap_or(0));
@@ -2421,6 +2495,8 @@ fn stale_rokhir_is_rejected() {
     assert_eq!(varint(&mut at), 1);
     assert_eq!(string(&mut at), "lib.rok");
     assert_eq!(string(&mut at), "pub fn one() -> i32 ;\n");
+    assert_eq!(varint(&mut at), 0);
+    assert_eq!(at, good.len());
     // 9.3.5: the archive's functions are global `_Y` symbols.
     if !cfg!(windows) && Command::new("nm").arg("--version").output().is_ok() {
         let nm = Command::new("nm")
@@ -3022,8 +3098,9 @@ fn custom_target_file() {
         fs::create_dir_all(sys.join("bin")).unwrap();
         fs::create_dir_all(sys.join("lib/rok/targets")).unwrap();
         let exe = sys.join("bin/rokc");
-        // Same file system as `ROKC`; `current_exe` must name the link.
-        fs::hard_link(ROKC, &exe).unwrap();
+        // A copy: `current_exe` must name it, and a hard link would change
+        // `ROKC`'s ctime, so its identity, under the tests running beside.
+        fs::copy(ROKC, &exe).unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(
             rokc_core::real_path(Path::new(ROKC).parent().unwrap().join("../lib/rok/targets"))

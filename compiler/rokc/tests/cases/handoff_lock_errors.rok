@@ -1,0 +1,65 @@
+// expect-error: error[E202]: `xs` was moved into the `Mutex` at line 25
+// expect-error: handoff_lock_errors.rok:26:5: `xs` was moved into the `Mutex` at line 25
+// expect-error: help: it belongs to the `Mutex` now; use it through the lock: `using g = m.lock() { g.get().push(3) }`, or hand over `xs.clone()` to keep a separate copy (stdlib 2.13.9)
+// expect-error: handoff_lock_errors.rok:32:5: `ys` was moved into the `RwLock` at line 31
+// expect-error: handoff_lock_errors.rok:40:5: `xs` was moved into the `Mutex` at line 38
+// expect-error: handoff_lock_errors.rok:47:29: `xs` was already moved into the `Mutex` by this call, on an earlier pass of the loop
+// expect-error: handoff_lock_errors.rok:56:19: `xs` was moved into the `Mutex` at line 55
+// expect-error: handoff_lock_errors.rok:64:5: `xs` was moved into the `Mutex` at line 63
+// spec: std 213-marker §2.13.9 / std 216-sync §2.16.3 / §2.16.4
+
+// rok has no move semantics: after `Mutex::new(xs)` the caller's `xs`
+// still points at the object the lock now guards, so a later use on
+// any path would race with the lock's users. It is a compile error:
+// after a use on one branch, the next loop iteration's hand-off, or
+// beside a parallel loop whose closure goes through the lock.
+
+fn main() {
+    println(f"{after()} {rw([1])} {one_branch(true)} {allowed()}");
+    each_iteration();
+    beside_par();
+}
+
+fn after() -> i64 {
+    let xs: List<i32> = [1, 2];
+    let m = Mutex::new(xs);
+    xs.push(3);
+    using g = m.lock() { g.get().len() as i64 }
+}
+
+fn rw(ys: List<i32>) -> i64 {
+    let l = RwLock::new(ys);
+    ys.len() as i64
+}
+
+fn one_branch(c: bool) -> i64 {
+    let xs: List<i32> = [1];
+    if c {
+        let _m = Mutex::new(xs);
+    }
+    xs.len() as i64
+}
+
+fn each_iteration() {
+    let xs: List<i32> = [1];
+    let i = 0;
+    while i < 2 {
+        let _m = Mutex::new(xs);
+        i += 1;
+    }
+}
+
+fn beside_par() {
+    let xs: List<i32> = [];
+    for i in 0..100 { xs.push(i); }
+    let m = Mutex::new(xs);
+    par::for_each(xs, |x| { using g = m.lock() { g.get().push(x); } });
+}
+
+// An error, not a lint: `#[allow]` does not reach it.
+#[allow(use_after_handoff)]
+fn allowed() -> i64 {
+    let xs: List<i32> = [1];
+    let _m = Mutex::new(xs);
+    xs.len() as i64
+}

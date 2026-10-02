@@ -1,0 +1,49 @@
+// expect-error: error[E202]: `xs` was sent through a channel at line 27
+// expect-error: handoff_send_errors.rok:28:5: `xs` was sent through a channel at line 27
+// expect-error: help: the receiver owns it now; hand over `xs.clone()` to keep a separate copy, or give `xs` a new value before using it again (stdlib 2.13.9)
+// expect-error: handoff_send_errors.rok:34:5: `ys` was sent through a channel at line 33
+// expect-error: handoff_send_errors.rok:47:13: `xs` was handed to a `Handoff` at line 45
+// expect-error: handoff_send_errors.rok:40:5: `zs` was sent through a channel at line 39
+// needs: threads
+// spec: std 213-marker §2.13.9 / std 217-channel §2.17.2
+
+// A value sent through a channel, or wrapped in `Handoff` for another
+// thread, is shared with the receiver: using the sender's handle
+// afterwards is a compile error.
+use rok::core::marker::Handoff;
+use rok::std::thread;
+
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let a = sent(tx) + tried(tx) + task::block_on(sent_async(tx)) + handed();
+    for _ in 0..3 {
+        let _ = rx.recv();
+    }
+    println(f"{a}");
+}
+
+fn sent(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1];
+    try! tx.send(xs);
+    xs.len() as i64
+}
+
+fn tried(tx: Sender<List<i32>>) -> i64 {
+    let ys: List<i32> = [1, 2];
+    try! tx.try_send(ys);
+    ys.len() as i64
+}
+
+async fn sent_async(tx: Sender<List<i32>>) -> i64 {
+    let zs: List<i32> = [1, 2];
+    try! await tx.send_async(zs);
+    zs.len() as i64
+}
+
+fn handed() -> i64 {
+    let xs: List<i32> = [1, 2];
+    let h = unsafe { Handoff::new(xs) };
+    let t = thread::spawn(|| h.get().len());
+    let k = xs.len();
+    (try! t.join() + k) as i64
+}

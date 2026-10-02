@@ -1,0 +1,198 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout: 3 2 1 4 1 5 3 2 4 2 7 4 2 2 3 2 5 9 3 2
+// spec: std 213-marker §2.13.9 / std 216-sync §2.16.3 / refs-lang §4.15.2
+
+// What stays usable after a hand-off: a `clone()` handed over in place
+// of the value, a variable or field given a new value, the value used
+// through the lock, a field of another struct, a `Sync` value, a value
+// a helper only reads, the items of a list sent one by one, a value
+// `set` replaced, a tag test, and a use inside `unsafe`.
+use rok::core::marker::Handoff;
+
+struct Bag {
+    items: List<i32>;
+    other: List<i32>;
+}
+
+fn len_of(xs: List<i32>) -> usize { xs.len() }
+fn pair(a: List<i32>, b: List<i32>) -> Bag { Bag { items: a, other: b } }
+
+fn cloned() -> i64 {
+    let xs: List<i32> = [1, 2];
+    let m = Mutex::new(xs.clone());
+    xs.push(3);
+    using g = m.lock() { g.get().push(0); }
+    xs.len() as i64
+}
+
+fn reassigned() -> i64 {
+    let xs: List<i32> = [1];
+    let _m = Mutex::new(xs);
+    xs = [1, 2];
+    xs.len() as i64
+}
+
+fn through_lock() -> i64 {
+    let m = Mutex::new([1i32]);
+    using g = m.lock() { g.get().len() as i64 }
+}
+
+// Assigning a field re-arms that field.
+fn field_reassigned() -> i64 {
+    let s = Bag { items: [1], other: [] };
+    let _m = Mutex::new(s.items);
+    s.items = [1, 2, 3, 4];
+    s.items.len() as i64
+}
+
+// The other field of the struct is not the one handed over.
+fn disjoint_fields() -> i64 {
+    let s = Bag { items: [1], other: [7] };
+    let _m = Mutex::new(s.items);
+    s.other.len() as i64
+}
+
+// After `t = s`, a field of `t` that got a new value is `t`'s own.
+fn copy_field_reassigned() -> i64 {
+    let s = Bag { items: [1], other: [] };
+    let t = s;
+    t.items = [1, 2, 3, 4, 5];
+    let _m = Mutex::new(s);
+    t.items.len() as i64
+}
+
+// A struct built from two values: handing over one field leaves the other.
+fn built_apart() -> i64 {
+    let a: List<i32> = [1];
+    let b: List<i32> = [1, 2, 3];
+    let s = pair(a, b);
+    let _m = Mutex::new(s.items);
+    b.len() as i64
+}
+
+fn read_by_helper() -> i64 {
+    let xs: List<i32> = [1, 2];
+    let n = len_of(xs);
+    let _m = Mutex::new(xs.clone());
+    xs.push(0);
+    n as i64
+}
+
+fn shareable() -> i64 {
+    let n = 4i64;
+    let s = "ab";
+    let _a = Mutex::new(n);
+    let _b = Mutex::new(s);
+    n + s.len() as i64
+}
+
+// Each item goes to the receiver; the list itself stays ours.
+fn send_each(tx: Sender<List<i32>>) -> i64 {
+    let all: List<List<i32>> = [[1], [2]];
+    for x in all {
+        try! tx.send(x);
+    }
+    all.len() as i64
+}
+
+fn returned_first(c: bool) -> i64 {
+    let xs: List<i32> = [1, 2, 3, 4, 5, 6, 7];
+    if c {
+        let _m = Mutex::new(xs);
+        return 0;
+    }
+    xs.len() as i64
+}
+
+fn fresh_each_iteration() -> i64 {
+    let n = 0i64;
+    for i in 0..2 {
+        let xs: List<i32> = [i];
+        let _m = Mutex::new(xs);
+        n += 2;
+    }
+    n
+}
+
+// `set` gives the lock a new value: what `get` returned is ours alone.
+fn taken(m: Mutex<List<i32>>) -> i64 {
+    let ws: List<i32> = [];
+    using g = m.lock() {
+        ws = g.get();
+        g.set([]);
+    }
+    ws.push(0);
+    ws.len() as i64
+}
+
+fn copy_reassigned() -> i64 {
+    let xs: List<i32> = [1];
+    let ys = xs;
+    ys = [1, 2];
+    let _m = Mutex::new(xs);
+    ys.len() as i64
+}
+
+fn cloned_copy() -> i64 {
+    let xs: List<i32> = [1, 2, 3];
+    let ys = xs.clone();
+    let _m = Mutex::new(xs);
+    ys.len() as i64
+}
+
+fn update_sync(m: Mutex<List<i32>>) -> i64 {
+    let n = 2i64;
+    using g = m.lock() {
+        g.update(|v| { v.push(n as i32); v });
+    }
+    n
+}
+
+// Testing the tag of a value reads only the value itself.
+fn tag_only() -> i64 {
+    let xs: List<i32> = [1];
+    let o: List<i32> | none = xs;
+    let _m = Mutex::new(xs);
+    if o is none { 0 } else { 3 }
+}
+
+// Sent once, then a flag ends the loop: the check does not follow the
+// flag, and a new value re-arms `items` for the next pass it assumes.
+fn send_once_in_loop(tx: Sender<List<i32>>) -> i64 {
+    let items: List<i32> = [1, 2];
+    let tries = 0i64;
+    loop {
+        let done = false;
+        tries += 1;
+        if tries == 2 {
+            try! tx.send(items);
+            items = [];
+            done = true;
+        }
+        if done { break; }
+    }
+    tries
+}
+
+// The program vouches for it: `unsafe` (spec 4.15.2).
+fn in_unsafe() -> i64 {
+    let xs: List<i32> = [1, 2, 3, 4, 5];
+    let h = unsafe { Handoff::new(xs) };
+    let n = unsafe { xs.len() };
+    (n + h.get().len() - 5) as i64
+}
+
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let a = f"{cloned()} {reassigned()} {through_lock()} {field_reassigned()} {disjoint_fields()}";
+    let b = f"{copy_field_reassigned()} {built_apart()} {read_by_helper()} {shareable() - 2}";
+    let c = f"{send_each(tx)} {returned_first(false)} {fresh_each_iteration()}";
+    let d = f"{taken(Mutex::new([1i32]))} {copy_reassigned()} {cloned_copy()}";
+    let e = f"{update_sync(Mutex::new([]))} {in_unsafe()} {returned_first(true) + 9}";
+    let f = f"{tag_only()} {send_once_in_loop(tx)}";
+    for _ in 0..3 {
+        let _ = rx.recv();
+    }
+    println(f"{a} {b} {c} {d} {e} {f}");
+}

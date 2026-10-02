@@ -88,9 +88,9 @@ pub struct HirInput {
     pub fingerprint: u64,
     /// Where lowered bodies are kept for the next build (spec 9.2.16).
     pub bodies: Option<Bodies>,
-    /// Run the lints that need lowering's type facts (`rokc check` /
-    /// `lint`): `HirModule::lint_hits`.
-    pub lints: bool,
+    /// The use-after-hand-off summaries of the prebuilt libraries'
+    /// functions (their ROKHIR): `(function, summary)`.
+    pub summaries: Vec<(String, String)>,
     /// The program is a lone script (an anonymous package), not a
     /// package: a `use` of a package it lacks says how a script gets one.
     pub script: bool,
@@ -150,19 +150,9 @@ pub struct HirModule {
     pub any_tags: Vec<(HirTy, u32)>,
     /// Bodies replayed from `HirInput::bodies`, of those lowered.
     pub reuse: BodyReuse,
-    /// Findings of the lints that need lowering's type facts
-    /// (`HirInput::lints`).
-    pub lint_hits: Vec<LintHit>,
-}
-
-/// A lint finding; `rokc lint` sets its level.
-#[derive(Clone, Debug)]
-pub struct LintHit {
-    pub lint: &'static str,
-    pub span: Span,
-    pub msg: String,
-    pub secondary: Option<(Span, String)>,
-    pub note: String,
+    /// A prebuilt-library build's use-after-hand-off summaries of its
+    /// bodies, for its ROKHIR (`HirInput::summaries`).
+    pub summaries: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]

@@ -237,6 +237,8 @@ pub enum ErrorKind {
     Visibility,
     Module,
     Pattern,
+    /// A value used after another owner took it (stdlib 2.13.9).
+    Handoff,
     Meta,
     Lowering,
     Codegen,
@@ -258,6 +260,7 @@ impl fmt::Display for ErrorKind {
             Self::Visibility => "visibility",
             Self::Module => "module",
             Self::Pattern => "pattern",
+            Self::Handoff => "handoff",
             Self::Meta => "meta",
             Self::Lowering => "lowering",
             Self::Codegen => "codegen",
@@ -496,6 +499,7 @@ impl ErrorKind {
             Self::Module => "E102",
             Self::Type => "E200",
             Self::Pattern => "E201",
+            Self::Handoff => "E202",
             Self::Meta => "E300",
             Self::Lowering => "E400",
             Self::Codegen => "E401",
@@ -883,6 +887,7 @@ rokc_core::codec_enum!(ErrorKind {
     Internal,
     Other,
     Lint,
+    Handoff,
 });
 rokc_core::codec_struct!(Label { span, message });
 rokc_core::codec_struct!(RokDiagnostic {

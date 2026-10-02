@@ -2047,7 +2047,7 @@ pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
             }
         };
         executor().blocking.submit(job);
-        Blocking { slot: slot, done: done, waiter: waiter }
+        Blocking { slot: cell.get(), done: done, waiter: waiter }
     }
 }
 

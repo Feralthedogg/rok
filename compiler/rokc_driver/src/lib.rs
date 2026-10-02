@@ -521,6 +521,7 @@ pub fn compile_source(
                 .filter_map(|f| cfg::feature_of(f).map(str::to_owned))
                 .collect(),
             files: interface,
+            summaries: m.hir.summaries.clone(),
         });
     }
     Ok(p)
@@ -610,6 +611,7 @@ fn compile_std(
         type_count: 0,
         features: Vec::new(),
         files,
+        summaries: m.hir.summaries.clone(),
     });
     if !keep_ast {
         p.sources.clear();
@@ -984,7 +986,10 @@ fn compile_unit_in(
         no_implicit_rok: NO_IMPLICIT.with(std::cell::RefCell::take),
         fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
         bodies: incr::current().map(|i| incr::bodies(i, files)),
-        lints: config.keep_ast,
+        summaries: prebuilt
+            .iter()
+            .flat_map(|p| p.rokhir.summaries.iter().cloned())
+            .collect(),
         script: config.anonymous,
         library,
         stage: kept_stage.clone(),

@@ -367,10 +367,12 @@ impl SessionCache {
     }
 
     pub(pkg) fn put(self, t: Ticket) {
+        // The cache's own copy: the connection keeps its lists.
+        let own = Ticket { ticket: t.ticket.clone(), alpn: bytes_copy(t.alpn), peer: certs_copy(t.peer), ..t };
         using g = self.m.lock() {
             let l = g.get();
             if l.len() >= CACHE_MAX { let _ = l.remove(0); }
-            l.push(t);
+            l.push(own);
         }
     }
 
@@ -392,6 +394,22 @@ impl SessionCache {
         }
         found
     }
+}
+
+fn bytes_copy(b: List<u8> | none) -> List<u8> | none {
+    match b {
+        l: List<u8> => l.clone(),
+        none => none,
+    }
+}
+
+/// Copies parsed again: a certificate's views point into its bytes.
+fn certs_copy(cs: List<Certificate>) -> List<Certificate> {
+    let out: List<Certificate> = [];
+    for c in cs {
+        out.push(try! Certificate::from_der(c.der.clone()));
+    }
+    out
 }
 
 fn hash_offered(s: CipherSuite, suites: List<CipherSuite>) -> bool {
@@ -439,10 +457,12 @@ impl TicketStore {
     }
 
     pub(pkg) fn put(self, s: Session) {
+        // The store's own copy: the connection keeps its lists.
+        let own = Session { id: s.id.clone(), alpn: bytes_copy(s.alpn), peer: certs_copy(s.peer), ..s };
         using g = self.m.lock() {
             let l = g.get();
             if l.len() >= STORE_MAX { let _ = l.remove(0); }
-            l.push(s);
+            l.push(own);
         }
     }
 

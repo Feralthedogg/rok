@@ -1,0 +1,159 @@
+// expect-error: error[E202]: `xs` was moved into the `Mutex` at line 76
+// expect-error: handoff_call_errors.rok:77:5: `xs` was moved into the `Mutex` at line 76
+// expect-error: help: it belongs to the `Mutex` now; use it through the lock: `using g = m.lock() { .. g.get() .. }`, or hand over `xs.clone()` to keep a separate copy (stdlib 2.13.9)
+// expect-error: handoff_call_errors.rok:84:5: `xs` shares the value the `Mutex` protects (`peek(g)`) at line 83, and `g`'s `using` block released the lock
+// expect-error: handoff_call_errors.rok:90:5: `xs` was sent through a channel by `post(tx, xs)` at line 89 (inside `post`, line 42)
+// expect-error: handoff_call_errors.rok:97:5: `xs` was moved into the `Mutex` at line 96
+// expect-error: handoff_call_errors.rok:104:5: `xs` was moved into a `Mutex` by `outer(xs)` at line 103 (inside `store`, line 44)
+// expect-error: handoff_call_errors.rok:110:5: `xs` was sent through a channel by `post_later(tx, xs)` at line 109 (inside `post_later`, line 51)
+// expect-error: handoff_call_errors.rok:116:5: `xs` was moved into a `Mutex` by `down(xs, 3)` at line 115 (inside `down`, line 53)
+// expect-error: handoff_call_errors.rok:122:5: `b.items` shares what `b.lock_up()` moved into a `Mutex` at line 121 (inside `Bag::lock_up`, line 34)
+// expect-error: handoff_call_errors.rok:130:5: `x` shares `all`, which was moved into the `Mutex` at line 129
+// expect-error: handoff_call_errors.rok:138:5: `xs` shares `b`, which was moved into the `Mutex` at line 137
+// expect-error: handoff_call_errors.rok:145:5: `f` shares `xs`, which was moved into the `Mutex` at line 144
+// expect-error: handoff_call_errors.rok:152:5: `ys` shares `b`, which was moved into the `Mutex` at line 151
+// expect-error: handoff_call_errors.rok:158:5: `xs` was sent through a channel by `run(|x| { try! tx.send(x); }, xs)` at line 157 (inside `through_value`, line 157)
+// needs: threads
+// spec: std 213-marker §2.13.9
+
+// Values are followed through calls: a function that hands a parameter
+// over (directly or through another call, a method, an `async fn`, a
+// recursive call or a function value), returns it or a part of it,
+// stores it into another parameter's object or a `ref` parameter,
+// captures it into the closure it returns, or returns a guard
+// parameter's value, does so for its caller too.
+use rok::std::thread;
+
+struct Bag {
+    items: List<i32>;
+    n: i64;
+}
+
+impl Bag {
+    fn lock_up(self) -> Mutex<List<i32>> {
+        Mutex::new(self.items)
+    }
+}
+
+fn id(x: List<i32>) -> List<i32> { x }
+fn mk(xs: List<i32>) -> Bag { Bag { items: xs, n: 0 } }
+fn items(b: Bag) -> List<i32> { b.items }
+fn peek(g: MutexGuard<List<i32>>) -> List<i32> { g.get() }
+fn post(tx: Sender<List<i32>>, xs: List<i32>) { try! tx.send(xs); }
+fn store(xs: List<i32>) -> Mutex<List<i32>> {
+    let m = Mutex::new(xs);
+    m
+}
+fn outer(xs: List<i32>) -> i64 {
+    let _m = store(xs);
+    0
+}
+async fn post_later(tx: Sender<List<i32>>, xs: List<i32>) { try! tx.send(xs); }
+fn down(xs: List<i32>, n: i32) -> Mutex<List<i32>> {
+    if n == 0 { return Mutex::new(xs); }
+    down(xs, n - 1)
+}
+fn keep(all: List<List<i32>>, x: List<i32>) { all.push(x); }
+fn put(ref s: Bag, xs: List<i32>) { s.items = xs; }
+fn later(xs: List<i32>) -> fn() -> usize { || xs.len() }
+fn run(f: fn(List<i32>), xs: List<i32>) { f(xs); }
+
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let m: Mutex<List<i32>> = Mutex::new([]);
+    let a = through_id() + through_peek(m) + through_post(tx) + through_mk();
+    let b = through_outer() + through_async(tx) + through_recursion() + through_method();
+    let c = through_keep() + through_ref() + through_closure() + through_items();
+    let d = through_value(tx);
+    for _ in 0..3 {
+        let _ = rx.recv();
+    }
+    println(f"{a} {b} {c} {d}");
+}
+
+fn through_id() -> i64 {
+    let xs: List<i32> = [];
+    let m = Mutex::new(id(xs));
+    xs.push(1);
+    using g = m.lock() { g.get().len() as i64 }
+}
+
+fn through_peek(m: Mutex<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    using g = m.lock() { xs = peek(g); }
+    xs.len() as i64
+}
+
+fn through_post(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    post(tx, xs);
+    xs.push(1);
+    0
+}
+
+fn through_mk() -> i64 {
+    let xs: List<i32> = [];
+    let _m = Mutex::new(mk(xs));
+    xs.push(2);
+    0
+}
+
+fn through_outer() -> i64 {
+    let xs: List<i32> = [];
+    outer(xs);
+    xs.len() as i64
+}
+
+fn through_async(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    task::block_on(post_later(tx, xs));
+    xs.len() as i64
+}
+
+fn through_recursion() -> i64 {
+    let xs: List<i32> = [];
+    let _m = down(xs, 3);
+    xs.len() as i64
+}
+
+fn through_method() -> i64 {
+    let b = Bag { items: [1], n: 0 };
+    let _m = b.lock_up();
+    b.items.len() as i64
+}
+
+fn through_keep() -> i64 {
+    let all: List<List<i32>> = [];
+    let x: List<i32> = [];
+    keep(all, x);
+    let _m = Mutex::new(all);
+    x.len() as i64
+}
+
+fn through_ref() -> i64 {
+    let b = Bag { items: [], n: 0 };
+    let xs: List<i32> = [];
+    put(ref b, xs);
+    let _m = Mutex::new(b);
+    xs.len() as i64
+}
+
+fn through_closure() -> i64 {
+    let xs: List<i32> = [];
+    let f = later(xs);
+    let _m = Mutex::new(xs);
+    f() as i64
+}
+
+fn through_items() -> i64 {
+    let b = Bag { items: [], n: 0 };
+    let ys = items(b);
+    let _m = Mutex::new(b);
+    ys.len() as i64
+}
+
+fn through_value(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    run(|x| { try! tx.send(x); }, xs);
+    xs.len() as i64
+}
