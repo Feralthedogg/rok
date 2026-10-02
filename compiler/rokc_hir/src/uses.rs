@@ -306,18 +306,49 @@ pub fn glob_reexports(
     }
 }
 
+/// How the user's code gets a package it lacks: as a script, or as a
+/// package (its dependencies by top-level name).
+pub struct Missing<'a> {
+    pub script: bool,
+    pub packages: &'a [String],
+}
+
+impl Missing<'_> {
+    /// The help for `use <root>::..` in module `module`, where `root`
+    /// names nothing: none inside a dependency.
+    fn help(&self, root: &str, module: &str) -> Option<String> {
+        let first = module.split("::").next().unwrap_or_default();
+        if self.packages.iter().any(|p| p == first) {
+            return None;
+        }
+        Some(if self.script {
+            format!(
+                "`{root}` is not a dependency of this script: `rok install {root}`, or add it to \
+                 a `//! ```rokon` block at the top of the file"
+            )
+        } else {
+            format!(
+                "`{root}` is not a dependency of this package: add it to rok.rokon (`rok add \
+                 {root}`); libraries installed with `rok install` are only for scripts"
+            )
+        })
+    }
+}
+
 /// Unresolved module-level imports, reported at the leaf's path.
 ///
 /// A leaf must name an item, an enum variant, a module, or a re-export. A
 /// path rooted at a bare name (not `pkg` / `sup` / `rok`) may also start
 /// with a name the module sees through one of its globs or the implicit
-/// `use rok::core::**` (`use Result::*`).
+/// `use rok::core::**` (`use Result::*`). One rooted at a name nothing
+/// has gets `missing`'s help.
 #[must_use]
 pub fn check_use_targets(
     raw: &[(String, Visibility, UseTree)],
     items: &[&rokc_ast::Item],
     table: &UseTable,
     reexports: &[ReExport],
+    missing: Option<Missing<'_>>,
 ) -> Vec<RokDiagnostic> {
     use rokc_ast::{ExternItem, ImplItem, Item};
     if raw.is_empty() {
@@ -481,11 +512,29 @@ pub fn check_use_targets(
                     continue;
                 }
             }
-            diags.push(RokDiagnostic::error(
+            let mut d = RokDiagnostic::error(
                 ErrorKind::Module,
                 span,
                 format!("unresolved import: `{path}` does not exist"),
-            ));
+            );
+            let root = tree.prefix.segments.first().map(|s| s.name.as_str());
+            let unknown = |r: &str| {
+                let (head, inner) = (format!("{r}::"), format!("::{r}::"));
+                !known.iter().any(|k| {
+                    k == r
+                        || k.starts_with(&head)
+                        || k.contains(&inner)
+                        || k.strip_suffix(r).is_some_and(|s| s.ends_with("::"))
+                })
+            };
+            if let Some(help) = root
+                .filter(|r| bare && unknown(r))
+                .zip(missing.as_ref())
+                .and_then(|(r, m)| m.help(r, module_path))
+            {
+                d = d.with_help(help);
+            }
+            diags.push(d);
         }
     }
     diags

@@ -87,6 +87,9 @@ pub struct HirInput {
     /// Run the lints that need lowering's type facts (`rokc check` /
     /// `lint`): `HirModule::lint_hits`.
     pub lints: bool,
+    /// The program is a lone script (an anonymous package), not a
+    /// package: a `use` of a package it lacks says how a script gets one.
+    pub script: bool,
     /// The library's items are the same as in an earlier compile of
     /// this process that gave this key (a REPL session's cells): what
     /// collecting them made is taken from it.

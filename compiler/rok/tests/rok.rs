@@ -778,8 +778,22 @@ fn named_environments() {
     ok(&rok(
         &home,
         &root,
-        &["add", "--env", "work", "greet", "--path", "lib1"],
+        &["install", "--env", "work", "greet", "--path", "lib1"],
     ));
+    // `rok install` is the one way into an environment.
+    fails(
+        &rok(
+            &home,
+            &root,
+            &["add", "--env", "work", "x", "--path", "lib1"],
+        ),
+        "`rok add` edits a package's rok.rokon; for the libraries scripts see in environment \
+         `work`, run `rok install --env work <name>`",
+    );
+    fails(
+        &rok(&home, &elsewhere, &["add", "x", "--path", "../lib1"]),
+        "for scripts, `rok install <name>` installs a library they can all `use`",
+    );
     // In an environment, path dependencies are absolute.
     let manifest = read(&home.join("envs/work/rok.rokon"));
     let want = q(lib.display().to_string().replace('\\', "/"));
@@ -796,7 +810,7 @@ fn named_environments() {
     ok(&rok(
         &home,
         &root,
-        &["add", "--env", "default", "d", "--path", "lib1"],
+        &["install", "--env", "default", "d", "--path", "lib1"],
     ));
     let out = rok_cmd(&home, &elsewhere, &["deps"])
         .env("ROK_ENV", "default")
@@ -2753,4 +2767,296 @@ fn closed_output_ends_rok_quietly() {
     #[cfg(not(unix))]
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert_eq!(stderr, "");
+}
+
+/// `rok -q <args>`'s stdout.
+#[track_caller]
+fn script_out(home: &Path, cwd: &Path, args: &[&str]) -> String {
+    let mut all = vec!["-q"];
+    all.extend_from_slice(args);
+    ok(&rok(home, cwd, &all))
+}
+
+/// `rok install`: a library goes into the active environment, where
+/// scripts see it and packages do not; an executable package or a script
+/// file is built into `$ROK_HOME/bin`; `uninstall` undoes either.
+// spec: §9.10.5 §9.10.7
+#[test]
+fn install_libraries_and_executables() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("install");
+    let home = root.join("home");
+    let greet = root.join("greet");
+    write(&greet.join("rok.rokon"), "Package { name: \"greet\" }\n");
+    write(&greet.join("src/lib.rok"), LIB_V1);
+    let script = "use greet::greet;\nprintln(f\"{greet()}\");\n";
+    write(&root.join("s.rok"), script);
+
+    // A library: the package's own name, absolute in the environment,
+    // prebuilt into its target/.
+    ok(&rok(&home, &root, &["install", "--path", "greet"]));
+    let manifest = read(&home.join("envs/default/rok.rokon"));
+    let src = q(greet.display().to_string().replace('\\', "/"));
+    assert!(
+        manifest.contains(&format!("\"greet\": Dep::path({src})")),
+        "{manifest}"
+    );
+    assert!(
+        home.join("envs/default/target/debug/deps/libgreet.a")
+            .is_file()
+    );
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
+    // The script compiled against the prebuilt library.
+    let out = rok(&home, &root, &["run", "-v", "s.rok"]);
+    assert!(
+        !text(&out.stderr).contains("Compiling greet"),
+        "{}",
+        text(&out.stderr)
+    );
+
+    // A library that does not build is not installed.
+    write(
+        &root.join("broken/src/lib.rok"),
+        "pub fn f() -> i32 { return \"s\"; }\n",
+    );
+    fails(
+        &rok(&home, &root, &["install", "--path", "broken"]),
+        "`broken` did not build in environment `default`; nothing was installed",
+    );
+    assert_eq!(read(&home.join("envs/default/rok.rokon")), manifest);
+
+    // A package does not see it, with a manifest or without.
+    for (dir, files) in [
+        ("app", &[("rok.rokon", "Package { name: \"app\" }\n")][..]),
+        ("bare", &[][..]),
+    ] {
+        let app = root.join(dir);
+        write(&app.join("src/main.rok"), script);
+        for (f, t) in files {
+            write(&app.join(f), t);
+        }
+        fails(
+            &rok(&home, &app, &["-q", "build"]),
+            "= help: `greet` is not a dependency of this package: add it to rok.rokon (`rok add \
+             greet`); libraries installed with `rok install` are only for scripts",
+        );
+    }
+    fails(
+        &rok(&home, &root.join("app"), &["--env", "default", "build"]),
+        "`--env default` is for scripts and the REPL: a package builds with the dependencies in \
+         its rok.rokon only (add one: `rok add <name>`)",
+    );
+
+    // Executables: a package with src/main.rok, from a path and from git
+    // (built from a copy: the cached checkout stays as it was), and a
+    // script file.
+    let hello = root.join("hello");
+    write(&hello.join("rok.rokon"), "Package { name: \"hello\" }\n");
+    write(&hello.join("src/main.rok"), "println(\"hello\");\n");
+    ok(&rok(&home, &root, &["install", "--path", "hello"]));
+    let tool = root.join("tool");
+    let commit = commit(&tool, &[("src/main.rok", "println(\"tool\");\n")]);
+    ok(&rok(
+        &home,
+        &root,
+        &["install", "--git", &tool.display().to_string()],
+    ));
+    write(&root.join("hi.rok"), "println(\"hi\");\n");
+    ok(&rok(&home, &root, &["install", "--path", "hi.rok"]));
+    for (name, want) in [("hello", "hello\n"), ("tool", "tool\n"), ("hi", "hi\n")] {
+        let out = Command::new(home.join("bin").join(exe(name)))
+            .output()
+            .unwrap();
+        assert_eq!(ok(&out), want);
+    }
+    assert!(hello.join("target/release").is_dir());
+    assert!(
+        !home
+            .join("cache/git/checkouts")
+            .join(&commit)
+            .join("target")
+            .exists()
+    );
+    let list = ok(&rok(&home, &root, &["install", "--list"]));
+    let want = format!(
+        "libraries (environment `default`):\n  greet Dep::path({src})\nexecutables ({}):\n  hello \
+         Dep::path({})\n  tool Dep::git({})\n  hi Dep::path({})\n",
+        home.join("bin").display(),
+        q(hello.display()),
+        q(tool.display()),
+        q(root.join("hi.rok").display()),
+    );
+    assert_eq!(list, want);
+    fails(
+        &rok(&home, &root, &["install", "rokc", "--path", "hello"]),
+        "`rokc` is the toolchain's own executable",
+    );
+    write(&home.join("bin").join(exe("mine")), "");
+    fails(
+        &rok(&home, &root, &["install", "mine", "--path", "hello"]),
+        "and `rok install` did not put it there; remove it first",
+    );
+
+    // `uninstall`: executables, then the library.
+    ok(&rok(&home, &root, &["uninstall", "hello", "hi"]));
+    assert!(!home.join("bin").join(exe("hello")).exists());
+    assert!(home.join("bin").join(exe("tool")).is_file());
+    let list = ok(&rok(&home, &root, &["install", "--list"]));
+    assert!(
+        !list.contains("hello") && list.contains("  tool "),
+        "{list}"
+    );
+    ok(&rok(&home, &root, &["uninstall", "greet"]));
+    fails(
+        &rok(&home, &root, &["-q", "s.rok"]),
+        "= help: `greet` is not a dependency of this script: `rok install greet`, or add it to a \
+         `//! ```rokon` block at the top of the file",
+    );
+    fails(
+        &rok(&home, &root, &["uninstall", "greet"]),
+        "`greet` is not installed: environment `default` has no library `greet`",
+    );
+    fails(
+        &rok(&home, &root, &["uninstall", "mine"]),
+        "`mine` is not installed",
+    );
+}
+
+/// What a script sees follows the environment (`--env` > `ROK_ENV` >
+/// `rok env use`); its `//! rokon` block adds to the installed libraries,
+/// and its entry wins over an installed one of the same name, but one
+/// build still has one package per name.
+// spec: §9.10.5 §9.10.7
+#[test]
+fn scripts_see_the_environment_and_their_block() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("install-env");
+    let home = root.join("home");
+    for (dir, lib) in [("greet", LIB_V1), ("greet2", LIB_V2)] {
+        write(
+            &root.join(dir).join("rok.rokon"),
+            "Package { name: \"greet\" }\n",
+        );
+        write(&root.join(dir).join("src/lib.rok"), lib);
+    }
+    write(
+        &root.join("util/src/lib.rok"),
+        "pub fn ten() -> i32 { return 10; }\n",
+    );
+    write(
+        &root.join("s.rok"),
+        "use greet::greet;\nprintln(f\"{greet()}\");\n",
+    );
+    ok(&rok(&home, &root, &["install", "--path", "greet"]));
+    ok(&rok(&home, &root, &["env", "create", "other"]));
+    ok(&rok(
+        &home,
+        &root,
+        &["--env", "other", "install", "--path", "greet2"],
+    ));
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
+    assert_eq!(
+        script_out(&home, &root, &["--env", "other", "s.rok"]),
+        "2\n"
+    );
+    let out = rok_cmd(&home, &root, &["-q", "s.rok"])
+        .env("ROK_ENV", "other")
+        .output()
+        .unwrap();
+    assert_eq!(ok(&out), "2\n");
+    ok(&rok(&home, &root, &["env", "use", "other"]));
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "2\n");
+    ok(&rok(&home, &root, &["env", "use", "default"]));
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
+
+    // The block's `util` and the installed `greet` together.
+    let block = |deps: &str, body: &str| {
+        format!("//! ```rokon\n//! Package {{ deps: {{ {deps} }} }}\n//! ```\n{body}")
+    };
+    let both = "use greet::greet;\nuse util::ten;\nprintln(f\"{greet() + ten()}\");\n";
+    write(
+        &root.join("t.rok"),
+        &block("\"util\": Dep::path(\"util\")", both),
+    );
+    assert_eq!(script_out(&home, &root, &["t.rok"]), "11\n");
+    // The block's `greet` wins over the installed one.
+    let own = "\"util\": Dep::path(\"util\"), \"greet\": Dep::path(\"greet2\")";
+    write(&root.join("t.rok"), &block(own, both));
+    assert_eq!(script_out(&home, &root, &["t.rok"]), "12\n");
+    // An installed library that needs the other `greet`: one build has
+    // one.
+    let wrap = root.join("wrap");
+    write(
+        &wrap.join("rok.rokon"),
+        "Package { name: \"wrap\", deps: { \"greet\": Dep::path(\"../greet\") } }\n",
+    );
+    write(
+        &wrap.join("src/lib.rok"),
+        "use greet::greet;\npub fn wrapped() -> i32 { return greet() * 100; }\n",
+    );
+    ok(&rok(&home, &root, &["install", "--path", "wrap"]));
+    let uses = "use wrap::wrapped;\nprintln(f\"{wrapped()}\");\n";
+    write(&root.join("w.rok"), uses);
+    assert_eq!(script_out(&home, &root, &["w.rok"]), "100\n");
+    write(
+        &root.join("w.rok"),
+        &block("\"greet\": Dep::path(\"greet2\")", uses),
+    );
+    fails(
+        &rok(&home, &root, &["w.rok"]),
+        &format!(
+            "conflicting requirements for package `greet`:\n  path {} (required by the script's \
+             `//! rokon` block)\n  path {} (required by `wrap`)",
+            root.join("greet2").display(),
+            root.join("greet").display()
+        ),
+    );
+}
+
+/// `rok install <stone>` from a local index: into the environment, pinned
+/// in its lock (a stone is a library).
+// spec: §9.10.4a §9.10.5
+#[test]
+fn install_stones() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("install-stones");
+    let home = root.join("home");
+    let index = root.join("index");
+    commit(
+        &index,
+        &[("config.rokon", "Config { api: \"https://rokstones.io\" }\n")],
+    );
+    for kv in [
+        ["user.name", "t"],
+        ["user.email", "t@t"],
+        ["commit.gpgsign", "false"],
+    ] {
+        git(&index, &["config", kv[0], kv[1]]);
+    }
+    let reg = index.display().to_string();
+    write(
+        &home.join("config.rokon"),
+        &format!("Config {{ registry: {} }}\n", q(&reg)),
+    );
+    let num = root.join("num");
+    stone(&num, "num", "1.0.0", "", &[("src/lib.rok", ONE)]);
+    ok(&rok(&home, &num, &["publish", "--index", &reg, "--commit"]));
+
+    ok(&rok(&home, &root, &["install", "num"]));
+    let env = home.join("envs/default");
+    assert!(read(&env.join("rok.rokon")).contains("\"num\": Dep::version(\"^1.0.0\")"));
+    assert_eq!(locked_stones(&read(&env.join("rok.lock"))), ["num@1.0.0"]);
+    write(
+        &root.join("s.rok"),
+        "use num::one;\nprintln(f\"{one()}\");\n",
+    );
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
+    ok(&rok(&home, &root, &["uninstall", "num"]));
+    assert!(locked_stones(&read(&env.join("rok.lock"))).is_empty());
 }

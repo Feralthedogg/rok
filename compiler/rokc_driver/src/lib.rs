@@ -981,6 +981,7 @@ fn compile_unit_in(
         fingerprint: incr::key(&[incr::target_key(&cfg_env, &config.target).as_bytes()]),
         bodies: incr::current().map(|i| incr::bodies(i, files)),
         lints: config.keep_ast,
+        script: config.anonymous,
         library,
         stage: kept_stage.clone(),
     };

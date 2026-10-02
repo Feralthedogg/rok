@@ -173,7 +173,7 @@ pub fn rokc_for(plus: Option<&str>, pin: Option<&str>) -> Result<PathBuf, String
     Ok(rokc)
 }
 
-fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+pub fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
     for e in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
         let e = e.map_err(|e| e.to_string())?;

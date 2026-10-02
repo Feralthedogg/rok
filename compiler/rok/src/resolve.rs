@@ -58,6 +58,9 @@ pub struct Context {
     pub base: PathBuf,
     /// `None`: nothing to lock (no dependencies).
     pub lock_path: Option<PathBuf>,
+    /// A script with a `//! ```rokon` block: the environment whose
+    /// installed libraries joined its `deps`, and their names.
+    pub installed: Option<(String, Vec<String>)>,
 }
 
 #[derive(Clone)]
@@ -158,20 +161,7 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, Stri
             return Err("there is no rok.lock, and --locked forbids writing one".to_owned());
         }
     }
-    let mut r = Resolver {
-        home: home.to_path_buf(),
-        root: rokc_core::real_path(&ctx.base).unwrap_or_else(|_| ctx.base.clone()),
-        cache: Cache::new(home),
-        index: Cache::index(home),
-        registry: registry::default_url(home)?,
-        opts,
-        old,
-        new: Lock::default(),
-        fetched: Vec::new(),
-        seen: HashMap::new(),
-        out: Vec::new(),
-        natives: Vec::new(),
-    };
+    let mut r = Resolver::new(home, &ctx.base, opts, old)?;
     let base = ctx.base.display().to_string();
     r.natives.extend(ctx.manifest.native.iter().map(|d| {
         let by = "the root package".to_owned();
@@ -184,7 +174,17 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, Stri
         .chain(&ctx.manifest.dev_deps)
         .cloned()
         .collect();
-    r.walk(&all, &ctx.base, "the root package")?;
+    match &ctx.installed {
+        Some((env, names)) => {
+            let (env_deps, own): (Vec<Dep>, Vec<Dep>) = all
+                .into_iter()
+                .partition(|d| names.iter().any(|n| manifest::same(n, &d.name)));
+            r.walk(&own, &ctx.base, "the script's `//! rokon` block")?;
+            let by = format!("environment `{env}` (installed with `rok install`)");
+            r.walk(&env_deps, &ctx.base, &by)?;
+        }
+        None => r.walk(&all, &ctx.base, "the root package")?,
+    }
     let natives = r.natives()?;
     if let Some(path) = &ctx.lock_path {
         let text = r.new.to_text();
@@ -486,7 +486,36 @@ fn order<T>(
     idx.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
-impl Resolver<'_> {
+/// The directory of package `dep` (any kind, library or not), fetched
+/// into the cache when it is not there; a path is relative to `base`.
+pub fn fetch_package(
+    home: &Path,
+    dep: &Dep,
+    base: &Path,
+    opts: &Options,
+) -> Result<PathBuf, String> {
+    let mut r = Resolver::new(home, base, opts, Lock::default())?;
+    r.locate(dep, base).map(|(dir, _, _)| dir)
+}
+
+impl<'a> Resolver<'a> {
+    fn new(home: &Path, base: &Path, opts: &'a Options, old: Lock) -> Result<Self, String> {
+        Ok(Resolver {
+            home: home.to_path_buf(),
+            root: rokc_core::real_path(base).unwrap_or_else(|_| base.to_path_buf()),
+            cache: Cache::new(home),
+            index: Cache::index(home),
+            registry: registry::default_url(home)?,
+            opts,
+            old,
+            new: Lock::default(),
+            fetched: Vec::new(),
+            seen: HashMap::new(),
+            out: Vec::new(),
+            natives: Vec::new(),
+        })
+    }
+
     /// Every package `deps` reach, optional ones too.
     fn walk(&mut self, deps: &[Dep], base: &Path, by: &str) -> Result<(), String> {
         let mut queue: Vec<(Dep, PathBuf, String)> = deps

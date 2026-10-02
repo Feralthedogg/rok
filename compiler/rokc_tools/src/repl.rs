@@ -55,7 +55,8 @@ const HELP: &str = "\
                  `struct S` replaces the old one)
   :type <expr>   print the type of an expression
   :add <name> --path <dir> | --git <url> [--rev|--tag|--branch <r>]
-                 add a dependency to the active environment (`rok repl`)
+                 add a dependency: `rok install` into the environment, or
+                 in a package `rok add` (`rok repl`)
   :reset         forget every cell
   :quit          leave (also end of input)
 ";
@@ -503,9 +504,10 @@ impl Repl {
             .collect()
     }
 
-    /// `:add <args>`: `$ROK add [--env $ROK_ENV] <args>` (the `rok`
-    /// that started this session), then prebuild the dependency list of
-    /// `$ROK deps`.
+    /// `:add <args>`: `$ROK install --env $ROK_ENV <args>` in an
+    /// environment's session, else `$ROK add <args>` (to the package; the
+    /// `rok` that started this session), then prebuild the dependency list
+    /// of `$ROK deps`.
     fn add_dep(&mut self, args: &str) {
         let Some(rok) = std::env::var_os("ROK") else {
             eprintln!("`:add` needs a session started by `rok repl`");
@@ -527,7 +529,7 @@ impl Repl {
                 .filter(|o| o.status.success())
         };
         let words: Vec<&str> = args.split_whitespace().collect();
-        if run("add", &words).is_none() {
+        if run(if env.is_empty() { "add" } else { "install" }, &words).is_none() {
             return;
         }
         let Some(out) = run("deps", &[]) else { return };

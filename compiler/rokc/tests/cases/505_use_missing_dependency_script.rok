@@ -1,0 +1,8 @@
+// expect-error: 6:5: unresolved import: `json::parse` does not exist
+// expect-error: = help: `json` is not a dependency of this script: `rok install json`, or add it to a `//! ```rokon` block at the top of the file
+// A lone script gets packages from the environment (`rok install`) or
+// its own `//! ```rokon` block (spec 9.10.7).
+// spec: §9.10.7
+use json::parse;
+
+println("unreached");

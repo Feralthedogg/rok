@@ -519,8 +519,17 @@ fn collect<'a>(
     let mut reexports = base_reexports;
     reexports.extend(stage_reexports);
     let reexports = reexports;
+    // A prebuilt dependency's build has no user package to advise.
+    let missing = crate::uses::Missing {
+        script: input.script,
+        packages: &input.packages,
+    };
     early.extend(crate::uses::check_use_targets(
-        raw_uses, &all_items, uses, &reexports,
+        raw_uses,
+        &all_items,
+        uses,
+        &reexports,
+        input.lib.is_none().then_some(missing),
     ));
     early.extend(check_tiers(raw_uses, &owned.items, item_modules));
     drop(all_items);
