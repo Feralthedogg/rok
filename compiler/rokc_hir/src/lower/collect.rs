@@ -714,6 +714,7 @@ fn collect<'a>(
             imp.items.extend(added);
         }
     }
+    expand_impl_aliases(owned, &names);
     impl_param_types(owned, &names, &base_trait_defs);
     add_self_assoc_sigs(owned);
     let program: &'a Program = owned;
@@ -1348,10 +1349,9 @@ fn collect<'a>(
         });
         // A generic trait impl, or a generic inherent impl on a structural
         // type (`impl<T, const N: usize> [T; N] { .. }`, no trait: empty
-        // key): matched against the receiver, its methods templates.
-        if impl_generic
-            && (trait_name.is_some() || !matches!(impl_def.self_ty.kind, AstTyKind::Path(_)))
-        {
+        // key) or on some instances of a base (`impl<V> P<str, V>`):
+        // matched against the receiver, its methods templates.
+        if impl_generic && (trait_name.is_some() || !covers_base(impl_def)) {
             let trait_key = trait_name.unwrap_or_default();
             let td = trait_defs.get(&trait_key).copied();
             let id = format!(
@@ -6943,6 +6943,43 @@ fn may_diverge(
 /// declares at its position (trait parameters replaced by the impl's
 /// arguments), not an implicit type parameter: the method implements
 /// that signature.
+/// Does generic impl `i` cover every instance of its target's base: a
+/// path whose arguments are distinct parameters of the impl (`Box<T>`,
+/// not `P<str, V>` or `P<T, T>`)?
+fn covers_base(i: &rokc_ast::ImplDef) -> bool {
+    let AstTyKind::Path(p) = &i.self_ty.kind else {
+        return false;
+    };
+    let args = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
+    let mut seen = std::collections::HashSet::new();
+    args.iter().all(|a| {
+        matches!(&a.kind, AstTyKind::Path(ap)
+            if ap.segments.len() == 1
+                && ap.segments[0].generics.is_empty()
+                && i.generics.params.iter().any(|gp| matches!(gp,
+                    rokc_ast::GenericParam::Type { name, .. }
+                    | rokc_ast::GenericParam::Const { name, .. } if *name == ap.segments[0].name))
+                && seen.insert(ap.segments[0].name.as_str()))
+    })
+}
+
+/// `impl<T> Al<T>` with `type Al<T> = S<T>;` is `impl<T> S<T>`: a
+/// generic alias target is expanded (through nested aliases) before
+/// impls are keyed by their written target.
+fn expand_impl_aliases(program: &mut Program, names: &TypeNames) {
+    for it in &mut program.items {
+        let Item::Impl(i) = it else { continue };
+        let module = impl_module(i);
+        for _ in 0..32 {
+            let Some(mut ty) = names.expand_alias(&i.self_ty, &module, i.span) else {
+                break;
+            };
+            ty.span = i.self_ty.span;
+            i.self_ty = ty;
+        }
+    }
+}
+
 fn impl_param_types(
     program: &mut Program,
     names: &TypeNames,

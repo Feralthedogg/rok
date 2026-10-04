@@ -1,0 +1,53 @@
+// spec: §2.9.1 §2.9.4
+// expect-exit: 0
+// expect-stdout:
+// 7 8 5 1 4 9 2 3 10
+
+// An impl on a generic type alias is an impl on the aliased type, as if
+// written out: nested aliases, an alias fixing some of the target's
+// arguments, a trait impl, an alias from another module, a structural
+// target.
+struct S<T> { v: T; }
+type Al<T> = S<T>;
+type Al2<U> = Al<U>;
+
+impl<T> Al2<T> {
+    fn get(self) -> T { return self.v; }
+    fn mk(v: T) -> Self { return Self { v: v }; }
+}
+
+type B = Al<i32>;
+impl B { fn next(self) -> i32 { return self.v + 1; } }
+
+trait Tr { fn five(self) -> i32; }
+impl<T> Tr for Al2<T> { fn five(self) -> i32 { return 5; } }
+
+type Names<V> = Dict<str, V>;
+impl<V> Names<V> { fn count(self) -> usize { return self.len(); } }
+
+type Arr<T> = [T; 3];
+impl<T> Arr<T> { fn head(self) -> T { return self[0]; } }
+
+mod geo {
+    pub struct P<A, B> { pub a: A; pub b: B; }
+    pub type Keyed<V> = P<str, V>;
+}
+impl<V> geo::Keyed<V> { fn val(self) -> V { return self.b; } }
+
+struct Two<A, B> { a: A; b: B; }
+type Same<T> = Two<T, T>;
+impl<T> Same<T> { fn second(self) -> T { return self.b; } }
+impl Two<i32, str> { fn second(self) -> i32 { return self.a; } }
+
+fn main() -> i32 {
+    let s = S::mk(7);
+    let s2 = Al2::<i32>::mk(10);
+    let d: Dict<str, i32> = Dict::new();
+    d.insert("a", 1);
+    let a: [i32; 3] = [4, 5, 6];
+    let p = geo::P { a: "k", b: 9 };
+    let t = Two { a: 1, b: 2 };
+    let u = Two { a: 3, b: "x" };
+    println(f"{s.get()} {s.next()} {s.five()} {d.count()} {a.head()} {p.val()} {t.second()} {u.second()} {s2.get()}");
+    return 0;
+}

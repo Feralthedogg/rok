@@ -1,0 +1,7 @@
+pub struct Cell<T> { pub v: T; }
+pub type Al<T> = Cell<T>;
+
+// The dependency's own impl through its alias.
+impl<T> Al<T> {
+    pub fn get(self) -> T { return self.v; }
+}

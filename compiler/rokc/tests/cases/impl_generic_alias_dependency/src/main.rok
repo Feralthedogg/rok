@@ -1,0 +1,19 @@
+// spec: §2.9.1 §2.9.5
+// rokc-arg: --extern adep=tests/cases/impl_generic_alias_dependency/adep
+// expect-exit: 0
+// expect-stdout:
+// 4 cell 4
+
+// A dependency's generic alias as an impl target: the dependency's own
+// inherent impl, and local trait impls here.
+trait Twice { fn twice(self) -> i32; }
+impl Twice for adep::Al<i32> { fn twice(self) -> i32 { return self.v * 2; } }
+
+trait Show { fn show(self) -> str; }
+impl<T> Show for adep::Al<T> { fn show(self) -> str { return "cell"; } }
+
+fn main() -> i32 {
+    let c = adep::Cell { v: 2 };
+    println(f"{c.twice()} {c.show()} {c.get() + 2}");
+    return 0;
+}
