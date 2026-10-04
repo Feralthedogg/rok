@@ -1,0 +1,44 @@
+// spec: §2.6.9 §2.10.4 §2.10.9
+// expect-exit: 0
+// expect-stdout:
+// 3 4 5 6 7 8 9 10 11
+
+// A generic alias's `where` on a type parameter holds by the bounds in
+// scope at the use: the fn's generics and `where`, the impl's (for its
+// methods too), a trait's supertraits and associated-type bounds.
+trait Num { fn n(self) -> i32; }
+impl Num for i32 { fn n(self) -> i32 { return self; } }
+trait Big: Num {}
+impl Big for i32 {}
+
+struct S<T> { v: T; }
+type W<T> = S<T> where T: Num;
+
+fn get<T: Num>(x: W<T>) -> i32 { return x.v.n(); }
+fn get2<T>(x: W<T>) -> i32 where T: Num { return x.v.n(); }
+fn get3<T: Big>(x: T) -> i32 { let w: W<T> = S { v: x }; return w.v.n(); }
+
+impl<T: Num> W<T> { fn m(self) -> i32 { return self.v.n(); } }
+
+struct Box2<T> { v: T; }
+impl<T> Box2<T> where T: Num {
+    fn wrap(self) -> W<T> { return S { v: self.v }; }
+    fn pair<U: Num>(self, u: W<U>) -> i32 { return self.v.n() + u.v.n(); }
+}
+
+trait Twice: Num { fn twice(self) -> i32 { let w: W<Self> = S { v: self }; return w.v.n() * 2; } }
+impl Twice for i32 {}
+
+trait Has {
+    type A: Num;
+    fn a(self) -> Self::A;
+    fn via(self) -> i32 { let w: W<Self::A> = S { v: self.a() }; return w.v.n(); }
+}
+struct X {}
+impl Has for X { type A = i32; fn a(self) -> i32 { return 10; } }
+
+fn main() -> i32 {
+    let b = Box2 { v: 7 };
+    println(f"{get(S { v: 3 })} {get2(S { v: 4 })} {get3(5)} {S { v: 6 }.m()} {b.wrap().v} {Box2 { v: 3 }.pair(S { v: 5 })} {Twice::twice(4) + 1} {X {}.via()} {get(S { v: 11 })}");
+    return 0;
+}

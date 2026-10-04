@@ -5062,79 +5062,161 @@ fn check_type_bounds(env: &Env<'_>) {
             ));
         }
     }
-    let uses = env.names.alias_uses.borrow().clone();
-    for (full, args, module, span) in uses {
-        let Some(def) = env.names.generic_aliases.get(&full) else {
-            continue;
-        };
-        let sc = Scope {
-            names: &env.names,
-            module: &module,
-            at: span,
-        };
-        let mut rcx = LowerCtx::new(env, &no_subst, None, span);
-        rcx.current_module.clone_from(&module);
-        let args: Vec<HirTy> = def
-            .generics
-            .params
-            .iter()
-            .zip(&args)
-            .map(|(gp, a)| match (gp, &a.kind) {
-                (rokc_ast::GenericParam::Const { .. }, AstTyKind::Const(c)) => rcx
-                    .eval_const(c)
-                    .map_or(HirTy::Unknown, |v| HirTy::Const(v, None)),
-                _ => resolve_ty_with_structs(a, &env.defs, None, sc),
-            })
-            .collect();
-        let shown: Vec<String> = args.iter().map(|a| ctx.ty_name(a)).collect();
-        insts.push((
-            format!("{}<{}>", leaf_name(&full), shown.join(", ")),
-            module_of(&full),
-            args,
-            &def.generics,
-            &def.where_clause,
-            span,
-        ));
-    }
     for (shown, module, args, generics, where_clause, span) in insts {
-        let subst = generic_subst(generics, &args);
-        let mut rcx = LowerCtx::new(env, &subst, None, span);
-        rcx.current_module = module;
-        let mut goals: Vec<(HirTy, &Vec<Ty>)> = Vec::new();
-        for gp in &generics.params {
-            if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
-                if let Some(t) = subst.get(name) {
-                    goals.push((t.clone(), bounds));
-                }
+        let errors = unmet_bounds(
+            env,
+            &shown,
+            module,
+            &args,
+            generics,
+            where_clause,
+            span,
+            |_| None,
+        );
+        env.sink.diagnostics.borrow_mut().extend(errors);
+    }
+    // A generic alias use naming a type parameter is checked where the
+    // parameter's bounds are known: a generic body's by its definition
+    // check (`bounds::check_one`), a generic impl's target here.
+    let mut seen = std::collections::HashSet::new();
+    let uses = env.names.alias_uses.borrow().clone();
+    for u in uses {
+        if !seen.insert((u.0.clone(), u.3)) {
+            continue;
+        }
+        let errors = if let Some(gi) = env.impls.generic().find(|gi| gi.self_ty.span == u.3) {
+            let params: Vec<_> = gi.generics.params.iter().collect();
+            let where_clause: Vec<_> = gi.where_clause.iter().collect();
+            let self_of = super::bounds::SelfOf::Impl(&gi.self_ty);
+            let owner = |_: &str| Some("the impl's generics".to_owned());
+            super::bounds::in_scope(
+                env,
+                &params,
+                &where_clause,
+                (u.2.clone(), u.3, &[]),
+                &self_of,
+                |rcx, _, _| alias_use_unmet(rcx, &u, false, owner),
+            )
+            .0
+        } else {
+            let mut rcx = LowerCtx::new(env, &no_subst, None, u.3);
+            let mark = rcx.probe_mark();
+            let errors = alias_use_unmet(&mut rcx, &u, false, |_| None);
+            rcx.rollback(&mark);
+            errors
+        };
+        env.sink.diagnostics.borrow_mut().extend(errors);
+    }
+}
+
+/// The bounds generic alias use `u` fails, its arguments resolved by
+/// `rcx` (with the type parameters around the use). None when an
+/// argument names a type `rcx` doesn't know (a parameter of a generic
+/// item around the use, checked by that item's check, or reported as
+/// unknown), or with `params_only`, when none names a parameter.
+pub(super) fn alias_use_unmet(
+    rcx: &mut LowerCtx<'_>,
+    (full, args, module, span): &AliasUse,
+    params_only: bool,
+    owner: impl Fn(&str) -> Option<String>,
+) -> Vec<rokc_diagnostic::RokDiagnostic> {
+    let env = rcx.env;
+    let Some(def) = env.names.generic_aliases.get(full) else {
+        return Vec::new();
+    };
+    let outer = std::mem::replace(&mut rcx.current_module, module.clone());
+    let args: Vec<HirTy> = def
+        .generics
+        .params
+        .iter()
+        .zip(args)
+        .map(|(gp, a)| match (gp, &a.kind) {
+            (rokc_ast::GenericParam::Const { .. }, AstTyKind::Const(c)) => rcx
+                .eval_const(c)
+                .map_or(HirTy::Unknown, |v| HirTy::Const(v, None)),
+            _ => rcx.resolve_ast_ty(a),
+        })
+        .collect();
+    rcx.current_module = outer;
+    let unknown = |a: &HirTy| super::bounds::mentions(rcx, a, &|t| matches!(t, HirTy::Path(_)));
+    let param = |a: &HirTy| super::bounds::has_param(rcx, a);
+    if args.iter().any(unknown) || params_only && !args.iter().any(param) {
+        return Vec::new();
+    }
+    let shown: Vec<String> = args.iter().map(|a| rcx.ty_name(a)).collect();
+    let shown = format!("{}<{}>", leaf_name(full), shown.join(", "));
+    let (generics, where_clause) = (&def.generics, &def.where_clause);
+    unmet_bounds(
+        env,
+        &shown,
+        module_of(full),
+        &args,
+        generics,
+        where_clause,
+        *span,
+        owner,
+    )
+}
+
+/// The bounds of `generics` / `where_clause` that `args` fail, as
+/// errors at `span`. `owner` names what declares a type parameter of
+/// the use's scope, for the help.
+#[allow(clippy::too_many_arguments)]
+fn unmet_bounds(
+    env: &Env<'_>,
+    shown: &str,
+    module: String,
+    args: &[HirTy],
+    generics: &rokc_ast::Generics,
+    where_clause: &[rokc_ast::WherePred],
+    span: Span,
+    owner: impl Fn(&str) -> Option<String>,
+) -> Vec<rokc_diagnostic::RokDiagnostic> {
+    let subst = generic_subst(generics, args);
+    let mut rcx = LowerCtx::new(env, &subst, None, span);
+    rcx.current_module = module;
+    let mut goals: Vec<(HirTy, &Vec<Ty>)> = Vec::new();
+    for gp in &generics.params {
+        if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
+            if let Some(t) = subst.get(name) {
+                goals.push((t.clone(), bounds));
             }
         }
-        for w in where_clause {
-            goals.push((rcx.resolve_ast_ty(&w.ty), &w.bounds));
+    }
+    for w in where_clause {
+        goals.push((rcx.resolve_ast_ty(&w.ty), &w.bounds));
+    }
+    let mut out = Vec::new();
+    for (ty, bounds) in goals {
+        if ty == HirTy::Unknown {
+            continue;
         }
-        for (ty, bounds) in goals {
-            if ty == HirTy::Unknown {
+        for b in bounds {
+            let module = rcx.current_module.clone();
+            let Some(want) = rcx.bound_ref(b, &module, |t| rcx.resolve_ast_ty(t)) else {
+                continue;
+            };
+            if rcx.implements_trait(&ty, &want, 0) {
                 continue;
             }
-            for b in bounds {
-                let module = rcx.current_module.clone();
-                let Some(want) = rcx.bound_ref(b, &module, |t| rcx.resolve_ast_ty(t)) else {
-                    continue;
-                };
-                if !rcx.implements_trait(&ty, &want, 0) {
-                    rcx.emit_error_at(
-                        rokc_diagnostic::ErrorKind::Type,
-                        span,
-                        format!(
-                            "type `{}` does not satisfy trait bound `{}` required by `{shown}` \
-                             (spec 2.10.4)",
-                            rcx.ty_name(&ty),
-                            rcx.trait_name(&want),
-                        ),
-                    );
-                }
+            let name = rcx.ty_name(&ty);
+            let mut d = rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                span,
+                format!(
+                    "type `{name}` does not satisfy trait bound `{}` required by `{shown}` \
+                     (spec 2.10.4)",
+                    rcx.trait_name(&want),
+                ),
+            );
+            if let (HirTy::Param(_), Some(o)) = (&ty, owner(&name)) {
+                let bound = want.render(leaf_name(&want.path), |t| rcx.ty_name(t));
+                d.notes.push(format!("help: add `{name}: {bound}` to {o}"));
             }
+            out.push(d);
         }
     }
+    out
 }
 
 /// Spec 5.3: every thread reads a `static`, so its type is `Sync`.

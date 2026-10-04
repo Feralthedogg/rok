@@ -1,0 +1,15 @@
+// spec: §2.10.4
+// expect-error: where_alias_param_wrong_bound_err.rok:11:33: type `T` does not satisfy trait bound `Num` required by `W<T>`
+// expect-error: help: add `T: Num` to `get`'s generics
+// A bound in scope that isn't the alias's (nor has it as a supertrait)
+// does not meet it.
+trait Num { fn n(self) -> i32; }
+trait Other {}
+impl Num for i32 { fn n(self) -> i32 { return self; } }
+struct S<T> { v: T; }
+type W<T> = S<T> where T: Num;
+fn get<T: Other>(x: T) { let w: W<T> = S { v: x }; }
+
+fn main() -> i32 {
+    return 0;
+}

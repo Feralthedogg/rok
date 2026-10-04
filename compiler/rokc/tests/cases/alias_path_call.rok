@@ -1,0 +1,42 @@
+// spec: §2.6.9 §2.9.4
+// expect-exit: 0
+// expect-stdout:
+// 1 2 x 0 0 5 6 3 9 4
+
+// A path through a type alias is the aliased type's: `Al::mk` with
+// `type Al<T> = S<T>` is `S::mk` (`T` inferred), `B::mk` with
+// `type B = S<i32>` is `S::<i32>::mk`; nested aliases, an alias in
+// another module, a method value, an enum variant, an associated const.
+struct S<T> { v: T; }
+impl<T> S<T> {
+    fn mk(v: T) -> Self { return Self { v: v }; }
+    fn zero() -> Self where T: Default { return Self { v: T::default() }; }
+}
+impl S<i32> { const K: i32 = 4; }
+type Al<T> = S<T>;
+type Al2<U> = Al<U>;
+type B = S<i32>;
+type B2 = Al<i64>;
+
+mod m {
+    pub struct P<A> { pub a: A; }
+    impl<A> P<A> { pub fn of(a: A) -> Self { return Self { a: a }; } }
+    pub type Q<A> = P<A>;
+}
+
+enum E<T> { A(T), N }
+type EI = E<i32>;
+
+fn main() -> i32 {
+    let a = Al::mk(1);
+    let b = B::mk(2);
+    let c = Al2::mk("x");
+    let d = B::zero();
+    let e = B2::zero();
+    let f = m::Q::of(5);
+    let g: fn(i32) -> S<i32> = B::mk;
+    let h = match EI::A(3) { E::A(x) => x, E::N => 0 };
+    let i = Al::<i32>::mk(9);
+    println(f"{a.v} {b.v} {c.v} {d.v} {e.v} {f.a} {g(6).v} {h} {i.v} {B::K}");
+    return 0;
+}

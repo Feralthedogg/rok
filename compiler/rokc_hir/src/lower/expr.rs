@@ -7268,17 +7268,32 @@ pub(super) fn lower_call(
         let callee_h = lower_expected(ctx, callee, HirTy::Unknown);
         return call_value(ctx, callee_h, args, span);
     };
-    let self_segs = self_path_segs(ctx, p);
-    let segs: Vec<&str> = self_segs.iter().map(String::as_str).collect();
-    let display = segs.join("::");
-
     // A local of `fn(...)` / closure type shadows items.
-    if let [name] = segs.as_slice() {
-        if let Some(local) = ctx.lookup(name) {
+    if let [s] = p.segments.as_slice() {
+        if let Some(local) = ctx.lookup(&s.name) {
             let callee_h = ctx.read_local(local, callee.span);
             return call_value(ctx, callee_h, args, span);
         }
     }
+    match alias_path(ctx, p) {
+        Ok(a) => lower_path_call(ctx, a.as_ref().unwrap_or(p), args, span),
+        Err(msg) => {
+            discard_args(ctx, args);
+            ctx.error_expr(span, msg)
+        }
+    }
+}
+
+/// A call of path `p`, not a local.
+fn lower_path_call(
+    ctx: &mut LowerCtx<'_>,
+    p: &AstPath,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    let self_segs = self_path_segs(ctx, p);
+    let segs: Vec<&str> = self_segs.iter().map(String::as_str).collect();
+    let display = segs.join("::");
 
     // Free function / extern / re-export, module-aware.
     if let Some(full) = ctx.resolve_fn_name(&segs) {
@@ -10282,6 +10297,111 @@ pub(super) fn prefix_for_prim(sym: &str, prim: PrimTy) -> Option<(PrimOp, HirTy)
 
 /// Path segments with a leading `Self` (inside an impl of a named type)
 /// replaced by that type's absolute path (`pkg::m::T`, `rok::..`).
+/// `B::mk` with `type B = S<i32>` is `S::<i32>::mk`; `Al::mk` with
+/// `type Al<T> = S<T>` is `S::mk`, the arguments inferred (each of the
+/// aliased type's must then be a distinct parameter of the alias). `p`
+/// with its type prefix through aliases, `None` if it names none.
+fn alias_path(ctx: &LowerCtx<'_>, p: &AstPath) -> Result<Option<AstPath>, String> {
+    let Some((last, prefix)) = p.segments.split_last().filter(|(_, t)| !t.is_empty()) else {
+        return Ok(None);
+    };
+    let names = &ctx.env.names;
+    let at = ctx.here();
+    let mut ty = Ty {
+        kind: AstTyKind::Path(AstPath {
+            segments: prefix.to_vec(),
+            span: p.span,
+        }),
+        span: p.span,
+    };
+    let mut through = false;
+    for _ in 0..32 {
+        let AstTyKind::Path(tp) = &ty.kind else {
+            return Ok(None);
+        };
+        let segs: Vec<&str> = tp.segments.iter().map(|s| s.name.as_str()).collect();
+        let Some(full) = ctx.canon_type(&segs) else {
+            break;
+        };
+        let generic = names
+            .generic_alias(&full)
+            .filter(|a| !a.generics.params.is_empty());
+        let unapplied = tp.segments.last().is_some_and(|s| s.generics.is_empty());
+        ty = match generic {
+            Some(a) if unapplied => {
+                let params: HashMap<String, Ty> = a
+                    .generics
+                    .params
+                    .iter()
+                    .map(|gp| {
+                        let (rokc_ast::GenericParam::Type { name, .. }
+                        | rokc_ast::GenericParam::Const { name, .. }) = gp;
+                        (
+                            name.clone(),
+                            Ty {
+                                kind: AstTyKind::Never,
+                                span: at,
+                            },
+                        )
+                    })
+                    .collect();
+                let mut body = a.ty.clone();
+                names.absolutize(
+                    &mut body,
+                    &module_of(&full),
+                    &ctx.current_module,
+                    &params,
+                    at,
+                );
+                let AstTyKind::Path(bp) = &mut body.kind else {
+                    return Ok(None);
+                };
+                let mut seen = std::collections::HashSet::new();
+                let open = bp.segments.last_mut().filter(|s| {
+                    s.generics.iter().all(|g| {
+                        matches!(&g.kind, AstTyKind::Path(gp) if gp.segments.len() == 1
+                            && params.contains_key(&gp.segments[0].name)
+                            && seen.insert(gp.segments[0].name.clone()))
+                    })
+                });
+                let Some(open) = open else {
+                    let path = segs.join("::");
+                    return Err(format!(
+                        "`{path}::{}` can't infer `{}`'s arguments: its aliased type's arguments \
+                         are not its distinct parameters (spec 2.6.9) — write `{path}::<..>::{}`",
+                        last.name,
+                        leaf_name(&full),
+                        last.name
+                    ));
+                };
+                open.generics.clear();
+                body
+            }
+            Some(_) => match names.expand_alias(&ty, &ctx.current_module, at) {
+                Some(t) => t,
+                None => break,
+            },
+            None => match names.plain_alias_ty(&full) {
+                Some(t) => {
+                    let mut body = t.clone();
+                    let none = HashMap::new();
+                    names.absolutize(&mut body, &module_of(&full), &ctx.current_module, &none, at);
+                    body
+                }
+                None => break,
+            },
+        };
+        through = true;
+    }
+    let AstTyKind::Path(tp) = ty.kind else {
+        return Ok(None);
+    };
+    Ok(through.then(|| AstPath {
+        segments: tp.segments.into_iter().chain([last.clone()]).collect(),
+        span: p.span,
+    }))
+}
+
 pub(super) fn self_path_segs(ctx: &LowerCtx<'_>, p: &AstPath) -> Vec<String> {
     let segs: Vec<String> = p.segments.iter().map(|s| s.name.clone()).collect();
     let owner = match (segs.first().map(String::as_str), &ctx.self_ty) {
@@ -10538,6 +10658,11 @@ pub(super) fn lower_path(
     path: &AstPath,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    let aliased = match alias_path(ctx, path) {
+        Ok(a) => a,
+        Err(msg) => return ctx.error_expr(span, msg),
+    };
+    let path = aliased.as_ref().unwrap_or(path);
     let self_segs = self_path_segs(ctx, path);
     let segs: Vec<&str> = self_segs.iter().map(String::as_str).collect();
     if let [name] = segs.as_slice() {

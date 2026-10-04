@@ -61,9 +61,14 @@ fn add_bound(env: &Env<'_>, p: u32, r: TraitRef) {
 
 /// Does `t` mention a `Param`?
 pub(super) fn has_param(ctx: &LowerCtx<'_>, t: &HirTy) -> bool {
-    let rec = |t: &HirTy| has_param(ctx, t);
+    mentions(ctx, t, &|t| matches!(t, HirTy::Param(_)))
+}
+
+/// Does `t` mention a type `hit` picks?
+pub(super) fn mentions(ctx: &LowerCtx<'_>, t: &HirTy, hit: &dyn Fn(&HirTy) -> bool) -> bool {
+    let rec = |t: &HirTy| mentions(ctx, t, hit);
     match t {
-        HirTy::Param(_) => true,
+        _ if hit(t) => true,
         HirTy::Struct(id) => ctx.struct_def(*id).generic_args.iter().any(rec),
         HirTy::Enum(id) => ctx.enum_def(*id).generic_args.iter().any(rec),
         HirTy::Sum(ps) | HirTy::Tuple(ps) => ps.iter().any(rec),
@@ -646,31 +651,37 @@ pub(super) fn check_all(
         .filter(|d| d.body.is_some())
         .map(|d| d.span)
         .collect();
-    let mut todo: Vec<(&FnDef, String, SelfOf<'_>)> = env
+    // (body, module, `Self`, how many leading parameters are the impl's)
+    let mut todo: Vec<(&FnDef, String, SelfOf<'_>, usize)> = env
         .generic_fns
         .values()
-        .map(|f| (*f, SelfOf::None))
+        .map(|f| (*f, SelfOf::None, 0))
+        .chain(env.impls.generic().flat_map(|gi| {
+            let outer = gi.generics.params.len();
+            gi.methods
+                .values()
+                .map(move |gm| (&*gm.def, SelfOf::Impl(&gm.self_ty), outer))
+        }))
         .chain(
-            env.impls
-                .generic()
-                .flat_map(|gi| gi.methods.values())
-                .chain(env.generic_methods.values().flatten())
-                .map(|gm| (&*gm.def, SelfOf::Impl(&gm.self_ty))),
+            env.generic_methods
+                .values()
+                .flatten()
+                .map(|gm| (&*gm.def, SelfOf::Impl(&gm.self_ty), 0)),
         )
-        .filter(|(f, _)| f.body.is_some() && !implicit(f) && !defaults.contains(&f.span))
-        .map(|(f, s)| (f, module_of(&f.name), s))
+        .filter(|(f, ..)| f.body.is_some() && !implicit(f) && !defaults.contains(&f.span))
+        .map(|(f, s, outer)| (f, module_of(&f.name), s, outer))
         .chain(env.trait_info.iter().flat_map(|(key, info)| {
             info.decls
                 .values()
                 .filter(|d| d.body.is_some())
-                .map(|d| (d, info.module.clone(), SelfOf::Trait(key.as_str())))
+                .map(|d| (d, info.module.clone(), SelfOf::Trait(key.as_str()), 0))
         }))
-        .filter(|(_, module, _)| wanted(module))
+        .filter(|(_, module, ..)| wanted(module))
         .collect();
     todo.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     todo.dedup_by(|a, b| a.0.name == b.0.name && a.0.span == b.0.span);
     todo.sort_by_key(|(f, ..)| (f.span.file, f.span.start));
-    for (f, module, self_of) in todo {
+    for (f, module, self_of, outer) in todo {
         let generics: Vec<&rokc_ast::GenericParam> = match self_of {
             SelfOf::Trait(key) => env.trait_info[key].generics.params.iter().collect(),
             _ => Vec::new(),
@@ -682,7 +693,7 @@ pub(super) fn check_all(
             SelfOf::Impl(t) => rokc_core::codec::Codec::enc(*t, &mut owner),
             SelfOf::Trait(k) => owner.buf.extend_from_slice(k.as_bytes()),
         }
-        let run = || check_one(env, f, module.clone(), &generics, &self_of);
+        let run = || check_one(env, f, module.clone(), &generics, &self_of, outer);
         let errors = match incr {
             Some(incr) => incr.checked(env, f, &owner.buf, run),
             None => run(),
@@ -695,7 +706,7 @@ pub(super) fn check_all(
 }
 
 /// What `Self` is in a checked body.
-enum SelfOf<'a> {
+pub(super) enum SelfOf<'a> {
     None,
     /// An impl's target as written.
     Impl(&'a Ty),
@@ -772,7 +783,66 @@ fn check_one(
     module: String,
     generics: &[&rokc_ast::GenericParam],
     self_of: &SelfOf<'_>,
+    outer: usize,
 ) -> Vec<rokc_diagnostic::RokDiagnostic> {
+    let where_clause: Vec<&rokc_ast::WherePred> = f.where_clause.iter().collect();
+    // What declares type parameter `p`, for an alias bound's help.
+    let outer = match self_of {
+        SelfOf::Trait(key) => env.trait_info[*key].generics.params.len(),
+        _ => outer,
+    };
+    let owner = |p: &str| {
+        let at = generics
+            .iter()
+            .rposition(|gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if name == p))?;
+        Some(match self_of {
+            // A method template is `Base__method`.
+            SelfOf::Impl(_) if at >= outer => {
+                let name = leaf_name(&f.name);
+                format!("`{}`'s generics", name.rsplit("__").next().unwrap_or(name))
+            }
+            _ if at >= outer => format!("`{}`'s generics", leaf_name(&f.name)),
+            SelfOf::Trait(key) => format!("`{}`'s generics", leaf_name(key)),
+            _ => "the impl's generics".to_owned(),
+        })
+    };
+    let ((), mut errors) = in_scope(
+        env,
+        generics,
+        &where_clause,
+        (module.clone(), f.span, &f.attrs),
+        self_of,
+        |ctx, subst, self_hir| {
+            let from = env.names.alias_uses.borrow().len();
+            let id = FunctionId(env.sink.next_id.get());
+            env.sink.next_id.set(id.0 + 1);
+            mono::lower_fn_inner(env, f, id, f.name.clone(), self_hir, module, subst);
+            // Spec 2.10.4: a generic alias's bounds on these parameters
+            // hold by theirs.
+            let uses = env.names.alias_uses.borrow()[from..].to_vec();
+            let mut seen = std::collections::HashSet::new();
+            for u in uses.iter().filter(|u| seen.insert((&u.0, u.3))) {
+                let errors = collect::alias_use_unmet(ctx, u, true, owner);
+                env.sink.diagnostics.borrow_mut().extend(errors);
+            }
+        },
+    );
+    errors.retain(rokc_diagnostic::RokDiagnostic::is_error);
+    errors
+}
+
+/// Run `run` with `generics` as opaque type parameters bounded by their
+/// bounds and `where_clause`, as a generic body sees them (its context,
+/// substitution and `Self`): its result and the errors reported. The
+/// shared state is left as it was.
+pub(super) fn in_scope<R>(
+    env: &Env<'_>,
+    generics: &[&rokc_ast::GenericParam],
+    where_clause: &[&rokc_ast::WherePred],
+    (module, at, attrs): (String, Span, &[rokc_ast::Attribute]),
+    self_of: &SelfOf<'_>,
+    run: impl FnOnce(&mut LowerCtx<'_>, &TySubst, Option<HirTy>) -> R,
+) -> (R, Vec<rokc_diagnostic::RokDiagnostic>) {
     let snapshot = Snapshot::take(env);
     let mut subst = TySubst::new();
     let mut consts = Vec::new();
@@ -785,7 +855,7 @@ fn check_one(
         }
     }
     for (name, ty) in consts {
-        let p = match LowerCtx::new(env, &subst, None, f.span).resolve_ast_ty(ty) {
+        let p = match LowerCtx::new(env, &subst, None, at).resolve_ast_ty(ty) {
             HirTy::Prim(p) => p,
             _ => PrimTy::Usize,
         };
@@ -818,10 +888,9 @@ fn check_one(
         }
         _ => None,
     };
-    let mut ctx = LowerCtx::new(env, &subst, self_param.clone(), f.span);
+    let mut ctx = LowerCtx::new(env, &subst, self_param.clone(), at);
     ctx.current_module.clone_from(&module);
-    ctx.assoc_names = f
-        .attrs
+    ctx.assoc_names = attrs
         .iter()
         .filter(|a| a.path.first().is_some_and(|p| p == crate::ASSOC_TYPES_ATTR))
         .flat_map(|a| a.path[1..].iter().cloned())
@@ -840,8 +909,8 @@ fn check_one(
             }
         }
     }
-    let bare = |w: &&rokc_ast::WherePred| matches!(&w.ty.kind, AstTyKind::Path(p) if p.segments.len() == 1 && subst.contains_key(&p.segments[0].name));
-    let (alone, rest): (Vec<_>, Vec<_>) = f.where_clause.iter().partition(bare);
+    let bare = |w: &&&rokc_ast::WherePred| matches!(&w.ty.kind, AstTyKind::Path(p) if p.segments.len() == 1 && subst.contains_key(&p.segments[0].name));
+    let (alone, rest): (Vec<&&rokc_ast::WherePred>, Vec<_>) = where_clause.iter().partition(bare);
     // A clause on another type (`where List<T>: Display`) is assumed in
     // the body.
     for w in alone.iter().chain(&rest) {
@@ -858,13 +927,11 @@ fn check_one(
         SelfOf::Impl(t) => Some(ctx.resolve_ast_ty(t)),
         _ => self_param,
     };
-    let id = FunctionId(env.sink.next_id.get());
-    env.sink.next_id.set(id.0 + 1);
-    mono::lower_fn_inner(env, f, id, f.name.clone(), self_hir, module, &subst);
+    ctx.self_ty.clone_from(&self_hir);
+    let out = run(&mut ctx, &subst, self_hir);
     let mut errors = ctx.rollback(&mark);
     errors.extend(snapshot.restore(env));
-    errors.retain(rokc_diagnostic::RokDiagnostic::is_error);
-    errors
+    (out, errors)
 }
 
 /// Does a `where` clause of the body being checked give `ty` `want`?

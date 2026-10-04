@@ -1,0 +1,20 @@
+// spec: §2.6.9 §2.10.4
+// expect-error: where_alias_param_unbounded_err.rok:14:14: type `T` does not satisfy trait bound `Num` required by `W<T>`
+// expect-error: help: add `T: Num` to `get`'s generics
+// expect-error: where_alias_param_unbounded_err.rok:15:9: type `T` does not satisfy trait bound `Num` required by `W<T>`
+// expect-error: help: add `T: Num` to the impl's generics
+// expect-error: where_alias_param_unbounded_err.rok:16:38: type `U` does not satisfy trait bound `Num` required by `W<U>`
+// expect-error: help: add `U: Num` to `k`'s generics
+// A type parameter without the bound a generic alias's `where` needs
+// is rejected where the alias is used, never called or not.
+trait Num { fn n(self) -> i32; }
+impl Num for i32 { fn n(self) -> i32 { return self; } }
+struct S<T> { v: T; }
+type W<T> = S<T> where T: Num;
+fn get<T>(x: W<T>) -> i32 { return 0; }
+impl<T> W<T> { fn m(self) -> i32 { return 0; } }
+impl<T: Num> S<T> { fn k<U>(self, u: W<U>) -> i32 { return 0; } }
+
+fn main() -> i32 {
+    return 0;
+}
