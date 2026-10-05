@@ -15,7 +15,7 @@ use rok::std::thread;
 
 fn main() {
     let (tx, rx) = channel::<List<i32>>();
-    let a = sent(tx) + tried(tx) + task::block_on(sent_async(tx)) + handed();
+    let a = sent(tx) + tried(tx) + task::block_on(sent_async(tx)) + handed() + flagged(tx);
     for _ in 0..3 {
         let _ = rx.recv();
     }
@@ -47,3 +47,47 @@ fn handed() -> i64 {
     let k = xs.len();
     (try! t.join() + k) as i64
 }
+
+// Also where a flag says it was sent, where the flag got a value the
+// check cannot see, and on a loop's next pass.
+fn flagged(tx: Sender<List<i32>>) -> i64 {
+    flag_set(tx, true) + flag_lost(tx, true, false) + next_pass(tx)
+}
+
+fn flag_set(tx: Sender<List<i32>>, c: bool) -> i64 {
+    let xs: List<i32> = [1];
+    let sent = false;
+    if c {
+        try! tx.send(xs);
+        sent = true;
+    }
+    if sent { return xs.len() as i64; }
+    0
+}
+
+fn flag_lost(tx: Sender<List<i32>>, c: bool, d: bool) -> i64 {
+    let xs: List<i32> = [1];
+    let sent = false;
+    if c {
+        try! tx.send(xs);
+        sent = true;
+    }
+    sent = d;
+    if !sent { return xs.len() as i64; }
+    0
+}
+
+fn next_pass(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1];
+    let n = 0i64;
+    loop {
+        n += 1;
+        if n == 2 { try! tx.send(xs); }
+        if n > 3 { break; }
+    }
+    n
+}
+
+// expect-error: handoff_send_errors.rok:64:22: `xs` was sent through a channel at line 61
+// expect-error: handoff_send_errors.rok:76:23: `xs` was sent through a channel at line 72
+// expect-error: handoff_send_errors.rok:85:34: `xs` was already sent through a channel by this call, on an earlier pass of the loop

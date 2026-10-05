@@ -2161,7 +2161,8 @@ fn prebuilt_dependency_sums_keep_their_tags() {
 /// use-after-hand-off summaries kept (stdlib 2.13.9): a value its
 /// function hands to a `Mutex` (through another of its functions, a
 /// method or a struct it builds) is gone in the app, one it only reads,
-/// or a clone, is not.
+/// or a clone, is not; one it hands over unless it returns `none` is
+/// still the app's where the result is `none`.
 #[test]
 fn prebuilt_dependency_keeps_handoff_summaries() {
     let Some(env) = setup() else { return };
@@ -2178,6 +2179,10 @@ fn prebuilt_dependency_keeps_handoff_summaries() {
          pub fn bag(xs: List<i32>) -> Bag { return Bag { items: xs }; }\n\
          impl Bag {\n\
              pub fn share(self) -> Mutex<List<i32>> { return Mutex::new(self.items); }\n\
+         }\n\
+         pub fn store_if(xs: List<i32>, ok: bool) -> Mutex<List<i32>> | none {\n\
+             if !ok { return none; }\n\
+             return lock(xs);\n\
          }\n",
     )
     .unwrap();
@@ -2195,6 +2200,9 @@ fn prebuilt_dependency_keeps_handoff_summaries() {
     let ext = format!("dep={}", rokhir.display());
     let dump = text(&rokc(None, &dir, &["rokhir-text", "dep/target/debug/dep.rokhir"]).stdout);
     assert!(dump.contains("--- summaries\ndep::lock\n"), "{dump}");
+    // By exit: the `Mutex` (variant 0) took `xs`, `none` (1) nothing.
+    assert!(dump.contains("dep::store_if\n"), "{dump}");
+    assert!(dump.contains("    x 0 0\n    x 1\n"), "{dump}");
     assert!(
         !dump.contains("pub fn store(xs: List<i32>) -> Mutex<List<i32>> { return"),
         "{dump}"
@@ -2214,6 +2222,20 @@ fn prebuilt_dependency_keeps_handoff_summaries() {
             "error[E202]: `xs` was moved into a `Mutex` by `dep::store(xs)` at line 2 (inside \
              `lock`, lib.rok:3)"
         ),
+        "{err}"
+    );
+
+    app("if dep::store_if(xs, false) is none { xs.push(2); } else { xs = [7]; }");
+    let out = rokc(Some(&env), &dir, &["run", "-q", "app", "--extern", &ext]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "2\n");
+
+    app("if let _m: Mutex<List<i32>> = dep::store_if(xs, true) { xs.push(2); }");
+    let out = rokc(Some(&env), &dir, &["build", "app", "--extern", &ext]);
+    assert_exit(&out, 1);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("error[E202]: `xs` was moved into a `Mutex` by `dep::store_if(xs, true)`"),
         "{err}"
     );
 
@@ -2379,7 +2401,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "ROKHIR version: 5\n",
+        "ROKHIR version: 6\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
@@ -2462,7 +2484,7 @@ fn stale_rokhir_is_rejected() {
 
     let good = fs::read(&rokhir).unwrap();
     // The layout (9.4.3 - 9.4.7): a 16-byte little-endian header (`ROKH`,
-    // version 5, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
+    // version 6, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
     // the producer, then the meta (mount name, package hash — 0.3.3: the
     // SHA-256 of `path \0 text \0` per file, 8 hex digits — and source
     // directory, GC type range, features); at the body offset, the files
@@ -2470,7 +2492,7 @@ fn stale_rokhir_is_rejected() {
     // summaries (none: `one` has no value that is not `Sync`).
     let word = |i: usize| u32::from_le_bytes(good[i..i + 4].try_into().unwrap());
     assert_eq!(&good[..4], b"ROKH");
-    assert_eq!((word(4), word(8)), (5, 0));
+    assert_eq!((word(4), word(8)), (6, 0));
     let varint = |at: &mut usize| -> usize {
         let extra = good[*at].leading_ones() as usize;
         let mut v = usize::from(good[*at] & 0xffu8.checked_shr(extra as u32 + 1).unwrap_or(0));

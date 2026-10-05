@@ -1,13 +1,15 @@
 // needs: threads
 // expect-exit: 0
-// expect-stdout: 3 2 1 4 1 5 3 2 4 2 7 4 2 2 3 2 5 9 3 2
+// expect-stdout: 3 2 1 4 1 5 3 2 4 2 7 4 2 2 3 2 5 9 3 2 2 3 4 1 2 3 3
 // spec: std 213-marker §2.13.9 / std 216-sync §2.16.3 / refs-lang §4.15.2
 
 // What stays usable after a hand-off: a `clone()` handed over in place
 // of the value, a variable or field given a new value, the value used
 // through the lock, a field of another struct, a `Sync` value, a value
 // a helper only reads, the items of a list sent one by one, a value
-// `set` replaced, a tag test, and a use inside `unsafe`.
+// `set` replaced, a tag test, a use inside `unsafe`, and a value on a
+// path where it was not handed over (a callee's error, `none` or
+// `false` exit, a flag, a loop left on the pass that sent).
 use rok::core::marker::Handoff;
 
 struct Bag {
@@ -157,8 +159,7 @@ fn tag_only() -> i64 {
     if o is none { 0 } else { 3 }
 }
 
-// Sent once, then a flag ends the loop: the check does not follow the
-// flag, and a new value re-arms `items` for the next pass it assumes.
+// Sent once, then a flag ends the loop: no pass after the send.
 fn send_once_in_loop(tx: Sender<List<i32>>) -> i64 {
     let items: List<i32> = [1, 2];
     let tries = 0i64;
@@ -167,12 +168,95 @@ fn send_once_in_loop(tx: Sender<List<i32>>) -> i64 {
         tries += 1;
         if tries == 2 {
             try! tx.send(items);
-            items = [];
             done = true;
         }
         if done { break; }
     }
     tries
+}
+
+struct Oops { n: i64; }
+
+// Each hands `xs` over only on the way out without an error, `none` or
+// `false`.
+fn post(tx: Sender<List<i32>>, xs: List<i32>, fail: bool) throws (Oops) -> i64 {
+    if fail { throw Oops { n: 1 }; }
+    try! tx.send(xs);
+    0
+}
+
+fn post_some(tx: Sender<List<i32>>, xs: List<i32>, skip: bool) -> i64 | none {
+    if skip { return none; }
+    try! tx.send(xs);
+    0
+}
+
+fn posted(tx: Sender<List<i32>>, xs: List<i32>) -> bool {
+    if xs.is_empty() { return false; }
+    try! tx.send(xs);
+    true
+}
+
+async fn post_later(tx: Sender<List<i32>>, xs: List<i32>, fail: bool) throws (Oops) -> i64 {
+    if fail { throw Oops { n: 1 }; }
+    try! tx.send(xs);
+    0
+}
+
+fn kept_on_error(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1, 2];
+    try post(tx, xs, true) catch _ { xs.len() as i64 }
+}
+
+fn kept_on_try_q(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1, 2, 3];
+    if let n: i64 = try? post(tx, xs, true) { return n; }
+    xs.len() as i64
+}
+
+fn kept_on_none(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1, 2, 3, 4];
+    let n = post_some(tx, xs, true) ?? { return xs.len() as i64; };
+    n
+}
+
+fn kept_on_false(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    if !posted(tx, xs) {
+        xs.push(5);
+        return xs.len() as i64;
+    }
+    0
+}
+
+async fn kept_on_async_error(tx: Sender<List<i32>>) throws (Oops) -> i64 {
+    let xs: List<i32> = [1, 2];
+    try await post_later(tx, xs, true) catch _ { xs.len() as i64 }
+}
+
+fn flagged(tx: Sender<List<i32>>, c: bool) -> i64 {
+    let xs: List<i32> = [1, 2, 3];
+    let sent = false;
+    if c {
+        try! tx.send(xs);
+        sent = true;
+    }
+    if !sent { return xs.len() as i64; }
+    0
+}
+
+fn sent_then_break(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1];
+    let n = 0i64;
+    loop {
+        n += 1;
+        if n == 3 {
+            try! tx.send(xs);
+            break;
+        }
+        n += xs.len() as i64 - 1;
+    }
+    n
 }
 
 // The program vouches for it: `unsafe` (spec 4.15.2).
@@ -191,8 +275,10 @@ fn main() {
     let d = f"{taken(Mutex::new([1i32]))} {copy_reassigned()} {cloned_copy()}";
     let e = f"{update_sync(Mutex::new([]))} {in_unsafe()} {returned_first(true) + 9}";
     let f = f"{tag_only()} {send_once_in_loop(tx)}";
-    for _ in 0..3 {
+    let g = f"{kept_on_error(tx)} {kept_on_try_q(tx)} {kept_on_none(tx)} {kept_on_false(tx)}";
+    let h = f"{try! task::block_on_try(kept_on_async_error(tx))} {flagged(tx, false)} {sent_then_break(tx)}";
+    for _ in 0..4 {
         let _ = rx.recv();
     }
-    println(f"{a} {b} {c} {d} {e} {f}");
+    println(f"{a} {b} {c} {d} {e} {f} {g} {h}");
 }

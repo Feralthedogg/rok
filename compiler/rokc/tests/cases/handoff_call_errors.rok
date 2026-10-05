@@ -64,7 +64,7 @@ fn main() {
     let a = through_id() + through_peek(m) + through_post(tx) + through_mk();
     let b = through_outer() + through_async(tx) + through_recursion() + through_method();
     let c = through_keep() + through_ref() + through_closure() + through_items();
-    let d = through_value(tx);
+    let d = through_value(tx) + after_send(tx);
     for _ in 0..3 {
         let _ = rx.recv();
     }
@@ -157,3 +157,104 @@ fn through_value(tx: Sender<List<i32>>) -> i64 {
     run(|x| { try! tx.send(x); }, xs);
     xs.len() as i64
 }
+
+// A callee that hands a value over only on its way out without an
+// error, `none` or `false` still does so on that way: after a `catch`
+// of an error it threw after the hand-off, on the value path of `try?`
+// / `??` / `if`, and before an `await` of its future.
+fn after_send(tx: Sender<List<i32>>) -> i64 {
+    let a = after_early_send(tx) + after_catch(tx) + after_try_q(tx) + after_value(tx);
+    let b = after_true(tx) + after_send_none(tx);
+    a + b + try! task::block_on_try(after_await(tx)) + try! task::block_on_try(before_await(tx))
+}
+
+struct Oops { n: i64; }
+
+fn post_first(tx: Sender<List<i32>>, xs: List<i32>, fail: bool) throws (Oops) -> i64 {
+    try! tx.send(xs);
+    if fail { throw Oops { n: 1 }; }
+    0
+}
+fn post_ok(tx: Sender<List<i32>>, xs: List<i32>, fail: bool) throws (Oops) -> i64 {
+    if fail { throw Oops { n: 1 }; }
+    try! tx.send(xs);
+    0
+}
+fn post_some(tx: Sender<List<i32>>, xs: List<i32>, skip: bool) -> i64 | none {
+    if skip { return none; }
+    try! tx.send(xs);
+    0
+}
+fn posted(tx: Sender<List<i32>>, xs: List<i32>) -> bool {
+    if xs.is_empty() { return false; }
+    try! tx.send(xs);
+    true
+}
+fn post_or_none(tx: Sender<List<i32>>, xs: List<i32>, skip: bool) throws (Oops) -> i64 | none {
+    if skip { return none; }
+    try! tx.send(xs);
+    0
+}
+async fn post_maybe(tx: Sender<List<i32>>, xs: List<i32>, fail: bool) throws (Oops) -> i64 {
+    if fail { throw Oops { n: 1 }; }
+    try! tx.send(xs);
+    0
+}
+
+fn after_early_send(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    try post_first(tx, xs, true) catch _ { xs.len() as i64 }
+}
+
+fn after_catch(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    let n = try post_ok(tx, xs, false) catch _ { 0 };
+    n + xs.len() as i64
+}
+
+fn after_try_q(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    if let n: i64 = try? post_ok(tx, xs, false) { return n + xs.len() as i64; }
+    0
+}
+
+fn after_value(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    let n = post_some(tx, xs, false) ?? { return 0; };
+    n + xs.len() as i64
+}
+
+fn after_true(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [1];
+    if posted(tx, xs) { return xs.len() as i64; }
+    0
+}
+
+fn after_send_none(tx: Sender<List<i32>>) -> i64 {
+    let xs: List<i32> = [];
+    if let n: i64 = try! post_or_none(tx, xs, false) { return n + xs.len() as i64; }
+    0
+}
+
+async fn after_await(tx: Sender<List<i32>>) throws (Oops) -> i64 {
+    let xs: List<i32> = [];
+    let n = try await post_maybe(tx, xs, false) catch _ { 0 };
+    n + xs.len() as i64
+}
+
+async fn before_await(tx: Sender<List<i32>>) throws (Oops) -> i64 {
+    let xs: List<i32> = [];
+    let f = post_maybe(tx, xs, true);
+    let k = xs.len() as i64;
+    k + try await f catch _ { 0 }
+}
+
+// The same callees, used where they did hand the value over.
+// expect-error: handoff_call_errors.rok:206:44: `xs` was sent through a channel by `post_first(tx, xs, true)` at line 206 (inside `post_first`, line 174)
+// expect-error: handoff_call_errors.rok:212:9: `xs` was sent through a channel by `post_ok(tx, xs, false)` at line 211 (inside `post_ok`, line 180)
+// expect-error: handoff_call_errors.rok:217:62: `xs` was sent through a channel by `post_ok(tx, xs, false)` at line 217
+// expect-error: handoff_call_errors.rok:224:9: `xs` was sent through a channel by `post_some(tx, xs, false)` at line 223
+// expect-error: handoff_call_errors.rok:229:32: `xs` was sent through a channel by `posted(tx, xs)` at line 229
+// expect-error: handoff_call_errors.rok:235:67: `xs` was sent through a channel by `post_or_none(tx, xs, false)` at line 235
+// expect-error: handoff_call_errors.rok:242:9: `xs` was sent through a channel by `post_maybe(tx, xs, false)` at line 241 (inside `post_maybe`, line 200)
+// expect-error: handoff_call_errors.rok:248:13: `xs` was sent through a channel by `post_maybe(tx, xs, true)` at line 247

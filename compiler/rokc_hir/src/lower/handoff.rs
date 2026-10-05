@@ -20,8 +20,14 @@
 //! every place aliased to it along, and a value copied out of a gone
 //! one is gone too. Assigning a place re-arms it: its edges are joined
 //! past it and dropped, and a copy or gone place it is a field of is
-//! split into its other fields. Joins are unions (a use on any path
-//! counts); loops run to a fixpoint. Exempt: uses of a `Sync` type
+//! split into its other fields. Paths are kept apart by what they know
+//! of tags: a `bool`, a sum or enum variant, a carrier's error or its
+//! value's tag, set by a constant, a copy or a call (below), so a test
+//! of one (`if`, `while`, `match`, `catch`, `try?`, `??`) passes only
+//! the paths it may let through. Paths with the same places gone are
+//! one; past `MAX_PATHS`, or `MAX_SPLIT_PASSES` loop passes, all are
+//! one. Joins are unions (a use on any path counts); loops run to a
+//! fixpoint. Exempt: uses of a `Sync` type
 //! (numbers, `str`, `Mutex`, `Sender`, ...), uses inside `unsafe` (spec
 //! 4.15.2), a `match` on a variable (it reads the tag; its bindings are
 //! the uses), and compiler-made locals (what they are copied into is).
@@ -30,7 +36,12 @@
 //! parameter (hands it over, returns it or a part of it, stores it into
 //! another parameter's object, captures it into the returned closure,
 //! ties it to a guard parameter), its exit state projected onto its
-//! parameters as they were on entry and its return value. Summaries are
+//! parameters as they were on entry and its return value, and what it
+//! hands over by the tag of the value it returns (an error, `none`,
+//! `false`): the caller's paths split by that tag at the call. An
+//! `async` body's future has the tag its body ends with, and polling it
+//! gives an error only if that is one, so a `catch` of `try await
+//! f(xs)` sees only what `f` hands over before throwing. Summaries are
 //! a fixpoint over the call graph (recursion), and a prebuilt library
 //! keeps those of its bodies in its ROKHIR. A call through a function
 //! value may reach any function used as a value with its parameter
@@ -49,11 +60,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
-use rokc_ir_common::{FunctionId, LocalId};
+use rokc_ir_common::{ConstVal, FunctionId, LocalId, PrimOp, PrimTy};
 
 use super::send_check::{Child, each_child};
 use super::{Env, LowerCtx};
-use crate::{HirBlock, HirExpr, HirExprKind, HirFunction, HirStmt, HirTy};
+use crate::{
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirPattern, HirStmt, HirTy, StructId,
+};
 
 /// Who takes a value over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,6 +121,11 @@ const GUARDS: &[(&str, What)] = &[
     ("rok::core::sync::RwLockWriteGuard", What::RwLock),
 ];
 
+/// A future of an `async` body that may throw, and its poll: an error
+/// comes out of `poll` only if the body ends with one.
+const FUTURE: &str = "rok::core::future::TryAsyncFuture";
+const POLL: &str = "rok::core::future::TryAsyncFuture__poll";
+
 /// `name` is `path` or an instance of it (`path__mono__..`).
 fn is_fn(name: &str, path: &str) -> bool {
     name.strip_prefix(path)
@@ -151,6 +169,8 @@ const MAX_DEPTH: usize = 12;
 /// value, and a call's arguments and result.
 const SHADOW: u32 = 0x4000_0000;
 const TEMP: u32 = 0x5000_0000;
+/// The places holding a tested or stored value's tag (`Walk::key`).
+const TAG_KEY: u32 = 0x6000_0000;
 const RET: LocalId = LocalId(0x7fff_ffff);
 /// The return value as a summary root.
 const RET_ROOT: u32 = u32::MAX;
@@ -288,23 +308,249 @@ fn kept(e: &Edge) -> bool {
     a != b && a.1.len() <= MAX_DEPTH && b.1.len() <= MAX_DEPTH
 }
 
-/// `None`: unreachable.
-fn join(a: Option<St>, b: Option<St>) -> Option<St> {
-    match (a, b) {
-        (Some(mut a), Some(b)) => {
-            for (l, g) in b.gone {
-                a.gone.entry(l).or_insert(g);
-            }
-            for (g, ls) in b.tied {
-                let t = a.tied.entry(g).or_default();
-                for (l, s) in ls {
-                    t.entry(l).or_insert(s);
+fn join_st(mut a: St, b: St) -> St {
+    for (l, g) in b.gone {
+        a.gone.entry(l).or_insert(g);
+    }
+    for (g, ls) in b.tied {
+        let t = a.tied.entry(g).or_default();
+        for (l, s) in ls {
+            t.entry(l).or_insert(s);
+        }
+    }
+    a.edges.extend(b.edges);
+    a
+}
+
+/// What a path knows of the value at a place: a `bool`, a sum or enum
+/// variant, a carrier's (`ERR`, `OK`, `OK_TAG` + its value's), or a
+/// `TryAsyncFuture`'s (that of the carrier its body ends with).
+type Tags = BTreeMap<Place, u32>;
+
+/// An exit whose tag is not known (`Summary::exits`).
+const ANY: u32 = u32::MAX;
+/// Paths kept apart at one point; past it they are one.
+const MAX_PATHS: usize = 8;
+/// Loop passes with paths kept apart; then they are one.
+const MAX_SPLIT_PASSES: usize = 8;
+
+/// The paths reaching a point, apart by the tags they know (empty:
+/// unreachable). Paths with the same tags are one, and so are paths
+/// with the same places gone and tied (their aliases joined): only
+/// those tell paths apart later.
+#[derive(Clone, Default, PartialEq)]
+struct Cur(Vec<(Tags, St)>);
+
+impl Cur {
+    fn start() -> Self {
+        Self(vec![(Tags::new(), St::default())])
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn states(&mut self) -> impl Iterator<Item = &mut St> {
+        self.0.iter_mut().map(|(_, s)| s)
+    }
+
+    fn norm(&mut self) {
+        loop {
+            let mut out: Vec<(Tags, St)> = Vec::with_capacity(self.0.len());
+            let mut merged = false;
+            for (t, s) in std::mem::take(&mut self.0) {
+                match out
+                    .iter_mut()
+                    .find(|(u, v)| *u == t || v.gone.keys().eq(s.gone.keys()) && v.tied == s.tied)
+                {
+                    Some(o) => {
+                        if o.0 != t {
+                            o.0.retain(|k, v| t.get(k) == Some(v));
+                        }
+                        if o.1 != s {
+                            o.1 = join_st(std::mem::take(&mut o.1), s);
+                        }
+                        merged = true;
+                    }
+                    None => out.push((t, s)),
                 }
             }
-            a.edges.extend(b.edges);
-            Some(a)
+            self.0 = out;
+            if !merged {
+                break;
+            }
         }
-        (a, b) => a.or(b),
+        if self.0.len() > MAX_PATHS {
+            self.flatten();
+        }
+        self.0.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+
+    /// One path: the tags all know, the states joined.
+    fn flatten(&mut self) {
+        let mut it = std::mem::take(&mut self.0).into_iter();
+        if let Some((mut t, mut s)) = it.next() {
+            for (u, v) in it {
+                t.retain(|k, x| u.get(k) == Some(x));
+                s = join_st(s, v);
+            }
+            self.0.push((t, s));
+        }
+    }
+
+    fn untag(&mut self, k: &Place) {
+        let mut hit = false;
+        for (t, _) in &mut self.0 {
+            let n = t.len();
+            t.retain(|q, _| !overlap(q, k));
+            hit |= t.len() != n;
+        }
+        if hit {
+            self.norm();
+        }
+    }
+}
+
+fn join(a: Cur, b: Cur) -> Cur {
+    if a.is_empty() {
+        return b;
+    }
+    if b.is_empty() {
+        return a;
+    }
+    let mut c = a;
+    c.0.extend(b.0);
+    c.norm();
+    c
+}
+
+/// The place `e` names exactly (`x`, `x.f.0`).
+fn tag_place(e: &HirExpr) -> Option<Place> {
+    match &e.kind {
+        HirExprKind::Local(l) => Some((*l, Vec::new())),
+        HirExprKind::FieldRead {
+            target,
+            field_index,
+            ..
+        } => tag_place(target).map(|p| extend(&p, &[*field_index])),
+        HirExprKind::TupleField { target, index, .. } => {
+            tag_place(target).map(|p| extend(&p, &[index | TUPLE]))
+        }
+        _ => None,
+    }
+}
+
+/// A carrier's tag: an error, a value of unknown tag, or `OK_TAG` plus
+/// the value's tag.
+const OK: u32 = 0;
+const ERR: u32 = 1;
+const OK_TAG: u32 = 2;
+
+/// `ty` is a carrier with a value slot (`throws -> T`, `T` not `()`).
+const fn ok_slot(ty: &HirTy) -> bool {
+    matches!(ty, HirTy::Throws { ok, .. } if !matches!(**ok, HirTy::Unit | HirTy::Never))
+}
+
+/// The tag of `e`'s value on a path that knows `t`.
+fn tag_of(e: &HirExpr, t: &Tags) -> Option<u32> {
+    match &e.kind {
+        HirExprKind::Const(ConstVal::Bool(b)) => Some(u32::from(*b)),
+        HirExprKind::SumWrap {
+            sum_ty,
+            variant_index,
+            ..
+        } if is_sum(sum_ty) && *sum_ty == e.ty => Some(*variant_index),
+        HirExprKind::EnumVariantInit { variant_index, .. } => Some(*variant_index),
+        HirExprKind::Tuple { fields } if matches!(e.ty, HirTy::Throws { .. }) => {
+            match (tag_of(fields.first()?, t)?, ok_slot(&e.ty)) {
+                (1, _) => Some(ERR),
+                (_, true) => Some(tag_of(&fields[1], t).map_or(OK, |v| v.saturating_add(OK_TAG))),
+                (_, false) => Some(OK),
+            }
+        }
+        HirExprKind::PrimUnaryOp {
+            op: PrimOp::LogicalNot,
+            operand,
+        } => tag_of(operand, t).map(|b| b ^ 1),
+        // A carrier's `is_err`, and its value.
+        HirExprKind::TupleField {
+            target, index: 0, ..
+        } if matches!(target.ty, HirTy::Throws { .. }) => {
+            t.get(&tag_place(target)?).map(|&v| u32::from(v == ERR))
+        }
+        HirExprKind::TupleField {
+            target, index: 1, ..
+        } if ok_slot(&target.ty) => t
+            .get(&tag_place(target)?)
+            .and_then(|&v| v.checked_sub(OK_TAG)),
+        HirExprKind::Block(b) if b.stmts.is_empty() => tag_of(b.trailing.as_ref()?, t),
+        _ => t.get(&tag_place(e)?).copied(),
+    }
+}
+
+const fn is_sum(ty: &HirTy) -> bool {
+    matches!(ty, HirTy::Sum(_))
+}
+
+/// Pattern `p` may match a value of type `ty` with tag `v`.
+fn may_match(p: &HirPattern, v: u32, ty: &HirTy) -> bool {
+    match p {
+        HirPattern::Literal {
+            value: ConstVal::Bool(b),
+            ..
+        } if *ty == HirTy::Prim(PrimTy::Bool) => u32::from(*b) == v,
+        HirPattern::SumVariant {
+            sum_ty,
+            variant_index,
+            ..
+        }
+        | HirPattern::SumMember {
+            sum_ty,
+            variant_index,
+            ..
+        } if is_sum(ty) && sum_ty == ty => *variant_index == v,
+        HirPattern::EnumVariant {
+            enum_id,
+            variant_index,
+            ..
+        } if *ty == HirTy::Enum(*enum_id) => *variant_index == v,
+        HirPattern::At { sub, .. } => may_match(sub, v, ty),
+        HirPattern::Or(alts) => alts.iter().any(|a| may_match(a, v, ty)),
+        _ => true,
+    }
+}
+
+/// Pattern `p` matches every value of type `ty` with tag `v`.
+fn catches(p: &HirPattern, v: u32, ty: &HirTy) -> bool {
+    match p {
+        HirPattern::Wildcard | HirPattern::Binding { .. } => true,
+        HirPattern::Literal {
+            value: ConstVal::Bool(b),
+            ..
+        } => *ty == HirTy::Prim(PrimTy::Bool) && u32::from(*b) == v,
+        HirPattern::SumVariant {
+            sum_ty,
+            variant_index,
+            ..
+        } => is_sum(ty) && sum_ty == ty && *variant_index == v,
+        HirPattern::SumMember {
+            sum_ty,
+            variant_index,
+            sub,
+            ..
+        } => is_sum(ty) && sum_ty == ty && *variant_index == v && sub.is_irrefutable(),
+        HirPattern::EnumVariant {
+            enum_id,
+            variant_index,
+            args,
+        } => {
+            *ty == HirTy::Enum(*enum_id)
+                && *variant_index == v
+                && args.iter().all(HirPattern::is_irrefutable)
+        }
+        HirPattern::At { sub, .. } => catches(sub, v, ty),
+        HirPattern::Or(alts) => alts.iter().any(|a| catches(a, v, ty)),
+        _ => false,
     }
 }
 
@@ -394,6 +640,10 @@ struct Summary {
     edges: BTreeSet<SEdge>,
     /// `(guard parameter, root)`: tied to that guard.
     ties: BTreeSet<(u32, Root)>,
+    /// Exit tag (of the return value; `ANY`: not known) -> the parts of
+    /// `gives` handed over on those exits. Empty: every exit hands over
+    /// all of them.
+    exits: BTreeMap<u32, BTreeSet<Root>>,
 }
 
 impl Summary {
@@ -403,7 +653,31 @@ impl Summary {
 
     /// The same facts (which hand-off is named does not matter).
     fn same_facts(&self, o: &Self) -> bool {
-        self.gives.keys().eq(o.gives.keys()) && self.edges == o.edges && self.ties == o.ties
+        self.gives.keys().eq(o.gives.keys())
+            && self.edges == o.edges
+            && self.ties == o.ties
+            && self.exits == o.exits
+    }
+
+    /// `exits`, with every exit kind spelled out.
+    fn exit_kinds(&self) -> BTreeMap<u32, BTreeSet<Root>> {
+        if self.exits.is_empty() {
+            BTreeMap::from([(ANY, self.gives.keys().cloned().collect())])
+        } else {
+            self.exits.clone()
+        }
+    }
+
+    /// Drop `exits` when no exit of a known tag hands over less.
+    fn trim(&mut self) {
+        let any = self.exits.get(&ANY).cloned().unwrap_or_default();
+        let less = self
+            .exits
+            .iter()
+            .any(|(t, r)| *t != ANY && r.union(&any).count() < self.gives.len());
+        if !less {
+            self.exits.clear();
+        }
     }
 
     fn roots(&self) -> impl Iterator<Item = &Root> {
@@ -444,15 +718,26 @@ impl Summary {
                 .iter()
                 .filter_map(|(g, r)| Some((map(*g)?, root(r)?)))
                 .collect(),
+            exits: self
+                .exits
+                .iter()
+                .map(|(t, rs)| (*t, rs.iter().filter_map(root).collect()))
+                .collect(),
         }
     }
 
     fn merge(&mut self, o: &Self) {
+        let mut exits = self.exit_kinds();
+        for (t, rs) in o.exit_kinds() {
+            exits.entry(t).or_default().extend(rs);
+        }
         for (r, w) in &o.gives {
             self.gives.entry(r.clone()).or_insert_with(|| w.clone());
         }
         self.edges.extend(o.edges.iter().cloned());
         self.ties.extend(o.ties.iter().cloned());
+        self.exits = exits;
+        self.trim();
     }
 
     /// One line per fact, fields split by tabs (ROKHIR).
@@ -488,6 +773,19 @@ impl Summary {
         }
         for (g, r) in &self.ties {
             out.push_str(&format!("t\t{g}\t{}\n", root(r)));
+        }
+        for (t, rs) in &self.exits {
+            let t = if *t == ANY {
+                "*".to_owned()
+            } else {
+                t.to_string()
+            };
+            if rs.is_empty() {
+                out.push_str(&format!("x\t{t}\n"));
+            }
+            for r in rs {
+                out.push_str(&format!("x\t{t}\t{}\n", root(r)));
+            }
         }
         out
     }
@@ -526,6 +824,13 @@ impl Summary {
                 }
                 ["t", g, r] => {
                     s.ties.insert((g.parse().ok()?, root(r)?));
+                }
+                ["x", t, ref rest @ ..] if rest.len() <= 1 => {
+                    let t = if t == "*" { ANY } else { t.parse().ok()? };
+                    let rs = s.exits.entry(t).or_default();
+                    if let [r] = rest {
+                        rs.insert(root(r)?);
+                    }
                 }
                 _ => return None,
             }
@@ -589,8 +894,10 @@ fn place(e: &HirExpr) -> Option<Place> {
 struct Frame<'h> {
     label: Option<&'h str>,
     is_loop: bool,
-    brk: Option<St>,
-    cont: Option<St>,
+    brk: Cur,
+    cont: Cur,
+    /// Where the tag of a `break`'s value goes.
+    dest: Option<Place>,
 }
 
 /// What every walk shares.
@@ -600,6 +907,10 @@ struct Checker<'a> {
     sync: &'a str,
     fns: HashMap<FunctionId, &'a HirFunction>,
     ops: HashMap<FunctionId, Op>,
+    /// `TryAsyncFuture::poll` and its instances.
+    polls: HashSet<FunctionId>,
+    /// `TryAsyncFuture` and its instances.
+    futures: HashSet<StructId>,
     sums: RefCell<HashMap<FunctionId, Rc<Summary>>>,
     /// A closure's or coroutine body's function -> the function it is in.
     parent: HashMap<FunctionId, FunctionId>,
@@ -775,11 +1086,25 @@ pub(super) fn check(
         })
     };
     let mut ops = HashMap::new();
+    let mut polls = HashSet::new();
     for f in &all {
         if let Some(op) = op_of(&f.name, guard(f)) {
             ops.insert(f.id, op);
         }
+        if is_fn(&f.name, POLL) {
+            polls.insert(f.id);
+        }
     }
+    #[allow(clippy::cast_possible_truncation)]
+    let futures = structs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            let base = s.name.split("__").next().unwrap_or_default();
+            base.split('<').next() == Some(FUTURE)
+        })
+        .map(|(i, _)| StructId(i as u32))
+        .collect();
     drop(structs);
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
@@ -802,6 +1127,8 @@ pub(super) fn check(
         sync,
         fns: all.iter().map(|f| (f.id, *f)).collect(),
         ops,
+        polls,
+        futures,
         sums: RefCell::new(sums),
         parent: parents(&all),
         callees: RefCell::default(),
@@ -1028,9 +1355,13 @@ fn walk(c: &Checker<'_>, f: &HirFunction) -> WalkOut {
     let mut w = Walk {
         c,
         f,
-        cur: Some(St::default()),
+        cur: Cur::start(),
         frames: Vec::new(),
-        exit: None,
+        exits: BTreeMap::new(),
+        mixed: false,
+        keys: HashMap::new(),
+        dests: Vec::new(),
+        pinned: HashSet::new(),
         reported: HashSet::new(),
         temps: HashMap::new(),
         temp_tys: HashMap::new(),
@@ -1045,18 +1376,32 @@ fn walk(c: &Checker<'_>, f: &HirFunction) -> WalkOut {
     for (i, p) in f.params.iter().enumerate() {
         if c.tracked(&p.ty) {
             let s = shadow(i);
-            if let Some(st) = &mut w.cur {
+            for st in w.cur.states() {
                 st.edges
                     .insert(Edge::Same((s, Vec::new()), (p.local, Vec::new())));
             }
         }
     }
     let body = f.body.as_ref().expect("walked bodies have one");
-    w.block(body);
-    if let (Some(t), Some(_)) = (&body.trailing, &w.cur) {
+    crate::each_block(body, &mut |e| {
+        if let HirExprKind::AddrOf { place } = &e.kind {
+            let mut x = &**place;
+            while let HirExprKind::FieldRead { target: t, .. }
+            | HirExprKind::TupleField { target: t, .. }
+            | HirExprKind::ArrayIndex { array: t, .. } = &x.kind
+            {
+                x = t;
+            }
+            if let HirExprKind::Local(l) = x.kind {
+                w.pinned.insert(l);
+            }
+        }
+    });
+    w.block_to(body, Some(&RET_TAG));
+    if let (Some(t), false) = (&body.trailing, w.cur.is_empty()) {
         w.store(&(RET, Vec::new()), t, false);
     }
-    w.exit = join(w.exit.take(), w.cur.take());
+    w.exit_with(Some(&RET_TAG));
     let s = w.summarize();
     ((s, w.deps), w.diags)
 }
@@ -1066,13 +1411,26 @@ const fn shadow(i: usize) -> LocalId {
     LocalId(SHADOW + i as u32)
 }
 
+/// Where a returned (or a coroutine's step) value's tag goes.
+const RET_TAG: Place = (LocalId(0x7fff_fffe), Vec::new());
+
 struct Walk<'c, 'h> {
     c: &'c Checker<'c>,
     f: &'h HirFunction,
-    cur: Option<St>,
+    cur: Cur,
     frames: Vec<Frame<'h>>,
-    /// The states at the returns.
-    exit: Option<St>,
+    /// The states at the returns, by the returned value's tag.
+    exits: BTreeMap<u32, St>,
+    /// A coroutine step before the last one may be an error.
+    mixed: bool,
+    /// The places holding the tags of values being tested or stored (by
+    /// the expression's address).
+    keys: HashMap<usize, LocalId>,
+    /// Calls (by address) whose value's tag goes to a place, innermost
+    /// last.
+    dests: Vec<(usize, Place)>,
+    /// Locals whose address is taken: no tag is kept for them.
+    pinned: HashSet<LocalId>,
     reported: HashSet<(Place, u32, u32)>,
     /// A call's (by address) argument / result slot -> its local.
     temps: HashMap<(usize, u32), LocalId>,
@@ -1207,7 +1565,7 @@ impl<'h> Walk<'_, 'h> {
 
     /// A use of place `p`, written `e` (`None`: the whole local `p.0`).
     fn use_place(&mut self, p: &Place, ty: &HirTy, written: Option<&HirExpr>, at: Span) {
-        let Some((gp, g)) = self.cur.as_ref().and_then(|st| {
+        let Some((gp, g)) = self.cur.0.iter().find_map(|(_, st)| {
             st.gone
                 .iter()
                 .find(|(q, _)| overlap(p, q))
@@ -1515,8 +1873,8 @@ impl<'h> Walk<'_, 'h> {
     }
 
     fn mark_gone(&mut self, p: Place, why: Gone) {
-        if let Some(s) = &mut self.cur {
-            mark_gone(s, p, why);
+        for s in self.cur.states() {
+            mark_gone(s, p.clone(), why);
         }
     }
 
@@ -1548,7 +1906,15 @@ impl<'h> Walk<'_, 'h> {
     /// through it are joined past it first: what aliased its old value
     /// still aliases each other.
     fn assign(&mut self, p: &Place) {
-        let Some(mut s) = self.cur.take() else { return };
+        let mut cur = std::mem::take(&mut self.cur);
+        for (_, s) in &mut cur.0 {
+            *s = self.assign_st(std::mem::take(s), p);
+        }
+        cur.untag(p);
+        self.cur = cur;
+    }
+
+    fn assign_st(&self, mut s: St, p: &Place) -> St {
         self.regain(&mut s, p);
         for t in s.tied.values_mut() {
             t.retain(|q, _| !within(q, p));
@@ -1606,8 +1972,7 @@ impl<'h> Walk<'_, 'h> {
             for e in edges.into_iter().filter(kept) {
                 s.edges.insert(e);
             }
-            self.cur = Some(s);
-            return;
+            return s;
         }
         // Each end in `p`: (end, other end, other ⇒ end, end ⇒ other, same).
         let mut ends: Vec<(Place, Place, bool, bool, bool)> = Vec::new();
@@ -1653,7 +2018,7 @@ impl<'h> Walk<'_, 'h> {
         for e in edges.into_iter().filter(kept) {
             s.edges.insert(e);
         }
-        self.cur = Some(s);
+        s
     }
 
     /// What `e`'s value carries, of the places this walk knows.
@@ -1767,34 +2132,35 @@ impl<'h> Walk<'_, 'h> {
         self.assign(p);
         let mut fl = Vec::new();
         self.flows(e, &mut fl);
-        let Some(s) = &mut self.cur else { return };
-        // What is gone of the value stays gone in `p` (a call's result
-        // that its callee handed over).
-        let mut inherit = Vec::new();
-        for (k, q) in &fl {
-            for (g, why) in s.gone.iter().filter(|(g, _)| overlap(g, q)) {
-                match k {
-                    Fk::Is(sub) if !part => {
-                        let rest = g.1.get(q.1.len()..).unwrap_or_default();
-                        inherit.push((extend(p, &[&sub[..], rest].concat()), *why));
+        for s in self.cur.states() {
+            // What is gone of the value stays gone in `p` (a call's result
+            // that its callee handed over).
+            let mut inherit = Vec::new();
+            for (k, q) in &fl {
+                for (g, why) in s.gone.iter().filter(|(g, _)| overlap(g, q)) {
+                    match k {
+                        Fk::Is(sub) if !part => {
+                            let rest = g.1.get(q.1.len()..).unwrap_or_default();
+                            inherit.push((extend(p, &[&sub[..], rest].concat()), *why));
+                        }
+                        Fk::Is(_) | Fk::Both => inherit.push((p.clone(), *why)),
+                        Fk::Holds => {}
                     }
-                    Fk::Is(_) | Fk::Both => inherit.push((p.clone(), *why)),
-                    Fk::Holds => {}
                 }
             }
-        }
-        for (k, q) in fl {
-            let edge = match k {
-                Fk::Is(sub) if !part => Edge::Same(extend(p, &sub), q),
-                Fk::Is(_) | Fk::Both => Edge::In(p.clone(), q),
-                Fk::Holds => Edge::Into(p.clone(), q),
-            };
-            if kept(&edge) {
-                s.edges.insert(edge);
+            for (k, q) in &fl {
+                let edge = match k {
+                    Fk::Is(sub) if !part => Edge::Same(extend(p, sub), q.clone()),
+                    Fk::Is(_) | Fk::Both => Edge::In(p.clone(), q.clone()),
+                    Fk::Holds => Edge::Into(p.clone(), q.clone()),
+                };
+                if kept(&edge) {
+                    s.edges.insert(edge);
+                }
             }
-        }
-        for (q, why) in inherit {
-            mark_gone(s, q, why);
+            for (q, why) in inherit {
+                mark_gone(s, q, why);
+            }
         }
         if let Some(g) = self.got_from(e) {
             self.tie(g, p.clone(), e.span, Tie::Taken);
@@ -1815,8 +2181,10 @@ impl<'h> Walk<'_, 'h> {
                 return self.assign_into(extend(&p, &[*field_index]), value);
             }
         }
-        self.expr(e);
+        let k = self.key(e);
+        self.expr_to(e, &k);
         self.store(&p, e, false);
+        self.retag(&k, &p);
         // The variable that holds a new lock / `Handoff`: named in hints.
         let mut init = e;
         while let HirExprKind::Block(blk) = &init.kind {
@@ -1842,11 +2210,11 @@ impl<'h> Walk<'_, 'h> {
     }
 
     fn tie(&mut self, guard: LocalId, p: Place, at: Span, given: Tie) {
-        if let Some(s) = &mut self.cur {
+        for s in self.cur.states() {
             s.tied
                 .entry(guard)
                 .or_default()
-                .entry(p)
+                .entry(p.clone())
                 .or_insert((at, given));
         }
     }
@@ -1866,29 +2234,242 @@ impl<'h> Walk<'_, 'h> {
     }
 
     fn block(&mut self, b: &'h HirBlock) {
-        self.scopes.push(std::ptr::from_ref(b) as usize);
-        self.block_in(b);
-        self.scopes.pop();
+        self.block_to(b, None);
     }
 
-    fn block_in(&mut self, b: &'h HirBlock) {
+    /// Block `b`; the tag of its value goes to `k`.
+    fn block_to(&mut self, b: &'h HirBlock, k: Option<&Place>) {
+        self.scopes.push(std::ptr::from_ref(b) as usize);
         if b.label.is_some() {
             self.frames.push(Frame {
                 label: b.label.as_deref(),
                 is_loop: false,
-                brk: None,
-                cont: None,
+                brk: Cur::default(),
+                cont: Cur::default(),
+                dest: k.cloned(),
             });
         }
         for s in &b.stmts {
             self.stmt(s);
         }
         if let Some(t) = &b.trailing {
-            self.expr(t);
+            self.value(t, k);
         }
         if b.label.is_some() {
             let f = self.frames.pop().expect("block frame");
-            self.cur = join(self.cur.take(), f.brk);
+            self.cur = join(std::mem::take(&mut self.cur), f.brk);
+        }
+        self.scopes.pop();
+    }
+
+    fn value(&mut self, e: &'h HirExpr, k: Option<&Place>) {
+        match k {
+            Some(k) => self.expr_to(e, k),
+            None => self.expr(e),
+        }
+    }
+
+    /// The place holding the tag of `e`'s value while it is tested or
+    /// stored.
+    fn key(&mut self, e: &HirExpr) -> Place {
+        let n = self.keys.len();
+        #[allow(clippy::cast_possible_truncation)]
+        let l = *self
+            .keys
+            .entry(addr(e))
+            .or_insert(LocalId(TAG_KEY + n as u32));
+        (l, Vec::new())
+    }
+
+    /// The tags at `from` move to `to`.
+    fn retag(&mut self, from: &Place, to: &Place) {
+        let pinned = self.pinned.contains(&to.0);
+        for (t, _) in &mut self.cur.0 {
+            let moved: Vec<(Place, u32)> = t
+                .iter()
+                .filter(|(q, _)| within(q, from))
+                .map(|(q, v)| (extend(to, &q.1[from.1.len()..]), *v))
+                .collect();
+            t.retain(|q, _| !within(q, from));
+            if !pinned {
+                t.extend(moved);
+            }
+        }
+    }
+
+    /// `e`; the tag of its value goes to `k` on the paths that know it.
+    fn expr_to(&mut self, e: &'h HirExpr, k: &Place) {
+        if self.cur.is_empty() {
+            return;
+        }
+        for (t, _) in &mut self.cur.0 {
+            t.retain(|q, _| !within(q, k));
+        }
+        match &e.kind {
+            HirExprKind::Block(b) => {
+                let returning = std::mem::take(&mut self.returning);
+                self.returning = returning && b.stmts.is_empty();
+                self.block_to(b, Some(k));
+            }
+            HirExprKind::If {
+                cond,
+                then_block,
+                else_branch,
+            } => {
+                self.returning = false;
+                self.branch(cond, then_block, else_branch.as_deref(), Some(k));
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                self.returning = false;
+                self.matched(scrutinee, arms, Some(k));
+            }
+            HirExprKind::Loop { label, body, .. } => {
+                self.returning = false;
+                self.looped(label.as_deref(), None, body, Some(k));
+            }
+            HirExprKind::Call { .. }
+            | HirExprKind::CallIndirect { .. }
+            | HirExprKind::CallClosure { .. }
+            | HirExprKind::CoroNew { .. } => self.expr_into(e, e, k),
+            HirExprKind::PrimUnaryOp {
+                op: PrimOp::LogicalNot,
+                operand,
+            } => {
+                self.expr_to(operand, k);
+                for (t, _) in &mut self.cur.0 {
+                    if let Some(v) = t.get_mut(k) {
+                        *v ^= 1;
+                    }
+                }
+            }
+            // A future's tag is its body's.
+            HirExprKind::StructInit { struct_id, fields }
+                if self.c.futures.contains(struct_id)
+                    && matches!(&fields[..], [x] if matches!(x.kind, HirExprKind::CoroNew { .. })) =>
+            {
+                self.expr_into(e, &fields[0], k);
+            }
+            _ => {
+                self.expr(e);
+                let copied = tag_place(e).filter(|_| {
+                    !matches!(&e.kind, HirExprKind::TupleField { target, .. }
+                        if matches!(target.ty, HirTy::Throws { .. }))
+                });
+                for (t, _) in &mut self.cur.0 {
+                    if let Some(q) = &copied {
+                        let got: Vec<(Place, u32)> = t
+                            .iter()
+                            .filter(|(p, _)| within(p, q))
+                            .map(|(p, v)| (extend(k, &p.1[q.1.len()..]), *v))
+                            .collect();
+                        t.extend(got);
+                    } else if let Some(v) = tag_of(e, t) {
+                        t.insert(k.clone(), v);
+                    }
+                }
+            }
+        }
+    }
+
+    /// `e`, whose call `call` gives the tag of its value to `k`.
+    fn expr_into(&mut self, e: &'h HirExpr, call: &HirExpr, k: &Place) {
+        self.dests.push((addr(call), k.clone()));
+        self.expr(e);
+        self.dests.pop();
+    }
+
+    /// Walk `cond`: the paths on which it may be true, and false.
+    fn test(&mut self, cond: &'h HirExpr) -> (Cur, Cur) {
+        let k = self.key(cond);
+        self.expr_to(cond, &k);
+        let (mut yes, mut no) = (Cur::default(), Cur::default());
+        for (mut t, s) in std::mem::take(&mut self.cur.0) {
+            match t.remove(&k) {
+                Some(1) => yes.0.push((t, s)),
+                Some(0) => no.0.push((t, s)),
+                _ => {
+                    no.0.push((t.clone(), s.clone()));
+                    yes.0.push((t, s));
+                }
+            }
+        }
+        yes.norm();
+        no.norm();
+        (yes, no)
+    }
+
+    fn branch(
+        &mut self,
+        cond: &'h HirExpr,
+        then_block: &'h HirBlock,
+        else_branch: Option<&'h HirExpr>,
+        k: Option<&Place>,
+    ) {
+        let (yes, no) = self.test(cond);
+        self.cur = yes;
+        self.block_to(then_block, k);
+        let then = std::mem::replace(&mut self.cur, no);
+        if let Some(x) = else_branch {
+            self.value(x, k);
+        }
+        self.cur = join(then, std::mem::take(&mut self.cur));
+    }
+
+    /// Matching a variable reads its tag (in the value itself) and binds
+    /// its parts: the uses are the bindings'. An arm sees the paths whose
+    /// tag it may match and no arm before it takes.
+    fn matched(&mut self, scrutinee: &'h HirExpr, arms: &'h [HirMatchArm], k: Option<&Place>) {
+        let key = if place(scrutinee).is_none() {
+            let ks = self.key(scrutinee);
+            self.expr_to(scrutinee, &ks);
+            Some((ks, true))
+        } else {
+            tag_place(scrutinee).map(|p| (p, false))
+        };
+        let mut base = std::mem::take(&mut self.cur);
+        let ty = &scrutinee.ty;
+        let mut out = Cur::default();
+        for (i, a) in arms.iter().enumerate() {
+            let mut cur = Cur::default();
+            for (t, s) in &base.0 {
+                if let Some(&v) = key.as_ref().and_then(|(p, _)| t.get(p)) {
+                    let taken = arms[..i]
+                        .iter()
+                        .any(|b| b.guard.is_none() && catches(&b.pat, v, ty));
+                    if taken || !may_match(&a.pat, v, ty) {
+                        continue;
+                    }
+                }
+                cur.0.push((t.clone(), s.clone()));
+            }
+            if let Some((ks, true)) = &key {
+                cur.untag(ks);
+            }
+            self.cur = cur;
+            a.pat.each_binding(&mut |l| {
+                self.store(&(l, Vec::new()), scrutinee, true);
+            });
+            if let Some(g) = &a.guard {
+                self.expr(g);
+            }
+            self.value(&a.body, k);
+            out = join(out, std::mem::take(&mut self.cur));
+        }
+        if let Some((ks, true)) = &key {
+            base.untag(ks);
+        }
+        self.cur = if arms.is_empty() { base } else { out };
+    }
+
+    /// The paths reach an exit; `k` holds the returned value's tag.
+    fn exit_with(&mut self, k: Option<&Place>) {
+        for (t, s) in std::mem::take(&mut self.cur.0) {
+            let tag = k.and_then(|k| t.get(k)).copied().unwrap_or(ANY);
+            let s = match self.exits.remove(&tag) {
+                Some(e) => join_st(e, s),
+                None => s,
+            };
+            self.exits.insert(tag, s);
         }
     }
 
@@ -1923,29 +2504,32 @@ impl<'h> Walk<'_, 'h> {
             HirStmt::Return(e) => {
                 if let Some(e) = e {
                     self.returning = place(e).is_some();
-                    self.expr(e);
+                    self.expr_to(e, &RET_TAG);
                     self.returning = false;
                     self.store(&(RET, Vec::new()), e, false);
                 }
-                self.exit = join(self.exit.take(), self.cur.take());
+                self.exit_with(Some(&RET_TAG));
             }
             HirStmt::Panic(e) => {
                 self.expr(e);
-                self.cur = None;
+                self.cur = Cur::default();
             }
             HirStmt::Break { label, value } => {
                 if let Some(e) = value {
-                    self.expr(e);
+                    let k = self
+                        .target(label.as_deref(), false)
+                        .and_then(|f| f.dest.clone());
+                    self.value(e, k.as_ref());
                 }
-                let st = self.cur.take();
+                let st = std::mem::take(&mut self.cur);
                 if let Some(f) = self.target(label.as_deref(), false) {
-                    f.brk = join(f.brk.take(), st);
+                    f.brk = join(std::mem::take(&mut f.brk), st);
                 }
             }
             HirStmt::Continue { label } => {
-                let st = self.cur.take();
+                let st = std::mem::take(&mut self.cur);
                 if let Some(f) = self.target(label.as_deref(), true) {
-                    f.cont = join(f.cont.take(), st);
+                    f.cont = join(std::mem::take(&mut f.cont), st);
                 }
             }
         }
@@ -1976,10 +2560,10 @@ impl<'h> Walk<'_, 'h> {
     fn hold(&mut self, c: &Place, v: &HirExpr) {
         let mut fl = Vec::new();
         self.flows(v, &mut fl);
-        if let Some(s) = &mut self.cur {
-            for (_, q) in fl {
-                if q != *c {
-                    s.edges.insert(Edge::Into(c.clone(), q));
+        for s in self.cur.states() {
+            for (_, q) in &fl {
+                if q != c {
+                    s.edges.insert(Edge::Into(c.clone(), q.clone()));
                 }
             }
         }
@@ -1987,24 +2571,36 @@ impl<'h> Walk<'_, 'h> {
 
     /// `while` (with `cond`) or `loop`: the body runs until the state at
     /// its head stops growing.
-    fn looped(&mut self, label: Option<&'h str>, cond: Option<&'h HirExpr>, body: &'h HirBlock) {
-        let mut head = self.cur.take();
-        loop {
+    fn looped(
+        &mut self,
+        label: Option<&'h str>,
+        cond: Option<&'h HirExpr>,
+        body: &'h HirBlock,
+        k: Option<&Place>,
+    ) {
+        let mut head = std::mem::take(&mut self.cur);
+        for pass in 0.. {
             self.frames.push(Frame {
                 label,
                 is_loop: true,
-                brk: None,
-                cont: None,
+                brk: Cur::default(),
+                cont: Cur::default(),
+                dest: k.cloned(),
             });
             self.cur.clone_from(&head);
-            let mut exit = None;
+            let mut exit = Cur::default();
             if let Some(c) = cond {
-                self.expr(c);
-                exit.clone_from(&self.cur);
+                let (yes, no) = self.test(c);
+                self.cur = yes;
+                exit = no;
             }
             self.block(body);
             let f = self.frames.pop().expect("loop frame");
-            let next = join(head.clone(), join(self.cur.take(), f.cont));
+            let cur = std::mem::take(&mut self.cur);
+            let mut next = join(head.clone(), join(cur, f.cont));
+            if pass >= MAX_SPLIT_PASSES {
+                next.flatten();
+            }
             if next == head {
                 self.cur = join(f.brk, exit);
                 return;
@@ -2014,7 +2610,7 @@ impl<'h> Walk<'_, 'h> {
     }
 
     fn expr(&mut self, e: &'h HirExpr) {
-        if self.cur.is_none() {
+        if self.cur.is_empty() {
             return;
         }
         if let Some(p) = place(e).filter(|_| {
@@ -2037,40 +2633,27 @@ impl<'h> Walk<'_, 'h> {
                 cond,
                 then_block,
                 else_branch,
-            } => {
-                self.expr(cond);
-                let base = self.cur.clone();
-                self.block(then_block);
-                let then = std::mem::replace(&mut self.cur, base);
-                if let Some(x) = else_branch {
-                    self.expr(x);
-                }
-                self.cur = join(then, self.cur.take());
-            }
+            } => self.branch(cond, then_block, else_branch.as_deref(), None),
             HirExprKind::While { label, cond, body } => {
-                self.looped(label.as_deref(), Some(cond), body);
+                self.looped(label.as_deref(), Some(cond), body, None);
             }
-            HirExprKind::Loop { label, body, .. } => self.looped(label.as_deref(), None, body),
-            HirExprKind::Match { scrutinee, arms } => {
-                // Matching a variable reads its tag (in the value itself)
-                // and binds its parts: the uses are the bindings'.
-                if place(scrutinee).is_none() {
-                    self.expr(scrutinee);
-                }
-                let base = self.cur.take();
-                let mut out = None;
-                for a in arms {
-                    self.cur = base.clone();
-                    a.pat.each_binding(&mut |l| {
-                        self.store(&(l, Vec::new()), scrutinee, true);
-                    });
-                    if let Some(g) = &a.guard {
-                        self.expr(g);
+            HirExprKind::Loop { label, body, .. } => {
+                self.looped(label.as_deref(), None, body, None);
+            }
+            HirExprKind::Match { scrutinee, arms } => self.matched(scrutinee, arms, None),
+            // A step handed to the resumer; the last one ends the body.
+            HirExprKind::Suspend { value, is_final } => {
+                self.expr_to(value, &RET_TAG);
+                if *is_final {
+                    self.exit_with(Some(&RET_TAG));
+                } else {
+                    let mut mixed = false;
+                    for (t, _) in &mut self.cur.0 {
+                        mixed |= t.remove(&RET_TAG).is_none_or(|v| v == ERR);
                     }
-                    self.expr(&a.body);
-                    out = join(out, self.cur.take());
+                    self.mixed |= mixed;
+                    self.cur.norm();
                 }
-                self.cur = if arms.is_empty() { base } else { out };
             }
             _ => {
                 let is_call = matches!(
@@ -2117,6 +2700,9 @@ impl<'h> Walk<'_, 'h> {
                         }
                     }
                     self.apply(&s, &args, e, true);
+                }
+                if self.c.polls.contains(callee) {
+                    self.polled(e, args.first().copied());
                 }
             }
             HirExprKind::CallIndirect { callee, args, .. } => {
@@ -2228,14 +2814,14 @@ impl<'h> Walk<'_, 'h> {
             slot.insert(RET_ROOT, t);
         }
         let map = |r: &Root| slot.get(&r.0).map(|p| extend(p, &r.1));
-        if let Some(st) = &mut self.cur {
-            for edge in &s.edges {
-                let e = match edge {
-                    SEdge::Same(a, b) => map(a).zip(map(b)).map(|(a, b)| Edge::Same(a, b)),
-                    SEdge::Into(a, b) => map(a).zip(map(b)).map(|(a, b)| Edge::Into(a, b)),
-                };
-                if let Some(e) = e.filter(|e| e.ends().0 != e.ends().1) {
-                    st.edges.insert(e);
+        for edge in &s.edges {
+            let e = match edge {
+                SEdge::Same(a, b) => map(a).zip(map(b)).map(|(a, b)| Edge::Same(a, b)),
+                SEdge::Into(a, b) => map(a).zip(map(b)).map(|(a, b)| Edge::Into(a, b)),
+            };
+            if let Some(e) = e.filter(|e| e.ends().0 != e.ends().1) {
+                for st in self.cur.states() {
+                    st.edges.insert(e.clone());
                 }
             }
         }
@@ -2248,10 +2834,66 @@ impl<'h> Walk<'_, 'h> {
                 self.tie(guard.0, p, e.span, Tie::Taken);
             }
         }
-        for (r, why) in &s.gives {
-            if let Some(p) = map(r) {
+        let given: Vec<(&Root, Place, Gone)> = s
+            .gives
+            .iter()
+            .filter_map(|(r, why)| {
                 let id = self.c.why_id(why.clone());
-                self.mark_gone(p, Gone::Via(e.span, id));
+                Some((r, map(r)?, Gone::Via(e.span, id)))
+            })
+            .collect();
+        // Apart by how the call ends, when its value's tag is followed.
+        let dest = self.dest_of(e);
+        let (Some(dest), false) = (dest, s.exits.is_empty()) else {
+            for (_, p, why) in given {
+                self.mark_gone(p, why);
+            }
+            return;
+        };
+        let none = BTreeSet::new();
+        let any = s.exits.get(&ANY).unwrap_or(&none);
+        let mut out = Cur::default();
+        for (t, st) in std::mem::take(&mut self.cur.0) {
+            for (tag, roots) in &s.exits {
+                let (mut t, mut st) = (t.clone(), st.clone());
+                if *tag != ANY {
+                    t.insert(dest.clone(), *tag);
+                }
+                for (r, p, why) in &given {
+                    if roots.contains(*r) || *tag != ANY && any.contains(*r) {
+                        mark_gone(&mut st, p.clone(), *why);
+                    }
+                }
+                out.0.push((t, st));
+            }
+        }
+        out.norm();
+        self.cur = out;
+    }
+
+    /// Where the tag of call `e`'s value goes.
+    fn dest_of(&self, e: &HirExpr) -> Option<Place> {
+        let a = addr(e);
+        self.dests
+            .iter()
+            .rev()
+            .find(|(x, _)| *x == a)
+            .map(|(_, p)| p.clone())
+    }
+
+    /// `e` polled future `fut` (`poll(ref self, ref ctx)`): its value
+    /// is `(step, fut, ctx)`, and the step is no error if `fut`'s body
+    /// ends with none.
+    fn polled(&mut self, e: &HirExpr, fut: Option<&HirExpr>) {
+        let (Some(dest), Some(f)) = (self.dest_of(e), fut.and_then(tag_place)) else {
+            return;
+        };
+        for (t, _) in &mut self.cur.0 {
+            if let Some(&v) = t.get(&f) {
+                t.insert(extend(&dest, &[1 | TUPLE]), v);
+                if v != ERR {
+                    t.insert(extend(&dest, &[TUPLE]), OK);
+                }
             }
         }
     }
@@ -2292,7 +2934,7 @@ impl<'h> Walk<'_, 'h> {
             // The lock now guards the new value, not what `get` returned.
             Op::Set => {
                 let Some(g) = guard else { return };
-                if let Some(s) = &mut self.cur {
+                for s in self.cur.states() {
                     s.tied.remove(&g);
                 }
                 for q in carried(self, 1) {
@@ -2309,19 +2951,19 @@ impl<'h> Walk<'_, 'h> {
             }
             Op::Drop => {
                 let Some(g) = guard else { return };
-                let tied = self.cur.as_mut().and_then(|s| s.tied.remove(&g));
-                for (q, (span, tie)) in tied.unwrap_or_default() {
-                    self.mark_gone(q, Gone::Guard(span, g, tie));
+                for s in self.cur.states() {
+                    for (q, (span, tie)) in s.tied.remove(&g).unwrap_or_default() {
+                        mark_gone(s, q, Gone::Guard(span, g, tie));
+                    }
                 }
             }
             Op::Get => {}
         }
     }
 
-    /// The walk's exit state as its callers see it.
-    fn summarize(&self) -> Summary {
-        let mut s = Summary::default();
-        let Some(exit) = &self.exit else { return s };
+    /// What `exit` has handed over of the parameters.
+    fn gives(&self, exit: &St) -> BTreeMap<Root, Why> {
+        let mut out = BTreeMap::new();
         let root_of = |l: LocalId| -> Option<u32> {
             if l == RET {
                 Some(RET_ROOT)
@@ -2356,8 +2998,36 @@ impl<'h> Walk<'_, 'h> {
                     line: at.line,
                 },
             };
-            s.gives.insert((r, q.1.clone()), why);
+            out.insert((r, q.1.clone()), why);
         }
+        out
+    }
+
+    /// The walk's exit state as its callers see it.
+    fn summarize(&self) -> Summary {
+        let mut s = Summary::default();
+        let Some(exit) = self.exits.values().cloned().reduce(join_st) else {
+            return s;
+        };
+        let exit = &exit;
+        s.gives = self.gives(exit);
+        if !self.mixed && self.exits.keys().any(|&t| t != ANY) {
+            s.exits = self
+                .exits
+                .iter()
+                .map(|(t, st)| (*t, self.gives(st).into_keys().collect()))
+                .collect();
+            s.trim();
+        }
+        let root_of = |l: LocalId| -> Option<u32> {
+            if l == RET {
+                Some(RET_ROOT)
+            } else if (SHADOW..TEMP).contains(&l.0) {
+                Some(l.0 - SHADOW)
+            } else {
+                None
+            }
+        };
         let mut roots: Vec<(u32, Place)> = self
             .f
             .params
