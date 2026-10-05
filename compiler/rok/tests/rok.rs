@@ -787,12 +787,12 @@ fn named_environments() {
             &root,
             &["add", "--env", "work", "x", "--path", "lib1"],
         ),
-        "`rok add` edits a package's rok.rokon; for the libraries scripts see in environment \
-         `work`, run `rok install --env work <name>`",
+        "`rok add` edits a package's rok.rokon or a script's block; for the libraries the REPL \
+         / Jupyter see in environment `work`, run `rok install --env work <name>`",
     );
     fails(
         &rok(&home, &elsewhere, &["add", "x", "--path", "../lib1"]),
-        "for scripts, `rok install <name>` installs a library they can all `use`",
+        "for a script, name it: `rok add <name> <file.rok>`",
     );
     // In an environment, path dependencies are absolute.
     let manifest = read(&home.join("envs/work/rok.rokon"));
@@ -1160,7 +1160,10 @@ fn script_executables_are_cached_by_content() {
     let (out, (one, compiled)) = run(&[]);
     assert_eq!((out.as_str(), compiled), ("one\n", true));
     let entry = Path::new(&one).parent().unwrap().to_path_buf();
-    assert!(entry.starts_with(home.join("envs/default/target/debug/scripts")));
+    // A script's own directory, in the cache (`target/<profile>/scripts/`).
+    let scripts = entry.parent().unwrap();
+    assert!(scripts.starts_with(home.join("cache/scripts")), "{one}");
+    assert!(scripts.ends_with("target/debug/scripts"), "{one}");
     // The second run compiles nothing.
     assert_eq!(run(&[]), ("one\n".to_owned(), (one.clone(), false)));
     // An edit is a new key; the old entry stays and serves the old text.
@@ -1196,7 +1199,7 @@ fn concurrent_script_runs_share_one_entry() {
     let root = scratch("script-race");
     let home = root.join("home");
     write(&root.join("t.rok"), "println(\"ok\");\n");
-    // The environment's directory first: the runs race on the script.
+    // The script's cache directory first: the runs race on the script.
     ok(&rok(&home, &root, &["-q", "check", "t.rok"]));
     let runs: Vec<_> = (0..6)
         .map(|_| {
@@ -1211,7 +1214,12 @@ fn concurrent_script_runs_share_one_entry() {
         let out = r.wait_with_output().unwrap();
         assert_eq!(ok(&out), "ok\n", "{}", text(&out.stderr));
     }
-    let scripts = home.join("envs/default/target/debug/scripts");
+    let cache: Vec<_> = fs::read_dir(home.join("cache/scripts"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert_eq!(cache.len(), 1);
+    let scripts = cache[0].path().join("target/debug/scripts");
     let entries: Vec<_> = fs::read_dir(&scripts).unwrap().flatten().collect();
     assert_eq!(entries.len(), 1);
     let left: Vec<String> = fs::read_dir(entries[0].path())
@@ -2777,9 +2785,9 @@ fn script_out(home: &Path, cwd: &Path, args: &[&str]) -> String {
     ok(&rok(home, cwd, &all))
 }
 
-/// `rok install`: a library goes into the active environment, where
-/// scripts see it and packages do not; an executable package or a script
-/// file is built into `$ROK_HOME/bin`; `uninstall` undoes either.
+/// `rok install`: a library goes into the active environment, for the
+/// REPL; neither scripts nor packages see it. An executable package or a
+/// script file is built into `$ROK_HOME/bin`; `uninstall` undoes either.
 // spec: §9.10.5 §9.10.7
 #[test]
 fn install_libraries_and_executables() {
@@ -2807,13 +2815,23 @@ fn install_libraries_and_executables() {
         home.join("envs/default/target/debug/deps/libgreet.a")
             .is_file()
     );
-    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
-    // The script compiled against the prebuilt library.
-    let out = rok(&home, &root, &["run", "-v", "s.rok"]);
-    assert!(
-        !text(&out.stderr).contains("Compiling greet"),
-        "{}",
-        text(&out.stderr)
+    // The REPL's dependencies (`rok deps` outside a package).
+    assert_eq!(deps(&home, &root, &[])[0].0, "greet");
+    // A script does not see it: the help is the command that adds it,
+    // and a note says why the installed one does not count.
+    let out = rok(&home, &root, &["-q", "s.rok"]);
+    fails(&out, "= help: run `rok add greet s.rok`");
+    fails(
+        &out,
+        "= note: `greet` is installed in environment `default`, but a script uses only the \
+         libraries of its own `//! rokon` block (installed libraries are for `rok repl` / `rok \
+         jupyter`)",
+    );
+    // `import greet`: the library's `rok add`.
+    write(&root.join("i.rok"), "import greet\n");
+    fails(
+        &rok(&home, &root, &["check", "i.rok"]),
+        "= help: to use library `greet`, run `rok add greet i.rok`, then write `use greet::f;`",
     );
 
     // A library that does not build is not installed.
@@ -2840,7 +2858,7 @@ fn install_libraries_and_executables() {
         fails(
             &rok(&home, &app, &["-q", "build"]),
             "= help: `greet` is not a dependency of this package: add it to rok.rokon (`rok add \
-             greet`); libraries installed with `rok install` are only for scripts",
+             greet`)",
         );
     }
     fails(
@@ -2909,10 +2927,12 @@ fn install_libraries_and_executables() {
         "{list}"
     );
     ok(&rok(&home, &root, &["uninstall", "greet"]));
-    fails(
-        &rok(&home, &root, &["-q", "s.rok"]),
-        "= help: `greet` is not a dependency of this script: `rok install greet`, or add it to a \
-         `//! ```rokon` block at the top of the file",
+    let out = rok(&home, &root, &["-q", "s.rok"]);
+    fails(&out, "= help: run `rok add greet s.rok`");
+    assert!(
+        !text(&out.stderr).contains("note:"),
+        "{}",
+        text(&out.stderr)
     );
     fails(
         &rok(&home, &root, &["uninstall", "greet"]),
@@ -2924,17 +2944,22 @@ fn install_libraries_and_executables() {
     );
 }
 
-/// What a script sees follows the environment (`--env` > `ROK_ENV` >
-/// `rok env use`); its `//! rokon` block adds to the installed libraries,
-/// and its entry wins over an installed one of the same name, but one
-/// build still has one package per name.
-// spec: §9.10.5 §9.10.7
+/// `//! rokon` block lines for `Package { deps: { <deps> } }`, then `body`.
+fn block(deps: &str, body: &str) -> String {
+    format!("//! ```rokon\n//! Package {{ deps: {{ {deps} }} }}\n//! ```\n{body}")
+}
+
+/// A script uses only the `//! rokon` blocks of the files it reaches (its
+/// own and those its `mod`s load, each path relative to its file),
+/// merged; never the environment's libraries. `rok init --script` makes
+/// it a package.
+// spec: §4.16.8 §9.10.2 §9.10.5 §9.10.7
 #[test]
-fn scripts_see_the_environment_and_their_block() {
+fn scripts_use_their_blocks() {
     if !llvm() {
         return;
     }
-    let root = scratch("install-env");
+    let root = scratch("script-blocks");
     let home = root.join("home");
     for (dir, lib) in [("greet", LIB_V1), ("greet2", LIB_V2)] {
         write(
@@ -2947,73 +2972,200 @@ fn scripts_see_the_environment_and_their_block() {
         &root.join("util/src/lib.rok"),
         "pub fn ten() -> i32 { return 10; }\n",
     );
+    // The environment's `greet` is not the script's.
+    ok(&rok(&home, &root, &["install", "--path", "greet"]));
+    let uses = "use greet::greet;\nprintln(f\"{greet()}\");\n";
     write(
         &root.join("s.rok"),
-        "use greet::greet;\nprintln(f\"{greet()}\");\n",
+        &block("\"greet\": Dep::path(\"greet2\")", uses),
     );
-    ok(&rok(&home, &root, &["install", "--path", "greet"]));
-    ok(&rok(&home, &root, &["env", "create", "other"]));
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "2\n");
+    assert_eq!(
+        script_out(&home, &root, &["--env", "default", "s.rok"]),
+        "2\n"
+    );
+
+    // `mod helper;` loads app/helper.rok; its `mod deep;` app/helper/deep.rok,
+    // whose block's path is relative to it.
+    let app = root.join("app");
+    write(
+        &app.join("hi.rok"),
+        &block(
+            "\"greet\": Dep::path(\"../greet\")",
+            "mod helper;\nuse greet::greet;\nprintln(f\"{greet() + helper::ten()}\");\n",
+        ),
+    );
+    let helper = "mod deep;\npub fn ten() -> i32 { return deep::ten(); }\n";
+    write(&app.join("helper.rok"), helper);
+    let deep = |n: i32| {
+        block(
+            "\"util\": Dep::path(\"../../util\")",
+            &format!("use util::ten as t;\npub fn ten() -> i32 {{ return t() * {n}; }}\n"),
+        )
+    };
+    write(&app.join("helper/deep.rok"), &deep(1));
+    assert_eq!(script_out(&home, &root, &["app/hi.rok"]), "11\n");
+    let names = |file: &str| -> Vec<String> {
+        ok(&rok(&home, &root, &["deps", file]))
+            .lines()
+            .filter_map(|l| Some(l.split_once('=')?.0.to_owned()))
+            .collect()
+    };
+    let mut both = names("app/hi.rok");
+    both.sort();
+    assert_eq!(both, ["greet", "util"]);
+    // Run on its own, a file has only the blocks it reaches.
+    assert_eq!(names("app/helper/deep.rok"), ["util"]);
+    // A helper's change is a new build.
+    write(&app.join("helper/deep.rok"), &deep(2));
+    assert_eq!(script_out(&home, &root, &["app/hi.rok"]), "21\n");
+    // Every block is part of the cache key.
+    let count = || fs::read_dir(home.join("cache/scripts")).unwrap().count();
+    let before = count();
+    write(
+        &app.join("helper.rok"),
+        &block("\"greet\": Dep::path(\"../greet\")", helper),
+    );
+    assert_eq!(script_out(&home, &root, &["app/hi.rok"]), "21\n");
+    assert_eq!(count(), before + 1);
+    // Two blocks, two requirements of one library.
+    write(
+        &app.join("helper.rok"),
+        &block("\"greet\": Dep::path(\"../greet2\")", helper),
+    );
+    fails(
+        &rok(&home, &root, &["app/hi.rok"]),
+        "`greet` is required as Dep::path(\"../greet\") in app/hi.rok and as \
+         Dep::path(\"../greet2\") in app/helper.rok: use one version, the same entry in both \
+         blocks (or keep it in one of them)",
+    );
+    write(&app.join("helper.rok"), helper);
+
+    // To a package: rok.rokon from every block, the files under src/
+    // without theirs.
+    ok(&rok(&home, &root, &["init", "--script", "app/hi.rok"]));
+    assert_eq!(
+        read(&app.join("rok.rokon")),
+        "Package {\n    name: \"hi\",\n    version: \"0.1.0\",\n    deps: { \"greet\": \
+         Dep::path(\"../greet\"), \"util\": Dep::path(\"../util\") },\n}\n"
+    );
+    assert!(!app.join("hi.rok").exists() && !app.join("helper").exists());
+    assert_eq!(read(&app.join("src/helper.rok")), helper);
+    assert!(read(&app.join("src/main.rok")).starts_with("mod helper;\n"));
+    assert!(read(&app.join("src/helper/deep.rok")).starts_with("use util::ten as t;\n"));
+    assert_eq!(script_out(&home, &app, &["run"]), "21\n");
+    fails(
+        &rok(&home, &root, &["init", "--script", "s.rok", "x"]),
+        "usage: rok init --script <file.rok>",
+    );
+}
+
+/// `rok add` / `remove` with a script edit its `//! rokon` block: made
+/// after the shebang and doc lines when missing, removed when empty, a
+/// path relative to the script. `import x` says what to write.
+// spec: §9.10.4 §9.10.7
+#[test]
+fn script_add_and_remove() {
+    let root = scratch("script-add");
+    let home = root.join("home");
+    write(&root.join("lib1/src/lib.rok"), LIB_V1);
+    write(&root.join("util/src/lib.rok"), LIB_V2);
+    fs::create_dir_all(root.join("elsewhere")).unwrap();
+    let plain = "#!/usr/bin/env rok\n//! Greets.\nuse greet::greet;\nprintln(f\"{greet()}\");\n";
+    let file = root.join("s.rok");
+    write(&file, plain);
     ok(&rok(
         &home,
         &root,
-        &["--env", "other", "install", "--path", "greet2"],
+        &["add", "greet", "--path", "lib1", "s.rok"],
     ));
-    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
-    assert_eq!(
-        script_out(&home, &root, &["--env", "other", "s.rok"]),
-        "2\n"
+    let one = "#!/usr/bin/env rok\n//! Greets.\n//! ```rokon\n//! Package {\n//!     deps: {\n\
+               //!         \"greet\": Dep::path(\"lib1\"),\n//!     },\n//! }\n//! ```\n\
+               use greet::greet;\nprintln(f\"{greet()}\");\n";
+    assert_eq!(read(&file), one);
+    if llvm() {
+        assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
+    }
+    // Again: the same text.
+    ok(&rok(
+        &home,
+        &root,
+        &["add", "greet", "--path", "lib1", "s.rok"],
+    ));
+    assert_eq!(read(&file), one);
+    // From elsewhere: the path is relative to the script.
+    ok(&rok(
+        &home,
+        &root.join("elsewhere"),
+        &["add", "util", "--path", "../util", "../s.rok"],
+    ));
+    assert!(read(&file).contains("//!         \"util\": Dep::path(\"util\"),\n"));
+    // Removing both gives the file back.
+    ok(&rok(&home, &root, &["remove", "util", "s.rok"]));
+    assert_eq!(read(&file), one);
+    ok(&rok(&home, &root, &["remove", "greet", "s.rok"]));
+    assert_eq!(read(&file), plain);
+    fails(
+        &rok(&home, &root, &["remove", "greet", "s.rok"]),
+        "`greet` is not a dependency in the block of s.rok",
     );
-    let out = rok_cmd(&home, &root, &["-q", "s.rok"])
-        .env("ROK_ENV", "other")
-        .output()
-        .unwrap();
-    assert_eq!(ok(&out), "2\n");
-    ok(&rok(&home, &root, &["env", "use", "other"]));
-    assert_eq!(script_out(&home, &root, &["s.rok"]), "2\n");
-    ok(&rok(&home, &root, &["env", "use", "default"]));
-    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
-
-    // The block's `util` and the installed `greet` together.
-    let block = |deps: &str, body: &str| {
-        format!("//! ```rokon\n//! Package {{ deps: {{ {deps} }} }}\n//! ```\n{body}")
-    };
-    let both = "use greet::greet;\nuse util::ten;\nprintln(f\"{greet() + ten()}\");\n";
-    write(
-        &root.join("t.rok"),
-        &block("\"util\": Dep::path(\"util\")", both),
+    // A block of the user's keeps its layout and comments.
+    let mine = "//! ```rokon\n//! Package { deps: { \"greet\": Dep::path(\"lib1\") } } // mine\n\
+                //! ```\nprintln(1);\n";
+    write(&file, mine);
+    ok(&rok(
+        &home,
+        &root,
+        &["add", "util", "--path", "util", "s.rok"],
+    ));
+    let text = read(&file);
+    assert!(
+        text.contains("// mine") && text.contains("\"util\": Dep::path(\"util\")"),
+        "{text}"
     );
-    assert_eq!(script_out(&home, &root, &["t.rok"]), "11\n");
-    // The block's `greet` wins over the installed one.
-    let own = "\"util\": Dep::path(\"util\"), \"greet\": Dep::path(\"greet2\")";
-    write(&root.join("t.rok"), &block(own, both));
-    assert_eq!(script_out(&home, &root, &["t.rok"]), "12\n");
-    // An installed library that needs the other `greet`: one build has
-    // one.
-    let wrap = root.join("wrap");
-    write(
-        &wrap.join("rok.rokon"),
-        "Package { name: \"wrap\", deps: { \"greet\": Dep::path(\"../greet\") } }\n",
+    // What does not resolve is not written; a block holds only `deps`.
+    write(&file, plain);
+    fails(
+        &rok(&home, &root, &["add", "x", "--path", "elsewhere", "s.rok"]),
+        "is not a library package: no src/lib.rok",
     );
-    write(
-        &wrap.join("src/lib.rok"),
-        "use greet::greet;\npub fn wrapped() -> i32 { return greet() * 100; }\n",
-    );
-    ok(&rok(&home, &root, &["install", "--path", "wrap"]));
-    let uses = "use wrap::wrapped;\nprintln(f\"{wrapped()}\");\n";
-    write(&root.join("w.rok"), uses);
-    assert_eq!(script_out(&home, &root, &["w.rok"]), "100\n");
-    write(
-        &root.join("w.rok"),
-        &block("\"greet\": Dep::path(\"greet2\")", uses),
+    assert_eq!(read(&file), plain);
+    fails(
+        &rok(
+            &home,
+            &root,
+            &["add", "greet", "--dev", "--path", "lib1", "s.rok"],
+        ),
+        "a script's block holds only `deps`: no --dev",
     );
     fails(
-        &rok(&home, &root, &["w.rok"]),
-        &format!(
-            "conflicting requirements for package `greet`:\n  path {} (required by the script's \
-             `//! rokon` block)\n  path {} (required by `wrap`)",
-            root.join("greet2").display(),
-            root.join("greet").display()
+        &rok(
+            &home,
+            &root,
+            &["add", "greet", "--path", "lib1", "nope.rok"],
         ),
+        "`nope.rok` does not exist",
+    );
+
+    // `import x` (or `include` / `require`): `mod` for x.rok beside the
+    // file; the `use` hint for a name the file knows; else `rok add`.
+    write(&root.join("helper.rok"), "pub fn f() {}\n");
+    write(&root.join("i.rok"), "import helper\n");
+    fails(
+        &rok(&home, &root, &["check", "i.rok"]),
+        "= help: to load helper.rok, write `mod helper;` then call `helper::f()` or `use helper::f;`",
+    );
+    for known in ["import rok\n", "mod geo { pub fn f() {} }\ninclude geo\n"] {
+        write(&root.join("i.rok"), known);
+        fails(
+            &rok(&home, &root, &["check", "i.rok"]),
+            "= help: did you mean `use`?",
+        );
+    }
+    write(&root.join("i.rok"), "require json\n");
+    fails(
+        &rok(&home, &root, &["check", "i.rok"]),
+        "= help: to use library `json`, run `rok add json i.rok`, then write `use json::f;`",
     );
 }
 
@@ -3052,13 +3204,20 @@ fn install_stones() {
     let env = home.join("envs/default");
     assert!(read(&env.join("rok.rokon")).contains("\"num\": Dep::version(\"^1.0.0\")"));
     assert_eq!(locked_stones(&read(&env.join("rok.lock"))), ["num@1.0.0"]);
-    write(
-        &root.join("s.rok"),
-        "use num::one;\nprintln(f\"{one()}\");\n",
-    );
-    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
     ok(&rok(&home, &root, &["uninstall", "num"]));
     assert!(locked_stones(&read(&env.join("rok.lock"))).is_empty());
+    // A script gets a stone into its block, pinned as a package's is.
+    let file = root.join("s.rok");
+    write(&file, "use num::one;\nprintln(f\"{one()}\");\n");
+    ok(&rok(&home, &root, &["add", "num", "s.rok"]));
+    assert!(read(&file).contains("//!         \"num\": Dep::version(\"^1.0.0\"),\n"));
+    assert_eq!(script_out(&home, &root, &["s.rok"]), "1\n");
+    // `import num`: a library name.
+    write(&root.join("i.rok"), "import num\n");
+    fails(
+        &rok(&home, &root, &["check", "i.rok"]),
+        "= help: to use library `num`, run `rok add num i.rok`, then write `use num::f;`",
+    );
 }
 
 /// A package with `src/lib.rok` and `src/main.rok` (spec 0.3.1): `rok new
@@ -3111,7 +3270,7 @@ fn lib_and_main_packages() {
     assert!(
         text(&out.stderr).contains(
             "note: `both` also has a library (src/lib.rok); `rok install --lib ..` puts that \
-             into environment `default` instead"
+             into environment `default` (for `rok repl` / `rok jupyter`) instead"
         ),
         "{}",
         text(&out.stderr)
@@ -3122,11 +3281,9 @@ fn lib_and_main_packages() {
     assert_eq!(ok(&installed), "2 + 2 = 4\n");
     ok(&rok(&home, &root, &["install", "--lib", "--path", "both"]));
     assert!(read(&home.join("envs/default/rok.rokon")).contains("\"both\": Dep::path("));
-    write(
-        &root.join("s.rok"),
-        "use both::add;\nprintln(f\"{add(3, 4)}\");\n",
-    );
-    assert_eq!(script_out(&home, &root, &["s.rok"]), "7\n");
+    // For the REPL (`rok deps` outside a package).
+    assert!(deps(&home, &root, &[]).iter().any(|(n, _)| n == "both"));
+    write(&root.join("s.rok"), "println(7);\n");
     let list = ok(&rok(&home, &root, &["install", "--list"]));
     assert_eq!(list.matches("  both ").count(), 2, "{list}");
     let hello = root.join("hello");
@@ -3203,6 +3360,7 @@ fn lib_and_main_packages() {
         &root.join("c.rok"),
         "use calc::one;\nprintln(f\"{one()}\");\n",
     );
+    ok(&rok(&home, &root, &["add", "calc", "c.rok"]));
     assert_eq!(script_out(&home, &root, &["c.rok"]), "1\n");
     fails(
         &rok(&home, &root, &["install", "--lib", "tool"]),

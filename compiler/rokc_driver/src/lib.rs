@@ -121,6 +121,16 @@ pub struct CompilerConfig {
     pub incremental: Option<PathBuf>,
 }
 
+/// The environment `rok` runs a script from (`ROK_ENV`) and the
+/// libraries installed in it (`ROK_ENV_LIBS`, comma-separated), which
+/// the script does not see.
+fn script_env() -> Option<(String, Vec<String>)> {
+    let env = std::env::var("ROK_ENV").ok().filter(|e| !e.is_empty())?;
+    let libs = std::env::var("ROK_ENV_LIBS").unwrap_or_default();
+    let libs = libs.split(',').filter(|l| !l.is_empty()).map(str::to_owned);
+    Some((env, libs.collect()))
+}
+
 /// The build's cfg (spec 6.3): the target's keys, `--cfg` and `test`.
 #[must_use]
 pub fn cfg_env(config: &CompilerConfig) -> CfgEnv {
@@ -822,8 +832,10 @@ fn compile_unit_in(
     let root_dir = path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    // Spec 4.16.8: the anonymous package has no file submodules.
-    let sub_dir = (!config.anonymous).then_some(root_dir.as_path());
+    // Spec 4.16.8: a script's file submodules are beside it, as in a
+    // package's `src/`; stdin and a REPL session have none.
+    let script_file = config.anonymous && !config.cache_library && path.is_file();
+    let sub_dir = (!config.anonymous || script_file).then_some(root_dir.as_path());
     let mut sources = Vec::new();
 
     let mut all_items: Vec<ModItem> = Vec::new();
@@ -990,7 +1002,10 @@ fn compile_unit_in(
             .iter()
             .flat_map(|p| p.rokhir.summaries.iter().cloned())
             .collect(),
-        script: config.anonymous,
+        script: config.anonymous.then(|| rokc_hir::Script {
+            file: script_file.then(|| path.display().to_string()),
+            env: script_env(),
+        }),
         library,
         stage: kept_stage.clone(),
     };
@@ -1532,9 +1547,8 @@ fn mod_file(
     });
     let Some(dir) = dir else {
         return Err(err(format!(
-            "`mod {name}` in a single-file module — declare a sibling `{name}/` folder to \
-             host submodules (a lone file run outside any package cannot have file \
-             submodules, spec 4.16.8; use `mod {name} {{ }}`)"
+            "`mod {name};` loads `{name}.rok` beside the file, and this code has no file \
+             (stdin or a REPL session): write `mod {name} {{ .. }}` here instead"
         )));
     };
     let (body, folder) = match custom.transpose()? {

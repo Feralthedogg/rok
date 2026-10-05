@@ -857,28 +857,86 @@ pub fn remove_dep(
     edit::remove(text, &[Step::Field(field), Step::Key(key)]).map_err(|e| e.render(text, file))
 }
 
-/// A script's leading block of `//!` lines from a ```` ```rokon ```` line
-/// to a ```` ``` ```` line: a `rok.rokon` value, without the `//!`
-/// prefixes.
-pub fn script_block(src: &str) -> Option<String> {
-    // After a shebang line.
-    let mut lines = src
-        .lines()
-        .skip(usize::from(rokc_core::shebang_len(src) > 0))
-        .map_while(|l| l.strip_prefix("//!"))
-        .map(|l| l.strip_prefix(' ').unwrap_or(l));
-    if !lines.by_ref().any(|l| l.trim() == "```rokon") {
-        return None;
-    }
-    let mut out = String::new();
-    for l in lines {
-        if l.trim() == "```" {
-            return Some(out);
+/// A script's `//! ```rokon` block.
+pub struct Block {
+    /// A `rok.rokon` value, without the `//!` prefixes.
+    pub text: String,
+    /// The bytes of the file its lines take, fences included.
+    pub span: std::ops::Range<usize>,
+}
+
+/// The leading `//!` lines of `src` (after a shebang line): each line's
+/// start, end (newline included) and text after `//!` and one space.
+fn doc_lines(src: &str) -> impl Iterator<Item = (usize, usize, &str)> {
+    let start = if rokc_core::shebang_len(src) > 0 {
+        src.find('\n').map_or(src.len(), |i| i + 1)
+    } else {
+        0
+    };
+    let mut at = start;
+    src[start..].split_inclusive('\n').map_while(move |line| {
+        let rest = line.trim_end_matches(['\n', '\r']).strip_prefix("//!")?;
+        let from = at;
+        at += line.len();
+        Some((from, at, rest.strip_prefix(' ').unwrap_or(rest)))
+    })
+}
+
+/// A script's block of leading `//!` lines from a ```` ```rokon ````
+/// line to a ```` ``` ```` line.
+pub fn script_block(src: &str) -> Option<Block> {
+    let mut open = None;
+    let mut text = String::new();
+    for (from, to, l) in doc_lines(src) {
+        match open {
+            None if l.trim() == "```rokon" => open = Some(from),
+            Some(o) if l.trim() == "```" => {
+                return Some(Block { text, span: o..to });
+            }
+            Some(_) => {
+                text.push_str(l);
+                text.push('\n');
+            }
+            None => {}
         }
-        out.push_str(l);
-        out.push('\n');
     }
     None
+}
+
+/// `src` with `text` (a `rok.rokon` value) as its block: in place of the
+/// old one, else after the shebang line and the leading `//!` lines;
+/// `None` removes the block.
+pub fn set_script_block(src: &str, text: Option<&str>) -> String {
+    let lines = text.map_or_else(String::new, |t| {
+        let mut out = "//! ```rokon\n".to_owned();
+        for l in t.lines() {
+            out += &if l.is_empty() {
+                "//!\n".to_owned()
+            } else {
+                format!("//! {l}\n")
+            };
+        }
+        out + "//! ```\n"
+    });
+    if let Some(b) = script_block(src) {
+        return format!("{}{lines}{}", &src[..b.span.start], &src[b.span.end..]);
+    }
+    let at = doc_lines(src).last().map_or_else(
+        || {
+            if rokc_core::shebang_len(src) > 0 {
+                src.find('\n').map_or(src.len(), |i| i + 1)
+            } else {
+                0
+            }
+        },
+        |(_, to, _)| to,
+    );
+    let gap = if at > 0 && !src[..at].ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    format!("{}{gap}{lines}{}", &src[..at], &src[at..])
 }
 
 #[cfg(test)]
@@ -1138,15 +1196,37 @@ mod tests {
 
     #[test]
     fn script_blocks() {
+        let text = |s: &str| script_block(s).map(|b| b.text);
         let src = "//! ```rokon\n//! Package { deps: {} }\n//! ```\nprintln(\"hi\");\n";
-        assert_eq!(script_block(src).as_deref(), Some("Package { deps: {} }\n"));
+        assert_eq!(text(src).as_deref(), Some("Package { deps: {} }\n"));
         let shebang = format!("#!/usr/bin/env rok\n{src}");
-        assert_eq!(
-            script_block(&shebang).as_deref(),
-            Some("Package { deps: {} }\n")
+        assert_eq!(text(&shebang).as_deref(), Some("Package { deps: {} }\n"));
+        assert_eq!(text("//! ```rokon\n//! x\nfn main() {}"), None);
+        assert_eq!(text("println(1);\n//! ```rokon\n//! ```"), None);
+        assert_eq!(text("//! ```rok\n//! let x = 1;\n//! ```\n"), None);
+        // Written after the shebang and the doc lines, read back, removed.
+        let deps = "Package {\n    deps: {\n        \"a\": \"^1\",\n    },\n}\n";
+        for src in [
+            "println(1);\n",
+            "#!/usr/bin/env rok\nprintln(1);\n",
+            "#!/usr/bin/env rok\n//! Says one.\n//!\n//! More.\nprintln(1);\n",
+            "//! Doc, no newline",
+        ] {
+            let with = set_script_block(src, Some(deps));
+            assert_eq!(text(&with).as_deref(), Some(deps), "{with}");
+            let again = set_script_block(&with, Some(deps));
+            assert_eq!(again, with);
+            let back = set_script_block(&with, None);
+            let want = if src.ends_with('\n') {
+                src.to_owned()
+            } else {
+                format!("{src}\n")
+            };
+            assert_eq!(back, want);
+        }
+        let with = set_script_block("#!/usr/bin/env rok\n//! Says one.\nx\n", Some(deps));
+        assert!(
+            with.starts_with("#!/usr/bin/env rok\n//! Says one.\n//! ```rokon\n//! Package {\n")
         );
-        assert_eq!(script_block("//! ```rokon\n//! x\nfn main() {}"), None);
-        assert_eq!(script_block("println(1);\n//! ```rokon\n//! ```"), None);
-        assert_eq!(script_block("//! ```rok\n//! let x = 1;\n//! ```\n"), None);
     }
 }

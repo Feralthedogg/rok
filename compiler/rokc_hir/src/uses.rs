@@ -309,29 +309,44 @@ pub fn glob_reexports(
 /// How the user's code gets a package it lacks: as a script, or as a
 /// package (its dependencies by top-level name).
 pub struct Missing<'a> {
-    pub script: bool,
+    pub script: Option<&'a crate::Script>,
     pub packages: &'a [String],
 }
 
 impl Missing<'_> {
     /// The help for `use <root>::..` in module `module`, where `root`
-    /// names nothing: none inside a dependency.
-    fn help(&self, root: &str, module: &str) -> Option<String> {
+    /// names nothing: none inside a dependency. A script's has a note
+    /// when the active environment has `root`.
+    fn help(&self, root: &str, module: &str) -> Option<(String, Option<String>)> {
         let first = module.split("::").next().unwrap_or_default();
         if self.packages.iter().any(|p| p == first) {
             return None;
         }
-        Some(if self.script {
-            format!(
-                "`{root}` is not a dependency of this script: `rok install {root}`, or add it to \
-                 a `//! ```rokon` block at the top of the file"
-            )
-        } else {
-            format!(
+        let Some(script) = self.script else {
+            let help = format!(
                 "`{root}` is not a dependency of this package: add it to rok.rokon (`rok add \
-                 {root}`); libraries installed with `rok install` are only for scripts"
-            )
-        })
+                 {root}`)"
+            );
+            return Some((help, None));
+        };
+        let help = match &script.file {
+            Some(file) => format!("run `rok add {root} {file}`"),
+            None => format!(
+                "`:add {root}` in the REPL; a script file gets it with `rok add {root} <file>`"
+            ),
+        };
+        let note = script
+            .env
+            .as_ref()
+            .filter(|(_, libs)| libs.iter().any(|l| l.replace('-', "_") == root))
+            .map(|(env, _)| {
+                format!(
+                    "`{root}` is installed in environment `{env}`, but a script uses only the \
+                     libraries of its own `//! rokon` block (installed libraries are for `rok \
+                     repl` / `rok jupyter`)"
+                )
+            });
+        Some((help, note))
     }
 }
 
@@ -527,12 +542,15 @@ pub fn check_use_targets(
                         || k.strip_suffix(r).is_some_and(|s| s.ends_with("::"))
                 })
             };
-            if let Some(help) = root
+            if let Some((help, note)) = root
                 .filter(|r| bare && unknown(r))
                 .zip(missing.as_ref())
                 .and_then(|(r, m)| m.help(r, module_path))
             {
                 d = d.with_help(help);
+                if let Some(n) = note {
+                    d = d.with_note(n);
+                }
             }
             diags.push(d);
         }

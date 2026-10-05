@@ -43,6 +43,17 @@ pub enum RootMain {
     Harness,
 }
 
+/// A lone script's build (`HirInput::script`).
+#[derive(Clone, Debug, Default)]
+pub struct Script {
+    /// The file `rok add` edits, as the user named it; `None`: no file
+    /// (stdin, a REPL session).
+    pub file: Option<String>,
+    /// The active environment and the libraries installed in it, which
+    /// a script does not see.
+    pub env: Option<(String, Vec<String>)>,
+}
+
 /// What the driver tells HIR about the build besides the program.
 #[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)] // independent switches
@@ -93,7 +104,7 @@ pub struct HirInput {
     pub summaries: Vec<(String, String)>,
     /// The program is a lone script (an anonymous package), not a
     /// package: a `use` of a package it lacks says how a script gets one.
-    pub script: bool,
+    pub script: Option<Script>,
     /// The library's items are the same as in an earlier compile of
     /// this process that gave this key (a REPL session's cells): what
     /// collecting them made is taken from it.

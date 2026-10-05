@@ -1315,13 +1315,21 @@ fn lone_file_is_an_anonymous_package() {
     assert_exit(&rokc(Some(&env), &dir, &["build", "hello.rok"]), 0);
     assert!(dir.join("target/debug").join(exe_name("hello")).is_file());
 
-    // Spec 4.16.8: no file submodules.
-    put(dir.join("m.rok"), "fn f() {}\n").unwrap();
-    put(dir.join("sub.rok"), "mod m;\nprintln(\"x\");\n").unwrap();
+    // Spec 4.16.8: `mod m;` loads m.rok beside the file, as in a
+    // package's src/, and a change to it is a new build.
+    put(dir.join("m.rok"), "pub fn f() { println(\"m\"); }\n").unwrap();
+    put(dir.join("sub.rok"), "mod m;\nm::f();\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "sub.rok"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "m\n");
+    put(dir.join("m.rok"), "pub fn f() { println(\"m2\"); }\n").unwrap();
+    let out = rokc(Some(&env), &dir, &["run", "sub.rok"]);
+    assert_eq!(text(&out.stdout), "m2\n");
+    put(dir.join("sub.rok"), "mod gone;\n").unwrap();
     let out = rokc(Some(&env), &dir, &["build", "sub.rok"]);
     assert_exit(&out, 1);
     assert!(
-        text(&out.stderr).contains("4.16.8"),
+        text(&out.stderr).contains("module `gone` body not found"),
         "{}",
         text(&out.stderr)
     );

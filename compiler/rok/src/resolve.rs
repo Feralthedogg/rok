@@ -58,9 +58,8 @@ pub struct Context {
     pub base: PathBuf,
     /// `None`: nothing to lock (no dependencies).
     pub lock_path: Option<PathBuf>,
-    /// A script with a `//! ```rokon` block: the environment whose
-    /// installed libraries joined its `deps`, and their names.
-    pub installed: Option<(String, Vec<String>)>,
+    /// A script: its `deps` are those of its `//! ```rokon` blocks.
+    pub script: bool,
 }
 
 #[derive(Clone)]
@@ -174,17 +173,12 @@ pub fn resolve(home: &Path, ctx: &Context, opts: &Options) -> Result<Graph, Stri
         .chain(&ctx.manifest.dev_deps)
         .cloned()
         .collect();
-    match &ctx.installed {
-        Some((env, names)) => {
-            let (env_deps, own): (Vec<Dep>, Vec<Dep>) = all
-                .into_iter()
-                .partition(|d| names.iter().any(|n| manifest::same(n, &d.name)));
-            r.walk(&own, &ctx.base, "the script's `//! rokon` block")?;
-            let by = format!("environment `{env}` (installed with `rok install`)");
-            r.walk(&env_deps, &ctx.base, &by)?;
-        }
-        None => r.walk(&all, &ctx.base, "the root package")?,
-    }
+    let by = if ctx.script {
+        "the script's `//! rokon` blocks"
+    } else {
+        "the root package"
+    };
+    r.walk(&all, &ctx.base, by)?;
     let natives = r.natives()?;
     if let Some(path) = &ctx.lock_path {
         let text = r.new.to_text();

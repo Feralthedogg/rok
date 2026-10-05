@@ -56,6 +56,9 @@ packages:
                                default), src/lib.rok (--lib) or both, and
                                rok.rokon
   init [--lib] [--bin] [dir]   make a directory a package
+  init --script <file.rok>     make a script's directory a package: its
+                               blocks become rok.rokon, its files move
+                               under src/ (the script is src/main.rok)
   add <name>[@<req>] [--registry <url>]
                                add a stone (default: ^ the newest version)
   add <name> --path <dir>      add a dependency (--dev: to dev_deps)
@@ -65,7 +68,11 @@ packages:
                                by a new feature of its name)
   add --native <name>[@<req>] [--registry <url>]
                                add a native package (prebuilt C library)
-  remove [--native] <name>     remove a dependency
+  add .. <file.rok>            the same into a script's //! ```rokon
+                               block (made at the top when missing; no
+                               --dev / --optional)
+  remove [--native] <name> [<file.rok>]
+                               remove a dependency (from a script's block)
   update [name...]             re-resolve git dependencies and stones,
                                rewrite rok.lock
   search [--native] <query>    stones (native packages) whose name contains
@@ -78,16 +85,18 @@ packages:
                                and their rokc arguments, one per line
   clean [path]                 remove target/
 
-  A package uses only the dependencies in its own rok.rokon; libraries
-  installed with `rok install` are for scripts.
+  A package uses only the dependencies in its own rok.rokon, a script
+  only those of its //! ```rokon blocks; libraries installed with `rok
+  install` are for the REPL and Jupyter.
 
-scripts and installs:
+installs:
   install <name>[@<req>] [--registry <url>]
                                a stone: an executable package (src/main.rok)
                                is built --release into $ROK_HOME/bin; a
                                library (src/lib.rok only, or with --lib)
-                               goes into the active environment (scripts
-                               outside packages can `use` it)
+                               goes into the active environment, for `rok
+                               repl` / `rok jupyter` (a script adds it
+                               with `rok add <name> <file.rok>`)
   install [<name>] --path <dir | file.rok>
                                the same from a directory; a script file is
                                built into $ROK_HOME/bin
@@ -174,19 +183,19 @@ toolchains ($ROK_HOME/toolchains/<version>-<triple>/):
                                `toolchain`, else the default
 
 options (anywhere before `--`):
-  --env <name>    work in that environment (scripts, REPL, install)
+  --env <name>    work in that environment (REPL, Jupyter, install)
   --offline       never fetch (git dependencies must be cached)
   --locked        fail instead of changing rok.lock
   --cwd <dir>     change directory first
   -q, --quiet     less output
   version, help
 
-A package builds with its own rok.rokon's dependencies only. Outside a
-package (scripts, the REPL) the environment is --env, else $ROK_ENV, else
-the one `rok env use` chose, else `default`: a script sees the libraries
-`rok install` put there, and those of the //! ```rokon block it may start
-with (`Package { deps: {..} }`; its entry wins over an installed library of
-the same name).
+A package builds with its own rok.rokon's dependencies only. A script
+builds with the //! ```rokon blocks (`Package { deps: {..} }`) at the
+top of it and of the files its `mod`s load, merged; `rok add <name>
+<file.rok>` writes one. Outside a package the REPL and Jupyter use an
+environment: --env, else $ROK_ENV, else the one `rok env use` chose, else
+`default`, with the libraries `rok install` put there.
 
 Shared lint levels: `lints_from: \"<dir>\"` in rok.rokon starts from the
 `lints` of <dir>/rok.rokon (and its own `lints_from`, recursively); this
@@ -493,7 +502,7 @@ fn load_dir(dir: &Path) -> Result<Context, String> {
         manifest,
         base: dir.to_path_buf(),
         lock_path: dir.is_dir().then(|| dir.join(manifest::LOCK)),
-        installed: None,
+        script: false,
     })
 }
 
@@ -537,68 +546,154 @@ fn target_for(g: &Global, path: Option<&str>) -> Result<Target, String> {
     env_target(&env)
 }
 
-/// A lone script: the libraries installed in environment `env`, and the
-/// `deps` of its `//! ```rokon` block, if any, whose entry wins over an
-/// installed library of the same name. A block's lock and builds live in
-/// `cache/scripts/<hash>/`, `<hash>` of the script's path, the block and
-/// the environment's `rok.rokon` / `rok.lock`; a new lock starts as the
-/// environment's, so installed libraries keep their versions.
-fn script_target(file: &Path, env: &str) -> Result<Target, String> {
-    let src = std::fs::read_to_string(file).unwrap_or_default();
-    let Some(block) = manifest::script_block(&src) else {
-        return env_target(env);
-    };
-    let label = format!("{} (//! rokon block)", file.display());
-    let mut manifest = manifest::parse(&block, &label)?;
-    if manifest.dev_deps.len() + manifest.lints.len() + manifest.features.len() > 0
-        || manifest.lints_from.is_some()
-        || manifest.toolchain.is_some()
-        || manifest.name.is_some()
-        || manifest.version.is_some()
-    {
-        return Err(format!("{label}: a script block holds only `deps`"));
+/// `path` as the user sees it: relative to the working directory when
+/// under it.
+fn shown(path: &Path) -> String {
+    let cwd = std::env::current_dir().and_then(rokc_core::real_path);
+    match cwd {
+        Ok(c) if path.starts_with(&c) => relative(&c, path).display().to_string(),
+        _ => path.display().to_string(),
     }
-    let dir = env_dir(env);
-    let installed = load_dir(&dir)?.manifest;
-    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap_or_default();
-    let abs = rokc_core::real_path(file).map_err(|e| e.to_string())?;
-    let key = format!(
-        "{}\0{block}\0{env}\0{}\0{}",
-        abs.display(),
-        read(MANIFEST),
-        read(manifest::LOCK)
-    );
+}
+
+/// The files of script `root` (absolute): itself, then those its `mod
+/// name;` declarations reach, as rokc finds them (`name.rok` beside the
+/// file, a `#[path("..")]` relative to it; their own submodules in
+/// `name/`). Each with its text.
+fn script_files(root: &Path) -> Vec<(PathBuf, String)> {
+    use rokc_lexer::TokenKind as T;
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    let dir = root.parent().map(Path::to_path_buf);
+    let mut todo = vec![(root.to_path_buf(), dir)];
+    while let Some((file, dir)) = todo.pop() {
+        let Ok(src) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        if out.iter().any(|(f, _)| *f == file) {
+            continue;
+        }
+        // A token scan, not a parse: a `mod` removed by `#[cfg]` still
+        // counts, and so does its file's block.
+        if let Some(dir) = dir.filter(|_| src.contains("mod")) {
+            let (tokens, _) = rokc_lexer::Lexer::new(&src, "").lex_all();
+            let kinds: Vec<&T> = tokens.iter().map(|t| &t.kind).collect();
+            let mut path = None;
+            for (i, k) in kinds.iter().enumerate() {
+                match (k, kinds.get(i + 1..i + 5)) {
+                    (T::HashLBracket, Some([T::Ident(a), T::LParen, T::StrLit(p), T::RParen]))
+                        if a == "path" =>
+                    {
+                        path = Some(p.clone());
+                    }
+                    (T::Mod, Some([T::Ident(name), T::Semi, ..])) => {
+                        let (body, sub) = match path.take() {
+                            Some(p) => {
+                                let body = dir.join(p);
+                                let sub = body.with_extension("");
+                                (body, sub)
+                            }
+                            None => (dir.join(format!("{name}.rok")), dir.join(name)),
+                        };
+                        todo.push((body, Some(sub)));
+                    }
+                    (T::Semi | T::LBrace | T::RBrace, _) => path = None,
+                    _ => {}
+                }
+            }
+        }
+        out.push((file, src));
+    }
+    // The order rokc reads them in does not matter; the key's does.
+    if let Some(rest) = out.get_mut(1..) {
+        rest.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    out
+}
+
+/// A lone script: the `deps` (and `native`) of the `//! ```rokon` blocks of
+/// it and of the files its `mod`s reach, merged, each block's paths
+/// relative to its file. One library required differently by two
+/// blocks is an error. The lock and builds live in
+/// `cache/scripts/<hash>/`, `<hash>` of the script's path and every
+/// file's path and block.
+fn script_target(file: &Path, env: &str) -> Result<Target, String> {
+    let abs = rokc_core::real_path(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let mut manifest = Manifest::default();
+    // Each dependency: (name, the file whose block has it, its entry as
+    // written, as merged).
+    let mut by: Vec<(String, String, String, String)> = Vec::new();
+    let mut key = abs.display().to_string();
+    for (f, src) in script_files(&abs) {
+        let Some(block) = manifest::script_block(&src) else {
+            continue;
+        };
+        let name = shown(&f);
+        key += &format!("\0{}\0{}", f.display(), block.text);
+        let label = format!("{name} (//! rokon block)");
+        let m = manifest::parse(&block.text, &label)?;
+        if m.dev_deps.len() + m.lints.len() + m.features.len() > 0
+            || m.lints_from.is_some()
+            || m.toolchain.is_some()
+            || m.name.is_some()
+            || m.version.is_some()
+        {
+            return Err(format!("{label}: a script block holds only `deps`"));
+        }
+        let dir = f.parent().unwrap_or_else(|| Path::new("/"));
+        let local = |p: &str| {
+            let joined = dir.join(p);
+            rokc_core::real_path(&joined)
+                .unwrap_or(joined)
+                .display()
+                .to_string()
+                .replace('\\', "/")
+        };
+        let mut merge = |dep: &str, req: String, text: String| -> Result<bool, String> {
+            match by.iter().find(|b| manifest::same(&b.0, dep)) {
+                Some(b) if b.3 == text => Ok(false),
+                Some((n, file1, req1, _)) => Err(format!(
+                    "`{n}` is required as {req1} in {file1} and as {req} in {name}: use one \
+                     version, the same entry in both blocks (or keep it in one of them)"
+                )),
+                None => {
+                    by.push((dep.to_owned(), name.clone(), req, text));
+                    Ok(true)
+                }
+            }
+        };
+        for mut d in m.deps {
+            let req = d.source.to_rok();
+            if let Source::Path(p) = &d.source {
+                d.source = Source::Path(local(p));
+            }
+            let text = rokc_rokon::to_line(&d.to_value());
+            if merge(&d.name, req, text)? {
+                manifest.deps.push(d);
+            }
+        }
+        for mut d in m.native {
+            let req = rokc_rokon::to_line(&d.source.to_value());
+            if let manifest::NativeSource::Direct { url, .. } = &mut d.source {
+                if !url.contains("://") && Path::new(url.as_str()).is_relative() {
+                    *url = local(url);
+                }
+            }
+            let text = rokc_rokon::to_line(&d.source.to_value());
+            if merge(&format!("native {}", d.name), req, text)? {
+                manifest.native.push(d);
+            }
+        }
+    }
     let cache = home()
         .join("cache/scripts")
         .join(format!("{:016x}", rokc_core::hash::fnv(key.as_bytes())));
     std::fs::create_dir_all(&cache).map_err(|e| format!("{}: {e}", cache.display()))?;
-    let lock = cache.join(manifest::LOCK);
-    if !lock.is_file() && dir.join(manifest::LOCK).is_file() {
-        std::fs::copy(dir.join(manifest::LOCK), &lock)
-            .map_err(|e| format!("{}: {e}", lock.display()))?;
-    }
-    let own = |n: &str| manifest.deps.iter().any(|d| manifest::same(&d.name, n));
-    let from_env: Vec<Dep> = installed
-        .deps
-        .into_iter()
-        .filter(|d| !own(&d.name))
-        .collect();
-    let own = |n: &str| manifest.native.iter().any(|d| manifest::same(&d.name, n));
-    let natives: Vec<_> = installed
-        .native
-        .into_iter()
-        .filter(|d| !own(&d.name))
-        .collect();
-    let names = from_env.iter().map(|d| d.name.clone()).collect();
-    manifest.deps.extend(from_env);
-    manifest.native.extend(natives);
-    manifest.lints = installed.lints;
     Ok(Target {
         ctx: Context {
             manifest,
             base: abs.parent().unwrap_or_else(|| Path::new("/")).to_path_buf(),
-            lock_path: Some(lock),
-            installed: Some((env.to_owned(), names)),
+            lock_path: Some(cache.join(manifest::LOCK)),
+            script: true,
         },
         env: Some(env.to_owned()),
         target_dir: Some(cache.join("target")),
@@ -648,6 +743,19 @@ fn split_features(v: &str) -> impl Iterator<Item = String> {
 
 /// Run `rokc <pre> <cmd> [--extern..] [lint levels] [--target-dir] <post>`.
 fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
+    let (c, rokc) = rokc_command(g, cmd, pre, post, None)?;
+    Ok(exec(c, &rokc))
+}
+
+/// `delegate`'s rokc command, and the rokc it runs; with `in_env`, on
+/// that environment's libraries (`prebuild_env`).
+fn rokc_command(
+    g: &Global,
+    cmd: &str,
+    pre: &[String],
+    post: &[String],
+    in_env: Option<&str>,
+) -> Result<(Command, PathBuf), String> {
     let mut opts = options(g);
     opts.dev = matches!(cmd, "test" | "bench");
     let resolves = !matches!(cmd, "fmt" | "clean" | "demangle" | "profdata");
@@ -690,7 +798,10 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
                 .display()
         ));
     }
-    let t = target_for(g, path)?;
+    let t = match in_env {
+        Some(e) => env_target(e)?,
+        None => target_for(g, path)?,
+    };
     let mut extra: Vec<String> = Vec::new();
     // The manifest's `name` is the package's (spec 9.10.3).
     let named = package.as_deref().filter(|_| t.env.is_none() && !stdin);
@@ -759,7 +870,18 @@ fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i3
         Some(e) => c.env("ROK_ENV", e),
         None => c.env_remove("ROK_ENV"),
     };
-    Ok(exec(c, &rokc))
+    // What the environment has, which a script does not see: rokc says
+    // so when a script lacks one of them.
+    match t.env.as_deref().filter(|_| t.ctx.script) {
+        Some(e) => {
+            let libs: Vec<String> = load_dir(&env_dir(e))
+                .map(|c| c.manifest.deps.into_iter().map(|d| d.name).collect())
+                .unwrap_or_default();
+            c.env("ROK_ENV_LIBS", libs.join(","))
+        }
+        None => c.env_remove("ROK_ENV_LIBS"),
+    };
+    Ok((c, rokc))
 }
 
 /// rokc's options that take a separate value (`--target x86_64-..`).
@@ -899,10 +1021,16 @@ fn adds() {
 fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
     let (mut lib, mut bin) = (false, false);
     let mut pos = Vec::new();
-    for a in args {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         match a.as_str() {
             "--lib" => lib = true,
             "--bin" => bin = true,
+            "--script" if cmd == "init" && args.len() == 2 => {
+                let file = it.next().ok_or("`--script` needs a value")?;
+                return init_script(g, Path::new(file));
+            }
+            "--script" => return Err("usage: rok init --script <file.rok>".into()),
             f if f.starts_with('-') => return Err(format!("unknown option `{f}`")),
             p => pos.push(p),
         }
@@ -1007,6 +1135,101 @@ fn cmd_new(g: &Global, cmd: &str, args: &[String]) -> Result<i32, String> {
             _ => "executable",
         };
         eprintln!("     Created {what} package ({})", dir.display());
+    }
+    Ok(0)
+}
+
+/// `rok init --script <file.rok>`: the script's directory becomes a
+/// package named after it. Its rok.rokon gets the merged `deps` /
+/// `native` of every block (paths relative to it); the script becomes
+/// `src/main.rok` and each file it reaches moves under `src/` the same
+/// way, without its block.
+fn init_script(g: &Global, file: &Path) -> Result<i32, String> {
+    if package_dir(file).is_some() || !file.is_file() {
+        return Err(format!(
+            "`{}` is not a script outside a package",
+            file.display()
+        ));
+    }
+    let t = script_target(file, &ambient_env())?;
+    let root = rokc_core::real_path(file).map_err(|e| e.to_string())?;
+    let dir = root.parent().unwrap_or_else(|| Path::new("/"));
+    let stem = root.file_stem().and_then(|s| s.to_str()).unwrap_or("app");
+    let name = stem.to_ascii_lowercase();
+    manifest::check_name(&name)?;
+    let files = script_files(&root);
+    let mut moves = Vec::new();
+    for (f, src) in files {
+        let to = if f == root {
+            dir.join("src/main.rok")
+        } else {
+            let rel = f.strip_prefix(dir).map_err(|_| {
+                format!(
+                    "{} is outside {}: move it there first",
+                    f.display(),
+                    dir.display()
+                )
+            })?;
+            dir.join("src").join(rel)
+        };
+        if to.exists() {
+            return Err(format!("`{}` already exists", to.display()));
+        }
+        moves.push((f, to, manifest::set_script_block(&src, None)));
+    }
+    if dir.join(MANIFEST).exists() {
+        return Err(format!("`{}` already exists", dir.join(MANIFEST).display()));
+    }
+    let deps = t.ctx.manifest.deps.iter().map(|d| {
+        let mut d = d.clone();
+        if let Source::Path(p) = &d.source {
+            let rel = relative(dir, Path::new(p)).display().to_string();
+            d.source = Source::Path(rel.replace('\\', "/"));
+        }
+        (Value::str(&d.name), d.to_value())
+    });
+    let mut fields = vec![
+        ("name", Value::str(&name)),
+        ("version", Value::str("0.1.0")),
+        ("deps", Value::new(Kind::Dict(deps.collect()))),
+    ];
+    if !t.ctx.manifest.native.is_empty() {
+        let natives = t.ctx.manifest.native.iter().map(|d| {
+            let mut s = d.source.clone();
+            if let NativeSource::Direct { url, .. } = &mut s {
+                if Path::new(url.as_str()).is_absolute() {
+                    *url = relative(dir, Path::new(url.as_str())).display().to_string();
+                }
+            }
+            (Value::str(&d.name), s.to_value())
+        });
+        fields.push(("native", Value::new(Kind::Dict(natives.collect()))));
+    }
+    let manifest = rokc_rokon::to_string(&Value::record(Some("Package"), fields)) + "\n";
+    let write = |p: &Path, t: &str| {
+        std::fs::create_dir_all(p.parent().unwrap_or(dir))
+            .and_then(|()| std::fs::write(p, t))
+            .map_err(|e| format!("{}: {e}", p.display()))
+    };
+    write(&dir.join(MANIFEST), &manifest)?;
+    for (from, to, text) in &moves {
+        write(to, text)?;
+        std::fs::remove_file(from).map_err(|e| format!("{}: {e}", from.display()))?;
+        // A submodule folder left empty goes too.
+        if let Some(p) = from.parent().filter(|p| *p != dir) {
+            let _ = std::fs::remove_dir(p);
+        }
+    }
+    let ignore = dir.join(".gitignore");
+    if !ignore.exists() {
+        write(&ignore, "target/\n")?;
+    }
+    if !g.quiet {
+        eprintln!(
+            "     Created executable package `{name}` from {} ({})",
+            file.display(),
+            dir.display()
+        );
     }
     Ok(0)
 }
@@ -1188,8 +1411,7 @@ fn manifest_to_edit(env: Option<&str>) -> Result<(PathBuf, bool), String> {
     }
     let dir = package_dir(Path::new(".")).ok_or(
         "not inside a package (no src/main.rok, src/lib.rok or rok.rokon here or above): make \
-         one with `rok init`; for scripts, `rok install <name>` installs a library they can all \
-         `use`",
+         one with `rok init`; for a script, name it: `rok add <name> <file.rok>`",
     )?;
     Ok((
         manifest::find(&dir).unwrap_or_else(|| dir.join(MANIFEST)),
@@ -1234,8 +1456,14 @@ fn write_and_resolve(g: &Global, path: &Path, old: Option<&str>, text: &str) -> 
 }
 
 /// `--native <name>[@<req>] [--registry <url>]` into the `native` of the
-/// package's manifest (`env: None`) or environment `env`'s.
-fn add_native(g: &Global, args: &[String], env: Option<&str>) -> Result<i32, String> {
+/// package's manifest (`env: None`), environment `env`'s or the block of
+/// `script`.
+fn add_native(
+    g: &Global,
+    args: &[String],
+    env: Option<&str>,
+    script: Option<&Path>,
+) -> Result<i32, String> {
     let (vals, _, pos) = flags(args, &["--registry"], &["--native"])?;
     let [spec] = pos.as_slice() else {
         return Err("usage: rok add --native <name>[@<req>] [--registry <url>]".into());
@@ -1257,9 +1485,19 @@ fn add_native(g: &Global, args: &[String], env: Option<&str>) -> Result<i32, Str
         semver::Req::parse(req)?;
         req.to_owned()
     };
+    let source = NativeSource::Registry { req, registry };
+    if let Some(file) = script {
+        let value = rokc_rokon::to_line(&source.to_value());
+        edit_script(g, file, |old, label| {
+            manifest::set_dep(old, label, "native", name, &value).map(Some)
+        })?;
+        if !g.quiet {
+            eprintln!("       Added {name} to native of {}", file.display());
+        }
+        return Ok(0);
+    }
     let (path, _) = manifest_to_edit(env)?;
     let old = std::fs::read_to_string(&path).ok();
-    let source = NativeSource::Registry { req, registry };
     let text = manifest::set_dep(
         old.as_deref().unwrap_or(manifest::EMPTY),
         &path.display().to_string(),
@@ -1278,8 +1516,8 @@ fn add_native(g: &Global, args: &[String], env: Option<&str>) -> Result<i32, Str
 fn package_only(g: &Global, cmd: &str, instead: &str) -> Result<(), String> {
     match &g.env {
         Some(e) => Err(format!(
-            "`rok {cmd}` edits a package's rok.rokon; for the libraries scripts see in \
-             environment `{e}`, run `rok {instead} --env {e} <name>`"
+            "`rok {cmd}` edits a package's rok.rokon or a script's block; for the libraries the \
+             REPL / Jupyter see in environment `{e}`, run `rok {instead} --env {e} <name>`"
         )),
         None => Ok(()),
     }
@@ -1287,14 +1525,115 @@ fn package_only(g: &Global, cmd: &str, instead: &str) -> Result<(), String> {
 
 fn cmd_add(g: &Global, args: &[String]) -> Result<i32, String> {
     package_only(g, "add", "install")?;
+    let (script, args) = script_arg(args)?;
     if args.iter().any(|a| a == "--native") {
-        return add_native(g, args, None);
+        return add_native(g, &args, None, script.as_deref());
     }
-    let (dep, dev) = parse_dep_args(args)?;
+    let (dep, dev) = parse_dep_args(&args)?;
     if dep.name.is_empty() {
         return Err("usage: rok add <name> --path <dir> | <name> --git <url> ..".into());
     }
-    add_dep(g, dep, dev, None)
+    match script {
+        Some(file) => add_to_script(g, dep, dev, &file),
+        None => add_dep(g, dep, dev, None),
+    }
+}
+
+/// The options of `rok add` / `remove` that take a value.
+const DEP_VALUE_OPTIONS: [&str; 7] = [
+    "--path",
+    "--git",
+    "--rev",
+    "--tag",
+    "--branch",
+    "--registry",
+    "--features",
+];
+
+/// The script `rok add` / `remove` edits (a last argument ending in
+/// `.rok` that is no option's value), and the other arguments.
+fn script_arg(args: &[String]) -> Result<(Option<PathBuf>, Vec<String>), String> {
+    let Some((last, rest)) = args.split_last().filter(|(l, r)| {
+        Path::new(l.as_str())
+            .extension()
+            .is_some_and(|x| x == "rok")
+            && r.last()
+                .is_none_or(|p| !DEP_VALUE_OPTIONS.contains(&p.as_str()))
+    }) else {
+        return Ok((None, args.to_vec()));
+    };
+    let file = PathBuf::from(last);
+    if !file.is_file() {
+        return Err(format!("`{last}` does not exist"));
+    }
+    if let Some(dir) = package_dir(&file) {
+        return Err(format!(
+            "`{last}` belongs to the package in {}, which uses its rok.rokon: run the command \
+             there without `{last}`",
+            dir.display(),
+        ));
+    }
+    Ok((Some(file), rest.to_vec()))
+}
+
+/// Edit script `file`'s `//! ```rokon` block: `edit(text, label)` of it
+/// (`manifest::EMPTY` when it has none; `None`: no change), then
+/// resolve, putting the file back when that fails. A block left empty
+/// is removed. Whether it changed.
+fn edit_script(
+    g: &Global,
+    file: &Path,
+    edit: impl FnOnce(&str, &str) -> Result<Option<String>, String>,
+) -> Result<bool, String> {
+    let src = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let old = manifest::script_block(&src).map(|b| b.text);
+    let old = old.as_deref().unwrap_or(manifest::EMPTY);
+    let label = format!("{} (//! rokon block)", file.display());
+    let Some(text) = edit(old, &label)? else {
+        return Ok(false);
+    };
+    let text = canonical_edit(old, &text);
+    let m = manifest::parse(&text, &label)?;
+    let keep = !(m.deps.is_empty() && m.native.is_empty());
+    let new = manifest::set_script_block(&src, keep.then_some(text.as_str()));
+    let write = |t: &str| {
+        std::fs::write(file, t).map_err(|e| format!("cannot write {}: {e}", file.display()))
+    };
+    write(&new)?;
+    let r = script_target(file, &ambient_env())
+        .and_then(|t| resolve::resolve(&home(), &t.ctx, &options(g)));
+    if let Err(e) = r {
+        write(&src).map_err(|e2| format!("{e}\n(and {e2})"))?;
+        return Err(e);
+    }
+    Ok(true)
+}
+
+/// `rok add <dep> <file.rok>`: `dep` into the script's block, a path
+/// relative to the script.
+fn add_to_script(g: &Global, mut dep: Dep, dev: bool, file: &Path) -> Result<i32, String> {
+    if dev || dep.optional {
+        return Err(
+            "a script's block holds only `deps`: no --dev, and no --optional (it has no \
+             features)"
+                .into(),
+        );
+    }
+    if let Source::Path(p) = &dep.source {
+        let abs = rokc_core::real_path(p).map_err(|e| format!("--path {p}: {e}"))?;
+        let script = rokc_core::real_path(file).map_err(|e| e.to_string())?;
+        let dir = script.parent().unwrap_or_else(|| Path::new("/"));
+        let rel = relative(dir, &abs).display().to_string();
+        dep.source = Source::Path(rel.replace('\\', "/"));
+    }
+    pin_newest(g, &mut dep)?;
+    edit_script(g, file, |old, label| {
+        manifest::add_dep(old, label, "deps", &dep).map(Some)
+    })?;
+    if !g.quiet {
+        eprintln!("       Added {} to {}", dep.name, file.display());
+    }
+    Ok(0)
 }
 
 /// A stone without a requirement: `^` its newest version.
@@ -1341,7 +1680,11 @@ fn add_dep(g: &Global, mut dep: Dep, dev: bool, env: Option<&str>) -> Result<i32
     write_and_resolve(g, &path, old.as_deref(), &text)?;
     if !g.quiet {
         match env {
-            Some(e) => eprintln!("   Installed {} into environment `{e}`", dep.name),
+            Some(e) => eprintln!(
+                "   Installed {n} into environment `{e}` (for `rok repl` / `rok jupyter`; a \
+                 script gets it with `rok add {n} <file.rok>`)",
+                n = dep.name
+            ),
             None => eprintln!(
                 "       Added {} to {section} of {}",
                 dep.name,
@@ -1354,11 +1697,28 @@ fn add_dep(g: &Global, mut dep: Dep, dev: bool, env: Option<&str>) -> Result<i32
 
 fn cmd_remove(g: &Global, args: &[String]) -> Result<i32, String> {
     package_only(g, "remove", "uninstall")?;
-    let (native, name) = match args {
+    let (script, args) = script_arg(args)?;
+    let (native, name) = match args.as_slice() {
         [name] => (false, name),
         [f, name] if f == "--native" => (true, name),
-        _ => return Err("usage: rok remove [--native] <name>".into()),
+        _ => return Err("usage: rok remove [--native] <name> [<file.rok>]".into()),
     };
+    if let Some(file) = script {
+        let section = if native { "native" } else { "deps" };
+        let removed = edit_script(g, &file, |old, label| {
+            manifest::remove_dep(old, label, section, name)
+        })?;
+        if !removed {
+            return Err(format!(
+                "`{name}` is not a dependency in the block of {}",
+                file.display()
+            ));
+        }
+        if !g.quiet {
+            eprintln!("     Removed {name} from {}", file.display());
+        }
+        return Ok(0);
+    }
     let (path, _) = manifest_to_edit(None)?;
     if !remove_from(g, &path, native, name)? {
         return Err(format!(
@@ -1417,7 +1777,7 @@ const INSTALL_USAGE: &str = "usage: rok install <name>[@<req>] [--registry <url>
 /// `rok install`: an executable (a package with `src/main.rok`, or a
 /// script file) built `--release` into `$ROK_HOME/bin`, or a library
 /// package (`src/lib.rok` only, or with `--lib`) into the active
-/// environment (scripts `use` it).
+/// environment, for its REPL / Jupyter sessions.
 fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     if args.iter().any(|a| a == "--list") {
         return match args {
@@ -1427,7 +1787,7 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     }
     let env = selected_env(g)?;
     if args.iter().any(|a| a == "--native") {
-        return add_native(g, args, Some(&env));
+        return add_native(g, args, Some(&env), None);
     }
     let lib = args.iter().any(|a| a == "--lib");
     let args: Vec<String> = args.iter().filter(|a| *a != "--lib").cloned().collect();
@@ -1460,7 +1820,7 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
             manifest::check_name(&dep.name)?;
             let abs = rokc_core::real_path(file).map_err(|e| format!("--path {p}: {e}"))?;
             dep.source = Source::Path(abs.display().to_string().replace('\\', "/"));
-            return install_bin(g, &dep, &abs, false, Some(&env));
+            return install_bin(g, &dep, &abs, false);
         }
     }
     if !named {
@@ -1497,11 +1857,11 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
         }
         let copy = !matches!(dep.source, Source::Path(_));
         let name = dep.name.clone();
-        let code = install_bin(g, &dep, &dir, copy, None)?;
+        let code = install_bin(g, &dep, &dir, copy)?;
         if has_lib && !g.quiet {
             eprintln!(
                 "note: `{name}` also has a library (src/lib.rok); `rok install --lib ..` puts \
-                 that into environment `{env}` instead"
+                 that into environment `{env}` (for `rok repl` / `rok jupyter`) instead"
             );
         }
         return Ok(code);
@@ -1536,17 +1896,10 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Build `src` (a package directory, or a script file built in
-/// environment `env`) `--release` into `$ROK_HOME/bin`, from a scratch
-/// copy when `copy` (a cached checkout is not written to), and record
-/// `dep` as its source.
-fn install_bin(
-    g: &Global,
-    dep: &Dep,
-    src: &Path,
-    copy: bool,
-    env: Option<&str>,
-) -> Result<i32, String> {
+/// Build `src` (a package directory, or a script file) `--release` into
+/// `$ROK_HOME/bin`, from a scratch copy when `copy` (a cached checkout
+/// is not written to), and record `dep` as its source.
+fn install_bin(g: &Global, dep: &Dep, src: &Path, copy: bool) -> Result<i32, String> {
     let name = &dep.name;
     if PROXIES.contains(&name.as_str()) {
         return Err(format!(
@@ -1591,9 +1944,6 @@ fn install_bin(
             c.arg(flag);
         }
     }
-    if let Some(e) = env {
-        c.args(["--env", e]);
-    }
     c.arg("build").arg(from).args(["--release", "-o"]).arg(&tmp);
     if !dep.features.is_empty() {
         c.arg(format!("--features={}", dep.features.join(",")));
@@ -1618,22 +1968,21 @@ fn install_bin(
     Ok(0)
 }
 
-/// Prebuild environment `env`'s libraries into its `target/` as a script
-/// run in it does: by building an empty script. Whether they built.
+/// Prebuild environment `env`'s libraries into its `target/`, as a REPL
+/// session in it does: by building an empty file with them. Whether they
+/// built.
 fn prebuild_env(g: &Global, env: &str) -> Result<bool, String> {
     let id = std::process::id();
     let probe = std::env::temp_dir().join(format!("rok-prebuild-{id}.rok"));
     let out = probe.with_extension(std::env::consts::EXE_EXTENSION);
     std::fs::write(&probe, "").map_err(|e| format!("{}: {e}", probe.display()))?;
-    let mut c = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
-    if g.offline {
-        c.arg("--offline");
-    }
-    c.args(["--env", env, "-q", "build"])
-        .arg(&probe)
-        .arg("-o")
-        .arg(&out);
-    let built = c.status().map_err(|e| format!("cannot run rok: {e}"));
+    let args = [
+        probe.display().to_string(),
+        "-o".to_owned(),
+        out.display().to_string(),
+    ];
+    let built = rokc_command(g, "build", &["-q".to_owned()], &args, Some(env))
+        .and_then(|(mut c, _)| c.status().map_err(|e| format!("cannot run rokc: {e}")));
     let _ = std::fs::remove_file(&probe);
     let _ = std::fs::remove_file(&out);
     Ok(built?.success())

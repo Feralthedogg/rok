@@ -522,7 +522,7 @@ fn collect<'a>(
     let reexports = reexports;
     // A prebuilt dependency's build has no user package to advise.
     let missing = crate::uses::Missing {
-        script: input.script,
+        script: input.script.as_ref(),
         packages: &input.packages,
     };
     early.extend(crate::uses::check_use_targets(

@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "rokc_core",
  "rokc_diagnostic",
+ "rokc_lexer",
  "rokc_rokon",
  "rokc_target",
 ]

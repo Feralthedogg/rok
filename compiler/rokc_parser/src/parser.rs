@@ -873,12 +873,22 @@ impl<'a> Parser<'a> {
         // misspelled keyword, followed by another word.
         if let Some(TokenKind::Ident(word)) = self.prev_kind() {
             if matches!(found, TokenKind::Ident(_)) || keyword_alias(word).is_some() {
-                if let Some(k) = keyword_hint(word) {
+                let import = match found {
+                    TokenKind::Ident(name)
+                        if matches!(word.as_str(), "import" | "include" | "require") =>
+                    {
+                        import_help(&self.file, self.tokens, name)
+                    }
+                    _ => None,
+                };
+                if let Some(k) =
+                    import.or_else(|| keyword_hint(word).map(|k| format!("did you mean `{k}`?")))
+                {
                     let at = self.prev_span().unwrap_or(here);
                     return d
                         .with_span(here, "")
                         .with_secondary(at, "not a keyword")
-                        .with_help(format!("did you mean `{k}`?"));
+                        .with_help(k);
                 }
             }
         }
@@ -7320,6 +7330,45 @@ fn keyword_alias(word: &str) -> Option<&'static str> {
         "except" => "catch",
         _ => return None,
     })
+}
+
+/// The help for `import name` (or `include` / `require`) in `file`,
+/// whose tokens are `tokens`: `mod` for a `name.rok` beside it; `None`
+/// (the `use` hint) for a name the file knows (a path root, a module it
+/// declares); else `rok add` of library `name`.
+fn import_help(file: &str, tokens: &[Token], name: &str) -> Option<String> {
+    use std::path::Path;
+    let path = Path::new(file);
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if dir.join(format!("{name}.rok")).is_file() {
+        return Some(format!(
+            "to load {name}.rok, write `mod {name};` then call `{name}::f()` or `use {name}::f;`"
+        ));
+    }
+    let declared = tokens.windows(2).any(|w| {
+        w[0].kind == TokenKind::Mod && matches!(&w[1].kind, TokenKind::Ident(n) if n == name)
+    });
+    if declared || matches!(name, "rok" | "crate" | "self" | "super" | "pkg" | "sup") {
+        return None;
+    }
+    // A package's file (under its `src/`) adds to rok.rokon.
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let package = abs
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join("src/main.rok").is_file() || d.join("src/lib.rok").is_file())
+        .is_some_and(|d| abs.starts_with(d.join("src")));
+    let add = if package {
+        format!("rok add {name}")
+    } else {
+        format!("rok add {name} {file}")
+    };
+    Some(format!(
+        "to use library `{name}`, run `{add}`, then write `use {name}::f;`"
+    ))
 }
 
 /// The keyword `word` most likely meant: a known alias, else the
