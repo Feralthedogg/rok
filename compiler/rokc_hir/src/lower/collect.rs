@@ -609,6 +609,7 @@ fn collect<'a>(
         .canon_memo
         .get_mut()
         .retain(|(_, module), _| !package_of(module).is_empty());
+    let mut type_spans: HashMap<&str, Span> = HashMap::new();
     for item in &program.items {
         let (name, vis) = match item {
             Item::Struct(s) => (&s.name, s.vis),
@@ -617,18 +618,41 @@ fn collect<'a>(
             Item::TypeAlias(a) => (&a.name, a.vis),
             Item::Trait(t) => {
                 names.traits.insert(t.name.clone());
+                let mut methods: HashMap<&str, Span> = HashMap::new();
+                for ti in &t.items {
+                    let rokc_ast::TraitItem::Method(m) = ti else {
+                        continue;
+                    };
+                    if let Some(first) = methods.insert(&m.name, m.span) {
+                        pre_diags.push(rokc_diagnostic::duplicate(
+                            rokc_diagnostic::ErrorKind::Type,
+                            format!(
+                                "method `{}` is defined more than once in trait `{}`",
+                                m.name, t.name
+                            ),
+                            &m.name,
+                            m.span,
+                            Some(first),
+                            true,
+                        ));
+                    }
+                }
                 (&t.name, t.vis)
             }
             _ => continue,
         };
         if names.names.insert(name.clone()) {
             names.visibility.insert(name.clone(), vis);
+            type_spans.insert(name, item.span());
         } else {
-            err(
-                &mut pre_diags,
-                item.span(),
+            pre_diags.push(rokc_diagnostic::duplicate(
+                rokc_diagnostic::ErrorKind::Type,
                 format!("type `{name}` is defined more than once"),
-            );
+                name,
+                item.span(),
+                type_spans.get(name.as_str()).copied(),
+                false,
+            ));
         }
     }
     // `pub use` aliases → what they name, chains followed to the item.
@@ -865,6 +889,10 @@ fn collect<'a>(
     let mut consts = consts;
     // Per impl item: its associated consts, for its `Impl`.
     let mut impl_const_lists: HashMap<usize, Vec<AssocConst>> = HashMap::new();
+    // Where this stage's consts are, for a later item of their name.
+    let mut const_spans: HashMap<String, Span> = HashMap::new();
+    // Module-level consts and statics: one value namespace with fns.
+    let mut value_spans: HashMap<String, (Span, &str)> = HashMap::new();
     for (idx, item) in program.items.iter().enumerate() {
         // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
         // inside the impl); a trait impl also gets the trait's defaults
@@ -883,19 +911,39 @@ fn collect<'a>(
         // where it is read, `lower_assoc_const`); an inherent `S::N`
         // shadows the trait ones, as for methods.
         let trait_impl = matches!(item, Item::Impl(i) if i.trait_path.is_some());
-        for (key, ty, value) in item_consts {
+        // An inherent impl's own consts come first, in order.
+        let spans: Vec<Span> = match item {
+            Item::Impl(i) => i
+                .items
+                .iter()
+                .filter_map(|it| match it {
+                    AstImplItem::Const(c) => Some(c.span),
+                    _ => None,
+                })
+                .collect(),
+            _ => vec![item.span()],
+        };
+        for (n, (key, ty, value)) in item_consts.into_iter().enumerate() {
+            let here = spans.get(n).copied().unwrap_or_else(|| item.span());
             if trait_impl {
                 if !inherent_keys.contains(&key) {
                     consts.insert(key, (ty, value));
                 }
             } else if inherent_keys.insert(key.clone()) {
+                if matches!(item, Item::Const(_)) {
+                    value_spans.insert(key.clone(), (here, "const"));
+                }
+                const_spans.insert(key.clone(), here);
                 consts.insert(key, (ty, value));
             } else {
-                err(
-                    &mut pre_diags,
-                    item.span(),
+                pre_diags.push(rokc_diagnostic::duplicate(
+                    rokc_diagnostic::ErrorKind::Type,
                     format!("const `{key}` is defined more than once"),
-                );
+                    &key,
+                    here,
+                    const_spans.get(&key).copied(),
+                    false,
+                ));
             }
         }
     }
@@ -910,14 +958,22 @@ fn collect<'a>(
     for (idx, item) in program.items.iter().enumerate() {
         let here = item.span();
         if let Item::Static(s) = item {
-            if static_tys.contains_key(&s.name) {
-                err(
-                    &mut pre_diags,
+            if static_tys.contains_key(&s.name) || value_spans.contains_key(&s.name) {
+                let first = static_defs
+                    .iter()
+                    .find(|d| d.name == s.name)
+                    .map(|d| d.span);
+                pre_diags.push(rokc_diagnostic::duplicate(
+                    rokc_diagnostic::ErrorKind::Type,
+                    value_dup("static", &s.name, &value_spans),
+                    &s.name,
                     here,
-                    format!("static `{}` is defined more than once", s.name),
-                );
+                    first.or_else(|| value_spans.get(&s.name).map(|(at, _)| *at)),
+                    false,
+                ));
                 continue;
             }
+            value_spans.insert(s.name.clone(), (here, "static"));
             // Its type (and literal initializer) once every item is
             // registered.
             static_asts.push((&s.ty, module_of(&s.name)));
@@ -942,11 +998,17 @@ fn collect<'a>(
                     continue;
                 };
                 if static_tys.contains_key(&s.name) {
-                    err(
-                        &mut pre_diags,
-                        here,
+                    pre_diags.push(rokc_diagnostic::duplicate(
+                        rokc_diagnostic::ErrorKind::Type,
                         format!("static `{}` is defined more than once", s.name),
-                    );
+                        &s.name,
+                        s.span,
+                        static_defs
+                            .iter()
+                            .find(|d| d.name == s.name)
+                            .map(|d| d.span),
+                        false,
+                    ));
                     continue;
                 }
                 // Its type is resolved in the block's module.
@@ -1091,12 +1153,27 @@ fn collect<'a>(
         let here = item.span();
         match item {
             Item::Fn(fn_def) => {
-                if fn_table.contains_key(&fn_def.name) || generic_fns.contains_key(&fn_def.name) {
-                    err(
-                        &mut pre_diags,
+                let name = &fn_def.name;
+                if fn_table.contains_key(name)
+                    || generic_fns.contains_key(name)
+                    || value_spans.contains_key(name)
+                {
+                    let first = generic_fns
+                        .get(name)
+                        .map(|f| f.span)
+                        .or_else(|| {
+                            let id = fn_table.get(name)?.id.0 as usize;
+                            decls.get(id).map(decl_span)
+                        })
+                        .or_else(|| value_spans.get(name).map(|(at, _)| *at));
+                    pre_diags.push(rokc_diagnostic::duplicate(
+                        rokc_diagnostic::ErrorKind::Type,
+                        value_dup("function", name, &value_spans),
+                        name,
                         here,
-                        format!("function `{}` is defined more than once", fn_def.name),
-                    );
+                        first,
+                        !value_spans.contains_key(name),
+                    ));
                     continue;
                 }
                 let module = module_of(&fn_def.name);
@@ -1597,23 +1674,29 @@ fn collect<'a>(
             .as_ref()
             .and_then(|tn| trait_defs.get(tn).copied());
         let target_display = impl_def_display(&impl_def.self_ty);
+        let dup = |leaf: &str, at: Span, first: Option<Span>| {
+            rokc_diagnostic::duplicate(
+                rokc_diagnostic::ErrorKind::Type,
+                format!("method `{leaf}` is defined more than once for `{target_display}`"),
+                leaf,
+                at,
+                first,
+                true,
+            )
+        };
         // Methods this impl provides: their trait defaults are skipped.
-        let mut explicit_methods: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut explicit_methods: HashMap<String, Span> = HashMap::new();
         for ii in &impl_def.items {
             let m = match ii {
                 AstImplItem::Method(m) => m,
                 AstImplItem::Const(_) | AstImplItem::AssocType { .. } => continue,
             };
             let leaf = leaf_name(&m.name).to_owned();
-            if !explicit_methods.insert(leaf.clone()) {
-                err(
-                    &mut pre_diags,
-                    here,
-                    format!("method `{leaf}` is defined more than once for `{target_display}`"),
-                );
+            if let Some(first) = explicit_methods.get(&leaf) {
+                pre_diags.push(dup(&leaf, m.span, Some(*first)));
                 continue;
             }
+            explicit_methods.insert(leaf.clone(), m.span);
             if let (Some(base), true) =
                 (&generic_base, impl_generic || !m.generics.params.is_empty())
             {
@@ -1641,15 +1724,11 @@ fn collect<'a>(
                 let slot = generic_methods
                     .entry((base.clone(), leaf.clone()))
                     .or_default();
-                if slot
+                if let Some(first) = slot
                     .iter()
-                    .any(|g| g.info.trait_name.is_none() && trait_name.is_none())
+                    .find(|g| g.info.trait_name.is_none() && trait_name.is_none())
                 {
-                    err(
-                        &mut pre_diags,
-                        here,
-                        format!("method `{leaf}` is defined more than once for `{target_display}`"),
-                    );
+                    pre_diags.push(dup(&leaf, m.span, Some(first.def.span)));
                     continue;
                 }
                 // A trait impl's generic method (`fn from_iter<I>` of
@@ -1715,11 +1794,11 @@ fn collect<'a>(
                 trait_name.as_deref(),
                 &trait_args_key,
             ) else {
-                err(
-                    &mut pre_diags,
-                    here,
-                    format!("method `{leaf}` is defined more than once for `{target_display}`"),
-                );
+                let first = fn_table
+                    .get(&format!("{}__{leaf}", ty_mangle(&target_ty)))
+                    .and_then(|sig| decls.get(sig.id.0 as usize))
+                    .map(decl_span);
+                pre_diags.push(dup(&leaf, m.span, first));
                 continue;
             };
             let id = FunctionId(u32::try_from(decls.len()).expect("FunctionId overflow"));
@@ -1782,7 +1861,7 @@ fn collect<'a>(
                 let rokc_ast::TraitItem::Method(tm) = ti else {
                     continue;
                 };
-                if explicit_methods.contains(&tm.name) {
+                if explicit_methods.insert(tm.name.clone(), tm.span).is_some() {
                     continue;
                 }
                 if tm.body.is_none() {
@@ -2131,19 +2210,28 @@ fn collect<'a>(
         } else {
             (show(&params, &ret), show(&s.param_tys, &s.ret_ty), f.span)
         };
-        err(
-            &mut pre_diags,
-            at,
-            format!(
-                "extern function `{}` is declared twice with different signatures: `{here}` \
-                 here, `{other}` elsewhere{} (spec 5.9.4)",
-                f.name,
-                if f.name.starts_with("rok_") {
-                    "; `rok_*` symbols are the runtime's, with the signatures of spec 8.5"
-                } else {
-                    ""
-                }
-            ),
+        let elsewhere = if at == f.span { first_def.span } else { f.span };
+        pre_diags.push(
+            rokc_diagnostic::RokDiagnostic::error(
+                rokc_diagnostic::ErrorKind::Type,
+                at,
+                format!(
+                    "extern function `{}` is declared twice with different signatures: `{here}` \
+                     here, `{other}` elsewhere{} (spec 5.9.4)",
+                    f.name,
+                    if f.name.starts_with("rok_") {
+                        "; `rok_*` symbols are the runtime's, with the signatures of spec 8.5"
+                    } else {
+                        ""
+                    }
+                ),
+            )
+            .with_secondary(elsewhere, format!("declared as `{other}` here"))
+            .with_help(format!(
+                "a C symbol has one signature: declare `{}` as `{other}` here too, or drop \
+                 this declaration",
+                f.name
+            )),
         );
     }
     let mut ref_out: Vec<(FunctionId, RefOut)> = sigs
@@ -4217,12 +4305,18 @@ fn generic_trait_impl(
                 Some(_) => {}
             }
         }
-        if methods.insert(leaf.clone(), template(m, module)).is_some() {
-            err(
-                diags,
+        if let Some(first) = methods.get(&leaf) {
+            diags.push(rokc_diagnostic::duplicate(
+                rokc_diagnostic::ErrorKind::Type,
                 format!("method `{leaf}` is defined more than once for `{target_display}`"),
-            );
+                &leaf,
+                m.span,
+                Some(first.def.span),
+                true,
+            ));
+            continue;
         }
+        methods.insert(leaf.clone(), template(m, module));
     }
     if let Some(td) = trait_def {
         let trait_module = module_of(&td.name);
@@ -7310,6 +7404,25 @@ pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
 /// or `Ty__m__by_Tr` when another trait (or an inherent impl) already
 /// took that name (spec 4.9.6 picks one at the call site). `None`: the
 /// same trait / inherent impl defines it twice.
+/// Where a declaration is.
+fn decl_span(d: &MethodOrFn<'_>) -> Span {
+    match d {
+        MethodOrFn::Fn(f) => f.span,
+        MethodOrFn::Method { fn_def, .. } => fn_def.span,
+    }
+}
+
+/// A second `what` named `name`; against a const or static of that
+/// name, both kinds.
+fn value_dup(what: &str, name: &str, values: &HashMap<String, (Span, &str)>) -> String {
+    match values.get(name) {
+        Some((_, other)) if *other != what => {
+            format!("`{name}` is defined more than once, as a {other} and as a {what}")
+        }
+        _ => format!("{what} `{name}` is defined more than once"),
+    }
+}
+
 fn method_key(
     fn_table: &HashMap<String, std::sync::Arc<FnSig>>,
     method_info: &HashMap<FunctionId, MethodInfo>,

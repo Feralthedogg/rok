@@ -1,6 +1,6 @@
 // expect-error: 15:25: conflicting implementations of trait `Area`: `impl<..> Area for T` and `impl<..> Area for T` overlap on `T` — bounds don't make impls disjoint
 // expect-error: 20:18: conflicting implementations of trait `Name`: `impl<..> Name for T` and `impl<..> Name for Wrap<U>` overlap on `Wrap<U>`
-// expect-error: 24:1: method `get` is defined more than once for `Wrap<T>`
+// expect-error: 24:26: method `get` is defined more than once for `Wrap<T>`
 
 // Spec 2.9.5 coherence: bounds on a type left generic never make two
 // impls disjoint, even when no type meets both bounds yet (Rust-like).

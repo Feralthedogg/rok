@@ -372,6 +372,43 @@ impl RokDiagnostic {
     }
 }
 
+/// `message` about the name `leaf` defined at both `a` and `b`.
+///
+/// One name, one item: no overloading. Points at both, the later as
+/// the error; `callable`: the help names default parameters, the way
+/// to take different argument counts (spec 4.2.3).
+#[must_use]
+pub fn duplicate(
+    kind: ErrorKind,
+    message: impl Into<String>,
+    leaf: &str,
+    a: Span,
+    b: Option<Span>,
+    callable: bool,
+) -> RokDiagnostic {
+    let (here, first) = match b.filter(|b| !b.is_dummy() && *b != a) {
+        Some(b) if (b.file, b.start) > (a.file, a.start) => (b, Some(a)),
+        b => (a, b),
+    };
+    let leaf = leaf.rsplit("::").next().unwrap_or(leaf);
+    let mut d = RokDiagnostic::error(kind, here, message);
+    if !here.is_dummy() {
+        d = d.with_span(here, "defined again here");
+    }
+    if let Some(first) = first {
+        d = d.with_secondary(first, "first defined here");
+    }
+    let rename = format!("rename one of them, e.g. `{leaf}2`");
+    d.with_help(if callable {
+        format!(
+            "{rename}; there is no overloading, so to take fewer arguments keep one and give \
+             its last parameters defaults, as in `b: i32 = 0` (spec 4.2.3)"
+        )
+    } else {
+        rename
+    })
+}
+
 impl SourceMap {
     /// `diag` on one line: `error[E200]: path:line:col: message`.
     #[must_use]

@@ -2879,10 +2879,14 @@ impl<'a> LowerCtx<'a> {
 
     /// An error at `at`.
     fn emit_error_at(&self, kind: rokc_diagnostic::ErrorKind, at: Span, msg: String) {
+        self.emit_diag(rokc_diagnostic::RokDiagnostic::error(kind, at, msg));
+    }
+
+    /// An error built by the caller.
+    fn emit_diag(&self, mut d: rokc_diagnostic::RokDiagnostic) {
         if bounds::in_failed(self.env) {
             return;
         }
-        let mut d = rokc_diagnostic::RokDiagnostic::error(kind, at, msg);
         if let Some((callee, at)) = self.env.sink.call_sites.borrow().first() {
             d = d.with_secondary(*at, format!("in this call of `{}`", leaf_name(callee)));
         }

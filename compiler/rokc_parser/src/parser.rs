@@ -4245,6 +4245,8 @@ impl<'a> Parser<'a> {
     /// namespace (inner blocks renamed theirs already).
     fn rename_local_items(&mut self, block: &mut Block, lifted: usize) {
         let mut r = rokc_ast::rename::Renames::default();
+        // Per namespace (types, values): where each name is first.
+        let mut first: [std::collections::HashMap<String, Span>; 2] = Default::default();
         for s in &block.stmts {
             let StmtKind::Item(item) = &s.kind else {
                 continue;
@@ -4262,8 +4264,28 @@ impl<'a> Parser<'a> {
             let source = rokc_core::local::leaf(name).into_owned();
             let twice = ty && r.types.insert(source.clone(), name.to_owned()).is_some()
                 || value && r.values.insert(source.clone(), name.to_owned()).is_some();
+            let ns: [bool; 2] = (ty, value).into();
             if twice {
-                self.error(s.span, format!("`{source}` is defined twice in this block"));
+                let at = ns
+                    .iter()
+                    .zip(&first)
+                    .find_map(|(in_ns, m)| m.get(&source).filter(|_| *in_ns));
+                self.diagnostics.push(
+                    rokc_diagnostic::duplicate(
+                        ErrorKind::Parse,
+                        format!("`{source}` is defined twice in this block"),
+                        &source,
+                        s.span,
+                        at.copied(),
+                        matches!(item, Item::Fn(_)),
+                    )
+                    .with_file(self.file.clone()),
+                );
+            }
+            for (in_ns, m) in ns.into_iter().zip(&mut first) {
+                if in_ns {
+                    m.entry(source.clone()).or_insert(s.span);
+                }
             }
         }
         for s in &block.stmts {

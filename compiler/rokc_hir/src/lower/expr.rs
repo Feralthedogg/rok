@@ -122,15 +122,18 @@ fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
             if from_outer != inherited {
                 continue;
             }
-            if !inherited && own.insert(&f.name, s.span).is_some() {
-                ctx.emit_error_at(
+            if let Some(first) = (!inherited).then(|| own.insert(&f.name, s.span)).flatten() {
+                ctx.emit_diag(rokc_diagnostic::duplicate(
                     rokc_diagnostic::ErrorKind::Type,
-                    s.span,
                     format!(
                         "nested function `{}` is defined twice in this block",
                         f.name
                     ),
-                );
+                    &f.name,
+                    s.span,
+                    Some(first),
+                    true,
+                ));
             }
             let full = if ctx.current_module.is_empty() {
                 lifted.to_owned()

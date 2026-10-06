@@ -1,0 +1,58 @@
+// spec: 004.01.10-no-duplicate-definitions-in-the-same-module
+// spec: 002.09.3-multiple-impl-blocks-for-one-type
+// spec: 003.09.1-form
+// One name in different namespaces, types, traits, modules and blocks
+// is not a duplicate.
+// expect-exit: 63
+// expect-stdout:
+
+// A braced struct is a type only; a fn of its name is a value.
+#[allow(non_snake_case)]
+fn Pt(x: i32) -> Pt { Pt { x: x } }
+struct Pt { x: i32 }
+
+struct A { v: i32 }
+struct B { v: i32 }
+impl A { fn get(self) -> i32 { self.v } }
+impl B { fn get(self) -> i32 { self.v * 2 } }
+impl A { fn other(self) -> i32 { 1 } }
+
+trait One { fn name(self) -> i32; }
+trait Two { fn name(self) -> i32; }
+impl One for A { fn name(self) -> i32 { 10 } }
+impl Two for A { fn name(self) -> i32 { 20 } }
+impl One for B { fn name(self) -> i32 { 30 } }
+
+mod m { pub fn post_later(a: i32) -> i32 { a } }
+mod n { pub fn post_later(a: i32, b: i32) -> i32 { a + b } }
+
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+extern "C" {
+    fn abs(x: i32) -> i32;
+}
+
+fn helper() -> i32 { 1 }
+
+fn main() -> i32 {
+    let a = A { v: 1 };
+    let b = B { v: 2 };
+    // A nested fn hides the module's in its block; sibling blocks
+    // each have their own.
+    let inner = {
+        fn helper() -> i32 { 2 }
+        helper()
+    };
+    let other = {
+        fn helper() -> i32 { 3 }
+        helper()
+    };
+    let total = Pt(1).x + a.get() + b.get() + a.other() + One::name(a) + Two::name(a)
+        + One::name(b) - 60;
+    // 1 + 1 + 4 + 1 + 10 + 20 + 30 - 60 = 7
+    let calls = m::post_later(4) + n::post_later(5, 6);
+    // 4 + 11 = 15
+    let c = unsafe { abs(-30) };
+    return total + calls + helper() + inner + other + c + 5;
+}
