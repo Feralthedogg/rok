@@ -7,3 +7,6 @@ fn process(input: str, t: fn(str) -> str, output: str) -> str { t(input) }
 
 println(process("in", |s| { s }, "out"));
 println(process("in", "out") |s| { s });
+// expect-error-extra: allow
+// (the trailing closure, put in `output: str`, is also reported as
+// a mismatch and as a closure whose parameter type can't be inferred)

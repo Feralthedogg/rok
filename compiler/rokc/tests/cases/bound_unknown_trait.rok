@@ -10,3 +10,7 @@ trait Tr: Nope5 {}
 fn main() -> i32 {
     return 0;
 }
+// expect-error: cannot find trait `Nope1` (named in a bound)
+// expect-error: cannot find trait `Nope3` (named in a bound)
+// expect-error: cannot find trait `Nope4` (named in a bound)
+// expect-error: cannot find trait `Nope5` (named in a bound)

@@ -48,3 +48,4 @@ fn main() {
     let q: Holder = Holder { v: 1 };
     println(f"{f(1)} {g(1)} {h(1)} {c::<1>()}");
 }
+// expect-error: 48:21: cannot find struct `Holder` in this scope

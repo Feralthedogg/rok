@@ -364,8 +364,11 @@ pub(super) fn lower_let(
                 )
                 .with_secondary(fixed, format!("`{name}`'s type fixed here"));
                 ctx.env.sink.diagnostics.borrow_mut().push(d);
-            }
-            if has_var(ctx, &t) {
+                // Its uses are not checked against either type again.
+                lower_expected(ctx, init, t);
+                ctx.declare(Some(name.to_owned()), HirTy::Unknown);
+                None
+            } else if has_var(ctx, &t) {
                 ctx.emit_uninferred(format!(
                     "cannot infer the type of `{name}` (`{}`) from its initializer or later \
                      uses — add an annotation (`let {name}: T = ..`)",

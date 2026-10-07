@@ -17,3 +17,6 @@ fn main() -> i32 {
     let c = M { v: 1 } + M { v: 2 };
     return c.v;
 }
+// expect-error-extra: allow
+// (the `+` still calls the throwing `add`, so `c.v` also reports
+// a field access on `throws (Overflow) -> M`)

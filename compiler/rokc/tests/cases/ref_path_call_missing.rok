@@ -19,3 +19,4 @@ fn main() {
     Box2::set(b, 5);
     println(f"{c.c} {b.v}");
 }
+// expect-error: parameter 1 of `Box2::set` is `ref` — pass `ref x`

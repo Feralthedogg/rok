@@ -5,6 +5,7 @@
 // expect-error: const `BIG` cannot be evaluated at compile time: attempt to multiply with overflow
 // expect-error: const `RT` cannot be evaluated at compile time: calls `plain`, which is not a `const fn`
 // expect-error: const `A` is defined in terms of itself
+// expect-error: const `B` is defined in terms of itself
 // expect-error: const `DEEP` cannot be evaluated at compile time: evaluation exceeds the call depth limit
 // expect-error: const `SPIN` cannot be evaluated at compile time: evaluation exceeds the step limit
 // expect-error: const `DIV` cannot be evaluated at compile time: attempt to divide by zero

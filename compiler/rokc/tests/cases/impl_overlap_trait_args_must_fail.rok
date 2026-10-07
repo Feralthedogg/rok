@@ -12,3 +12,6 @@ impl<T: Num> Pick<W<T>> for T { fn pick(self, r: W<T>) -> i32 { return 1; } }
 impl Pick<W<i32>> for i32 { fn pick(self, r: W<i32>) -> i32 { return 2; } }
 
 fn main() -> i32 { return 7.pick(W { v: 1 }); }
+// expect-error-extra: allow
+// (the call is also reported as ambiguous between the two
+// overlapping impls)

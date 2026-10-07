@@ -11,3 +11,6 @@ impl<T: Num> Twice for T { fn twice(self) -> i32 { return self.num() * 2; } }
 impl Twice for i32 { fn twice(self) -> i32 { return 0; } }
 
 fn main() -> i32 { return 7.twice(); }
+// expect-error-extra: allow
+// (the call `7.twice()` is also reported as ambiguous between the
+// two overlapping impls)

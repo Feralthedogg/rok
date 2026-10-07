@@ -446,6 +446,7 @@ fn collect<'a>(
         main_lets: _,
         harness_main: _,
         may_diverge: base_may_diverge,
+        duplicated: _,
         method_info,
         defs,
         consts,
@@ -1115,6 +1116,8 @@ fn collect<'a>(
     // call, outside `decls` / `fn_table`.
     let mut fn_table = fn_table;
     let mut extern_fns = extern_fns;
+    // The kept definition of each name defined again (`Env::duplicated`).
+    let mut duplicated: std::collections::HashSet<Span> = std::collections::HashSet::new();
     // Later extern declarations of a name already declared: whether
     // `extern "rok"`, the first one's id.
     let mut extern_redecls: Vec<(&FnDef, bool, FunctionId)> = Vec::new();
@@ -1166,6 +1169,7 @@ fn collect<'a>(
                             decls.get(id).map(decl_span)
                         })
                         .or_else(|| value_spans.get(name).map(|(at, _)| *at));
+                    duplicated.extend(first);
                     pre_diags.push(rokc_diagnostic::duplicate(
                         rokc_diagnostic::ErrorKind::Type,
                         value_dup("function", name, &value_spans),
@@ -1441,7 +1445,15 @@ fn collect<'a>(
                 tag = format!("{tag}_{seen}");
             }
             *seen += 1;
-            let mut gi = generic_trait_impl(impl_def, trait_key, td, &module, &tag, &mut pre_diags);
+            let mut gi = generic_trait_impl(
+                impl_def,
+                trait_key,
+                td,
+                &module,
+                &tag,
+                &mut pre_diags,
+                &mut duplicated,
+            );
             gi.consts = consts;
             impls.push(gi);
             continue;
@@ -1580,6 +1592,7 @@ fn collect<'a>(
                 .into_iter()
                 .chain(may_diverge(program, &mut diverging))
                 .collect(),
+            duplicated: std::cell::RefCell::default(),
             fn_table,
             fn_leaves: std::cell::OnceCell::new(),
             extern_fns,
@@ -1674,7 +1687,8 @@ fn collect<'a>(
             .as_ref()
             .and_then(|tn| trait_defs.get(tn).copied());
         let target_display = impl_def_display(&impl_def.self_ty);
-        let dup = |leaf: &str, at: Span, first: Option<Span>| {
+        let mut dup = |leaf: &str, at: Span, first: Option<Span>| {
+            duplicated.extend(first);
             rokc_diagnostic::duplicate(
                 rokc_diagnostic::ErrorKind::Type,
                 format!("method `{leaf}` is defined more than once for `{target_display}`"),
@@ -2126,6 +2140,7 @@ fn collect<'a>(
     );
     env.fn_table = fn_table;
     env.decls = decls;
+    env.duplicated = duplicated.into();
     env.method_table = method_table;
     env.method_info = method_info;
     env.intrinsics = intrinsics;
@@ -2211,6 +2226,8 @@ fn collect<'a>(
             (show(&params, &ret), show(&s.param_tys, &s.ret_ty), f.span)
         };
         let elsewhere = if at == f.span { first_def.span } else { f.span };
+        // Calls are checked against neither declaration.
+        env.duplicated.borrow_mut().insert(first_def.span);
         pre_diags.push(
             rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Type,
@@ -4237,6 +4254,7 @@ fn generic_trait_impl(
     module: &str,
     tag: &str,
     diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+    duplicated: &mut std::collections::HashSet<Span>,
 ) -> Impl {
     let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, msg: String| {
         pre.push(rokc_diagnostic::RokDiagnostic::error(
@@ -4306,6 +4324,7 @@ fn generic_trait_impl(
             }
         }
         if let Some(first) = methods.get(&leaf) {
+            duplicated.insert(first.def.span);
             diags.push(rokc_diagnostic::duplicate(
                 rokc_diagnostic::ErrorKind::Type,
                 format!("method `{leaf}` is defined more than once for `{target_display}`"),

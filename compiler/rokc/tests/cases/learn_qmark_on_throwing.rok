@@ -13,3 +13,4 @@ fn parse_two(s: str) throws -> i32 {
     let n = s.parse::<i32>()?;
     n * 2
 }
+// expect-error: 9:18: type annotations needed: cannot infer type parameter `T` of `rok::core::str::str__parse`

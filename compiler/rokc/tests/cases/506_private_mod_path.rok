@@ -23,3 +23,4 @@ fn main() {
     println(f"{s.v} {a::hidden::C} {g()}");
 }
 // spec: §5.6.13
+// expect-error: 23:37: `a::hidden::f` is not visible from `<root>`

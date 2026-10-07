@@ -551,22 +551,43 @@ pub fn flatten_diagnostics(stderr: &str) -> String {
 }
 
 /// Check a failed build's stderr against every `// expect-error:` and
-/// `// forbid-error:`.
+/// `// forbid-error:`: each expected text is present, and each
+/// `error[..]` headline (or its `path:line:col: message` form) contains
+/// one of them. `// expect-error-extra: allow` lifts the second rule,
+/// for a case whose further errors are legitimate (it says which).
 pub fn check_expect_error(source: &str, stderr: &str) -> Result<(), String> {
-    let stderr = &flatten_diagnostics(stderr);
-    if let Some(unwanted) = directives(source, "forbid-error:").find(|w| stderr.contains(w)) {
+    let flat = &flatten_diagnostics(stderr);
+    if let Some(unwanted) = directives(source, "forbid-error:").find(|w| flat.contains(w)) {
         return Err(format!("build stderr has error {unwanted:?}"));
     }
-    match directives(source, "expect-error:").find(|want| !stderr.contains(want)) {
-        Some(want) => Err(format!(
+    let wants: Vec<&str> = directives(source, "expect-error:").collect();
+    if let Some(want) = wants.iter().find(|want| !flat.contains(*want)) {
+        return Err(format!(
             "build failed but stderr lacks expect-error {want:?}\n    stderr: {:?}",
-            stderr
-                .lines()
+            flat.lines()
                 .find(|l| l.starts_with("error"))
-                .unwrap_or_else(|| stderr.trim())
-        )),
-        None => Ok(()),
+                .unwrap_or_else(|| flat.trim())
+        ));
     }
+    if directive(source, "expect-error-extra:") == Some("allow") {
+        return Ok(());
+    }
+    let lines: Vec<&str> = stderr.lines().collect();
+    for (i, l) in lines.iter().enumerate() {
+        if !l.starts_with("error[") {
+            continue;
+        }
+        let msg = l.split_once("]: ").map_or("", |(_, m)| m);
+        let at = lines
+            .get(i + 1)
+            .and_then(|n| n.trim_start().strip_prefix("--> "))
+            .map(|loc| format!("{loc}: {msg}"))
+            .unwrap_or_default();
+        if !wants.iter().any(|w| l.contains(w) || at.contains(w)) {
+            return Err(format!("build stderr has unexpected error {l:?} ({at})"));
+        }
+    }
+    Ok(())
 }
 
 /// Deterministic PRNG (splitmix64) for the fuzz and differential tests.

@@ -9,3 +9,6 @@ trait Tr<A> { fn f(self, a: A); }
 fn widen2<T: Into<U>, U>(x: T) -> U { x.into() }
 fn two<T: Tr<i32, i64>>(x: T) {}
 fn main() {}
+// expect-error-extra: allow
+// (`x.into()` in `widen2` also reports the unmet `From<T>` bound of
+// `Into::into`, as the rejected `Into<U>` bound gives `U: From<T>`)

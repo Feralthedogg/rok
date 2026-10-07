@@ -9,3 +9,6 @@ impl T for S {
 }
 
 println(f"{S {}.m()}");
+// expect-error-extra: allow
+// (the call `S {}.m()` also reports the missing `try`, as the impl's
+// throwing method is still the one called)

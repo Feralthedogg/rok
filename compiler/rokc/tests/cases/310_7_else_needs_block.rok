@@ -13,3 +13,6 @@ fn main() -> i32 {
     if let p: i32 = x && let q: i32 = y { return p + q; }
     return v + w;
 }
+// expect-error-extra: allow
+// (parser recovery after the `let` chain also reports
+// "expected `;`, found keyword `return`")

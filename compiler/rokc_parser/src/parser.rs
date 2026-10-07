@@ -1322,12 +1322,36 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.bump(); // `#[` or `#![`
         let path = self.parse_attr_path()?;
+        let errors = self.diagnostics.len();
         let body = if path == ["literal"] && matches!(self.peek(), TokenKind::LParen) {
             self.parse_literal_attr_body()
         } else {
             self.parse_attr_body()
         };
-        self.expect(&TokenKind::RBracket, "`]`");
+        if self.diagnostics.len() == errors {
+            self.expect(&TokenKind::RBracket, "`]`");
+        } else {
+            // A malformed body: on past its `]`, reporting nothing more.
+            let mut depth = 0usize;
+            loop {
+                match self.peek() {
+                    TokenKind::Eof => break,
+                    TokenKind::RBracket if depth == 0 => {
+                        self.bump();
+                        break;
+                    }
+                    TokenKind::LBracket
+                    | TokenKind::HashLBracket
+                    | TokenKind::LParen
+                    | TokenKind::LBrace => depth += 1,
+                    TokenKind::RBracket | TokenKind::RParen | TokenKind::RBrace => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    _ => {}
+                }
+                self.bump();
+            }
+        }
         Some(Attribute {
             path,
             body,
@@ -4922,6 +4946,13 @@ impl<'a> Parser<'a> {
         if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
             let s = self.peek_span();
             self.error(s, "range operators cannot be chained (spec 3.7.3)");
+            // Skip the rest of the chain, so it is not a second error.
+            while matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotEq) {
+                self.bump();
+                if self.can_start_range_end() {
+                    self.parse_expr_bp(0)?;
+                }
+            }
         }
         Some(Expr {
             span: self.to_prev(span),

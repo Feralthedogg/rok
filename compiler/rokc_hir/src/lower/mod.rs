@@ -1194,6 +1194,8 @@ struct Tables<'a> {
     /// Bodies without `-> T` that may diverge on every path
     /// (`collect::may_diverge`), by span.
     may_diverge: std::collections::HashSet<rokc_diagnostic::Span>,
+    /// Definitions a later item of the same name repeats (reported).
+    duplicated: std::cell::RefCell<std::collections::HashSet<rokc_diagnostic::Span>>,
     method_info: HashMap<FunctionId, MethodInfo>,
     /// Every struct / union / enum, declared or instantiated.
     defs: TypeDefs<'a>,
@@ -1376,6 +1378,13 @@ impl<'a> Env<'a> {
         self.may_diverge.contains(&at)
     }
 
+    /// A later item repeats the definition at `at`: calls of it report
+    /// no argument errors, which would read as if one was chosen. Not a
+    /// logged read: while the set is not empty no unit is made.
+    fn duplicated(&self, at: Span) -> bool {
+        self.duplicated.borrow().contains(&at)
+    }
+
     fn intrinsic(&self, id: FunctionId) -> Option<&collect::Intrinsic> {
         incr::read(|| incr::Read::Intrinsic(id));
         self.intrinsics.get(&id)
@@ -1529,6 +1538,7 @@ impl Tables<'_> {
             main_lets: HashMap::new(),
             harness_main: false,
             may_diverge: std::collections::HashSet::new(),
+            duplicated: std::cell::RefCell::default(),
             method_info: HashMap::new(),
             defs: TypeDefs::default(),
             consts: HashMap::new(),

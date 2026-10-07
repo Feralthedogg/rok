@@ -329,6 +329,13 @@ impl<'src> Lexer<'src> {
             self.advance(c.len_utf8());
         }
         let text: String = self.src[start..self.pos].chars().take(16).collect();
+        // `#!` past the first line: a misplaced shebang, so the rest of
+        // the line is not code.
+        if text == "#" && self.peek_char() == Some('!') {
+            while let Some(c) = self.peek_char().filter(|&c| c != '\n') {
+                self.advance(c.len_utf8());
+            }
+        }
         let msg = if text == "#" {
             "stray `#` (expected `#[` or `#![`)".to_owned()
         } else {

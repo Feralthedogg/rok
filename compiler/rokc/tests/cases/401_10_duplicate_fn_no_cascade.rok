@@ -1,0 +1,52 @@
+// spec: 004.01.10-no-duplicate-definitions-in-the-same-module
+// A call of a duplicated function or method reports nothing more: an
+// argument count or type error would read as if one definition was
+// picked. Errors inside the arguments themselves still show.
+// expect-error: 17:1: function `f` is defined more than once
+// expect-error: 20:1: function `g` is defined more than once
+// expect-error: 25:5: method `m` is defined more than once for `S`
+// expect-error: 28:5: method `m` is defined more than once for `S`
+// expect-error: 33:5: method `n` is defined more than once for `B<T>`
+// expect-error: 37:5: method `t` is defined more than once for `S`
+// expect-error: 45:22: cannot find value `nope` in this scope
+// expect-error: 50:5: nested function `h` is defined twice in this block
+
+trait Tr { fn t(self, a: i32) -> i32; }
+
+fn f(a: i32) -> i32 { a }
+fn f(a: i32, b: i32) -> i32 { a + b }
+
+fn g<T>(a: T) -> T { a }
+fn g<T>(a: T, b: T) -> T { b }
+
+struct S {}
+impl S {
+    fn m(self, a: i32) -> i32 { a }
+    fn m(self, a: i32, b: i32) -> i32 { a + b }
+}
+impl S {
+    fn m(self) -> i32 { 0 }
+}
+struct B<T> { x: T }
+impl<T> B<T> {
+    fn n(self, a: i32) -> i32 { a }
+    fn n(self, a: i32, b: i32) -> i32 { a + b }
+}
+impl Tr for S {
+    fn t(self, a: i32) -> i32 { a }
+    fn t(self, a: i32, b: i32) -> i32 { a + b }
+}
+
+fn main() -> i32 {
+    let s = S {};
+    let b = B { x: 1 };
+    let a = f(1, 2) + f("x") + g(1, 2) + s.m(1, 2) + s.m();
+    let c = S::m(s, 1, 2) + b.n(1, 2) + s.t(1, 2);
+    return a + c + f(nope);
+}
+
+fn nested() -> i32 {
+    fn h(a: i32) -> i32 { a }
+    fn h(a: i32, b: i32) -> i32 { a + b }
+    h(1, 2) + h("x")
+}

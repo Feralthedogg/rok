@@ -583,7 +583,7 @@ pub(super) fn resolve_ty_with_structs(
                          generic parameter `<T: {written}>`"
                     ),
                 );
-                return HirTy::Any;
+                return HirTy::Unknown;
             }
             if let (GC_BUF, [elem]) = (full.as_str(), generics) {
                 return HirTy::GcBuf(Box::new(rec(elem)));

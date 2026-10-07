@@ -830,6 +830,8 @@ impl<'a> Incr<'a> {
             || sink.uninferred.get() != before.uninferred
             || !sink.tentative_ret.borrow().is_empty()
             || !sink.recursive_ret.borrow().is_empty()
+            // Calls of a duplicated item lower without their checks.
+            || !env.duplicated.borrow().is_empty()
         {
             return None;
         }

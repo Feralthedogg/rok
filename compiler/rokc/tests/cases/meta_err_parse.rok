@@ -20,3 +20,4 @@ fn main() -> i32 {
 
 // spec: 006.08-meta-blocks
 // spec: §6.9.8 §6.9.9
+// expect-error: expected an item

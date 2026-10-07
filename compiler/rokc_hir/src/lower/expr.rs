@@ -90,7 +90,8 @@ pub(super) fn lower_block(ctx: &mut LowerCtx<'_>, block: &Block) -> HirBlock {
 /// The nested fns of `block` (spec 4.10), visible in the whole block
 /// (hoisted): the ones declared here over those of enclosing blocks.
 fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
-    let mut own: HashMap<&str, rokc_diagnostic::Span> = HashMap::new();
+    // Name → the statement and the fn of its first definition here.
+    let mut own: HashMap<&str, (rokc_diagnostic::Span, rokc_diagnostic::Span)> = HashMap::new();
     for inherited in [true, false] {
         if !inherited {
             // A `use` of the block hides the nested fns of the blocks
@@ -122,7 +123,7 @@ fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
             if from_outer != inherited {
                 continue;
             }
-            if let Some(first) = (!inherited).then(|| own.insert(&f.name, s.span)).flatten() {
+            if let Some(&(first, first_fn)) = own.get(f.name.as_str()).filter(|_| !inherited) {
                 ctx.emit_diag(rokc_diagnostic::duplicate(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
@@ -134,6 +135,12 @@ fn declare_nested_fns(ctx: &mut LowerCtx<'_>, block: &Block) {
                     Some(first),
                     true,
                 ));
+                // Calls keep to the first, reporting no argument errors.
+                ctx.env.duplicated.borrow_mut().insert(first_fn);
+                continue;
+            }
+            if !inherited {
+                own.insert(&f.name, (s.span, f.span));
             }
             let full = if ctx.current_module.is_empty() {
                 lifted.to_owned()
@@ -576,6 +583,8 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                 // its first `return`.
                 if ret == HirTy::Unknown && ctx.infer_ret {
                     ctx.fn_ret_ty = lowered.ty.clone();
+                    // A poisoned value leaves the type unknown, not unset.
+                    ctx.infer_ret = lowered.ty != HirTy::Unknown;
                     Some(lowered)
                 } else if let Some(tys) = ctx.ret_tys.as_mut() {
                     tys.push(lowered.ty.clone());
@@ -2416,8 +2425,11 @@ pub(super) fn lower_struct_init(
             kind: AstTyKind::Path(path.clone()),
             span: path.span,
         };
+        let errors = ctx.env.sink.diagnostics.borrow().len();
         match ctx.resolve_ast_ty(&synth) {
             HirTy::Struct(id) => id,
+            // Resolving reported why.
+            _ if ctx.env.sink.diagnostics.borrow().len() > errors => return poison(span),
             _ => {
                 return ctx.error_expr(
                     span,
@@ -4256,6 +4268,13 @@ pub(super) fn call_sig(
 ) -> HirExpr {
     if ctx.env.is(super::FnSet::Unsafe, sig.id) {
         check_unsafe_call(ctx, callee);
+    }
+    // By span: reading the declaration would tie the caller's
+    // incremental unit to the callee's body.
+    let decl = ctx.env.decls.get(sig.id.0 as usize);
+    if decl.is_some_and(|d| ctx.env.duplicated(d.def().span)) {
+        discard_args(ctx, args);
+        return poison(span);
     }
     let (lowered, lets, places) = lower_args_ref(ctx, sig, callee, receiver, args, span);
     let out = ctx.env.sink.ref_out.borrow().get(&sig.id).cloned();
@@ -6630,6 +6649,10 @@ pub(super) fn call_generic_on(
     callee: &str,
     span: rokc_diagnostic::Span,
 ) -> HirExpr {
+    if ctx.env.duplicated(def.span) {
+        discard_args(ctx, args);
+        return poison(span);
+    }
     if args
         .iter()
         .all(|a| matches!(a, CallArg::Positional(_) | CallArg::Ref(_)))
@@ -7298,15 +7321,28 @@ fn lower_path_call(
     let segs: Vec<&str> = self_segs.iter().map(String::as_str).collect();
     let display = segs.join("::");
 
+    let errors = ctx.env.sink.diagnostics.borrow().len();
+    let concrete = ctx.resolve_fn_name(&segs);
+    let generic = concrete
+        .is_none()
+        .then(|| ctx.resolve_generic_fn_name(&segs))
+        .flatten();
+    // An ambiguous name (reported) picks one: checking the arguments
+    // against it would read as if that was meant.
+    if ctx.env.sink.diagnostics.borrow().len() > errors {
+        discard_args(ctx, args);
+        return poison(span);
+    }
+
     // Free function / extern / re-export, module-aware.
-    if let Some(full) = ctx.resolve_fn_name(&segs) {
+    if let Some(full) = concrete {
         ctx.check_item_visible(&full, "function");
         let sig = ctx.sig_of_key(&full);
         return call_sig(ctx, &sig, &full, None, args, span);
     }
 
     // Generic function — monomorphize on the argument types.
-    if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
+    if let Some(full) = generic {
         ctx.check_item_visible(&full, "function");
         let generic_def = ctx.env.generic_fn(&full).expect("a generic function");
         if let Some(&op) = ctx.env.generic_intrinsic(&generic_def.name) {

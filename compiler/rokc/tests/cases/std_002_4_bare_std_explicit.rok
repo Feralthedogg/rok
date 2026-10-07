@@ -11,3 +11,4 @@ fn main() {
     let p: Ptr<u8> = Ptr::null();
     rok::core::num::bigint::radix_chunk(1);
 }
+// expect-error: cannot find function `Ptr::null` in this scope

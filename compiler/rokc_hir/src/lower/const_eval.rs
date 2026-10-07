@@ -1887,7 +1887,17 @@ pub(super) fn constant(ctx: &LowerCtx<'_>, what: &str, v: HirExpr) -> HirExpr {
     match eval_in(ctx, &v) {
         Ok(val) => embed(ctx, &val, &v.ty, v.span).unwrap_or(v),
         Err(Stop::Runtime(op, why) | Stop::Fail(op, why)) => {
-            report(ctx, v.span, what, op, &why);
+            // Not again when lowering `v` reported it (`200 * 2` in `u8`).
+            let reported = ctx
+                .env
+                .sink
+                .diagnostics
+                .borrow()
+                .iter()
+                .any(|d| d.is_error() && d.primary.as_ref().is_some_and(|l| l.span == op));
+            if !reported {
+                report(ctx, v.span, what, op, &why);
+            }
             poison(v.span)
         }
         Err(_) => v,

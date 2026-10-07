@@ -10,3 +10,4 @@ mod b {
 }
 
 println("unreached");
+// expect-error: 9:13: circular re-export: `b::Item` -> `a::Item` -> `b::Item` (spec 5.8.10)

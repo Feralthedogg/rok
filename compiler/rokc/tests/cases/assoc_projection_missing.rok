@@ -19,3 +19,4 @@ fn nope<T: Shape>(t: T) -> T::Nope {
 fn main() {
     nope(Sq { s: 1 });
 }
+// expect-error: `T` has no associated type `Nope`

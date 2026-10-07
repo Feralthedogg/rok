@@ -628,6 +628,7 @@ fn lower_coro_block<'a>(
                     .map_or(HirTy::Unknown, |c| c.item.clone())
             } else {
                 match probe.fn_ret_ty {
+                    HirTy::Unknown if !probe.infer_ret => HirTy::Unknown,
                     HirTy::Unknown => value.ty,
                     t => t,
                 }
