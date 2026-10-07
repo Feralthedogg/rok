@@ -7439,6 +7439,17 @@ fn lower_path_call(
                 .generic_struct(&full)
                 .is_some_and(|d| matches!(d.kind, rokc_ast::StructKind::Tuple(_)))
     });
+    let dup_ctor = ctx.canon_type(&segs).is_some_and(|full| {
+        let at = ctx
+            .lookup_struct(&full)
+            .map(|sid| ctx.struct_def(sid).span)
+            .or_else(|| ctx.env.defs.generic_struct(&full).map(|d| d.span));
+        at.is_some_and(|at| ctx.env.duplicated(at))
+    });
+    if dup_ctor {
+        discard_args(ctx, args);
+        return poison(span);
+    }
     if generic_tuple && args.iter().all(|a| matches!(a, CallArg::Positional(_))) {
         let fields: Vec<(String, Expr)> = args
             .iter()
@@ -10927,6 +10938,9 @@ pub(super) fn lower_path(
         .canon_type(&segs)
         .and_then(|full| ctx.lookup_struct(&full))
     {
+        if ctx.env.duplicated(ctx.struct_def(sid).span) {
+            return poison(span);
+        }
         if ctx.struct_def(sid).fields.is_empty() {
             return HirExpr {
                 kind: HirExprKind::StructInit {

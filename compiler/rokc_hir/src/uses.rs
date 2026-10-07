@@ -356,7 +356,8 @@ impl Missing<'_> {
 /// path rooted at a bare name (not `pkg` / `sup` / `rok`) may also start
 /// with a name the module sees through one of its globs or the implicit
 /// `use rok::core::**` (`use Result::*`). One rooted at a name nothing
-/// has gets `missing`'s help.
+/// has gets `missing`'s help. Apart: each item that hides a named
+/// import of its name, with its error; its uses report nothing more.
 #[must_use]
 pub fn check_use_targets(
     raw: &[(String, Visibility, UseTree)],
@@ -364,10 +365,10 @@ pub fn check_use_targets(
     table: &UseTable,
     reexports: &[ReExport],
     missing: Option<Missing<'_>>,
-) -> Vec<RokDiagnostic> {
+) -> (Vec<RokDiagnostic>, Vec<(RokDiagnostic, Span)>) {
     use rokc_ast::{ExternItem, ImplItem, Item};
     if raw.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let mut known: HashSet<String> = HashSet::new();
     for item in items {
@@ -432,8 +433,12 @@ pub fn check_use_targets(
             )
         })
         .collect();
+    let names = namespaces(items);
+    let mut hiding = Vec::new();
     let mut diags = Vec::new();
     for (module_path, use_vis, tree) in raw {
+        let mut written = HashMap::new();
+        written_leaves(tree, &mut Vec::new(), &mut written);
         let bare = tree.prefix.segments.first().is_some_and(|s| {
             crate::lower::root_path(&[s.name.as_str(), ""], module_path).is_none()
         });
@@ -446,8 +451,14 @@ pub fn check_use_targets(
                 UseEntry::Glob { prefix } | UseEntry::GlobDeep { prefix } => prefix,
             };
             if let UseEntry::Single { local, full } = &entry {
-                // Spec 5.8.10: re-exports that lead back to themselves.
                 let me = qualified(module_path, local);
+                if let Some(hidden) =
+                    shadowed_import(&names, &reexported, &me, local, full, span, &written)
+                {
+                    hiding.push(hidden);
+                    continue;
+                }
+                // Spec 5.8.10: re-exports that lead back to themselves.
                 if *use_vis != Visibility::Private {
                     let mut at = full.as_str();
                     let mut chain = vec![me.as_str()];
@@ -555,7 +566,145 @@ pub fn check_use_targets(
             diags.push(d);
         }
     }
-    diags
+    (diags, hiding)
+}
+
+const VALUE: u8 = 1;
+const TYPE: u8 = 2;
+
+/// Each item's namespaces (`VALUE`, `TYPE`) and span, by full path; a
+/// tuple or unit struct or variant is a value too.
+fn namespaces(items: &[&rokc_ast::Item]) -> HashMap<String, (u8, Span)> {
+    use rokc_ast::{EnumVariantKind, ExternItem, Item, StructKind};
+    let mut out = HashMap::new();
+    for item in items {
+        match *item {
+            Item::Fn(f) => drop(out.insert(f.name.clone(), (VALUE, f.span))),
+            Item::Const(c) => drop(out.insert(c.name.clone(), (VALUE, c.span))),
+            Item::Static(s) => drop(out.insert(s.name.clone(), (VALUE, s.span))),
+            Item::Struct(s) => {
+                let ns = match s.kind {
+                    StructKind::Named(_) => TYPE,
+                    StructKind::Tuple(_) | StructKind::Unit => TYPE | VALUE,
+                };
+                out.insert(s.name.clone(), (ns, s.span));
+            }
+            Item::Union(u) => drop(out.insert(u.name.clone(), (TYPE, u.span))),
+            Item::Trait(t) => drop(out.insert(t.name.clone(), (TYPE, t.span))),
+            Item::TypeAlias(a) => drop(out.insert(a.name.clone(), (TYPE, a.span))),
+            Item::Enum(e) => {
+                out.insert(e.name.clone(), (TYPE, e.span));
+                for v in &e.variants {
+                    let ns = match v.kind {
+                        EnumVariantKind::Named(_) => TYPE,
+                        _ => TYPE | VALUE,
+                    };
+                    out.insert(format!("{}::{}", e.name, v.name), (ns, v.span));
+                }
+            }
+            Item::Extern(b) => {
+                for x in &b.items {
+                    let (name, at) = match x {
+                        ExternItem::Fn(f) => (f.name.clone(), f.span),
+                        ExternItem::Static(s) => (s.name.clone(), s.span),
+                    };
+                    out.insert(name, (VALUE, at));
+                }
+            }
+            Item::Impl(_) | Item::Mod(_) | Item::Use(_) => {}
+        }
+    }
+    out
+}
+
+/// `use <full>` binding `local` (`me` in its module) where the module
+/// defines an item of that name in a namespace the import fills: the
+/// item would win unseen, so it is an error. A glob's names give way.
+fn shadowed_import(
+    names: &HashMap<String, (u8, Span)>,
+    reexported: &HashMap<String, &str>,
+    me: &str,
+    local: &str,
+    full: &str,
+    span: Span,
+    written: &HashMap<Span, String>,
+) -> Option<(RokDiagnostic, Span)> {
+    let &(own, at) = names.get(me)?;
+    let mut end = full;
+    for _ in 0..=reexported.len() {
+        match reexported.get(end) {
+            Some(next) => end = next,
+            None => break,
+        }
+    }
+    if end == me {
+        return None;
+    }
+    let &(theirs, _) = names.get(end)?;
+    if own & theirs == 0 {
+        return None;
+    }
+    let path = written.get(&span).map_or(full, String::as_str);
+    let mut segs = path.rsplit("::");
+    let leaf = segs.next().unwrap_or(local);
+    let rename = match segs
+        .next()
+        .filter(|p| !matches!(*p, "pkg" | "sup" | "self"))
+    {
+        Some(parent) => alias(parent, leaf),
+        None => format!("{leaf}2"),
+    };
+    Some((
+        RokDiagnostic::error(
+            ErrorKind::Module,
+            span,
+            format!("`{local}` is both imported from `{full}` and defined in this module"),
+        )
+        .with_span(span, "imported here")
+        .with_secondary(at, "defined here, which would hide the import")
+        .with_help(format!(
+            "import it under another name, `use {path} as {rename};`, or remove this `use` \
+             if the module does not need it"
+        )),
+        at,
+    ))
+}
+
+/// A name for `parent::leaf` in `leaf`'s case: `a_f`, `A_MAX`, `APoint`.
+fn alias(parent: &str, leaf: &str) -> String {
+    if leaf.starts_with(|c: char| c.is_lowercase() || c == '_') {
+        format!("{}_{leaf}", parent.to_lowercase())
+    } else if leaf.len() > 1
+        && leaf
+            .chars()
+            .all(|c| c.is_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        format!("{}_{leaf}", parent.to_uppercase())
+    } else {
+        let camel: String = parent
+            .split('_')
+            .flat_map(|w| {
+                let mut cs = w.chars();
+                cs.next()
+                    .map(|c| c.to_ascii_uppercase())
+                    .into_iter()
+                    .chain(cs)
+            })
+            .collect();
+        format!("{camel}{leaf}")
+    }
+}
+
+/// Each simple leaf of `tree` by its span, as the source writes its path.
+fn written_leaves(tree: &UseTree, prefix: &mut Vec<String>, out: &mut HashMap<Span, String>) {
+    let n = prefix.len();
+    prefix.extend(tree.prefix.segments.iter().map(|s| s.name.clone()));
+    match &tree.kind {
+        UseTreeKind::Simple(_) => drop(out.insert(tree.prefix.span, prefix.join("::"))),
+        UseTreeKind::Group(ts) => ts.iter().for_each(|t| written_leaves(t, prefix, out)),
+        UseTreeKind::Glob | UseTreeKind::GlobRecursive => {}
+    }
+    prefix.truncate(n);
 }
 
 /// `module::name` (`name` at the root).

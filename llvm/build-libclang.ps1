@@ -11,8 +11,8 @@
 #
 # Installs lib\libclang.dll (moved from bin\, so the layout is the Unix
 # one) and lib\clang\<major>\include only, with the dynamic CRT (/MD).
-# No LLVM back end is built. Needs what build.ps1 needs (cmake, ninja and
-# the MSVC C++ build tools on PATH) plus python.
+# No LLVM back end is built. Needs what build.ps1 needs (cmake, ninja,
+# Python 3 and the MSVC C++ build tools on PATH).
 param([string]$Prefix)
 $ErrorActionPreference = 'Stop'
 

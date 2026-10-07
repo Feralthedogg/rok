@@ -1,0 +1,29 @@
+// spec: §5.5.12
+// spec: §5.5.4
+// A glob gives way to the module's own items; a named import and an
+// item of its name in different namespaces do not meet.
+// expect-exit: 27
+// expect-stdout:
+
+mod a {
+    pub fn f() -> i32 { 1 }
+    pub fn h() -> i32 { 3 }
+    pub struct T { pub x: i32 }
+    pub fn v() -> i32 { 4 }
+}
+use a::*;
+use a::T;
+use a::v;
+
+fn f() -> i32 { 2 }
+#[allow(non_snake_case)]
+fn T() -> i32 { 10 }
+#[allow(non_camel_case_types)]
+struct v { n: i32 }
+
+fn main() -> i32 {
+    let t = T { x: 5 };
+    let w = v { n: 3 };
+    // 2 + 3 + 10 + 5 + 4 + 3 = 27
+    return f() + h() + T() + t.x + v() + w.n;
+}

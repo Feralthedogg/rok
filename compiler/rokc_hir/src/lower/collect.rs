@@ -526,13 +526,16 @@ fn collect<'a>(
         script: input.script.as_ref(),
         packages: &input.packages,
     };
-    early.extend(crate::uses::check_use_targets(
+    let (use_diags, hiding) = crate::uses::check_use_targets(
         raw_uses,
         &all_items,
         uses,
         &reexports,
         input.lib.is_none().then_some(missing),
-    ));
+    );
+    early.extend(use_diags);
+    let (hiding_diags, hiding): (Vec<_>, Vec<_>) = hiding.into_iter().unzip();
+    pre_diags.extend(hiding_diags);
     early.extend(check_tiers(raw_uses, &owned.items, item_modules));
     drop(all_items);
     add_lazy_static_inits(owned);
@@ -894,6 +897,23 @@ fn collect<'a>(
     let mut const_spans: HashMap<String, Span> = HashMap::new();
     // Module-level consts and statics: one value namespace with fns.
     let mut value_spans: HashMap<String, (Span, &str)> = HashMap::new();
+    // The kept definition of each name defined again (`Env::duplicated`),
+    // and each item hiding an import.
+    let mut duplicated: std::collections::HashSet<Span> = hiding.into_iter().collect();
+    // A tuple or unit struct's constructor is a value too.
+    for item in &program.items {
+        if let Item::Struct(s) = item {
+            match s.kind {
+                rokc_ast::StructKind::Tuple(_) => {
+                    value_spans.insert(s.name.clone(), (s.span, "tuple struct"))
+                }
+                rokc_ast::StructKind::Unit => {
+                    value_spans.insert(s.name.clone(), (s.span, "unit struct"))
+                }
+                rokc_ast::StructKind::Named(_) => None,
+            };
+        }
+    }
     for (idx, item) in program.items.iter().enumerate() {
         // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
         // inside the impl); a trait impl also gets the trait's defaults
@@ -930,6 +950,19 @@ fn collect<'a>(
                 if !inherent_keys.contains(&key) {
                     consts.insert(key, (ty, value));
                 }
+            } else if let Some(&(first, _)) = value_spans
+                .get(&key)
+                .filter(|_| matches!(item, Item::Const(_)))
+            {
+                duplicated.insert(first);
+                pre_diags.push(rokc_diagnostic::duplicate(
+                    rokc_diagnostic::ErrorKind::Type,
+                    value_dup("const", &key, &value_spans),
+                    &key,
+                    here,
+                    Some(first),
+                    false,
+                ));
             } else if inherent_keys.insert(key.clone()) {
                 if matches!(item, Item::Const(_)) {
                     value_spans.insert(key.clone(), (here, "const"));
@@ -963,13 +996,15 @@ fn collect<'a>(
                 let first = static_defs
                     .iter()
                     .find(|d| d.name == s.name)
-                    .map(|d| d.span);
+                    .map(|d| d.span)
+                    .or_else(|| value_spans.get(&s.name).map(|(at, _)| *at));
+                duplicated.extend(first);
                 pre_diags.push(rokc_diagnostic::duplicate(
                     rokc_diagnostic::ErrorKind::Type,
                     value_dup("static", &s.name, &value_spans),
                     &s.name,
                     here,
-                    first.or_else(|| value_spans.get(&s.name).map(|(at, _)| *at)),
+                    first,
                     false,
                 ));
                 continue;
@@ -1116,8 +1151,6 @@ fn collect<'a>(
     // call, outside `decls` / `fn_table`.
     let mut fn_table = fn_table;
     let mut extern_fns = extern_fns;
-    // The kept definition of each name defined again (`Env::duplicated`).
-    let mut duplicated: std::collections::HashSet<Span> = std::collections::HashSet::new();
     // Later extern declarations of a name already declared: whether
     // `extern "rok"`, the first one's id.
     let mut extern_redecls: Vec<(&FnDef, bool, FunctionId)> = Vec::new();

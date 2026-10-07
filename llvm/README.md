@@ -29,7 +29,7 @@ Hosts:
   links the C++ runtime the archives were built against: libstdc++, or
   libc++ when they name `std::__1`.
 - Windows (x86_64, arm64; MSVC ABI): `llvm\build.ps1 [prefix]` from a
-  Developer PowerShell for VS (the MSVC C++ build tools, cmake, ninja) →
+  Developer PowerShell for VS (the MSVC C++ build tools, cmake, ninja, Python 3) →
   `%LOCALAPPDATA%\rok\llvm-22.1.8`. The same libraries as `.lib` with
   the dynamic CRT (`/MD`, as rustc links), no DIA SDK. rokc_llvm compiles
   its shim with `cl` (or `CXX`, e.g. `clang-cl`) and archives it with

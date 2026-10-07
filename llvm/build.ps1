@@ -10,7 +10,7 @@
 #
 # Release static libraries only, with the dynamic CRT (/MD, what rustc
 # links), no DIA SDK, zlib, zstd or libxml2. Needs, on PATH: cmake,
-# ninja and the MSVC C++ build tools (run from a "Developer PowerShell
+# ninja, Python 3 and the MSVC C++ build tools (run from a "Developer PowerShell
 # for VS" / "x64 Native Tools" prompt; ARM64 hosts: the arm64 one).
 # CC / CXX pick another compiler (clang-cl). Only building rok needs
 # these: the toolchain it makes needs no MSVC or Windows SDK.
@@ -37,6 +37,10 @@ foreach ($tool in 'cmake', 'ninja', $cxx) {
     if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
         throw "build.ps1: $tool is not on PATH (see the top of this script)"
     }
+}
+# The python.exe Windows ships is a Store installer stub; LLVM's CMake needs a real one.
+if (-not (Get-Command python -ErrorAction SilentlyContinue) -or $(& python -c 'import sys' 2>$null; $LASTEXITCODE)) {
+    throw "build.ps1: Python 3 is not on PATH (install it from python.org, or 'winget install Python.Python.3.13')"
 }
 
 function Built {
