@@ -1,11 +1,13 @@
 // spec: §2.6.9 §2.10.4 §2.10.9
 // expect-exit: 0
 // expect-stdout:
+// 12 13 14 15
 // 3 4 5 6 7 8 9 10 11
 
 // A generic alias's `where` on a type parameter holds by the bounds in
 // scope at the use: the fn's generics and `where`, the impl's (for its
-// methods too), a trait's supertraits and associated-type bounds.
+// methods too), a trait's supertraits and associated-type bounds; in
+// declarations, by the struct's, enum's, impl's or trait method's.
 trait Num { fn n(self) -> i32; }
 impl Num for i32 { fn n(self) -> i32 { return self; } }
 trait Big: Num {}
@@ -37,7 +39,20 @@ trait Has {
 struct X {}
 impl Has for X { type A = i32; fn a(self) -> i32 { return 10; } }
 
+struct F<T: Num> { w: W<T>; }
+struct G<T>(W<T>) where T: Num;
+enum E<T: Num> { A(W<T>), B { w: W<T> } }
+trait Tr<X> { fn t(self) -> i32; }
+impl<T: Num> Tr<W<T>> for F<T> { fn t(self) -> i32 { return self.w.v.n(); } }
+trait Mk { fn mk<T: Num>(self, x: T) -> W<T>; fn me(self) -> W<Self> where Self: Num; }
+impl Mk for i32 {
+    fn mk<T: Num>(self, x: T) -> W<T> { return S { v: x }; }
+    fn me(self) -> W<i32> { return S { v: self }; }
+}
+fn e(x: E<i32>) -> i32 { match x { E::A(w) => { return w.v.n(); } E::B { w } => { return w.v; } } }
+
 fn main() -> i32 {
+    println(f"{F { w: S { v: 12 } }.t()} {G(S { v: 13 }).0.v} {e(E::A(S { v: 14 }))} {0.mk(15).v.n() + 0.me().v}");
     let b = Box2 { v: 7 };
     println(f"{get(S { v: 3 })} {get2(S { v: 4 })} {get3(5)} {S { v: 6 }.m()} {b.wrap().v} {Box2 { v: 3 }.pair(S { v: 5 })} {Twice::twice(4) + 1} {X {}.via()} {get(S { v: 11 })}");
     return 0;

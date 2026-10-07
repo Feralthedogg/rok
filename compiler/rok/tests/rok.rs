@@ -2900,13 +2900,55 @@ fn install_libraries_and_executables() {
     let list = ok(&rok(&home, &root, &["install", "--list"]));
     let want = format!(
         "libraries (environment `default`):\n  greet Dep::path({src})\nexecutables ({}):\n  hello \
-         Dep::path({})\n  tool Dep::git({})\n  hi Dep::path({})\n",
+         Dep::path({})\n  tool Dep::git({}, rev: \"{commit}\")\n  hi Dep::path({})\n",
         home.join("bin").display(),
         q(hello.display()),
         q(tool.display()),
         q(root.join("hi.rok").display()),
     );
     assert_eq!(list, want);
+    // The same commit again is kept; --force or a new commit rebuilds; a
+    // path always does.
+    let url = tool.display().to_string();
+    let at = |c: &str| format!("{url} at {}", &c[..12]);
+    let again = rok(&home, &root, &["install", "--git", &url]);
+    assert!(
+        text(&again.stderr).contains(&format!(
+            "`tool` {} is installed already ({}); to rebuild it, run `rok install --git {url} \
+             --force`",
+            at(&commit),
+            home.join("bin").join(exe("tool")).display()
+        )),
+        "{}",
+        text(&again.stderr)
+    );
+    let forced = rok(&home, &root, &["install", "--git", &url, "--force"]);
+    assert!(
+        text(&forced.stderr).contains(&format!(" Reinstalled tool {}", at(&commit))),
+        "{}",
+        text(&forced.stderr)
+    );
+    let commit2 = crate::commit(&tool, &[("src/main.rok", "println(\"tool 2\");\n")]);
+    let replaced = rok(&home, &root, &["install", "--git", &url]);
+    assert!(
+        text(&replaced.stderr).contains(&format!(
+            "    Replaced tool {} with {}",
+            at(&commit),
+            at(&commit2)
+        )),
+        "{}",
+        text(&replaced.stderr)
+    );
+    let out = Command::new(home.join("bin").join(exe("tool")))
+        .output()
+        .unwrap();
+    assert_eq!(ok(&out), "tool 2\n");
+    let rebuilt = rok(&home, &root, &["install", "--path", "hello"]);
+    assert!(
+        text(&rebuilt.stderr).contains(" Reinstalled hello "),
+        "{}",
+        text(&rebuilt.stderr)
+    );
     fails(
         &rok(&home, &root, &["install", "rokc", "--path", "hello"]),
         "`rokc` is the toolchain's own executable",
@@ -3344,8 +3386,45 @@ fn lib_and_main_packages() {
         &rok(&home, &empty, &["publish"]),
         "`empty` is not a package: no src/lib.rok (a library) or src/main.rok (an executable)",
     );
-    ok(&rok(&home, &root, &["install", "tool"]));
+    let installed = rok(&home, &root, &["install", "tool"]);
+    assert!(
+        text(&installed.stderr).contains("   Installed tool 0.1.0 ("),
+        "{}",
+        text(&installed.stderr)
+    );
     ok(&rok(&home, &root, &["install", "calc"]));
+    // Reinstalling: the same version is kept unless --force; another
+    // version, newer or older, replaces it.
+    let says = |args: &[&str], want: &str| {
+        let out = rok(&home, &root, args);
+        assert!(text(&out.stderr).contains(want), "{}", text(&out.stderr));
+    };
+    says(&["install", "tool"], "`tool` 0.1.0 is installed already (");
+    says(
+        &["install", "tool"],
+        "to rebuild it, run `rok install tool --force`",
+    );
+    says(&["install", "tool", "--force"], " Reinstalled tool 0.1.0 (");
+    stone(
+        &tool,
+        "tool",
+        "0.2.0",
+        "",
+        &[("src/main.rok", "println(\"tool\");\n")],
+    );
+    ok(&rok(
+        &home,
+        &tool,
+        &["publish", "--index", &reg, "--commit"],
+    ));
+    says(
+        &["install", "tool"],
+        "    Upgraded tool from 0.1.0 to 0.2.0 (",
+    );
+    says(
+        &["install", "tool@0.1"],
+        "  Downgraded tool from 0.2.0 to 0.1.0 (",
+    );
     for (name, want) in [("tool", "tool\n"), ("calc", "calc 1\n")] {
         let out = Command::new(home.join("bin").join(exe(name)))
             .output()

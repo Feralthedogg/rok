@@ -103,6 +103,9 @@ installs:
   install [<name>] --git <url> [--rev <r> | --tag <t> | --branch <b>]
                                the same from git (each also: --features
                                <f,..>, --no-default-features)
+
+  An executable already installed from the same stone version or git
+  commit is kept; --force rebuilds it. One from a path is always rebuilt.
   install --native <name>[@<req>]
                                a native package into the active environment
   install --list               the active environment's libraries and the
@@ -1771,13 +1774,15 @@ const PROXIES: [&str; 3] = ["rok", "rokc", "rokls"];
 
 const INSTALL_USAGE: &str = "usage: rok install <name>[@<req>] [--registry <url>] | [<name>] --path \
                              <dir | file.rok> | [<name>] --git <url> [--rev|--tag|--branch <r>] \
-                             [--features <f,..>] [--no-default-features] [--lib] | --native \
-                             <name>[@<req>] | --list";
+                             [--features <f,..>] [--no-default-features] [--lib] [--force] | \
+                             --native <name>[@<req>] | --list";
 
 /// `rok install`: an executable (a package with `src/main.rok`, or a
 /// script file) built `--release` into `$ROK_HOME/bin`, or a library
 /// package (`src/lib.rok` only, or with `--lib`) into the active
-/// environment, for its REPL / Jupyter sessions.
+/// environment, for its REPL / Jupyter sessions. An executable already
+/// installed from the same stone version or git commit (and features)
+/// is kept unless `--force`; one from a path is always rebuilt.
 fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
     if args.iter().any(|a| a == "--list") {
         return match args {
@@ -1790,10 +1795,16 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
         return add_native(g, args, Some(&env), None);
     }
     let lib = args.iter().any(|a| a == "--lib");
-    let args: Vec<String> = args.iter().filter(|a| *a != "--lib").cloned().collect();
+    let force = args.iter().any(|a| a == "--force");
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--lib" && *a != "--force")
+        .cloned()
+        .collect();
     if args.is_empty() {
         return Err(INSTALL_USAGE.into());
     }
+    let again = (!force).then(|| format!("rok install {} --force", args.join(" ")));
     let (mut dep, dev) = parse_dep_args(&args)?;
     if dev || dep.optional {
         return Err(
@@ -1820,7 +1831,7 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
             manifest::check_name(&dep.name)?;
             let abs = rokc_core::real_path(file).map_err(|e| format!("--path {p}: {e}"))?;
             dep.source = Source::Path(abs.display().to_string().replace('\\', "/"));
-            return install_bin(g, &dep, &abs, false);
+            return install_bin(g, &dep, &abs, false, again.as_deref());
         }
     }
     if !named {
@@ -1838,7 +1849,7 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
         .unwrap_or_default();
     }
     pin_newest(g, &mut dep)?;
-    let dir = resolve::fetch_package(&home(), &dep, Path::new("."), &options(g))?;
+    let (dir, exact) = resolve::fetch_package(&home(), &dep, Path::new("."), &options(g))?;
     if !named {
         if let Some(n) = manifest::find(&dir)
             .map(|m| manifest::load(&m))
@@ -1854,10 +1865,12 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
         if let Source::Path(p) = &dep.source {
             let abs = rokc_core::real_path(p).map_err(|e| format!("--path {p}: {e}"))?;
             dep.source = Source::Path(abs.display().to_string().replace('\\', "/"));
+        } else {
+            dep.source = exact;
         }
         let copy = !matches!(dep.source, Source::Path(_));
         let name = dep.name.clone();
-        let code = install_bin(g, &dep, &dir, copy)?;
+        let code = install_bin(g, &dep, &dir, copy, again.as_deref())?;
         if has_lib && !g.quiet {
             eprintln!(
                 "note: `{name}` also has a library (src/lib.rok); `rok install --lib ..` puts \
@@ -1898,8 +1911,16 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
 
 /// Build `src` (a package directory, or a script file) `--release` into
 /// `$ROK_HOME/bin`, from a scratch copy when `copy` (a cached checkout
-/// is not written to), and record `dep` as its source.
-fn install_bin(g: &Global, dep: &Dep, src: &Path, copy: bool) -> Result<i32, String> {
+/// is not written to), and record `dep` as its source. `again` (no
+/// `--force`): the command that rebuilds it, when `dep` is what is
+/// installed already (not from a path), so nothing is built.
+fn install_bin(
+    g: &Global,
+    dep: &Dep,
+    src: &Path,
+    copy: bool,
+    again: Option<&str>,
+) -> Result<i32, String> {
     let name = &dep.name;
     if PROXIES.contains(&name.as_str()) {
         return Err(format!(
@@ -1913,15 +1934,27 @@ fn install_bin(g: &Global, dep: &Dep, src: &Path, copy: bool) -> Result<i32, Str
     let file = record.display().to_string();
     let old = std::fs::read_to_string(&record)
         .unwrap_or_else(|_| format!("{INSTALLS_HEADER}{}", manifest::EMPTY));
-    let recorded = manifest::parse(&old, &file)?
+    let prev = manifest::parse(&old, &file)?
         .deps
-        .iter()
-        .any(|d| d.name == *name);
-    if exe.exists() && !recorded {
+        .into_iter()
+        .find(|d| d.name == *name);
+    if exe.exists() && prev.is_none() {
         return Err(format!(
             "{} is there and `rok install` did not put it there; remove it first",
             exe.display()
         ));
+    }
+    if let Some(again) = again {
+        if prev.as_ref() == Some(dep) && exe.exists() && !matches!(dep.source, Source::Path(_)) {
+            if !g.quiet {
+                eprintln!(
+                    "`{name}` {} is installed already ({}); to rebuild it, run `{again}`",
+                    installed_as(&dep.source),
+                    exe.display()
+                );
+            }
+            return Ok(0);
+        }
     }
     std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
     let id = std::process::id();
@@ -1963,9 +1996,32 @@ fn install_bin(g: &Global, dep: &Dep, src: &Path, copy: bool) -> Result<i32, Str
     let text = manifest::add_dep(&old, &file, "deps", dep)?;
     std::fs::write(&record, text).map_err(|e| format!("cannot write {file}: {e}"))?;
     if !g.quiet {
-        eprintln!("   Installed {name} ({})", exe.display());
+        let new = installed_as(&dep.source);
+        let what = match prev.map(|p| installed_as(&p.source)) {
+            None => format!("   Installed {name} {new}"),
+            Some(old) if old == new => format!(" Reinstalled {name} {new}"),
+            Some(old) => match (semver::Version::parse(&old), semver::Version::parse(&new)) {
+                (Ok(a), Ok(b)) if a < b => format!("    Upgraded {name} from {old} to {new}"),
+                (Ok(a), Ok(b)) if a > b => format!("  Downgraded {name} from {old} to {new}"),
+                _ => format!("    Replaced {name} {old} with {new}"),
+            },
+        };
+        eprintln!("{what} ({})", exe.display());
     }
     Ok(0)
+}
+
+/// What `rok install` says an executable came from: a stone's version,
+/// a git url and commit, a path.
+fn installed_as(source: &Source) -> String {
+    match source {
+        Source::Registry { req, .. } => req.trim_start_matches('=').to_owned(),
+        Source::Git { url, reference } => match reference.pair() {
+            Some((_, r)) => format!("{url} at {}", &r[..r.len().min(12)]),
+            None => url.clone(),
+        },
+        Source::Path(p) => p.clone(),
+    }
 }
 
 /// Prebuild environment `env`'s libraries into its `target/`, as a REPL

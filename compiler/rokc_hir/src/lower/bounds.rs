@@ -703,6 +703,142 @@ pub(super) fn check_all(
             env.sink.diagnostics.borrow_mut().extend(errors);
         }
     }
+    check_decl_types(env, &wanted);
+}
+
+/// Spec 2.10.4: a generic alias's bounds on type parameters, used in
+/// types no body check sees (generic struct / enum fields, a generic
+/// trait impl's trait arguments and associated types, a bodiless trait
+/// method's signature), hold by that declaration's bounds.
+fn check_decl_types(env: &Env<'_>, wanted: &impl Fn(&str) -> bool) {
+    struct Decl<'a> {
+        generics: Vec<&'a rokc_ast::GenericParam>,
+        where_clause: Vec<&'a rokc_ast::WherePred>,
+        module: String,
+        span: Span,
+        self_of: SelfOf<'a>,
+        tys: Vec<&'a Ty>,
+        /// What declares a parameter, from its position.
+        owner: Box<dyn Fn(usize) -> String + 'a>,
+    }
+    let mut todo: Vec<Decl<'_>> = Vec::new();
+    let item = |name: &str| {
+        let name = format!("`{}`'s generics", leaf_name(name));
+        Box::new(move |_| name.clone()) as Box<dyn Fn(usize) -> String>
+    };
+    for (name, s) in &env.defs.generic_structs {
+        let tys = match &s.kind {
+            rokc_ast::StructKind::Unit => Vec::new(),
+            rokc_ast::StructKind::Tuple(fs) => fs.iter().map(|f| &f.ty).collect(),
+            rokc_ast::StructKind::Named(fs) => fs.iter().map(|f| &f.ty).collect(),
+        };
+        todo.push(Decl {
+            generics: s.generics.params.iter().collect(),
+            where_clause: s.where_clause.iter().collect(),
+            module: module_of(name),
+            span: s.span,
+            self_of: SelfOf::None,
+            tys,
+            owner: item(name),
+        });
+    }
+    for (name, e) in &env.defs.generic_enums {
+        let tys = e
+            .variants
+            .iter()
+            .flat_map(|v| match &v.kind {
+                rokc_ast::EnumVariantKind::Tuple(ts) => ts.iter().collect(),
+                rokc_ast::EnumVariantKind::Named(fs) => fs.iter().map(|f| &f.ty).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        todo.push(Decl {
+            generics: e.generics.params.iter().collect(),
+            where_clause: e.where_clause.iter().collect(),
+            module: module_of(name),
+            span: e.span,
+            self_of: SelfOf::None,
+            tys,
+            owner: item(name),
+        });
+    }
+    for gi in env.impls.generic().filter(|gi| !gi.trait_key.is_empty()) {
+        todo.push(Decl {
+            generics: gi.generics.params.iter().collect(),
+            where_clause: gi.where_clause.iter().collect(),
+            module: gi.module.clone(),
+            span: gi.self_ty.span,
+            self_of: SelfOf::Impl(&gi.self_ty),
+            tys: gi
+                .trait_args
+                .iter()
+                .chain(gi.assoc.iter().map(|(_, t)| t))
+                .collect(),
+            owner: Box::new(|_| "the impl's generics".to_owned()),
+        });
+    }
+    for (key, info) in &env.trait_info {
+        let outer = info.generics.params.len();
+        for d in info.decls.values().filter(|d| d.body.is_none()) {
+            let tys = d
+                .params
+                .iter()
+                .filter_map(|p| p.ty.as_ref())
+                .chain(&d.ret_ty)
+                .collect();
+            let (method, of_trait) = (item(&d.name), item(key));
+            todo.push(Decl {
+                generics: info
+                    .generics
+                    .params
+                    .iter()
+                    .chain(&d.generics.params)
+                    .collect(),
+                where_clause: d.where_clause.iter().collect(),
+                module: info.module.clone(),
+                span: d.span,
+                self_of: SelfOf::Trait(key),
+                tys,
+                owner: Box::new(move |at| {
+                    if at >= outer {
+                        method(at)
+                    } else {
+                        of_trait(at)
+                    }
+                }),
+            });
+        }
+    }
+    todo.retain(|d| wanted(&d.module));
+    todo.sort_by_key(|d| (d.span.file, d.span.start));
+    for d in todo {
+        let owner = |p: &str| {
+            let at = d.generics.iter().rposition(
+                |gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if name == p),
+            )?;
+            Some((d.owner)(at))
+        };
+        let (errors, _) = in_scope(
+            env,
+            &d.generics,
+            &d.where_clause,
+            (d.module.clone(), d.span, &[]),
+            &d.self_of,
+            |ctx, _, _| {
+                let from = env.names.alias_uses.borrow().len();
+                for t in &d.tys {
+                    ctx.resolve_ast_ty(t);
+                }
+                let uses = env.names.alias_uses.borrow()[from..].to_vec();
+                let mut seen = std::collections::HashSet::new();
+                uses.iter()
+                    .filter(|u| seen.insert((&u.0, u.3)))
+                    .flat_map(|u| collect::alias_use_unmet(ctx, u, true, owner))
+                    .collect::<Vec<_>>()
+            },
+        );
+        env.sink.diagnostics.borrow_mut().extend(errors);
+    }
 }
 
 /// What `Self` is in a checked body.

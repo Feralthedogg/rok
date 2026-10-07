@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 
 use crate::git::Cache;
 use crate::lock::{Lock, Locked, LockedNative};
-use crate::manifest::{self, Dep, Enables, Features, Manifest, NativeDep, NativeSource, Source};
+use crate::manifest::{
+    self, Dep, Enables, Features, GitRef, Manifest, NativeDep, NativeSource, Source,
+};
 use crate::native;
 use crate::registry;
 use crate::semver::{Req, Version};
@@ -482,14 +484,28 @@ fn order<T>(
 
 /// The directory of package `dep` (any kind, library or not), fetched
 /// into the cache when it is not there; a path is relative to `base`.
+/// Also the exact source it came from: a stone's `=<version>`, a git
+/// commit's `rev`, a path as given.
 pub fn fetch_package(
     home: &Path,
     dep: &Dep,
     base: &Path,
     opts: &Options,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Source), String> {
     let mut r = Resolver::new(home, base, opts, Lock::default())?;
-    r.locate(dep, base).map(|(dir, _, _)| dir)
+    let (dir, id, _) = r.locate(dep, base)?;
+    let exact = match (id, &dep.source) {
+        (Id::Stone { vers, .. }, Source::Registry { registry, .. }) => Source::Registry {
+            req: format!("={vers}"),
+            registry: registry.clone(),
+        },
+        (Id::Git { commit, .. }, Source::Git { url, .. }) => Source::Git {
+            url: url.clone(),
+            reference: GitRef::Rev(commit),
+        },
+        _ => dep.source.clone(),
+    };
+    Ok((dir, exact))
 }
 
 impl<'a> Resolver<'a> {
