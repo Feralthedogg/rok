@@ -1,3 +1,4 @@
+// spec: §2.4.2 §2.10.6
 // expect-exit: 50
 // expect-stdout:
 // 21 20 9

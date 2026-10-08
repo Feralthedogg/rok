@@ -1,4 +1,4 @@
-// spec: 004.04-return
+// spec: 004.03-return
 // A missing return in a non-unit function is an error.
 // expect-error: can finish without returning a value
 

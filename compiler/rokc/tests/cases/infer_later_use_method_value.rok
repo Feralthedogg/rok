@@ -1,3 +1,4 @@
+// spec: §3.5.3 §2.10.2
 // expect-exit: 42
 // expect-stdout:
 // 41 1

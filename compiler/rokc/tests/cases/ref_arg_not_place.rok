@@ -1,3 +1,4 @@
+// spec: §4.7.3
 // expect-error: must name a variable or a field of one
 
 fn inc(ref n: i32) { n = n + 1; }

@@ -1,4 +1,4 @@
-// spec: 004.01-default-parameter
+// spec: 004.02.3-default-parameter
 // expect-exit: 0
 // expect-stdout:
 // 5

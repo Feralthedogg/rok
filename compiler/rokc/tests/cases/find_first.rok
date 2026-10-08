@@ -1,3 +1,4 @@
+// spec: §2.6.5 §2.10.3
 // expect-exit: 12
 // expect-stdout:
 // 8 100

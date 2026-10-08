@@ -1,3 +1,4 @@
+// spec: §3.9.7 §2.1.7
 // expect-exit: 0
 // expect-stdout:
 // a

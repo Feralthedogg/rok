@@ -1,3 +1,4 @@
+// spec: §2.6.4
 // expect-exit: 0
 // expect-stdout:
 // custom: 1 none 3 (3)

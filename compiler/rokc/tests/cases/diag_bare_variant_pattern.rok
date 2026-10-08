@@ -1,7 +1,8 @@
-// expect-error: diag_bare_variant_pattern.rok:16:9: `Red` here is a new variable that matches every value, not the variant `Color::Red`
+// spec: §3.11.1
+// expect-error: diag_bare_variant_pattern.rok:17:9: `Red` here is a new variable that matches every value, not the variant `Color::Red`
 // expect-error: help: did you mean `Color::Red`?
-// expect-error: diag_bare_variant_pattern.rok:17:9: `Green` here is a new variable that matches every value, not the variant `Color::Green`
-// expect-error: diag_bare_variant_pattern.rok:18:9: `Custom` here is a new variable that matches every value, not the variant `Color::Custom`
+// expect-error: diag_bare_variant_pattern.rok:18:9: `Green` here is a new variable that matches every value, not the variant `Color::Green`
+// expect-error: diag_bare_variant_pattern.rok:19:9: `Custom` here is a new variable that matches every value, not the variant `Color::Custom`
 // expect-error: help: did you mean `Color::Custom(..)`?
 // forbid-error: unreachable match arm
 

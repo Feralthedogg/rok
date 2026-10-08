@@ -1,4 +1,4 @@
-// spec: 002.12-inspect
+// spec: 006.10-inspect
 // expect-exit: 0
 // expect-stdout:
 // ["id", "name", "email"]

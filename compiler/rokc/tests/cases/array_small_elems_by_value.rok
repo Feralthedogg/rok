@@ -1,3 +1,4 @@
+// spec: §2.1.8 §8.8.10
 // expect-exit: 0
 // expect-stdout:
 // bool true true true true

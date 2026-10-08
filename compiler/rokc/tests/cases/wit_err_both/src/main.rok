@@ -1,3 +1,4 @@
+// spec: std §1.8.2
 // expect-error: interface `a:b/calc` is both imported and exported
 
 // Stdlib 1.8: one component cannot import and export an interface.

@@ -1,3 +1,4 @@
+// spec: §7.4.2 §7.2.9
 // expect-exit: 0
 // gc-stress: 50
 // expect-stdout:

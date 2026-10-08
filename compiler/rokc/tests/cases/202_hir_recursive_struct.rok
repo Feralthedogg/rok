@@ -1,4 +1,4 @@
-// spec: 002.07-struct
+// spec: 002.03-struct
 // A struct that contains itself by value is an error.
 // expect-error: recursive type `L` has infinite size
 

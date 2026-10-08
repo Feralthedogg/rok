@@ -1,3 +1,4 @@
+// spec: std §2.9.2 §2.9.3
 // expect-exit: 0
 // expect-stdout:
 // list pop 1

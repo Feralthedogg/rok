@@ -1,4 +1,4 @@
-// spec: 003.03-let
+// spec: 005.01.7-let
 // expect-exit: 0
 // expect-stdout:
 // 7

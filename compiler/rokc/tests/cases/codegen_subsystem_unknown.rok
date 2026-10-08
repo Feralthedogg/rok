@@ -1,3 +1,4 @@
+// spec: §9.1.2
 // rokc-arg: -C subsystem=gui
 // expect-error: unknown codegen option `subsystem=gui`
 

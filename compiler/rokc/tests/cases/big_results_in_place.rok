@@ -1,3 +1,4 @@
+// spec: §8.6.6
 // rokc-arg: -O2
 // gc-stress: 40
 // expect-exit: 0

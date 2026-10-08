@@ -1,4 +1,4 @@
-// spec: 000.04-operator-dispatch
+// spec: 003.01-operator-dispatch
 // The rhs type of an operator trait method is checked.
 // expect-error: the right operand of `+` expects `V`, found `i32`
 

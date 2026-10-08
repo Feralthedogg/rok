@@ -1,4 +1,4 @@
-// spec: 002.07-struct-literal
+// spec: 002.03-struct-literal
 // A literal of an undefined struct is an error.
 // expect-error: cannot find struct `Q`
 

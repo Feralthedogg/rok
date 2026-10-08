@@ -1,4 +1,4 @@
-// spec: 002.12-any-trait
+// spec: 002.02.10-any-trait
 // expect-error: `Sq` in `any Sq` is not a trait
 
 // The bound of `any` must be a trait.

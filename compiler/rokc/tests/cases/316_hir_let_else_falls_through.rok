@@ -1,4 +1,4 @@
-// spec: 003.15-let-else
+// spec: 003.16-let-else
 // The else of a let-else must diverge.
 // expect-error: the `else` block of `let ... else` must diverge
 

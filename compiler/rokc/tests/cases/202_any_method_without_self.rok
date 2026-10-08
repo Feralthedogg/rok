@@ -1,4 +1,5 @@
-// expect-error: 13:16: cannot call `make` on `any Make`: it takes no `self`
+// spec: §2.2.10
+// expect-error: 14:16: cannot call `make` on `any Make`: it takes no `self`
 
 // A trait method without `self` has no receiver to dispatch on through
 // `any Tr`: a diagnostic, not an internal error.

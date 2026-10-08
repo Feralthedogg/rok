@@ -1,3 +1,4 @@
+// spec: std §2.21.4
 // expect-exit: 0
 // expect-stdout:
 // rsa2048 sha256: matches true, verifies true, other message false, as pss false

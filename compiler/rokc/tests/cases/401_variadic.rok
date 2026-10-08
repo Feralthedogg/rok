@@ -1,4 +1,4 @@
-// spec: 004.01-variadic
+// spec: 004.02.5-variadic
 // expect-exit: 0
 // expect-stdout:
 // 6

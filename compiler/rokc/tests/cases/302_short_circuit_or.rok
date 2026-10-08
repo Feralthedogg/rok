@@ -1,4 +1,4 @@
-// spec: 003.02-short-circuit-or
+// spec: std 203-ops §2.3.9
 // expect-exit: 0
 // expect-stdout:
 // no_call

@@ -1,4 +1,4 @@
-// spec: 002.02-item-uniqueness
+// spec: 002.03.7-item-uniqueness
 // A duplicate struct definition is an error.
 // expect-error: type `P` is defined more than once
 

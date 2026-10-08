@@ -1,3 +1,4 @@
+// spec: §3.16.7
 // expect-exit: 15
 // expect-stdout:
 // 15 6

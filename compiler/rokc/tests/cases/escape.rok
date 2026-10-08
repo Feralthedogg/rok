@@ -1,3 +1,4 @@
+// spec: §1.7.1
 // expect-exit: 0
 // expect-stdout: line1	tab line2
 

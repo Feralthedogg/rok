@@ -1,3 +1,4 @@
+// spec: §4.7.3
 // expect-error: parameter `self` of `Bump::bump` is `ref` — pass `ref x`
 
 struct Counter { c: i32; }

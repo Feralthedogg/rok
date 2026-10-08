@@ -1,3 +1,4 @@
+// spec: std §1.8.2
 // only-target: wasm32-wasi
 // rokc-arg: --extern wdep=tests/cases/wit_dependency/wdep
 // expect-exit: 0

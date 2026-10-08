@@ -1,4 +1,4 @@
-// spec: 002.07-struct-field
+// spec: 002.03-struct-field
 // Reading a nonexistent field is an error.
 // expect-error: struct `P` has no field `y`
 

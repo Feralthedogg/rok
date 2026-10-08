@@ -1,3 +1,4 @@
+// spec: §5.9.1 std §1.7.1
 // expect-exit: 0
 // expect-stdout: hello, rok!
 

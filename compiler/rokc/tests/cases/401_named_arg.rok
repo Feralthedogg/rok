@@ -1,4 +1,4 @@
-// spec: 004.01-named-arg
+// spec: 004.02.4-named-arg
 // expect-exit: 0
 // expect-stdout:
 // 5

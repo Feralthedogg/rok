@@ -1,4 +1,4 @@
-// spec: 002.04-trait-as-type
+// spec: 002.12-trait-as-type
 // expect-error: trait `Shape` cannot be used as a type directly
 
 // A bare trait name is not a type; write `any Shape`.

@@ -1,3 +1,4 @@
+// spec: §4.11.12
 // expect-error: needs its item type
 
 yield fn g() {

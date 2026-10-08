@@ -1,3 +1,4 @@
+// spec: std §2.5.2
 // expect-exit: 1
 // `NaN != NaN` is true (unordered compare).
 // expect-stdout:

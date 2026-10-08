@@ -1,3 +1,4 @@
+// spec: §3.1.3 std §2.11.7
 // expect-error: `X::from`: the literal fits several `From` impls of `X` (`i64`, `u8`)
 // Spec 3.1.3: a literal that fits several impls, none of them its
 // default type (`i32`), needs a suffix.

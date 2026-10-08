@@ -1,4 +1,4 @@
-// spec: 003.02-unicode-operator
+// spec: 003.01.8-unicode-operator
 // expect-exit: 0
 // expect-stdout:
 // equal

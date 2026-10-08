@@ -1,3 +1,4 @@
+// spec: §2.10.9 §2.2.5
 // expect-exit: 0
 // expect-stdout:
 // is: true false true true false

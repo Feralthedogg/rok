@@ -1,4 +1,4 @@
-// spec: 002.07-struct-field
+// spec: 002.03-struct-field
 // An extra field in a struct literal is an error.
 // expect-error: struct `P` has no field `zz`
 

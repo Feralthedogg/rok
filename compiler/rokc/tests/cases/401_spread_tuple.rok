@@ -1,4 +1,4 @@
-// spec: 004.01-spread-tuple
+// spec: 004.02.6-spread-tuple
 // expect-exit: 0
 // expect-stdout:
 // 6

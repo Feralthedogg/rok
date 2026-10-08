@@ -1,4 +1,4 @@
-// spec: 003.14.3-finally-after-throw
+// spec: 003.14.5-finally-after-throw
 // expect-exit: 0
 // expect-stdout:
 // finally_ran

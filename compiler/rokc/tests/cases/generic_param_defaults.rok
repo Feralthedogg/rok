@@ -1,3 +1,4 @@
+// spec: §2.10.5
 // expect-exit: 0
 // expect-stdout:
 // W<i32>

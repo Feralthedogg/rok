@@ -1,6 +1,7 @@
-// expect-error: 13:13: `p.get` names a method without calling it; `.method` is not a function value (spec 3.5.4)
+// spec: §3.5.4
+// expect-error: 14:13: `p.get` names a method without calling it; `.method` is not a function value (spec 3.5.4)
 // expect-error: or use the method path `P::get`
-// expect-error: 14:13: `[1, 2].len` names a method without calling it
+// expect-error: 15:13: `[1, 2].len` names a method without calling it
 
 // `obj.method` without parentheses is neither a call nor a function
 // value (3.5.4); the diagnostic says so instead of "no field".
