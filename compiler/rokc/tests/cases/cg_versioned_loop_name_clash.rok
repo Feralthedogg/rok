@@ -1,0 +1,38 @@
+// spec: §3.13.3 std §2.9.2
+// A user function named like an unchecked accessor copy stays the
+// user's.
+// expect-exit: 0
+// expect-stdout: 6 1000
+
+use rok::core::collections::raw::GcBuf;
+
+struct V { meta: GcBuf<usize>; a: GcBuf<i64>; }
+
+fn vlen(p: V) -> usize { unsafe { p.meta[0] } }
+
+fn at(p: V, i: usize) -> i64 {
+    unsafe {
+        if i >= vlen(p) { return panic("oob"); }
+        p.a[i]
+    }
+}
+
+fn at__unchecked(p: V, i: usize) -> i64 { 1000 }
+
+fn sum(p: V, n: usize) -> i64 {
+    let s: i64 = 0;
+    for j in 0..n { s += at(p, j); }
+    s
+}
+
+fn main() -> i32 {
+    unsafe {
+        let meta: GcBuf<usize> = GcBuf::new(1);
+        meta[0] = 3;
+        let a: GcBuf<i64> = GcBuf::new(3);
+        a[0] = 1; a[1] = 2; a[2] = 3;
+        let p = V { meta, a };
+        println(f"{sum(p, 3)} {at__unchecked(p, 0)}");
+    }
+    return 0;
+}

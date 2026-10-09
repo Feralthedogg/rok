@@ -140,6 +140,22 @@ pub fn home_of(exe: &Path) -> Option<PathBuf> {
     (tcs.file_name()? == "toolchains").then(|| tcs.parent().map(Path::to_path_buf))?
 }
 
+/// The standard library's package name.
+pub const STD_PKG: &str = "rok";
+
+/// Why `name` cannot name a package or dependency, if it cannot: it is
+/// the standard library's, so the package would mount into `rok::`
+/// beside the library's own items.
+#[must_use]
+pub fn reserved_package(name: &str) -> Option<String> {
+    (name == STD_PKG).then(|| {
+        format!(
+            "`{name}` is reserved for the standard library; name the package something else, \
+             e.g. `{name}_util`"
+        )
+    })
+}
+
 /// The entry of `cmd` in a usage text: its lines (`  cmd ...`, or
 /// `  a | cmd | b ...`) and the more indented lines after each.
 #[must_use]

@@ -2183,3 +2183,113 @@ fn main() -> i32 {
     assert_eq!(scoped(false), [true, false, true], "{main}");
     assert_eq!(scoped(true), [true], "{main}");
 }
+
+/// A counted loop indexing lists with its counter and an invariant index
+/// is copied: the copy, behind a bounds test, calls accessors without
+/// the check (no panic in them); the original keeps the checked ones.
+#[test]
+fn bounds_versioned_loops() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("boundsversion");
+    fs::write(
+        dir.join("main.rok"),
+        r#"
+fn f(x: List<f64>, y: List<f64>, i: usize, n: usize) -> f64 {
+    let s = 0.0;
+    for j in i + 1..n {
+        s += x[i] - x[j];
+        y[j] = s;
+    }
+    s
+}
+
+fn main() -> i32 {
+    let x: List<f64> = [1.0, 2.0, 3.0];
+    println(f"{f(x, x, 0, 3)}");
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let ll = dir.join("main.ll");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["-O2", "--emit=llvmir", "-o", ll.to_str().unwrap()],
+    ));
+    let ir = fs::read_to_string(ll).unwrap();
+    // The definitions whose name has `part`.
+    let defs = |part: &str| {
+        ir.split("\ndefine ")
+            .skip(1)
+            .filter(|d| d.lines().next().unwrap().contains(part))
+            .map(|d| d[..d.find("\n}\n").unwrap()].to_owned())
+            .collect::<Vec<_>>()
+    };
+    let f = defs("__f_(").remove(0);
+    let calls = |unchecked: bool, set: bool| {
+        f.lines()
+            .filter(|l| {
+                l.contains(" call ")
+                    && l.contains("0index_")
+                    && l.contains("_123_unchecked_") == unchecked
+                    && l.contains("0index_0set_") == set
+            })
+            .count()
+    };
+    // `x[i]`, `x[j]`; `y[j] = s`: once unchecked, once checked.
+    assert_eq!((calls(true, false), calls(true, true)), (2, 1), "{f}");
+    assert_eq!((calls(false, false), calls(false, true)), (2, 1), "{f}");
+    let unchecked = defs("_123_unchecked_");
+    assert_eq!(unchecked.len(), 2);
+    for d in unchecked {
+        assert!(!d.contains("panic"), "{d}");
+    }
+}
+
+/// A loop that calls a closure or a `fn` value, directly or through a
+/// function, keeps its checks: the callee may shrink the list. The same
+/// loop calling nothing is versioned.
+#[test]
+fn bounds_versioning_skips_indirect_calls() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("boundsindirect");
+    let versioned = |call: &str| {
+        fs::write(
+            dir.join("main.rok"),
+            format!(
+                r#"
+fn run(f: fn()) {{
+    f();
+}}
+
+fn sum(x: List<i64>, n: usize, f: fn()) -> i64 {{
+    let s: i64 = 0;
+    for j in 0..n {{
+        {call}
+        s += x[j];
+    }}
+    s
+}}
+
+fn main() -> i32 {{
+    let x: List<i64> = [1, 2, 3];
+    println(f"{{sum(x, 3, || {{}})}}");
+    return 0;
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let ll = dir.join("main.ll");
+        ok(&build(
+            &env,
+            &dir.join("main.rok"),
+            &["-O2", "--emit=llvmir", "-o", ll.to_str().unwrap()],
+        ));
+        fs::read_to_string(ll).unwrap().contains("_123_unchecked_")
+    };
+    assert!(versioned(""));
+    assert!(!versioned("f();"));
+    assert!(!versioned("run(f);"));
+}

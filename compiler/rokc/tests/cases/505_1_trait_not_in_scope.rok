@@ -5,8 +5,8 @@
 // expect-error: 19:9: cannot find trait `Shape` (named in a bound)
 // expect-error: help: add `use geo::Shape;`
 // expect-error: 20:31: cannot find trait `Shape` (named in a bound)
-// expect-error: 21:6: cannot find trait `Shape` (named in a bound)
-// expect-error: 22:12: cannot find trait `Shape` (named in a bound)
+// expect-error: 21:6: cannot find trait `Shape` (named in an impl)
+// expect-error: 22:12: cannot find trait `Shape` (named as a supertrait)
 // expect-error: 23:13: cannot find trait `Shape` in this scope
 // expect-error: help: add `use geo::Shape;`
 mod geo {

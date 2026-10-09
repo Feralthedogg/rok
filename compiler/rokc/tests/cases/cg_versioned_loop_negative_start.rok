@@ -1,0 +1,23 @@
+// spec: §3.13.3 std §2.9.2
+// A signed counter indexes through `as usize`: the unchecked copy of the
+// loop needs it to start at 0 or above. From -1 the checked loop runs,
+// and `-1 as usize` is out of bounds on the first iteration.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_negative_start.rok:13:14:
+// expect-stderr: List index out of bounds
+// expect-stdout: 6
+
+fn sum(x: List<i64>, a: i64, n: i64) -> i64 {
+    let s: i64 = 0;
+    for j in a..n {
+        s += x[j as usize];
+    }
+    s
+}
+
+fn main() -> i32 {
+    let x: List<i64> = [1, 2, 3];
+    println(f"{sum(x, 0, 3)}");
+    sum(x, -1, 3);
+    return 0;
+}

@@ -16,6 +16,7 @@ mod target;
 #[path = "../../../runtime/rokr_common/src/tls_abi.rs"]
 pub mod tls_abi;
 mod ty;
+mod version;
 
 pub use liveness::{Deaths, addressed, block_local, deaths, live_across, stmt_uses, term_uses};
 pub use lower::lower;

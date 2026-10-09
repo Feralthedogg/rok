@@ -440,6 +440,9 @@ pub fn check_name(name: &str) -> Result<(), String> {
             && n.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     };
+    if let Some(e) = rokc_core::reserved_package(name) {
+        return Err(e);
+    }
     if valid(name) {
         return Ok(());
     }

@@ -5146,7 +5146,8 @@ fn check_bound_names(
         .chain(base.values().copied())
         .map(|t| (t.name.as_str(), &t.generics))
         .collect();
-    let mut check = |b: &Ty, module: &str| {
+    // `role` says where the trait was written: "in a bound", "in an impl", ..
+    let mut check = |b: &Ty, module: &str, role: &str| {
         let AstTyKind::Path(p) = &b.kind else {
             return;
         };
@@ -5157,7 +5158,7 @@ fn check_bound_names(
             let d = rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Resolve,
                 b.span,
-                format!("cannot find trait `{}` (named in a bound)", segs.join("::")),
+                format!("cannot find trait `{}` (named {role})", segs.join("::")),
             );
             let keys = || {
                 names
@@ -5203,18 +5204,18 @@ fn check_bound_names(
     let mut generics = |g: &rokc_ast::Generics, w: &[rokc_ast::WherePred], module: &str| {
         for gp in &g.params {
             if let rokc_ast::GenericParam::Type { bounds, .. } = gp {
-                bounds.iter().for_each(|b| check(b, module));
+                bounds.iter().for_each(|b| check(b, module, "in a bound"));
             }
         }
         for p in w {
-            p.bounds.iter().for_each(|b| check(b, module));
+            p.bounds.iter().for_each(|b| check(b, module, "in a bound"));
         }
     };
     let fn_bounds =
         |f: &FnDef, generics: &mut dyn FnMut(&rokc_ast::Generics, &[rokc_ast::WherePred], &str)| {
             generics(&f.generics, &f.where_clause, &module_of(&f.name));
         };
-    let mut impl_paths: Vec<(Ty, String)> = Vec::new();
+    let mut impl_paths: Vec<(Ty, String, &str)> = Vec::new();
     for item in &program.items {
         let module = item_module(item);
         match item {
@@ -5226,13 +5227,17 @@ fn check_bound_names(
             Item::Trait(t) => {
                 generics(&t.generics, &t.where_clause, &module);
                 for s in &t.supertraits {
-                    impl_paths.push((s.clone(), module.clone()));
+                    impl_paths.push((s.clone(), module.clone(), "as a supertrait"));
                 }
                 for ti in &t.items {
                     match ti {
                         rokc_ast::TraitItem::Method(m) => fn_bounds(m, &mut generics),
                         rokc_ast::TraitItem::AssocType { bounds, .. } => {
-                            impl_paths.extend(bounds.iter().map(|b| (b.clone(), module.clone())));
+                            impl_paths.extend(
+                                bounds
+                                    .iter()
+                                    .map(|b| (b.clone(), module.clone(), "in a bound")),
+                            );
                         }
                         rokc_ast::TraitItem::Const { .. } => {}
                     }
@@ -5248,6 +5253,7 @@ fn check_bound_names(
                             span: tp.span,
                         },
                         module.clone(),
+                        "in an impl",
                     ));
                 }
                 for ii in &i.items {
@@ -5259,8 +5265,8 @@ fn check_bound_names(
             _ => {}
         }
     }
-    for (t, module) in &impl_paths {
-        check(t, module);
+    for (t, module, role) in &impl_paths {
+        check(t, module, role);
     }
 }
 

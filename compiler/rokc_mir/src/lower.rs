@@ -121,6 +121,7 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         crate::rotate::rotate(f);
         crate::copy_into::copy_into(f);
     }
+    crate::version::version(&mut functions, target.pointer_width);
     crate::stable_names::stable_names(&mut functions, &rokc_hir::type_name);
     let debug = debug_types(module, &functions, &copies, target);
     MirModule {

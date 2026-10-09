@@ -1,0 +1,64 @@
+// spec: §3.13.3 std §2.9.2
+// A user accessor shaped like `List`'s (`if i >= len { panic }`, then a
+// load) keeps its check: another call in the loop shrinks its length.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_user_accessor.rok:23:20:
+// expect-stderr: Vec2 index out of bounds
+// expect-stdout:
+
+use rok::core::collections::raw::GcBuf;
+
+struct Vec2 {
+    meta: GcBuf<usize>;
+    data: GcBuf<GcBuf<i64>>;
+}
+
+fn vlen(v: Vec2) -> usize {
+    unsafe { v.meta[0] }
+}
+
+fn at(v: Vec2, i: usize) -> i64 {
+    unsafe {
+        if i >= vlen(v) {
+            return panic("Vec2 index out of bounds");
+        }
+        v.data[0][i]
+    }
+}
+
+// Safe API: keeps element `i` and below, swapping in a buffer of `i + 1`.
+fn keep_upto(v: Vec2, i: usize, small: GcBuf<i64>) {
+    unsafe {
+        if i >= vlen(v) {
+            panic("Vec2 keep_upto out of bounds");
+        }
+        v.meta[0] = i;
+        v.data[0] = small;
+    }
+}
+
+fn sum(v: Vec2, n: usize, small: GcBuf<i64>) -> i64 {
+    let s: i64 = 0;
+    for j in 0..n {
+        s += at(v, j);
+        keep_upto(v, 1, small);
+    }
+    s
+}
+
+fn main() -> i32 {
+    unsafe {
+        let n: usize = 100000;
+        let big: GcBuf<i64> = GcBuf::new(n);
+        for i in 0..n { big[i] = 1; }
+        let meta: GcBuf<usize> = GcBuf::new(1);
+        meta[0] = n;
+        let data: GcBuf<GcBuf<i64>> = GcBuf::new(1);
+        data[0] = big;
+        let small: GcBuf<i64> = GcBuf::new(1);
+        small[0] = 1;
+        let v = Vec2 { meta, data };
+        println(f"{sum(v, n, small)}");
+    }
+    return 0;
+}

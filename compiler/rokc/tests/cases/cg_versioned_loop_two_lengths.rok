@@ -1,0 +1,55 @@
+// spec: §3.13.3 std §2.9.2
+// Two accessors on one value with different length functions are
+// checked against their own lengths.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_two_lengths.rok:30:34:
+// expect-stderr: b out of bounds
+// expect-stdout:
+
+use rok::core::collections::raw::GcBuf;
+
+// Two runs in one object: `a` with `meta[0]` elements, `b` with `meta[1]`.
+struct Pair {
+    meta: GcBuf<usize>;
+    a: GcBuf<i64>;
+    b: GcBuf<i64>;
+}
+
+fn alen(p: Pair) -> usize { unsafe { p.meta[0] } }
+fn blen(p: Pair) -> usize { unsafe { p.meta[1] } }
+
+fn at_a(p: Pair, i: usize) -> i64 {
+    unsafe {
+        if i >= alen(p) { return panic("a out of bounds"); }
+        p.a[i]
+    }
+}
+
+fn at_b(p: Pair, i: usize) -> i64 {
+    unsafe {
+        if i >= blen(p) { return panic("b out of bounds"); }
+        p.b[i]
+    }
+}
+
+fn sum(p: Pair, n: usize) -> i64 {
+    let s: i64 = 0;
+    for j in 0..n {
+        s += at_a(p, j) + at_b(p, j);
+    }
+    s
+}
+
+fn main() -> i32 {
+    unsafe {
+        let n: usize = 1000000;
+        let meta: GcBuf<usize> = GcBuf::new(2);
+        meta[0] = n;
+        meta[1] = 1;
+        let a: GcBuf<i64> = GcBuf::new(n);
+        let b: GcBuf<i64> = GcBuf::new(1);
+        let p = Pair { meta, a, b };
+        println(f"{sum(p, n)}");
+    }
+    return 0;
+}

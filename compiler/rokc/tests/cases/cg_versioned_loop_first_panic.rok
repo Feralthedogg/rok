@@ -1,0 +1,24 @@
+// spec: §3.13.3 std §2.9.2
+// A counted loop whose invariant index is out of bounds fails the test
+// in front of its unchecked copy: the checked loop runs, and its first
+// iteration panics at that access, not at the in-bounds one before it.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_first_panic.rok:14:14:
+// expect-stderr: List index out of bounds
+// expect-stdout:
+
+fn sum(x: List<i64>, y: List<i64>, i: usize) -> i64 {
+    let s: i64 = 0;
+    for j in 0..x.len() {
+        s += x[j];
+        s += y[i];
+    }
+    s
+}
+
+fn main() -> i32 {
+    let x: List<i64> = [10, 20];
+    let y: List<i64> = [1];
+    sum(x, y, 1);
+    return 0;
+}

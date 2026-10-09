@@ -563,6 +563,9 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
     if !ident(name) {
         usage_error(&format!("`--extern`: `{name}` is not a package name"));
     }
+    if let Some(e) = rokc_core::reserved_package(name) {
+        usage_error(&format!("`--extern {name}`: {e}"));
+    }
     let path = PathBuf::from(path);
     let prebuilt = path.extension().is_some_and(|e| e == "a" || e == "rokhir");
     let root = if prebuilt {
@@ -866,6 +869,12 @@ fn discover_at(a: &Args, path: &str) -> Package {
     let mut pkg = rokc_interface::discover(Path::new(path)).unwrap_or_else(|e| fail(&e));
     if let Some(n) = a.name.as_ref().filter(|_| !pkg.anonymous) {
         pkg.name.clone_from(n);
+    }
+    // A library named like the standard library would mount into its paths.
+    if pkg.lib {
+        if let Some(e) = rokc_core::reserved_package(&rokc_interface::code_name(&pkg.name)) {
+            fail(&format!("{}: {e}", pkg.root.display()));
+        }
     }
     pkg
 }

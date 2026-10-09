@@ -515,6 +515,12 @@ fn new_and_init_write_a_manifest() {
     // Package names: `[a-z][a-z0-9_-]*`.
     fails(&rok(&home, &root, &["new", "My App"]), "try `my-app`");
     assert!(!root.join("My App").exists());
+    // The standard library's name is taken.
+    fails(
+        &rok(&home, &root, &["new", "--lib", "rok"]),
+        "`rok` is reserved for the standard library; name the package something else, e.g. `rok_util`",
+    );
+    assert!(!root.join("rok").exists());
     let dir = root.join("Existing.Dir");
     fs::create_dir_all(&dir).unwrap();
     // Inside a repository: no new one.

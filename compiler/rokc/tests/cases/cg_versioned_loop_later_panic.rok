@@ -1,0 +1,53 @@
+// spec: §3.13.3 std §2.9.2
+// Counted loops indexing lists with the counter, an invariant index or a
+// constant get an unchecked copy behind a bounds test in front of the
+// loop. In bounds every counter type gives the same sums; a bound past
+// the end runs the checked loop, which panics on the iteration that
+// steps out.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_later_panic.rok:40:9:
+// expect-stderr: List index out of bounds
+// expect-stdout:
+// 18 15 6 15
+// 3 [3, 5, 7]
+
+fn by_usize(x: List<i64>, i: usize, a: usize, n: usize) -> i64 {
+    let s: i64 = 0;
+    for j in a..n {
+        s += x[j] + x[i] + x[0];
+    }
+    s
+}
+
+fn by_i64(x: List<i64>, n: i64) -> i64 {
+    let s: i64 = 0;
+    for j in 0..n {
+        s += x[j as usize];
+    }
+    s
+}
+
+fn by_u32(x: List<i64>, n: u32) -> i64 {
+    let s: i64 = 0;
+    for j in 0u32..n {
+        s += x[j as usize];
+    }
+    s
+}
+
+fn fill(y: List<i64>, x: List<i64>, n: usize) {
+    for j in 0..n {
+        y[j] = x[j] * 2 + 1;
+    }
+}
+
+fn main() -> i32 {
+    let x: List<i64> = [1, 2, 3, 4, 5];
+    println(f"{by_usize(x, 1, 1, 4)} {by_i64(x, 5)} {by_u32(x, 3)} {by_usize(x, 0, 2, 2) + 15}");
+    let y: List<i64> = [0, 0, 0];
+    fill(y, x, 3);
+    println(f"{y.len()} {y:?}");
+    fill(y, x, 5);
+    println(f"{y:?}");
+    return 0;
+}

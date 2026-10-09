@@ -157,8 +157,7 @@ fn package_cfg(config: &CompilerConfig, features: Option<&[String]>) -> CfgEnv {
     env
 }
 
-/// The prebuilt standard library's package name.
-pub const STD_PKG: &str = "rok";
+pub use rokc_core::STD_PKG;
 
 thread_local! {
     /// Files served instead of the disk: the interface sources of the

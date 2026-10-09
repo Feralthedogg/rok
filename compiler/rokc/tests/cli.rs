@@ -2008,6 +2008,24 @@ fn extern_dependencies_are_top_level_names() {
     assert_exit(&rokc(None, &dir, &["build", "app", "--extern", "g=x.a"]), 1);
     // Without it, `greet` is unknown.
     assert_exit(&rokc(Some(&env), &dir, &["check", "app"]), 1);
+    // The standard library's name is taken, as a dependency and as a
+    // library's own.
+    let reserved = "`rok` is reserved for the standard library; name the package something \
+                    else, e.g. `rok_util`";
+    let out = rokc(None, &dir, &["check", "app", "--extern", "rok=greet"]);
+    assert_exit(&out, 2);
+    assert!(
+        text(&out.stderr).contains(reserved),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = rokc(None, &dir, &["build", "greet", "--name", "rok"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains(reserved),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 // spec: §5.7.14

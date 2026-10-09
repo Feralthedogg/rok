@@ -18,7 +18,7 @@ use crate::{BasicBlock, MirFunction, Operand, RValue, Statement, Terminator};
 /// A header copied for the back edges has at most this many statements.
 const MAX_HEADER: usize = 16;
 
-fn succs(b: &BasicBlock) -> Vec<u32> {
+pub fn succs(b: &BasicBlock) -> Vec<u32> {
     match &b.terminator {
         Terminator::Goto { target, .. } => vec![target.0],
         Terminator::If {
@@ -325,7 +325,7 @@ fn copyable(b: &BasicBlock) -> bool {
         })
 }
 
-fn retarget(t: &mut Terminator, from: u32, to: u32) {
+pub fn retarget(t: &mut Terminator, from: u32, to: u32) {
     let fix = |b: &mut BlockId| {
         if b.0 == from {
             *b = BlockId(to);
@@ -451,7 +451,7 @@ fn sink_step(f: &mut MirFunction, h: u32, copy: u32, body: &HashSet<u32>) {
 
 /// The blocks of the loop of header `h` (back edges from `latches`): the
 /// ones reaching a latch without passing `h`.
-fn loop_body(f: &MirFunction, h: u32, latches: &[u32]) -> HashSet<u32> {
+pub fn loop_body(f: &MirFunction, h: u32, latches: &[u32]) -> HashSet<u32> {
     let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
     for b in &f.blocks {
         for s in succs(b) {
