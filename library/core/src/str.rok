@@ -612,6 +612,7 @@ impl StrBuf {
         }
     }
 
+    #[cold]
     const fn push_grown(self, c: char) {
         unsafe {
             self.reserve(4);
@@ -632,6 +633,7 @@ impl StrBuf {
         }
     }
 
+    #[cold]
     const fn push_str_grown(self, s: str) {
         unsafe {
             let m = s.len();

@@ -193,7 +193,8 @@ pub enum Linkage {
     Prebuilt,
 }
 
-/// `#[inline]` / `#[inline(always)]` / `#[inline(never)]` (spec 6.2.4).
+/// `#[inline]` / `#[inline(always)]` / `#[inline(never)]` (spec 6.2.4),
+/// or `#[cold]` (6.2.6): never inlined, laid out away from hot code.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Inline {
     #[default]
@@ -201,6 +202,7 @@ pub enum Inline {
     Hint,
     Always,
     Never,
+    Cold,
 }
 
 /// A function the back end treats specially.
@@ -370,7 +372,8 @@ rokc_core::codec_enum!(Inline {
     Auto,
     Hint,
     Always,
-    Never
+    Never,
+    Cold
 });
 rokc_core::codec_struct!(FnFacts {
     abi,

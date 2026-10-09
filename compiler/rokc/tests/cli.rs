@@ -3930,6 +3930,37 @@ fn emitted_code_follows_the_runtime_abi() {
     );
 }
 
+/// `#[cold]` (6.2.6): at -O2 the function keeps its call, out of the
+/// caller's hot path, and LLVM sees it as cold.
+// spec: §6.2.6
+#[test]
+fn cold_functions_stay_out_of_line() {
+    let Some(_env) = setup() else { return };
+    let dir = scratch("cold");
+    let pkg = dir.join("cold");
+    let src = "#[cold]\nfn slow(x: i64) -> i64 { x * 3 + 1 }\n\
+               fn main() {\n\
+               \x20   let t = 0i64;\n\
+               \x20   for i in 0..10i64 { t += slow(i); }\n\
+               \x20   println(f\"{t}\");\n\
+               }\n";
+    put(pkg.join("src/main.rok"), src).unwrap();
+    assert_exit(&rokc(None, &pkg, &["-q", "emit", "--emit=mlir", "-O2"]), 0);
+    let mlir = fs::read_to_string(pkg.join("target/release/build/cold.mlir")).unwrap();
+    assert!(
+        mlir.lines()
+            .any(|l| l.contains("_slow_") && l.contains(r#""noinline", "cold""#)),
+        "`#[cold]` is not noinline + cold"
+    );
+    assert_exit(&rokc(None, &pkg, &["-q", "emit", "--emit=asm", "-O2"]), 0);
+    let asm = fs::read_to_string(pkg.join("target/release/build/cold.s")).unwrap();
+    assert!(
+        asm.lines()
+            .any(|l| l.contains("_slow_") && (l.contains("bl\t") || l.contains("call"))),
+        "`#[cold]` was inlined"
+    );
+}
+
 /// Every C symbol the runtime defines is `rok_`-prefixed (8.5.8), so it
 /// cannot collide with user code or a C library; the normative ones sit
 /// under their area's prefix. Toolchain symbols (Rust-mangled, compiler

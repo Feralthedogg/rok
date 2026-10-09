@@ -8,6 +8,10 @@
 //! iteration: each exits to its own panic, so no load after the first
 //! check is known to run, and none leaves the loop.
 //!
+//! An index may also be the counter plus a constant (`xs[j + 1]`), and
+//! a two-pointer loop (`while lo < hi`, `lo` stepped up and `hi` down by
+//! one) indexes within `lo0..=hi0`: its test is `hi0 < xs.len()`.
+//!
 //! The accessors are the core library's `List` `Index` / `IndexSet`
 //! impls (`if idx >= self.len() { panic }`, then the element access);
 //! an unchecked copy is the access alone. The loop may call only them
@@ -24,6 +28,9 @@ use crate::{BasicBlock, LocalDecl, MirFunction, MirTy, Operand, RValue, Statemen
 /// A loop body copied for its unchecked version has at most this many
 /// statements.
 const MAX_BODY: usize = 256;
+
+/// The largest `k` of an index `ctr + k` made unchecked (in total).
+const MAX_OFFSET: i128 = 64;
 
 /// A checked accessor (`xs[i]`, `xs[i] = v`): its length function and
 /// the block after the check.
@@ -203,7 +210,7 @@ fn storeless(fns: &[MirFunction]) -> HashSet<FunctionId> {
     }
 }
 
-fn same(a: &Operand, b: &Operand) -> bool {
+pub fn same(a: &Operand, b: &Operand) -> bool {
     match (a, b) {
         (Operand::Copy(x), Operand::Copy(y)) => x == y,
         (Operand::Const(x), Operand::Const(y)) => x == y,
@@ -211,16 +218,19 @@ fn same(a: &Operand, b: &Operand) -> bool {
     }
 }
 
-/// A loop's exit test `ctr < bound` of integer type `ty`.
+/// A loop's exit test `ctr < bound` of integer type `ty`. `hi`: a
+/// two-pointer loop (`while lo < hi { ..; lo += 1; hi -= 1 }`), whose
+/// bound is the local `hi`, stepped down as `ctr` steps up.
 #[derive(Clone)]
-struct Test {
-    ctr: LocalId,
-    bound: Operand,
-    ty: PrimTy,
+pub struct Test {
+    pub ctr: LocalId,
+    pub bound: Operand,
+    pub ty: PrimTy,
+    pub hi: Option<LocalId>,
 }
 
 /// The test block `block` ends in, taken to `header` when it holds.
-fn test_into(block: &BasicBlock, header: u32) -> Option<Test> {
+pub fn test_into(block: &BasicBlock, header: u32) -> Option<Test> {
     let Terminator::If {
         cond: Operand::Copy(cond),
         then_bb,
@@ -260,28 +270,54 @@ fn test_into(block: &BasicBlock, header: u32) -> Option<Test> {
         ctr: *ctr,
         bound: bound.clone(),
         ty: *ty,
+        hi: None,
     })
+}
+
+/// The test `lo < hi` header `hb` of loop `body` ends in, entering the
+/// loop when it holds: a two-pointer loop's, not rotated.
+fn two_test(hb: &BasicBlock, body: &HashSet<u32>) -> Option<Test> {
+    let Terminator::If {
+        then_bb, else_bb, ..
+    } = &hb.terminator
+    else {
+        return None;
+    };
+    if !body.contains(&then_bb.0) || body.contains(&else_bb.0) {
+        return None;
+    }
+    let t = test_into(hb, then_bb.0)?;
+    match t.bound {
+        Operand::Copy(hi) if hi != t.ctr => Some(Test { hi: Some(hi), ..t }),
+        _ => None,
+    }
 }
 
 /// A list access in the loop to make unchecked: block, statement.
 type Site = (u32, usize);
 
-/// What the test in front of the loop checks: `bound <= len(xs)` for a
-/// list indexed by the counter, `i < len(xs)` for one indexed by `i`, and
-/// `0 <= ctr` for a signed counter.
+/// What the test in front of the loop checks: `bound + k <= len(xs)` for
+/// a list indexed by the counter plus `k`, `i < len(xs)` for one indexed
+/// by `i` (`i < bound` when `xs` is indexed by the counter too: one test
+/// for every such list), and `0 <= ctr` for a signed counter. A
+/// two-pointer loop indexes within `lo..=hi`, so in front `hi < len(xs)`.
 enum Need {
-    Bound(LocalId, FunctionId),
+    Bound(LocalId, FunctionId, i128),
     Index(LocalId, FunctionId, Operand),
+    BelowBound(Operand),
     NonNeg,
 }
 
 impl Need {
     fn same(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Bound(xs, len), Self::Bound(ys, len2)) => xs == ys && len == len2,
+            (Self::Bound(xs, len, k), Self::Bound(ys, len2, l)) => {
+                xs == ys && len == len2 && k == l
+            }
             (Self::Index(xs, len, i), Self::Index(ys, len2, j)) => {
                 xs == ys && len == len2 && same(i, j)
             }
+            (Self::BelowBound(i), Self::BelowBound(j)) => same(i, j),
             (Self::NonNeg, Self::NonNeg) => true,
             _ => false,
         }
@@ -292,6 +328,8 @@ struct Plan {
     header: u32,
     body: HashSet<u32>,
     test: Test,
+    /// The counter type's width.
+    bits: u32,
     needs: Vec<Need>,
     sites: HashMap<Site, FunctionId>,
 }
@@ -317,13 +355,14 @@ impl Scope<'_> {
     /// the test must check for them; `None` if the block may change a
     /// list.
     fn scan(&self, block: &BasicBlock) -> Option<Vec<(usize, FunctionId, Need)>> {
-        let Test { ctr, ty, .. } = self.test;
-        // Locals holding the counter's value here, and the counter as a
-        // `usize`.
-        let mut at_ctr: HashSet<LocalId> = HashSet::from([ctr]);
-        let mut as_index: HashSet<LocalId> = HashSet::new();
+        let Test { ctr, ty, hi, .. } = self.test;
+        // Locals holding a counter's value plus a constant here (`hi`'s
+        // when the flag is set), and those as a `usize`.
+        let mut at: HashMap<LocalId, (bool, i128)> = HashMap::from([(ctr, (false, 0))]);
+        at.extend(hi.map(|h| (h, (true, 0))));
+        let mut as_index: HashMap<LocalId, (bool, i128)> = HashMap::new();
         if ty == PrimTy::Usize {
-            as_index.insert(ctr);
+            as_index.clone_from(&at);
         }
         let mut out = Vec::new();
         for (k, s) in block.stmts.iter().enumerate() {
@@ -341,8 +380,14 @@ impl Scope<'_> {
                     if let Some(a) = self.accessors.get(callee) {
                         let need = match args.as_slice() {
                             [Operand::Copy(xs), idx, ..] if !self.set.contains(xs) => match idx {
-                                Operand::Copy(i) if as_index.contains(i) => {
-                                    Some(Need::Bound(*xs, a.len))
+                                Operand::Copy(i) if as_index.contains_key(i) => {
+                                    match (hi, as_index[i]) {
+                                        (None, (_, off)) => Some(Need::Bound(*xs, a.len, off)),
+                                        (Some(h), (_, 0)) => {
+                                            Some(Need::Index(*xs, a.len, Operand::Copy(h)))
+                                        }
+                                        _ => None,
+                                    }
                                 }
                                 i if self.fixed(i) => Some(Need::Index(*xs, a.len, i.clone())),
                                 _ => None,
@@ -357,27 +402,39 @@ impl Scope<'_> {
                 rv if !pure(rv) => return None,
                 _ => {}
             }
+            // (counter value, as a `usize`) of the result.
             let from = match rvalue {
-                RValue::Use(Operand::Copy(l)) => Some((*l, false)),
+                RValue::Use(Operand::Copy(l)) => (at.get(l).copied(), as_index.get(l).copied()),
                 RValue::Cast {
                     source: Operand::Copy(l),
                     from_ty: MirTy::Prim(from),
                     to_ty,
-                } if *from == ty && *to_ty == usize_ty() => Some((*l, true)),
-                _ => None,
+                } if *from == ty && *to_ty == usize_ty() => (None, at.get(l).copied()),
+                RValue::BinOp {
+                    op: PrimOp::Add | PrimOp::WrappingAdd,
+                    op_ty: MirTy::Prim(t),
+                    lhs: Operand::Copy(l),
+                    rhs: Operand::Const(ConstVal::Int { value, .. }),
+                } if *t == ty && (1..=MAX_OFFSET).contains(value) => {
+                    // The total offset stays at most `MAX_OFFSET`, below every
+                    // signed type's top, so the wrap test's constant fits.
+                    let v = at
+                        .get(l)
+                        .map(|&(h, off)| (h, off + value))
+                        .filter(|&(_, off)| off <= MAX_OFFSET);
+                    (v, v.filter(|_| ty == PrimTy::Usize))
+                }
+                _ => (None, None),
             };
-            at_ctr.remove(target);
+            at.remove(target);
             as_index.remove(target);
-            if *target == ctr {
-                at_ctr.clear();
-                as_index.clear();
-            } else if let Some((l, cast)) = from {
-                if !cast && at_ctr.contains(&l) {
-                    at_ctr.insert(*target);
-                }
-                if (cast && at_ctr.contains(&l)) || (!cast && as_index.contains(&l)) {
-                    as_index.insert(*target);
-                }
+            if *target == ctr || Some(*target) == hi {
+                let moved = Some(*target) == hi;
+                at.retain(|_, (h, _)| *h != moved);
+                as_index.retain(|_, (h, _)| *h != moved);
+            } else {
+                at.extend(from.0.map(|v| (*target, v)));
+                as_index.extend(from.1.map(|v| (*target, v)));
             }
         }
         Some(out)
@@ -421,38 +478,66 @@ fn plan(
     }) {
         return None;
     }
-    let test = entry_test(func, header)?;
+    let test = entry_test(func, header).or_else(|| two_test(blocks[&header], &body))?;
     let (ctr, ty) = (test.ctr, test.ty);
     // Another counter type indexes through a cast to `usize`, which keeps
     // its value: no wider than `usize`, and a signed one counts up by one
     // from at least 0 (tested in front).
     let signed = ty.is_signed_int();
     let mut set = crate::addressed(func);
-    if set.contains(&ctr) || ty.bit_width(pointer_width) > pointer_width {
+    if set.contains(&ctr)
+        || test.hi.is_some_and(|h| set.contains(&h))
+        || ty.bit_width(pointer_width) > pointer_width
+    {
         return None;
     }
-    let by_one = |s: &Statement| {
+    let step = |s: &Statement, l: LocalId, op: PrimOp| {
         matches!(s, Statement::Assign {
+            target,
             rvalue: RValue::BinOp {
-                op: PrimOp::Add,
+                op: o,
                 op_ty: MirTy::Prim(t),
-                lhs: Operand::Copy(l),
+                lhs: Operand::Copy(x),
                 rhs: Operand::Const(ConstVal::Int { value: 1, .. }),
             },
-            ..
-        } if *l == ctr && *t == ty)
+        } if *target == l && *x == l && *o == op && *t == ty)
     };
-    // The counter is set only in the latches, whose way on is back to
-    // `header`.
     for id in &body {
         let b = blocks[id];
-        if matches!(b.terminator, Terminator::Suspend { .. }) {
+        if matches!(b.terminator, Terminator::Suspend { .. })
+            || b.params.iter().any(|p| *p == ctr || Some(*p) == test.hi)
+        {
             return None;
         }
         set.extend(b.params.iter().copied());
+        if let Some(hi) = test.hi {
+            // Two pointers: each stepped by one at most once an iteration,
+            // in a block whose only way on is back to `header`, so at
+            // every access `lo0 <= lo < hi <= hi0`.
+            let latch = matches!(&b.terminator,
+                Terminator::Goto { target, args } if target.0 == header && args.is_empty());
+            let defs = |l: LocalId| {
+                b.stmts
+                    .iter()
+                    .filter(|s| crate::liveness::stmt_uses(s).1 == Some(l))
+                    .collect::<Vec<_>>()
+            };
+            let (lo_defs, hi_defs) = (defs(ctr), defs(hi));
+            let ok = |ds: &[&Statement], l, op| {
+                ds.is_empty() || (latch && ds.len() == 1 && step(ds[0], l, op))
+            };
+            if !ok(&lo_defs, ctr, PrimOp::Add) || !ok(&hi_defs, hi, PrimOp::Sub) {
+                return None;
+            }
+        }
         for s in &b.stmts {
             if let Some(d) = crate::liveness::stmt_uses(s).1 {
-                if d == ctr && (!latches.contains(id) || (signed && !by_one(s))) {
+                // A counted loop's counter is set only in the latches,
+                // whose way on is the test into `header`.
+                if test.hi.is_none()
+                    && d == ctr
+                    && (!latches.contains(id) || (signed && !step(s, ctr, PrimOp::Add)))
+                {
                     return None;
                 }
                 set.insert(d);
@@ -465,25 +550,55 @@ fn plan(
         set,
         test,
     };
-    if !scope.fixed(&scope.test.bound) {
+    if scope.test.hi.is_none() && !scope.fixed(&scope.test.bound) {
         return None;
     }
     let mut needs: Vec<Need> = Vec::new();
     let mut sites: HashMap<Site, FunctionId> = HashMap::new();
     for id in &body {
-        for (k, callee, need) in scope.scan(blocks[id])? {
+        let found = scope.scan(blocks[id])?;
+        // A two-pointer header runs its statements before its test.
+        if scope.test.hi.is_some() && *id == header {
+            continue;
+        }
+        for (k, callee, need) in found {
             if !needs.iter().any(|n| n.same(&need)) {
                 needs.push(need);
             }
             sites.insert((*id, k), callee);
         }
     }
-    if signed && needs.iter().any(|n| matches!(n, Need::Bound(..))) {
+    // `i < bound <= len(xs)`: the bound test of `xs` covers `i`.
+    let bounded: HashSet<(LocalId, FunctionId)> = needs
+        .iter()
+        .filter_map(|n| match n {
+            Need::Bound(xs, len, _) => Some((*xs, *len)),
+            _ => None,
+        })
+        .collect();
+    let mut merged: Vec<Need> = Vec::new();
+    for need in needs {
+        let need = match need {
+            Need::Index(xs, len, i) if bounded.contains(&(xs, len)) => Need::BelowBound(i),
+            n => n,
+        };
+        if !merged.iter().any(|n| n.same(&need)) {
+            merged.push(need);
+        }
+    }
+    let mut needs = merged;
+    let by_ctr = |n: &Need| match n {
+        Need::Bound(..) => true,
+        Need::Index(_, _, i) => scope.test.hi.is_some() && same(i, &scope.test.bound),
+        _ => false,
+    };
+    if signed && needs.iter().any(by_ctr) {
         needs.push(Need::NonNeg);
     }
     (!sites.is_empty()).then_some(Plan {
         header,
         body,
+        bits: ty.bit_width(pointer_width),
         test: scope.test,
         needs,
         sites,
@@ -496,18 +611,36 @@ fn fresh(func: &mut MirFunction, ty: MirTy) -> LocalId {
     id
 }
 
+const fn int(value: i128, ty: PrimTy) -> Operand {
+    Operand::Const(ConstVal::Int { value, ty })
+}
+
 const fn assign(target: LocalId, rvalue: RValue) -> Statement {
     Statement::Assign { target, rvalue }
 }
 
-/// The test of plan `p` in `func`: its statements, then one condition
-/// per need.
+/// The test of plan `p` in `func`: its statements, then its conditions.
 fn conditions(func: &mut MirFunction, p: &Plan) -> (Vec<Statement>, Vec<LocalId>) {
-    let Test { ctr, ref bound, ty } = p.test;
+    let Test {
+        ctr, ref bound, ty, ..
+    } = p.test;
     let mut stmts = Vec::new();
     let mut conds = Vec::new();
+    let mut cmp = |func: &mut MirFunction, stmts: &mut Vec<Statement>, op, op_ty, lhs, rhs| {
+        let c = fresh(func, MirTy::Prim(PrimTy::Bool));
+        stmts.push(assign(
+            c,
+            RValue::BinOp {
+                op,
+                op_ty,
+                lhs,
+                rhs,
+            },
+        ));
+        conds.push(c);
+    };
     // The bound as a `usize` (a negative one fails the test).
-    let bound = if ty == PrimTy::Usize {
+    let ubound = if ty == PrimTy::Usize {
         bound.clone()
     } else {
         let l = fresh(func, usize_ty());
@@ -523,44 +656,101 @@ fn conditions(func: &mut MirFunction, p: &Plan) -> (Vec<Statement>, Vec<LocalId>
     };
     let mut lens: HashMap<(LocalId, FunctionId), LocalId> = HashMap::new();
     for need in &p.needs {
-        let (op, op_ty, lhs, rhs) = match need {
-            Need::NonNeg => (
-                PrimOp::Le,
-                MirTy::Prim(ty),
-                Operand::Const(ConstVal::Int { value: 0, ty }),
-                Operand::Copy(ctr),
-            ),
-            Need::Bound(xs, len) | Need::Index(xs, len, _) => {
-                let l = *lens.entry((*xs, *len)).or_insert_with(|| {
-                    let l = fresh(func, usize_ty());
-                    stmts.push(assign(
-                        l,
-                        RValue::Call {
-                            callee: *len,
-                            args: vec![Operand::Copy(*xs)],
-                            ret_ty: usize_ty(),
-                        },
-                    ));
-                    l
-                });
-                let (op, lhs) = match need {
-                    Need::Index(_, _, i) => (PrimOp::Lt, i.clone()),
-                    _ => (PrimOp::Le, bound.clone()),
-                };
-                (op, usize_ty(), lhs, Operand::Copy(l))
+        let (xs, len) = match need {
+            Need::NonNeg => {
+                let zero = Operand::Const(ConstVal::Int { value: 0, ty });
+                cmp(
+                    func,
+                    &mut stmts,
+                    PrimOp::Le,
+                    MirTy::Prim(ty),
+                    zero,
+                    Operand::Copy(ctr),
+                );
+                continue;
             }
+            Need::BelowBound(i) => {
+                cmp(
+                    func,
+                    &mut stmts,
+                    PrimOp::Lt,
+                    usize_ty(),
+                    i.clone(),
+                    ubound.clone(),
+                );
+                continue;
+            }
+            Need::Bound(xs, len, _) | Need::Index(xs, len, _) => (*xs, *len),
         };
-        let c = fresh(func, MirTy::Prim(PrimTy::Bool));
-        stmts.push(assign(
-            c,
-            RValue::BinOp {
-                op,
-                op_ty,
-                lhs,
-                rhs,
-            },
-        ));
-        conds.push(c);
+        let l = Operand::Copy(*lens.entry((xs, len)).or_insert_with(|| {
+            let l = fresh(func, usize_ty());
+            stmts.push(assign(
+                l,
+                RValue::Call {
+                    callee: len,
+                    args: vec![Operand::Copy(xs)],
+                    ret_ty: usize_ty(),
+                },
+            ));
+            l
+        }));
+        match need {
+            // A two-pointer loop's `hi`, as a `usize`.
+            Need::Index(_, _, i) if p.test.hi.is_some() && same(i, bound) => {
+                cmp(func, &mut stmts, PrimOp::Lt, usize_ty(), ubound.clone(), l);
+            }
+            Need::Index(_, _, i) => cmp(func, &mut stmts, PrimOp::Lt, usize_ty(), i.clone(), l),
+            &Need::Bound(_, _, 0) => {
+                cmp(func, &mut stmts, PrimOp::Le, usize_ty(), ubound.clone(), l);
+            }
+            &Need::Bound(_, _, k) => {
+                // A signed `ctr + k` wraps negative past the type's top at
+                // -O2, and as a `usize` it is huge: `bound <= MAX - k + 1`.
+                if ty.is_signed_int() {
+                    let top = (1i128 << (p.bits - 1)) - 1;
+                    cmp(
+                        func,
+                        &mut stmts,
+                        PrimOp::Le,
+                        MirTy::Prim(ty),
+                        bound.clone(),
+                        int(top - k + 1, ty),
+                    );
+                }
+                // `k <= len`, then `bound <= len - k`.
+                let k = Operand::Const(ConstVal::Int {
+                    value: k,
+                    ty: PrimTy::Usize,
+                });
+                cmp(
+                    func,
+                    &mut stmts,
+                    PrimOp::Le,
+                    usize_ty(),
+                    k.clone(),
+                    l.clone(),
+                );
+                let room = fresh(func, usize_ty());
+                stmts.push(assign(
+                    room,
+                    RValue::BinOp {
+                        op: PrimOp::WrappingSub,
+                        op_ty: usize_ty(),
+                        lhs: l,
+                        rhs: k,
+                    },
+                ));
+                cmp(
+                    func,
+                    &mut stmts,
+                    PrimOp::Le,
+                    usize_ty(),
+                    ubound.clone(),
+                    Operand::Copy(room),
+                );
+            }
+            _ => unreachable!(),
+        }
     }
     (stmts, conds)
 }
@@ -577,27 +767,38 @@ fn apply(func: &mut MirFunction, p: &Plan, unchecked: &mut dyn FnMut(FunctionId)
             (b, next - 1)
         })
         .collect();
-    let (mut first, conds) = conditions(func, p);
+    let (mut stmts, conds) = conditions(func, p);
     let fast = map[&p.header];
-    let tests: Vec<BasicBlock> = (next..)
-        .zip(&conds)
-        .map(|(id, c)| BasicBlock {
-            id: BlockId(id),
-            params: vec![],
-            stmts: std::mem::take(&mut first),
-            terminator: Terminator::If {
-                cond: Operand::Copy(*c),
-                then_bb: BlockId(if id + 1 == next + conds.len() as u32 {
-                    fast
-                } else {
-                    id + 1
-                }),
-                then_args: vec![],
-                else_bb: BlockId(p.header),
-                else_args: vec![],
-            },
+    // One branch on all the conditions (each computed anyway): the ones
+    // an enclosing loop does not change then leave it.
+    let all = conds
+        .into_iter()
+        .reduce(|a, b| {
+            let c = fresh(func, MirTy::Prim(PrimTy::Bool));
+            stmts.push(assign(
+                c,
+                RValue::BinOp {
+                    op: PrimOp::BitAnd,
+                    op_ty: MirTy::Prim(PrimTy::Bool),
+                    lhs: Operand::Copy(a),
+                    rhs: Operand::Copy(b),
+                },
+            ));
+            c
         })
-        .collect();
+        .expect("a plan tests something");
+    let tests = [BasicBlock {
+        id: BlockId(next),
+        params: vec![],
+        stmts,
+        terminator: Terminator::If {
+            cond: Operand::Copy(all),
+            then_bb: BlockId(fast),
+            then_args: vec![],
+            else_bb: BlockId(p.header),
+            else_args: vec![],
+        },
+    }];
     for b in &mut func.blocks {
         if !p.body.contains(&b.id.0) {
             retarget(&mut b.terminator, p.header, next);

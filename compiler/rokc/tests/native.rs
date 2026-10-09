@@ -2247,6 +2247,70 @@ fn main() -> i32 {
     }
 }
 
+/// A two-pointer loop (`lo < hi`, stepped toward each other) and an index
+/// `ctr + k` are versioned too: each access has an unchecked copy.
+#[test]
+fn bounds_versioned_two_pointers_and_offsets() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("boundsversion2");
+    fs::write(
+        dir.join("main.rok"),
+        r#"
+fn rev(xs: List<i64>, lo: i64, hi: i64) {
+    while lo < hi {
+        let t = xs[lo as usize];
+        xs[lo as usize] = xs[hi as usize];
+        xs[hi as usize] = t;
+        lo += 1;
+        hi -= 1;
+    }
+}
+
+fn shift(xs: List<i64>, n: usize) {
+    for i in 0..n {
+        xs[i] = xs[i + 1];
+    }
+}
+
+fn main() -> i32 {
+    let x: List<i64> = [1, 2, 3];
+    rev(x, 0, 2);
+    shift(x, 2);
+    println(f"{x:?}");
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let ll = dir.join("main.ll");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["-O2", "--emit=llvmir", "-o", ll.to_str().unwrap()],
+    ));
+    let ir = fs::read_to_string(ll).unwrap();
+    let calls = |name: &str, unchecked: bool| {
+        let d = ir
+            .split("\ndefine ")
+            .find(|d| d.lines().next().unwrap().contains(name))
+            .unwrap();
+        d[..d.find("\n}\n").unwrap()]
+            .lines()
+            .filter(|l| {
+                l.contains(" call ")
+                    && l.contains("0index_")
+                    && l.contains("_123_unchecked_") == unchecked
+            })
+            .count()
+    };
+    // `rev`: two loads, two stores; `shift`: one of each.
+    assert_eq!((calls("__rev_(", true), calls("__rev_(", false)), (4, 4));
+    assert_eq!(
+        (calls("__shift_(", true), calls("__shift_(", false)),
+        (2, 2)
+    );
+}
+
 /// A loop that calls a closure or a `fn` value, directly or through a
 /// function, keeps its checks: the callee may shrink the list. The same
 /// loop calling nothing is versioned.

@@ -141,6 +141,7 @@ impl<T> List<T> {
 
     /// `push` into a full list, out of line: a `push` that fits reaches
     /// no safepoint, so it keeps no frame.
+    #[cold]
     const fn push_grown(self, x: T) {
         unsafe {
             // One read of the length: the slot written and the new length

@@ -1148,21 +1148,24 @@ fn lower_fn_with(
     }
 }
 
-/// The `#[inline]` hint of a function (spec 6.2.4).
+/// The `#[inline]` hint of a function (spec 6.2.4); `#[cold]` (6.2.6)
+/// unless it is `#[inline(always)]`.
 fn inline_hint(attrs: &[rokc_ast::Attribute]) -> rokc_ir_common::Inline {
     use rokc_ast::{AttrArg, AttrBody};
     use rokc_ir_common::Inline;
-    let Some(a) = attrs.iter().find(|a| a.name() == "inline") else {
-        return Inline::Auto;
-    };
-    match &a.body {
-        AttrBody::Args(xs) => match xs.as_slice() {
+    let hint = match attrs.iter().find(|a| a.name() == "inline").map(|a| &a.body) {
+        None => Inline::Auto,
+        Some(AttrBody::Args(xs)) => match xs.as_slice() {
             [AttrArg::Word(w)] if w == "always" => Inline::Always,
             [AttrArg::Word(w)] if w == "never" => Inline::Never,
             _ => Inline::Hint,
         },
-        _ => Inline::Hint,
+        Some(_) => Inline::Hint,
+    };
+    if hint != Inline::Always && attrs.iter().any(|a| a.name() == "cold") {
+        return Inline::Cold;
     }
+    hint
 }
 
 /// `{T → arg}` for a generic item's type parameters.

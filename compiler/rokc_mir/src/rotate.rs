@@ -75,7 +75,7 @@ pub const SHORT_TRIPS: i128 = 64;
 ///
 /// Such a loop has a counter starting at constants, stepped by a
 /// constant once per iteration, and tested against a constant on every
-/// iteration.
+/// iteration; or `strip` made it (`MirFunction::strips`).
 #[must_use]
 pub fn short_loops(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
     let mut latches: HashMap<u32, Vec<u32>> = HashMap::new();
@@ -105,9 +105,11 @@ pub fn short_loops(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
         .filter_map(|(h, ls)| {
             let body = loop_body(f, h, &ls);
             let every = |x| every_iteration(&blocks, h, &ls, &body, x);
-            let short = body.iter().any(|x| {
-                trips(blocks[x], &body, &defs, every).is_some_and(|n| n <= SHORT_TRIPS) && every(*x)
-            });
+            let short = f.strips.contains(&h)
+                || body.iter().any(|x| {
+                    trips(blocks[x], &body, &defs, every).is_some_and(|n| n <= SHORT_TRIPS)
+                        && every(*x)
+                });
             short.then_some((h, body))
         })
         .collect()
@@ -557,6 +559,7 @@ mod tests {
             def_id: None,
             name: "f".into(),
             facts: rokc_ir_common::FnFacts::default(),
+            strips: Vec::new(),
             params: vec![LocalId(0), LocalId(1)],
             locals: (0..3)
                 .map(|i| LocalDecl {

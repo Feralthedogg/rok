@@ -1,0 +1,499 @@
+//! Strip mining of counted loops. An innermost rotated loop `ctr < bound`
+//! stepped by one, whose body reaches no safepoint, polls on every back
+//! edge: its trip count is unknown. Split into strips of at most
+//! `SHORT_TRIPS` iterations, `ctr < lim` with `lim = min(bound, ctr +
+//! SHORT_TRIPS)`, the inner loop is short (`MirFunction::strips`) and
+//! needs no poll; the strip loop around it polls once a strip. The
+//! inner test replaces the loop's own, so a strip costs a few
+//! instructions in front and one test behind.
+//!
+//! ```text
+//! E:  lim = bound; if bound - ctr > K { lim = ctr + K }   (E1)
+//! H:  body ..
+//! L:  ctr += 1; if ctr < lim then H else S
+//! S:  if ctr < bound then E else exit
+//! ```
+
+use std::collections::{HashMap, HashSet};
+
+use rokc_ir_common::{BlockId, ConstVal, FunctionId, Linkage, LocalId, PrimOp, PrimTy};
+
+use crate::rotate::{SHORT_TRIPS, back_edges, loop_body, retarget, succs};
+use crate::version::{Test, same, test_into};
+use crate::{BasicBlock, LocalDecl, MirFunction, MirTy, Operand, RValue, Statement, Terminator};
+
+/// Statement `s` reaches no safepoint, calling only `leaf` functions.
+fn quiet(s: &Statement, leaf: &HashSet<FunctionId>) -> bool {
+    match s {
+        Statement::Assign { rvalue, .. } => match rvalue {
+            RValue::Call { callee, .. } => leaf.contains(callee),
+            RValue::CallIndirect { .. }
+            | RValue::StaticLoad { .. }
+            | RValue::StaticAddr(_)
+            | RValue::HeapBox { .. }
+            | RValue::BufAlloc { .. }
+            | RValue::HeapAlloc { .. }
+            | RValue::MlirOp { .. } => false,
+            _ => true,
+        },
+        Statement::StaticStore { .. } | Statement::MlirRegion { .. } | Statement::MlirRegionEnd => {
+            false
+        }
+        _ => true,
+    }
+}
+
+/// Functions without loops that reach no safepoint: a subset of what
+/// codegen finds quiet, which decides the polls.
+fn leaves(fns: &[MirFunction]) -> HashSet<FunctionId> {
+    let mut out: HashSet<FunctionId> = HashSet::new();
+    loop {
+        let before = out.len();
+        for f in fns {
+            if out.contains(&f.id)
+                || f.blocks.is_empty()
+                || f.facts.linkage != Linkage::Defined
+                || !back_edges(f).is_empty()
+            {
+                continue;
+            }
+            if f.blocks.iter().all(|b| {
+                !matches!(b.terminator, Terminator::Suspend { .. })
+                    && b.stmts.iter().all(|s| quiet(s, &out))
+            }) {
+                out.insert(f.id);
+            }
+        }
+        if out.len() == before {
+            return out;
+        }
+    }
+}
+
+fn fresh(func: &mut MirFunction, ty: MirTy) -> LocalId {
+    let id = LocalId(u32::try_from(func.locals.len()).expect("local count"));
+    func.locals.push(LocalDecl { id, name: None, ty });
+    id
+}
+
+const fn assign(target: LocalId, rvalue: RValue) -> Statement {
+    Statement::Assign { target, rvalue }
+}
+
+const fn int(value: i128, ty: PrimTy) -> Operand {
+    Operand::Const(ConstVal::Int { value, ty })
+}
+
+/// The unsigned type of `ty`'s width.
+const fn unsigned(ty: PrimTy) -> Option<PrimTy> {
+    Some(match ty {
+        PrimTy::I8 | PrimTy::U8 => PrimTy::U8,
+        PrimTy::I16 | PrimTy::U16 => PrimTy::U16,
+        PrimTy::I32 | PrimTy::U32 => PrimTy::U32,
+        PrimTy::I64 | PrimTy::U64 => PrimTy::U64,
+        PrimTy::Isize | PrimTy::Usize => PrimTy::Usize,
+        _ => return None,
+    })
+}
+
+/// Whether `ctr < bound` holds on the edge from `from` to `to`: `from`
+/// tests it, or sets neither and it holds on every way into `from` (the
+/// bounds tests `version` puts in front of a loop).
+fn holds(
+    func: &MirFunction,
+    preds: &HashMap<u32, Vec<u32>>,
+    t: &Test,
+    from: u32,
+    to: u32,
+    seen: &mut HashSet<u32>,
+) -> bool {
+    let Some(b) = func.blocks.iter().find(|b| b.id.0 == from) else {
+        return false;
+    };
+    if test_into(b, to).is_some_and(|u| u.ctr == t.ctr && same(&u.bound, &t.bound) && u.ty == t.ty)
+    {
+        return true;
+    }
+    let sets = |l: LocalId| {
+        b.params.contains(&l)
+            || b.stmts
+                .iter()
+                .any(|s| crate::liveness::stmt_uses(s).1 == Some(l))
+    };
+    let bound_set = matches!(t.bound, Operand::Copy(n) if sets(n));
+    let ps = preds.get(&from).map_or(&[][..], Vec::as_slice);
+    seen.insert(from)
+        && !sets(t.ctr)
+        && !bound_set
+        && !ps.is_empty()
+        && ps.iter().all(|&p| holds(func, preds, t, p, from, seen))
+}
+
+/// Every latch of `h` tests `ctr < bound` into it, and it holds on every
+/// other way in.
+fn loop_test(func: &MirFunction, h: u32, ls: &[u32]) -> Option<Test> {
+    let mut test: Option<Test> = None;
+    for l in ls {
+        let t = test_into(func.blocks.iter().find(|b| b.id.0 == *l)?, h)?;
+        if let Some(seen) = &test {
+            if seen.ctr != t.ctr || !same(&seen.bound, &t.bound) || seen.ty != t.ty {
+                return None;
+            }
+        }
+        test = Some(t);
+    }
+    let test = test?;
+    let mut preds: HashMap<u32, Vec<u32>> = HashMap::new();
+    for b in &func.blocks {
+        for s in succs(b) {
+            preds.entry(s).or_default().push(b.id.0);
+        }
+    }
+    let entries: Vec<u32> = preds[&h]
+        .iter()
+        .copied()
+        .filter(|p| !ls.contains(p))
+        .collect();
+    (!entries.is_empty()
+        && entries
+            .iter()
+            .all(|&p| holds(func, &preds, &test, p, h, &mut HashSet::new())))
+    .then_some(test)
+}
+
+/// The loop of header `h` (latches `ls`) to strip: its test.
+fn eligible(
+    func: &MirFunction,
+    h: u32,
+    ls: &[u32],
+    headers: &HashSet<u32>,
+    leaf: &HashSet<FunctionId>,
+) -> Option<(Test, HashSet<u32>)> {
+    let blocks: HashMap<u32, &BasicBlock> = func.blocks.iter().map(|b| (b.id.0, b)).collect();
+    let body = loop_body(func, h, ls);
+    let test = loop_test(func, h, ls)?;
+    unsigned(test.ty)?;
+    let addressed = crate::addressed(func);
+    if test.hi.is_some()
+        || !blocks.get(&h)?.params.is_empty()
+        || addressed.contains(&test.ctr)
+        || body.iter().any(|b| *b != h && headers.contains(b))
+    {
+        return None;
+    }
+    if let Operand::Copy(n) = &test.bound {
+        if addressed.contains(n) || *n == test.ctr {
+            return None;
+        }
+    }
+    let step = |s: &Statement| {
+        matches!(s, Statement::Assign {
+            target,
+            rvalue: RValue::BinOp {
+                op: PrimOp::Add,
+                op_ty: MirTy::Prim(t),
+                lhs: Operand::Copy(x),
+                rhs: Operand::Const(ConstVal::Int { value: 1, .. } | ConstVal::UInt { value: 1, .. }),
+            },
+        } if *target == test.ctr && *x == test.ctr && *t == test.ty)
+    };
+    for id in &body {
+        let b = blocks[id];
+        if matches!(b.terminator, Terminator::Suspend { .. })
+            || b.params
+                .iter()
+                .any(|p| *p == test.ctr || same(&test.bound, &Operand::Copy(*p)))
+            || !b.stmts.iter().all(|s| quiet(s, leaf))
+        {
+            return None;
+        }
+        let mut steps = 0;
+        for s in &b.stmts {
+            match crate::liveness::stmt_uses(s).1 {
+                Some(d) if d == test.ctr && step(s) => steps += 1,
+                Some(d) if d == test.ctr || same(&test.bound, &Operand::Copy(d)) => return None,
+                _ => {}
+            }
+        }
+        // One step on every way back: in each latch (its test into `h`
+        // follows it), nowhere else.
+        if steps != usize::from(ls.contains(id)) {
+            return None;
+        }
+    }
+    Some((test, body))
+}
+
+/// Strip the loop of header `header`.
+fn apply(func: &mut MirFunction, header: u32, latches: &[u32], test: &Test) {
+    let Test {
+        ctr, ref bound, ty, ..
+    } = *test;
+    let uty = unsigned(ty).expect("integer counter");
+    let mut next = func.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+    let mut new_id = || {
+        next += 1;
+        next - 1
+    };
+    let (front, front1) = (new_id(), new_id());
+    let lim = fresh(func, MirTy::Prim(ty));
+    let (dist, udist, big) = (
+        fresh(func, MirTy::Prim(ty)),
+        fresh(func, MirTy::Prim(uty)),
+        fresh(func, MirTy::Prim(PrimTy::Bool)),
+    );
+    // Into the loop `ctr < bound`, so `bound - ctr` fits the unsigned type.
+    for b in &mut func.blocks {
+        if !latches.contains(&b.id.0) {
+            retarget(&mut b.terminator, header, front);
+        }
+    }
+    let mut strips = Vec::new();
+    for b in func.blocks.iter_mut().filter(|b| latches.contains(&b.id.0)) {
+        let Terminator::If {
+            cond: Operand::Copy(c),
+            else_bb,
+            else_args,
+            ..
+        } = &mut b.terminator
+        else {
+            unreachable!("a latch tests");
+        };
+        let c = *c;
+        let end = new_id();
+        let (exit, args) = (*else_bb, std::mem::take(else_args));
+        *else_bb = BlockId(end);
+        for st in b.stmts.iter_mut().rev() {
+            if let Statement::Assign {
+                target,
+                rvalue: RValue::BinOp { rhs, .. },
+            } = st
+            {
+                if *target == c {
+                    *rhs = Operand::Copy(lim);
+                    break;
+                }
+            }
+        }
+        strips.push(BasicBlock {
+            id: BlockId(end),
+            params: vec![],
+            stmts: vec![assign(
+                c,
+                RValue::BinOp {
+                    op: PrimOp::Lt,
+                    op_ty: MirTy::Prim(ty),
+                    lhs: Operand::Copy(ctr),
+                    rhs: bound.clone(),
+                },
+            )],
+            terminator: Terminator::If {
+                cond: Operand::Copy(c),
+                then_bb: BlockId(front),
+                then_args: vec![],
+                else_bb: exit,
+                else_args: args,
+            },
+        });
+    }
+    func.blocks.extend(strips);
+    func.blocks.push(BasicBlock {
+        id: BlockId(front),
+        params: vec![],
+        stmts: vec![
+            assign(
+                dist,
+                RValue::BinOp {
+                    op: PrimOp::WrappingSub,
+                    op_ty: MirTy::Prim(ty),
+                    lhs: bound.clone(),
+                    rhs: Operand::Copy(ctr),
+                },
+            ),
+            assign(
+                udist,
+                RValue::Cast {
+                    source: Operand::Copy(dist),
+                    from_ty: MirTy::Prim(ty),
+                    to_ty: MirTy::Prim(uty),
+                },
+            ),
+            assign(
+                big,
+                RValue::BinOp {
+                    op: PrimOp::Gt,
+                    op_ty: MirTy::Prim(uty),
+                    lhs: Operand::Copy(udist),
+                    rhs: int(SHORT_TRIPS, uty),
+                },
+            ),
+            assign(lim, RValue::Use(bound.clone())),
+        ],
+        terminator: Terminator::If {
+            cond: Operand::Copy(big),
+            then_bb: BlockId(front1),
+            then_args: vec![],
+            else_bb: BlockId(header),
+            else_args: vec![],
+        },
+    });
+    func.blocks.push(BasicBlock {
+        id: BlockId(front1),
+        params: vec![],
+        stmts: vec![assign(
+            lim,
+            RValue::BinOp {
+                op: PrimOp::WrappingAdd,
+                op_ty: MirTy::Prim(ty),
+                lhs: Operand::Copy(ctr),
+                rhs: int(SHORT_TRIPS, ty),
+            },
+        )],
+        terminator: Terminator::Goto {
+            target: BlockId(header),
+            args: vec![],
+        },
+    });
+    func.strips.push(header);
+}
+
+pub fn strip(fns: &mut [MirFunction]) {
+    let leaf = leaves(fns);
+    for func in fns.iter_mut() {
+        if func.facts.linkage != Linkage::Defined || func.blocks.is_empty() {
+            continue;
+        }
+        let mut latches: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (latch, hs) in back_edges(func) {
+            for h in hs {
+                latches.entry(h).or_default().push(latch);
+            }
+        }
+        let headers: HashSet<u32> = latches.keys().copied().collect();
+        let short = crate::rotate::short_loops(func);
+        let mut todo: Vec<(u32, Vec<u32>)> = latches
+            .into_iter()
+            .filter(|(h, _)| !short.contains_key(h))
+            .collect();
+        todo.sort_unstable_by_key(|(h, _)| *h);
+        let plans: Vec<(u32, Vec<u32>, Test)> = todo
+            .into_iter()
+            .filter_map(|(h, ls)| {
+                let (t, _) = eligible(func, h, &ls, &headers, &leaf)?;
+                Some((h, ls, t))
+            })
+            .collect();
+        for (h, ls, t) in &plans {
+            apply(func, *h, ls, t);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rokc_diagnostic::Span;
+
+    use super::*;
+
+    const fn usize_op(t: u32, op: PrimOp, lhs: u32, rhs: Operand) -> Statement {
+        assign(
+            LocalId(t),
+            RValue::BinOp {
+                op,
+                op_ty: MirTy::Prim(PrimTy::Usize),
+                lhs: Operand::Copy(LocalId(lhs)),
+                rhs,
+            },
+        )
+    }
+
+    /// `while x0 < x1 { x0 += 1 }`, `x1` a parameter; rotated.
+    fn counting() -> MirFunction {
+        let test = |id, then_bb, else_bb, stmts: Vec<Statement>| BasicBlock {
+            id: BlockId(id),
+            params: vec![],
+            stmts,
+            terminator: Terminator::If {
+                cond: Operand::Copy(LocalId(2)),
+                then_bb: BlockId(then_bb),
+                then_args: vec![],
+                else_bb: BlockId(else_bb),
+                else_args: vec![],
+            },
+        };
+        let lt = || usize_op(2, PrimOp::Lt, 0, Operand::Copy(LocalId(1)));
+        let one = Operand::Const(ConstVal::Int {
+            value: 1,
+            ty: PrimTy::Usize,
+        });
+        let mut f = MirFunction {
+            id: FunctionId(0),
+            def_id: None,
+            name: "f".into(),
+            facts: rokc_ir_common::FnFacts::default(),
+            strips: Vec::new(),
+            params: vec![LocalId(0), LocalId(1)],
+            locals: (0..3)
+                .map(|i| LocalDecl {
+                    id: LocalId(i),
+                    name: None,
+                    ty: MirTy::Prim(if i == 2 { PrimTy::Bool } else { PrimTy::Usize }),
+                })
+                .collect(),
+            blocks: vec![
+                test(0, 1, 3, vec![lt()]),
+                BasicBlock {
+                    id: BlockId(1),
+                    params: vec![],
+                    stmts: vec![],
+                    terminator: Terminator::Goto {
+                        target: BlockId(2),
+                        args: vec![],
+                    },
+                },
+                test(2, 1, 3, vec![usize_op(0, PrimOp::Add, 0, one), lt()]),
+                BasicBlock {
+                    id: BlockId(3),
+                    params: vec![],
+                    stmts: vec![],
+                    terminator: Terminator::Return(None),
+                },
+            ],
+            param_tys: vec![MirTy::Prim(PrimTy::Usize); 2],
+            ret_ty: MirTy::Unit,
+            span: Span::default(),
+        };
+        f.facts.linkage = Linkage::Defined;
+        f
+    }
+
+    #[test]
+    fn a_counted_loop_runs_in_short_strips() {
+        let mut fns = vec![counting()];
+        assert!(crate::rotate::short_loops(&fns[0]).is_empty());
+        strip(&mut fns);
+        let f = &fns[0];
+        assert_eq!(f.strips, [1]);
+        let short = crate::rotate::short_loops(f);
+        assert_eq!(short.keys().collect::<Vec<_>>(), [&1]);
+        // The entry and the strip's end go to the strip's front, which
+        // sets the limit the latch tests.
+        let front = succs(&f.blocks[0])[0];
+        assert!(
+            f.blocks
+                .iter()
+                .any(|b| b.id.0 == front && succs(b).contains(&1))
+        );
+        let edges = back_edges(f);
+        assert_eq!(edges[&2], HashSet::from([1]));
+        assert!(edges.values().any(|hs| hs.contains(&front)));
+        // A loop that may reach a safepoint (a lazy static) is left alone.
+        let mut g = counting();
+        g.blocks[1]
+            .stmts
+            .push(assign(LocalId(2), RValue::StaticAddr("s".into())));
+        let mut fns = vec![g];
+        strip(&mut fns);
+        assert!(fns[0].strips.is_empty());
+    }
+}

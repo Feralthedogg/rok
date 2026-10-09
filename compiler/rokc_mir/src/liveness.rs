@@ -464,6 +464,7 @@ mod tests {
             def_id: None,
             name: "f".into(),
             facts: rokc_ir_common::FnFacts::default(),
+            strips: Vec::new(),
             params: vec![LocalId(1), LocalId(3)],
             locals: (0..5).map(local).collect(),
             blocks: vec![

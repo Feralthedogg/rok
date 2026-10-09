@@ -12,6 +12,7 @@ mod print;
 mod rotate;
 mod specialize;
 mod stable_names;
+mod strip;
 mod target;
 #[path = "../../../runtime/rokr_common/src/tls_abi.rs"]
 pub mod tls_abi;
@@ -227,6 +228,9 @@ pub struct MirFunction {
     pub ret_ty: MirTy,
     pub span: Span,
     pub facts: FnFacts,
+    /// Loop headers whose loop `strip` bounded to `SHORT_TRIPS`
+    /// iterations a time (`short_loops`).
+    pub strips: Vec<u32>,
 }
 
 impl MirFunction {

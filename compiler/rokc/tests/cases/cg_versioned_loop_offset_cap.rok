@@ -1,0 +1,22 @@
+// spec: §3.13.3 std §2.9.2
+// Chained offsets add up: past 64 in total the access stays checked (an
+// i8 counter's wrap test could not hold the constant). Wrapped around,
+// `j + 266` is `j + 10`, the same at every -O.
+// expect-exit: 0
+// expect-stdout:
+// 5950 7956
+
+fn sum(x: List<i64>, n: i8) -> i64 {
+    let s: i64 = 0;
+    for j in 0i8..n {
+        s += x[j.wrapping_add(64).wrapping_add(64).wrapping_add(64).wrapping_add(64).wrapping_add(10) as usize];
+    }
+    s
+}
+
+fn main() -> i32 {
+    let x: List<i64> = [];
+    for i in 0i64..300 { x.push(i); }
+    println(f"{sum(x, 100)} {sum(x, 117)}");
+    return 0;
+}

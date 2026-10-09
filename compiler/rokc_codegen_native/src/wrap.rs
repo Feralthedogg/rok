@@ -24,6 +24,7 @@ pub fn shell(name: &str) -> MirFunction {
         ret_ty: MirTy::Unit,
         span: rokc_diagnostic::Span::default(),
         facts: rokc_ir_common::FnFacts::default(),
+        strips: Vec::new(),
     }
 }
 

@@ -306,6 +306,7 @@ pub fn transform(f: &mut MirFunction, n_resume: usize, ctor: FunctionId) -> MirF
         ret_ty: fat,
         span: f.span,
         facts: rokc_ir_common::FnFacts::default(),
+        strips: Vec::new(),
     };
 
     let mut params = vec![frame];
@@ -653,6 +654,7 @@ mod tests {
             ret_ty: I64,
             span: rokc_diagnostic::Span::default(),
             facts: rokc_ir_common::FnFacts::default(),
+            strips: Vec::new(),
         }
     }
 

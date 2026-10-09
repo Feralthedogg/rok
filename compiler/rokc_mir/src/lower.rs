@@ -122,6 +122,7 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         crate::copy_into::copy_into(f);
     }
     crate::version::version(&mut functions, target.pointer_width);
+    crate::strip::strip(&mut functions);
     crate::stable_names::stable_names(&mut functions, &rokc_hir::type_name);
     let debug = debug_types(module, &functions, &copies, target);
     MirModule {
@@ -314,6 +315,7 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
             ret_ty: f.ret_ty.clone(),
             span: f.span,
             facts: FnFacts::default(),
+            strips: Vec::new(),
         };
         functions.push(w);
     }
@@ -434,6 +436,7 @@ fn lower_fn(
         ret_ty: lower_ty(&f.ret_ty, module, target),
         span: f.span,
         facts: f.facts.clone(),
+        strips: Vec::new(),
     }
 }
 

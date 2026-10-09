@@ -1174,6 +1174,7 @@ impl Emitter {
                 Inline::Hint => r#", "inlinehint""#,
                 Inline::Always => r#", "alwaysinline""#,
                 Inline::Never => r#", "noinline""#,
+                Inline::Cold => r#", "noinline", "cold""#,
             }
         };
         // Windows probes through `__chkstk` instead (LLVM would take

@@ -1,0 +1,51 @@
+// spec: §3.13.3 std §2.9.2
+// A signed counter's `ctr + k` wraps negative past the type's top, and
+// as a `usize` that is far past the end: the test in front also needs
+// `bound <= MAX - k + 1`. At the top exactly the unchecked copy runs; one
+// past it the checked loop does, and panics at the wrapped index.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_signed_offset_wrap.rok:32:14:
+// expect-stderr: List index out of bounds
+// expect-stdout:
+// 118 32758 300
+// 117 300
+
+fn sum8(x: List<i64>, n: i8) -> i64 {
+    let s: i64 = 0;
+    for j in 0i8..n {
+        s += x[(j + 10) as usize];
+    }
+    s
+}
+
+fn sum16(x: List<i64>, n: i16) -> i64 {
+    let s: i64 = 0;
+    for j in 0i16..n {
+        s += x[j.wrapping_add(10) as usize];
+    }
+    s
+}
+
+fn wrap8(x: List<i64>, n: i8) -> i64 {
+    let s: i64 = 0;
+    for j in 0i8..n {
+        s += x[j.wrapping_add(10) as usize];
+    }
+    s
+}
+
+fn main() -> i32 {
+    // A list right before `x`, which an unchecked negative index would read.
+    let pad: List<i64> = List::with_capacity(300);
+    for _ in 0..300 {
+        pad.push(7777);
+    }
+    let x: List<i64> = List::with_capacity(32800);
+    for _ in 0..32800 {
+        x.push(1);
+    }
+    println(f"{sum8(x, 118)} {sum16(x, 32758)} {pad.len()}");
+    println(f"{sum8(x, 117)} {pad.len()}");
+    println(f"{wrap8(x, 119)}");
+    return 0;
+}
