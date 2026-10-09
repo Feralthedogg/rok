@@ -1,0 +1,114 @@
+// spec: §3.13.3 std §2.9.2
+// In a counted loop's unchecked copy, `xs[i]` read and written at an
+// index the loop does not change is kept in a local, entered when no
+// other list indexed at a fixed index is the same list, and each list
+// indexed by the counter is another one or `i` is below the counter.
+// Each runs the iterations of the loop as written: the kept element
+// below and inside the counter's range, the same list passed twice
+// (indexed at `i` or by the counter), an early exit, a signed counter,
+// a loop that never runs, and a panic past the end.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_kept_element.rok:53:17:
+// expect-stderr: List index out of bounds
+// expect-stdout:
+// [10, 1, 1, 1, 1] [0, 2, 3, 4, 5]
+// [16, 2, 3, 4, 5] [1, 2, 21, 4, 5]
+// [2, 3, 3, 4, 5] [2, 3, 3, 4, 5]
+// [6, 5, 3, 4, 5]
+// [7, 1, 1, 1] [0, -2, -2, -3]
+// [1, 2, 3]
+// [8, 0, 0, 0] [4, 0, 0, 0]
+// [1, 6, 1, 1] [1, 7, 1, 1]
+
+fn pull(a: List<f64>, b: List<f64>, i: usize, n: usize) {
+    for j in i + 1..n {
+        a[i] += b[j];
+        b[j] += 1.0;
+    }
+}
+
+fn spread(a: List<f64>, i: usize) {
+    for j in 0..a.len() {
+        a[i] = a[i] + a[j];
+    }
+}
+
+fn stop(a: List<f64>, i: usize) {
+    for j in i + 1..a.len() {
+        if a[j] > 3.5 {
+            break;
+        }
+        a[i] += a[j];
+    }
+}
+
+fn signed(a: List<f64>, b: List<f64>, i: i64, n: i64) {
+    for j in i + 1..n {
+        a[i as usize] -= b[j as usize];
+    }
+}
+
+fn past(a: List<f64>, b: List<f64>, i: usize, n: usize) {
+    for j in i + 1..n {
+        a[i] += b[j];
+    }
+}
+
+fn twice(a: List<f64>, c: List<f64>, b: List<f64>, i: usize, n: usize) {
+    for j in i + 1..n {
+        a[i] += c[i] + b[j];
+    }
+}
+
+fn acc(a: List<f64>, b: List<f64>, i: usize) {
+    for j in 0..b.len() {
+        a[i] += b[j];
+    }
+}
+
+fn show(xs: List<f64>) -> str {
+    let parts: List<str> = [];
+    for x in xs {
+        parts.push(f"{x as i64}");
+    }
+    f"[{parts.join(", ")}]"
+}
+
+fn main() -> i32 {
+    let a: List<f64> = [0.0, 1.0, 1.0, 1.0, 1.0];
+    let b: List<f64> = [0.0, 1.0, 2.0, 3.0, 4.0];
+    pull(a, b, 0, 5);
+    println(f"{show(a)} {show(b)}");
+    let c: List<f64> = [1.0, 2.0, 3.0, 4.0, 5.0];
+    spread(c, 0);
+    let c2: List<f64> = [1.0, 2.0, 3.0, 4.0, 5.0];
+    spread(c2, 2);
+    println(f"{show(c)} {show(c2)}");
+    let d: List<f64> = [0.0, 2.0, 3.0, 4.0, 5.0];
+    pull(d, d, 0, 2);
+    println(f"{show(d)} {show(d)}");
+    let e: List<f64> = [1.0, 2.0, 3.0, 4.0, 5.0];
+    stop(e, 0);
+    stop(e, 1);
+    println(show(e));
+    let f: List<f64> = [0.0, 1.0, 1.0, 1.0];
+    let g: List<f64> = [0.0, -2.0, -2.0, -3.0];
+    signed(f, g, 0, 4);
+    signed(f, g, 3, 1);
+    println(f"{show(f)} {show(g)}");
+    let h: List<f64> = [1.0, 2.0, 3.0];
+    pull(h, h, 2, 3);
+    println(show(h));
+    let t: List<f64> = [1.0, 0.0, 0.0, 0.0];
+    twice(t, t, t, 0, 4);
+    let u: List<f64> = [1.0, 0.0, 0.0, 0.0];
+    twice(u, [1.0], u, 0, 4);
+    println(f"{show(t)} {show(u)}");
+    let v: List<f64> = [1.0, 1.0, 1.0, 1.0];
+    acc(v, v, 1);
+    let w: List<f64> = [1.0, 1.0, 1.0, 1.0];
+    acc(w, [1.0, 2.0, 3.0], 1);
+    println(f"{show(v)} {show(w)}");
+    past(h, h, 0, 4);
+    return 0;
+}

@@ -156,7 +156,7 @@ fn the_def_file_filters_like_extract_symbols() {
     ];
     assert_eq!(
         exports::def_file(&syms, false).unwrap(),
-        "EXPORTS\n  ?Add@mlir@@YAXXZ\n  ?f@llvm@@YAHH@Z\n  \
+        "NAME rokc.exe\nEXPORTS\n  ?Add@mlir@@YAXXZ\n  ?f@llvm@@YAHH@Z\n  \
          ?id@?$TypeIDResolver@VArithDialect@arith@mlir@@X@detail@mlir@@0VSelfOwningTypeID@3@A DATA\n  \
          LLVMCantFail\n"
     );
@@ -167,7 +167,7 @@ fn the_def_file_filters_like_extract_symbols() {
     ];
     assert_eq!(
         exports::def_file(&x86, true).unwrap(),
-        "EXPORTS\n  LLVMCantFail\n  f\n  g\n"
+        "NAME rokc.exe\nEXPORTS\n  LLVMCantFail\n  f\n  g\n"
     );
     let many: Vec<_> = (0..=exports::MAX_EXPORTS)
         .map(|i| (format!("f{i}"), false))

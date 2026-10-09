@@ -1,0 +1,94 @@
+// spec: §3.13.2
+// A two-pointer loop whose body reaches no safepoint runs a copy that
+// polls nowhere when `hi - lo <= 64` (it runs at most that many times),
+// the loop as written otherwise. Both run the same iterations: empty,
+// crossed, at and past the limit, signed pointers near the type's
+// limits, one pointer moving, an early exit, a panic in the copy (at
+// the access, as the loop as written does).
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_strip_two_pointer.rok:73:27:
+// expect-stderr: List index out of bounds
+// expect-stdout:
+// 0 0 1 32 33 500
+// 64 65
+// [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+// 3 125
+// 4:124:123 4:-124:-124 128:0:-1
+// 7
+
+fn trips(lo: i64, hi: i64) -> i64 {
+    let c: i64 = 0;
+    while lo < hi {
+        c += 1;
+        lo += 1;
+        hi -= 1;
+    }
+    c
+}
+
+fn walk(lo: i64, hi: i64) -> i64 {
+    let c: i64 = 0;
+    while lo < hi {
+        c += 1;
+        lo += 1;
+    }
+    c
+}
+
+fn rev(xs: List<i64>, lo: i64, hi: i64) {
+    while lo < hi {
+        let t = xs[lo as usize];
+        xs[lo as usize] = xs[hi as usize];
+        xs[hi as usize] = t;
+        lo += 1;
+        hi -= 1;
+    }
+}
+
+fn first_neg(xs: List<i64>) -> i64 {
+    let lo: i64 = 0;
+    let hi = xs.len() as i64;
+    while lo < hi {
+        if xs[lo as usize] < 0 {
+            return lo;
+        }
+        lo += 1;
+    }
+    -1
+}
+
+fn narrow(lo: i8, hi: i8) -> str {
+    let c: i64 = 0;
+    while lo < hi {
+        c += 1;
+        lo += 1;
+        hi -= 1;
+    }
+    f"{c}:{lo}:{hi}"
+}
+
+fn swap_past(xs: List<i64>, lo: i64, hi: i64) {
+    while lo < hi {
+        let t = xs[lo as usize];
+        xs[lo as usize] = xs[hi as usize];
+        xs[hi as usize] = t;
+        lo += 1;
+        hi -= 1;
+    }
+}
+
+fn main() -> i32 {
+    println(f"{trips(0, 0)} {trips(5, 2)} {trips(0, 1)} {trips(0, 64)} {trips(0, 65)} {trips(0, 1000)}");
+    println(f"{walk(0, 64)} {walk(-1, 64)}");
+    let xs: List<i64> = [];
+    for i in 0i64..10 {
+        xs.push(i);
+    }
+    rev(xs, 0, 9);
+    println(f"{xs:?}");
+    println(f"{first_neg([4, 5, 6, -1, 2])} {walk(-128, -3)}");
+    println(f"{narrow(120, 127)} {narrow(-128, -120)} {narrow(-128, 127)}");
+    println(f"{first_neg([1, 2, 3, 4, 5, 6, 7, -8])}");
+    swap_past([1, 2, 3], 0, 3);
+    return 0;
+}

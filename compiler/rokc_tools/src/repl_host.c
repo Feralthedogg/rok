@@ -1552,6 +1552,8 @@ static struct book {
 enum { BOOK_SIZE = 16 << 20 };
 
 static DWORD main_thread;
+// ntdll's image: where the system thread pool's workers start.
+static const char *ntdll;
 // The main thread's yield flag, and the bit of it that interrupts the
 // cell (the runtime raises and clears only bit 0).
 static unsigned char *main_yield;
@@ -1944,6 +1946,20 @@ static void restore_stack(const struct before *t) {
     memcpy(t->sp, book->copy + t->copy, (size_t)(t->base - t->sp));
 }
 
+// Whether thread `i` is a worker of the system thread pool (it starts in
+// ntdll): the loader's, which a busy machine may start only after the
+// checkpoint. Ending one ends the process (STATUS_INVALID_THREAD), and
+// one let run faults in the pool's state as it was before it, so it
+// stays suspended (one suspension more than `resume_others` undoes;
+// `stop_others` finds it each time, so its stack is never put back).
+static int pool_worker(size_t i) {
+    void *start = NULL;
+    MEMORY_BASIC_INFORMATION m;
+    // 9: ThreadQuerySetWin32StartAddress.
+    return !NtQueryInformationThread(book->handle[i], 9, &start, sizeof start, NULL) &&
+           VirtualQuery(start, &m, sizeof m) == sizeof m && m.alloc == ntdll;
+}
+
 static void rollback(void) {
     stop_others();
     // The I/O poller's requests in flight write into memory about to be
@@ -1952,7 +1968,10 @@ static void rollback(void) {
     book->nlost = 0;
     for (size_t i = 0; i < book->nthreads; i++) {
         const struct before *t = before_of(book->id[i]);
-        if (!t) end_thread(i); // started since
+        if (!t) { // started since
+            if (pool_worker(i)) SuspendThread(book->handle[i]);
+            else end_thread(i);
+        }
         else if (!put_thread_back(i, t) && t->rok) {
             book->lost[book->nlost++] = t->id;
             end_thread(i);
@@ -2063,6 +2082,7 @@ int main(void) {
     if (!book) return 1;
     book->cap = (BOOK_SIZE - sizeof *book) / sizeof *book->regions;
     main_thread = GetCurrentThreadId();
+    ntdll = (const char *)GetModuleHandleA("ntdll.dll");
     main_yield = rok_tls_addr() + ROK_TLS_YIELD_FLAG;
     rok_set_exit_hook(on_exit_hook);
     SetUnhandledExceptionFilter(on_fault);

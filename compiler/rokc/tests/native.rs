@@ -2247,6 +2247,114 @@ fn main() -> i32 {
     }
 }
 
+/// A nest of counted loops gets a copy entered when its bounds are at
+/// most 8, polling nowhere; the nest as written polls.
+#[test]
+fn short_nest_polls_nowhere() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("shortnest");
+    fs::write(
+        dir.join("main.rok"),
+        r#"
+fn square(n: usize) -> usize {
+    let c: usize = 0;
+    for i in 0..n {
+        for j in 0..n {
+            c += i * 10 + j;
+        }
+    }
+    c
+}
+
+fn main() -> i32 {
+    println(f"{square(3)}");
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let out = |emit: &str, file: &str| {
+        let path = dir.join(file);
+        ok(&build(
+            &env,
+            &dir.join("main.rok"),
+            &["-O2", emit, "-o", path.to_str().unwrap()],
+        ));
+        fs::read_to_string(path).unwrap()
+    };
+    let mir = out("--emit=mir", "main.mir");
+    let square = &mir[mir.find("fn square").unwrap()..];
+    let square = &square[..square.find("\nfn ").unwrap_or(square.len())];
+    assert_eq!(square.matches(", 8usize)").count(), 2, "{square}");
+    let ir = out("--emit=llvmir", "main.ll");
+    let d = ir
+        .split("\ndefine ")
+        .find(|d| d.lines().next().unwrap().contains("__square_("))
+        .unwrap();
+    let polls = d[..d.find("\n}\n").unwrap()]
+        .lines()
+        .filter(|l| l.contains(" call ") && l.contains("rok_runtime_yield"))
+        .count();
+    assert_eq!(polls, 2, "the nest as written polls in both loops");
+}
+
+/// `a[i]` read and written in a versioned loop at an index the loop does
+/// not change gets a copy keeping it in a local: no access to `a[i]` in
+/// the loop, one load in front and one store on the way out. An integer
+/// sum, whose overflow panics, keeps it in memory.
+#[test]
+fn versioned_loop_keeps_an_element() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("keptelement");
+    fs::write(
+        dir.join("main.rok"),
+        r#"
+fn pull(a: List<f64>, b: List<f64>, i: usize, n: usize) {
+    for j in i + 1..n {
+        a[i] += b[j];
+        b[j] += 1.0;
+    }
+}
+
+fn count(a: List<i64>, b: List<i64>, i: usize, n: usize) {
+    for j in i + 1..n {
+        a[i] += b[j];
+    }
+}
+
+fn main() -> i32 {
+    let a: List<f64> = [0.0, 1.0, 2.0];
+    pull(a, [0.0, 1.0, 2.0], 0, 3);
+    count([0, 1], [0, 1], 0, 2);
+    println(f"{a:?}");
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    let ll = dir.join("main.ll");
+    ok(&build(
+        &env,
+        &dir.join("main.rok"),
+        &["-O2", "--emit=llvmir", "-o", ll.to_str().unwrap()],
+    ));
+    let ir = fs::read_to_string(ll).unwrap();
+    let sets = |name: &str| {
+        let d = ir
+            .split("\ndefine ")
+            .find(|d| d.lines().next().unwrap().contains(name))
+            .unwrap();
+        d[..d.find("\n}\n").unwrap()]
+            .lines()
+            .filter(|l| l.contains(" call ") && l.contains("0index_0set_123_unchecked_"))
+            .count()
+    };
+    // `a[i]`, `b[j]` in the unchecked copy; `b[j]` and the store on the
+    // way out in the one keeping `a[i]`.
+    assert_eq!(sets("__pull_("), 4);
+    assert_eq!(sets("__count_("), 1);
+}
+
 /// A two-pointer loop (`lo < hi`, stepped toward each other) and an index
 /// `ctr + k` are versioned too: each access has an unchecked copy.
 #[test]
@@ -2303,8 +2411,18 @@ fn main() -> i32 {
             })
             .count()
     };
-    // `rev`: two loads, two stores; `shift`: one of each.
-    assert_eq!((calls("__rev_(", true), calls("__rev_(", false)), (4, 4));
+    // `rev`: two loads, two stores, in the unchecked copy twice (one for
+    // `hi - lo <= 64`, polling nowhere); `shift`: one of each.
+    assert_eq!((calls("__rev_(", true), calls("__rev_(", false)), (8, 4));
+    let rev = ir
+        .split("\ndefine ")
+        .find(|d| d.lines().next().unwrap().contains("__rev_("))
+        .unwrap();
+    let polls = rev[..rev.find("\n}\n").unwrap()]
+        .lines()
+        .filter(|l| l.contains(" call ") && l.contains("rok_runtime_yield"))
+        .count();
+    assert_eq!(polls, 2, "the checked loop and the long unchecked one poll");
     assert_eq!(
         (calls("__shift_(", true), calls("__shift_(", false)),
         (2, 2)

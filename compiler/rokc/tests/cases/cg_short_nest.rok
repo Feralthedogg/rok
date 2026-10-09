@@ -1,0 +1,83 @@
+// spec: §3.13.3
+// A nest of counted loops reaching no safepoint, every bound at most 8
+// when it is entered, runs a copy that polls nowhere; the nest as
+// written runs otherwise. Both run the same iterations: bounds at, past
+// and far past the limit, an inner bound of its own, an inner loop
+// starting past the outer counter, early exits, u8 counters, and a
+// panic in an inner loop.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/cg_short_nest.rok:65:18:
+// expect-stderr: List index out of bounds
+// expect-stdout:
+// 0 0 2464 3564 5445000
+// 11 2717
+// 448 540 3825
+// 38 255 170
+// 0 0
+
+fn square(n: usize) -> usize {
+    let c: usize = 0;
+    for i in 0..n {
+        for j in 0..n {
+            c += i * 10 + j;
+        }
+    }
+    c
+}
+
+fn tri(xs: List<i64>) -> i64 {
+    let s: i64 = 0;
+    let n = xs.len();
+    for i in 0..n {
+        for j in i + 1..n {
+            s += xs[i] * xs[j];
+        }
+    }
+    s
+}
+
+fn own(n: usize, m: usize) -> usize {
+    let c: usize = 0;
+    for i in 0..n {
+        let k = m;
+        for j in 0..k {
+            c += i + j;
+        }
+    }
+    c
+}
+
+fn first(n: u8, at: u8) -> u8 {
+    for i in 0u8..n {
+        for j in 0u8..n {
+            if i * j == at {
+                return i * 16 + j;
+            }
+        }
+    }
+    255
+}
+
+fn reach(xs: List<i64>, n: usize) -> i64 {
+    let s: i64 = 0;
+    for i in 0..n {
+        for j in 0..n {
+            s += xs[j] - xs[i];
+        }
+    }
+    s
+}
+
+fn main() -> i32 {
+    println(f"{square(0)} {square(1)} {square(8)} {square(9)} {square(100)}");
+    let xs: List<i64> = [];
+    for i in 0i64..12 {
+        xs.push(i + 1);
+    }
+    println(f"{tri([1, 2, 3])} {tri(xs)}");
+    println(f"{own(8, 8)} {own(8, 9)} {own(3, 50)}");
+    println(f"{first(8, 12)} {first(8, 100)} {first(16, 100)}");
+    println(f"{reach(xs, 8)} {reach(xs, 12)}");
+    println(f"{reach([1, 2, 3], 4)}");
+    return 0;
+}

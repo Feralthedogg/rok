@@ -1757,7 +1757,7 @@ pub fn polled_back_edges(
         .into_iter()
         .filter(|(_, body)| {
             !f.blocks.iter().any(|b| {
-                let skip = noreturn_call(b);
+                let skip = rokc_mir::noreturn_call(b);
                 body.contains(&b.id.0)
                     && b.stmts
                         .iter()
@@ -1802,29 +1802,6 @@ pub fn stmt_safepoint(
     }
 }
 
-/// Index of the call that ends block `b` without returning (the last
-/// statement before an `Unreachable`, e.g. a panic): nothing of this
-/// frame is used after it, so it needs no roots here.
-pub(crate) fn noreturn_call(b: &BasicBlock) -> Option<usize> {
-    if !matches!(b.terminator, Terminator::Unreachable) {
-        return None;
-    }
-    let (i, s) = b
-        .stmts
-        .iter()
-        .enumerate()
-        .rev()
-        .find(|(_, s)| !matches!(s, Statement::Loc(..) | Statement::StorageDead(_)))?;
-    matches!(
-        s,
-        Statement::Assign {
-            rvalue: RValue::Call { .. },
-            ..
-        }
-    )
-    .then_some(i)
-}
-
 /// Whether some statement of `f` can reach a safepoint (`stmt_safepoint`),
 /// a never-returning call aside.
 #[allow(clippy::implicit_hasher)]
@@ -1835,7 +1812,7 @@ pub fn body_safepoints(
     target: &Target,
 ) -> bool {
     f.blocks.iter().any(|b| {
-        let skip = noreturn_call(b);
+        let skip = rokc_mir::noreturn_call(b);
         b.stmts
             .iter()
             .enumerate()
@@ -1970,7 +1947,7 @@ pub fn quiet_functions(
         }
         let mut callees: HashSet<FunctionId> = HashSet::new();
         for b in &f.blocks {
-            let skip = noreturn_call(b);
+            let skip = rokc_mir::noreturn_call(b);
             for (i, s) in b.stmts.iter().enumerate() {
                 match s {
                     Statement::Assign {

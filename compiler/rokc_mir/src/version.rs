@@ -276,7 +276,7 @@ pub fn test_into(block: &BasicBlock, header: u32) -> Option<Test> {
 
 /// The test `lo < hi` header `hb` of loop `body` ends in, entering the
 /// loop when it holds: a two-pointer loop's, not rotated.
-fn two_test(hb: &BasicBlock, body: &HashSet<u32>) -> Option<Test> {
+pub fn two_test(hb: &BasicBlock, body: &HashSet<u32>) -> Option<Test> {
     let Terminator::If {
         then_bb, else_bb, ..
     } = &hb.terminator
@@ -332,6 +332,9 @@ struct Plan {
     bits: u32,
     needs: Vec<Need>,
     sites: HashMap<Site, FunctionId>,
+    /// Each site's list, and its index when the loop does not change it
+    /// (none: the counter's).
+    refs: HashMap<Site, (LocalId, Option<Operand>)>,
 }
 
 /// What a loop's accesses are checked against.
@@ -555,6 +558,7 @@ fn plan(
     }
     let mut needs: Vec<Need> = Vec::new();
     let mut sites: HashMap<Site, FunctionId> = HashMap::new();
+    let mut refs: HashMap<Site, (LocalId, Option<Operand>)> = HashMap::new();
     for id in &body {
         let found = scope.scan(blocks[id])?;
         // A two-pointer header runs its statements before its test.
@@ -562,6 +566,14 @@ fn plan(
             continue;
         }
         for (k, callee, need) in found {
+            refs.insert(
+                (*id, k),
+                match &need {
+                    Need::Index(xs, _, i) => (*xs, Some(i.clone())),
+                    Need::Bound(xs, ..) => (*xs, None),
+                    _ => unreachable!("an access needs its list"),
+                },
+            );
             if !needs.iter().any(|n| n.same(&need)) {
                 needs.push(need);
             }
@@ -602,6 +614,7 @@ fn plan(
         test: scope.test,
         needs,
         sites,
+        refs,
     })
 }
 
@@ -755,6 +768,444 @@ fn conditions(func: &mut MirFunction, p: &Plan) -> (Vec<Statement>, Vec<LocalId>
     (stmts, conds)
 }
 
+/// Evaluating `rv` cannot panic: no integer arithmetic codegen checks
+/// (overflow, a zero divisor, a shift amount), no array index.
+fn no_panic(rv: &RValue) -> bool {
+    let unchecked = |op: PrimOp, ty: &MirTy| {
+        matches!(ty, MirTy::Prim(t) if t.is_float())
+            || matches!(
+                op,
+                PrimOp::Eq
+                    | PrimOp::Ne
+                    | PrimOp::Lt
+                    | PrimOp::Le
+                    | PrimOp::Gt
+                    | PrimOp::Ge
+                    | PrimOp::BitAnd
+                    | PrimOp::BitOr
+                    | PrimOp::BitXor
+                    | PrimOp::Not
+                    | PrimOp::LogicalAnd
+                    | PrimOp::LogicalOr
+                    | PrimOp::LogicalNot
+                    | PrimOp::WrappingAdd
+                    | PrimOp::WrappingSub
+                    | PrimOp::WrappingMul
+            )
+    };
+    match rv {
+        RValue::BinOp { op, op_ty, .. } | RValue::UnaryOp { op, op_ty, .. } => {
+            unchecked(*op, op_ty)
+        }
+        RValue::ArrayIndex { .. } => false,
+        rv => pure(rv),
+    }
+}
+
+/// A list element kept in a local through the loop: `xs[i]`, read and
+/// written at an index `i` the loop does not change.
+struct Promoted {
+    xs: LocalId,
+    i: Operand,
+    load: (FunctionId, Operand),
+    store: (FunctionId, Operand),
+    ty: MirTy,
+}
+
+/// The elements of plan `p` to keep in locals; the lists the loop
+/// indexes at an index it does not change (each must be another list
+/// than a kept element's); and those it indexes by the counter (each
+/// another list, or `i < ctr`: the counter only grows). Only for a loop
+/// whose every statement is an access made unchecked or cannot panic:
+/// an element left in a local is seen by no other code until the loop
+/// exits.
+fn promotable(func: &MirFunction, p: &Plan) -> Option<(Vec<Promoted>, Vec<LocalId>, Vec<LocalId>)> {
+    if p.test.hi.is_some() {
+        return None;
+    }
+    let ctr = p.test.ctr;
+    let mut lists: HashMap<LocalId, Option<Operand>> = HashMap::new();
+    let mut loads: HashMap<LocalId, (FunctionId, Operand, MirTy)> = HashMap::new();
+    let mut stores: HashMap<LocalId, (FunctionId, Operand)> = HashMap::new();
+    let mut fixed_lists: Vec<LocalId> = Vec::new();
+    let mut ctr_lists: Vec<LocalId> = Vec::new();
+    let mut clash: HashSet<LocalId> = HashSet::new();
+    let mut ids: Vec<u32> = p.body.iter().copied().collect();
+    ids.sort_unstable();
+    for id in ids {
+        let b = func.blocks.iter().find(|b| b.id.0 == id)?;
+        for (k, s) in b.stmts.iter().enumerate() {
+            let Statement::Assign { target, rvalue } = s else {
+                if matches!(s, Statement::Loc(..) | Statement::StorageDead(_)) {
+                    continue;
+                }
+                return None;
+            };
+            let RValue::Call {
+                callee,
+                args,
+                ret_ty,
+            } = rvalue
+            else {
+                // The counter steps up by one (below its bound, so it
+                // cannot overflow) and is set nowhere else.
+                let step = *target == ctr
+                    && matches!(rvalue, RValue::BinOp {
+                        op: PrimOp::Add,
+                        lhs: Operand::Copy(x),
+                        rhs: Operand::Const(ConstVal::Int { value: 1, .. } | ConstVal::UInt { value: 1, .. }),
+                        ..
+                    } if *x == ctr);
+                if !step && (*target == ctr || !no_panic(rvalue)) {
+                    return None;
+                }
+                continue;
+            };
+            let (xs, idx) = p.refs.get(&(id, k))?.clone();
+            let loc = args.last()?.clone();
+            let e = lists.entry(xs).or_insert(None);
+            match idx {
+                None => {
+                    if !ctr_lists.contains(&xs) {
+                        ctr_lists.push(xs);
+                    }
+                }
+                Some(i) => {
+                    if !fixed_lists.contains(&xs) {
+                        fixed_lists.push(xs);
+                    }
+                    match e {
+                        Some(seen) if !same(seen, &i) => {
+                            clash.insert(xs);
+                        }
+                        _ => *e = Some(i),
+                    }
+                    if *ret_ty == MirTy::Unit {
+                        stores.insert(xs, (*callee, loc));
+                    } else {
+                        loads.insert(xs, (*callee, loc, ret_ty.clone()));
+                    }
+                }
+            }
+        }
+    }
+    let scalar = |t: &MirTy| matches!(t, MirTy::Prim(t) if t.is_int() || t.is_float() || matches!(t, PrimTy::Bool | PrimTy::Char));
+    let mut out = Vec::new();
+    for xs in &fixed_lists {
+        let (Some((lf, lloc, ty)), Some((sf, sloc))) = (loads.get(xs), stores.get(xs)) else {
+            continue;
+        };
+        if clash.contains(xs) || !scalar(ty) {
+            continue;
+        }
+        let Some(i) = lists[xs].clone() else {
+            continue;
+        };
+        out.push(Promoted {
+            xs: *xs,
+            i,
+            load: (*lf, lloc.clone()),
+            store: (*sf, sloc.clone()),
+            ty: ty.clone(),
+        });
+    }
+    (!out.is_empty()).then_some((out, fixed_lists, ctr_lists))
+}
+
+/// A copy of the unchecked loop `p` (blocks `fast`, by original block)
+/// keeping the elements `kept` in locals, entered when its test holds
+/// (else `fast`'s header): its test block.
+fn promote(
+    func: &mut MirFunction,
+    p: &Plan,
+    fast: &HashMap<u32, u32>,
+    unchecked: &mut dyn FnMut(FunctionId) -> FunctionId,
+) -> Option<u32> {
+    let (kept, fixed_lists, ctr_lists) = promotable(func, p)?;
+    // A list's object, by its field 0 (a `List` holds only that).
+    let object = |func: &MirFunction, xs: LocalId| match &func.locals[xs.0 as usize].ty {
+        MirTy::Struct(_, fields) if fields.as_slice() == [MirTy::GcRef] => Some(()),
+        _ => None,
+    };
+    for k in &kept {
+        object(func, k.xs)?;
+    }
+    for xs in fixed_lists.iter().chain(&ctr_lists) {
+        object(func, *xs)?;
+    }
+    let mut next = func.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+    let mut new_id = || {
+        next += 1;
+        next - 1
+    };
+    let mut ids: Vec<u32> = p.body.iter().copied().collect();
+    ids.sort_unstable();
+    let map: HashMap<u32, u32> = ids.iter().map(|b| (*b, new_id())).collect();
+    let (test, pre) = (new_id(), new_id());
+    // The test: every list indexed at a fixed index another object than
+    // each kept one's; every list indexed by the counter another one too,
+    // or `i < ctr` (the counter only grows).
+    let mut stmts = Vec::new();
+    let mut conds: Vec<LocalId> = Vec::new();
+    let addr = |func: &mut MirFunction, stmts: &mut Vec<Statement>, xs: LocalId| {
+        let obj = fresh(func, MirTy::GcRef);
+        stmts.push(assign(
+            obj,
+            RValue::FieldRead {
+                target: Operand::Copy(xs),
+                index: 0,
+                field_ty: MirTy::GcRef,
+            },
+        ));
+        let a = fresh(func, usize_ty());
+        stmts.push(assign(
+            a,
+            RValue::Cast {
+                source: Operand::Copy(obj),
+                from_ty: MirTy::GcRef,
+                to_ty: usize_ty(),
+            },
+        ));
+        a
+    };
+    let mut addrs: HashMap<LocalId, LocalId> = HashMap::new();
+    for xs in fixed_lists.iter().chain(&ctr_lists) {
+        if !addrs.contains_key(xs) {
+            let a = addr(func, &mut stmts, *xs);
+            addrs.insert(*xs, a);
+        }
+    }
+    let cmp = |func: &mut MirFunction, stmts: &mut Vec<Statement>, op, ty, lhs, rhs| {
+        let c = fresh(func, MirTy::Prim(PrimTy::Bool));
+        stmts.push(assign(
+            c,
+            RValue::BinOp {
+                op,
+                op_ty: ty,
+                lhs,
+                rhs,
+            },
+        ));
+        c
+    };
+    let uctr = if p.test.ty == PrimTy::Usize {
+        Operand::Copy(p.test.ctr)
+    } else {
+        // A signed counter indexing a list is tested `0 <= ctr` in front.
+        let l = fresh(func, usize_ty());
+        stmts.push(assign(
+            l,
+            RValue::Cast {
+                source: Operand::Copy(p.test.ctr),
+                from_ty: MirTy::Prim(p.test.ty),
+                to_ty: usize_ty(),
+            },
+        ));
+        Operand::Copy(l)
+    };
+    for k in &kept {
+        let other = |func: &mut MirFunction, stmts: &mut Vec<Statement>, xs: &LocalId| {
+            cmp(
+                func,
+                stmts,
+                PrimOp::Ne,
+                usize_ty(),
+                Operand::Copy(addrs[&k.xs]),
+                Operand::Copy(addrs[xs]),
+            )
+        };
+        for xs in fixed_lists.iter().filter(|xs| **xs != k.xs) {
+            conds.push(other(func, &mut stmts, xs));
+        }
+        for xs in &ctr_lists {
+            let below = cmp(
+                func,
+                &mut stmts,
+                PrimOp::Lt,
+                usize_ty(),
+                k.i.clone(),
+                uctr.clone(),
+            );
+            let c = if *xs == k.xs {
+                below
+            } else {
+                let ne = other(func, &mut stmts, xs);
+                cmp(
+                    func,
+                    &mut stmts,
+                    PrimOp::BitOr,
+                    MirTy::Prim(PrimTy::Bool),
+                    Operand::Copy(ne),
+                    Operand::Copy(below),
+                )
+            };
+            conds.push(c);
+        }
+    }
+    let all = conds.into_iter().reduce(|a, b| {
+        let c = fresh(func, MirTy::Prim(PrimTy::Bool));
+        stmts.push(assign(
+            c,
+            RValue::BinOp {
+                op: PrimOp::BitAnd,
+                op_ty: MirTy::Prim(PrimTy::Bool),
+                lhs: Operand::Copy(a),
+                rhs: Operand::Copy(b),
+            },
+        ));
+        c
+    });
+    let mut vals: HashMap<LocalId, LocalId> = HashMap::new();
+    let mut loads = Vec::new();
+    for k in &kept {
+        let v = fresh(func, k.ty.clone());
+        vals.insert(k.xs, v);
+        loads.push(assign(
+            v,
+            RValue::Call {
+                callee: unchecked(k.load.0),
+                args: vec![Operand::Copy(k.xs), k.i.clone(), k.load.1.clone()],
+                ret_ty: k.ty.clone(),
+            },
+        ));
+    }
+    let stores = |func: &mut MirFunction, unchecked: &mut dyn FnMut(FunctionId) -> FunctionId| {
+        kept.iter()
+            .map(|k| {
+                let unit = fresh(func, MirTy::Unit);
+                assign(
+                    unit,
+                    RValue::Call {
+                        callee: unchecked(k.store.0),
+                        args: vec![
+                            Operand::Copy(k.xs),
+                            k.i.clone(),
+                            Operand::Copy(vals[&k.xs]),
+                            k.store.1.clone(),
+                        ],
+                        ret_ty: MirTy::Unit,
+                    },
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut copies: Vec<BasicBlock> = Vec::new();
+    let mut exits: Vec<BasicBlock> = Vec::new();
+    for id in &ids {
+        let orig = func
+            .blocks
+            .iter()
+            .find(|blk| blk.id.0 == *id)
+            .expect("loop block");
+        let mut copy = orig.clone();
+        copy.id = BlockId(map[id]);
+        copy.stmts.clear();
+        for (k, s) in orig.stmts.iter().enumerate() {
+            let mut s = s.clone();
+            if let (
+                Some(&callee),
+                Statement::Assign {
+                    target,
+                    rvalue:
+                        RValue::Call {
+                            callee: to, args, ..
+                        },
+                },
+            ) = (p.sites.get(&(*id, k)), &mut s)
+            {
+                let kept_here = match p.refs.get(&(*id, k)) {
+                    Some((xs, Some(_))) => vals.get(xs).copied(),
+                    _ => None,
+                };
+                match kept_here {
+                    // `xs[i] = v` sets the local; `xs[i]` reads it.
+                    Some(v) if args.len() == 4 => {
+                        copy.stmts.push(assign(v, RValue::Use(args[2].clone())));
+                        s = assign(*target, RValue::Use(Operand::Const(ConstVal::Unit)));
+                    }
+                    Some(v) => s = assign(*target, RValue::Use(Operand::Copy(v))),
+                    None => *to = unchecked(callee),
+                }
+            }
+            copy.stmts.push(s);
+        }
+        // Every way out of the loop stores the elements back first.
+        let outs: Vec<u32> = succs(&copy)
+            .into_iter()
+            .filter(|s| !p.body.contains(s))
+            .collect();
+        for (&from, &to) in &map {
+            retarget(&mut copy.terminator, from, to);
+        }
+        for o in outs {
+            let e = new_id();
+            let args = match &mut copy.terminator {
+                Terminator::Goto { target, args } if target.0 == o => {
+                    *target = BlockId(e);
+                    std::mem::take(args)
+                }
+                Terminator::If {
+                    then_bb,
+                    then_args,
+                    else_bb,
+                    else_args,
+                    ..
+                } => {
+                    if then_bb.0 == o {
+                        *then_bb = BlockId(e);
+                        std::mem::take(then_args)
+                    } else {
+                        *else_bb = BlockId(e);
+                        std::mem::take(else_args)
+                    }
+                }
+                _ => return None,
+            };
+            exits.push(BasicBlock {
+                id: BlockId(e),
+                params: vec![],
+                stmts: stores(func, unchecked),
+                terminator: Terminator::Goto {
+                    target: BlockId(o),
+                    args,
+                },
+            });
+        }
+        copies.push(copy);
+    }
+    func.blocks.extend(copies);
+    func.blocks.extend(exits);
+    func.blocks.push(BasicBlock {
+        id: BlockId(pre),
+        params: vec![],
+        stmts: loads,
+        terminator: Terminator::Goto {
+            target: BlockId(map[&p.header]),
+            args: vec![],
+        },
+    });
+    let terminator = match all {
+        Some(c) => Terminator::If {
+            cond: Operand::Copy(c),
+            then_bb: BlockId(pre),
+            then_args: vec![],
+            else_bb: BlockId(fast[&p.header]),
+            else_args: vec![],
+        },
+        None => Terminator::Goto {
+            target: BlockId(pre),
+            args: vec![],
+        },
+    };
+    func.blocks.push(BasicBlock {
+        id: BlockId(test),
+        params: vec![],
+        stmts,
+        terminator,
+    });
+    Some(test)
+}
+
 /// Insert the test and the unchecked copy of the loop `p` into `func`.
 fn apply(func: &mut MirFunction, p: &Plan, unchecked: &mut dyn FnMut(FunctionId) -> FunctionId) {
     let mut next = func.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
@@ -827,6 +1278,17 @@ fn apply(func: &mut MirFunction, p: &Plan, unchecked: &mut dyn FnMut(FunctionId)
     }
     func.blocks.extend(copies);
     func.blocks.extend(tests);
+    if let Some(entry) = promote(func, p, &map, unchecked) {
+        let t = func
+            .blocks
+            .iter_mut()
+            .find(|b| b.id.0 == next)
+            .expect("the test");
+        let Terminator::If { then_bb, .. } = &mut t.terminator else {
+            unreachable!("the test branches");
+        };
+        *then_bb = BlockId(entry);
+    }
 }
 
 /// Accessor `func` without its check: the tail block alone.

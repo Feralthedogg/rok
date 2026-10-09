@@ -43,9 +43,21 @@ fn quiet(s: &Statement, leaf: &HashSet<FunctionId>) -> bool {
     }
 }
 
+/// Block `b` reaches no safepoint, calling only `leaf` functions; with
+/// `panics`, but in a call that never returns (a panic: codegen's rule,
+/// `polled_back_edges`). Only nests take that: a loop whose panics are
+/// quiet is a checked one, rarely the one that runs.
+fn block_quiet(b: &BasicBlock, leaf: &HashSet<FunctionId>, panics: bool) -> bool {
+    let skip = crate::rotate::noreturn_call(b).filter(|_| panics);
+    b.stmts
+        .iter()
+        .enumerate()
+        .all(|(i, s)| Some(i) == skip || quiet(s, leaf))
+}
+
 /// Functions without loops that reach no safepoint: a subset of what
 /// codegen finds quiet, which decides the polls.
-fn leaves(fns: &[MirFunction]) -> HashSet<FunctionId> {
+fn leaves(fns: &[MirFunction], panics: bool) -> HashSet<FunctionId> {
     let mut out: HashSet<FunctionId> = HashSet::new();
     loop {
         let before = out.len();
@@ -58,8 +70,7 @@ fn leaves(fns: &[MirFunction]) -> HashSet<FunctionId> {
                 continue;
             }
             if f.blocks.iter().all(|b| {
-                !matches!(b.terminator, Terminator::Suspend { .. })
-                    && b.stmts.iter().all(|s| quiet(s, &out))
+                !matches!(b.terminator, Terminator::Suspend { .. }) && block_quiet(b, &out, panics)
             }) {
                 out.insert(f.id);
             }
@@ -161,13 +172,17 @@ fn loop_test(func: &MirFunction, h: u32, ls: &[u32]) -> Option<Test> {
     .then_some(test)
 }
 
-/// The loop of header `h` (latches `ls`) to strip: its test.
+/// The loop of header `h` (latches `ls`) to strip: its test, and its
+/// blocks. `nested`: it may hold other loops (each bounding itself);
+/// `panics`: see `block_quiet`.
 fn eligible(
     func: &MirFunction,
     h: u32,
     ls: &[u32],
     headers: &HashSet<u32>,
     leaf: &HashSet<FunctionId>,
+    nested: bool,
+    panics: bool,
 ) -> Option<(Test, HashSet<u32>)> {
     let blocks: HashMap<u32, &BasicBlock> = func.blocks.iter().map(|b| (b.id.0, b)).collect();
     let body = loop_body(func, h, ls);
@@ -177,7 +192,7 @@ fn eligible(
     if test.hi.is_some()
         || !blocks.get(&h)?.params.is_empty()
         || addressed.contains(&test.ctr)
-        || body.iter().any(|b| *b != h && headers.contains(b))
+        || (!nested && body.iter().any(|b| *b != h && headers.contains(b)))
     {
         return None;
     }
@@ -203,7 +218,7 @@ fn eligible(
             || b.params
                 .iter()
                 .any(|p| *p == test.ctr || same(&test.bound, &Operand::Copy(*p)))
-            || !b.stmts.iter().all(|s| quiet(s, leaf))
+            || !block_quiet(b, leaf, panics)
         {
             return None;
         }
@@ -357,11 +372,373 @@ fn apply(func: &mut MirFunction, header: u32, latches: &[u32], test: &Test) {
     func.strips.push(header);
 }
 
+/// The two-pointer loop of header `h` (`while lo < hi`) whose body
+/// reaches no safepoint, `lo` stepped up by one on every way back and
+/// `hi` at most down by one: it runs at most `hi0 - lo0` times. Its
+/// test, and its blocks.
+fn two_pointer(
+    func: &MirFunction,
+    h: u32,
+    ls: &[u32],
+    headers: &HashSet<u32>,
+    leaf: &HashSet<FunctionId>,
+) -> Option<(Test, HashSet<u32>)> {
+    let blocks: HashMap<u32, &BasicBlock> = func.blocks.iter().map(|b| (b.id.0, b)).collect();
+    let body = loop_body(func, h, ls);
+    let hb = blocks.get(&h)?;
+    let test = crate::version::two_test(hb, &body)?;
+    let (lo, hi) = (test.ctr, test.hi?);
+    unsigned(test.ty)?;
+    let addressed = crate::addressed(func);
+    if !hb.params.is_empty()
+        || addressed.contains(&lo)
+        || addressed.contains(&hi)
+        || body.iter().any(|b| *b != h && headers.contains(b))
+    {
+        return None;
+    }
+    let step = |s: &Statement, l: LocalId, op: PrimOp| {
+        matches!(s, Statement::Assign {
+            target,
+            rvalue: RValue::BinOp {
+                op: o,
+                op_ty: MirTy::Prim(t),
+                lhs: Operand::Copy(x),
+                rhs: Operand::Const(ConstVal::Int { value: 1, .. } | ConstVal::UInt { value: 1, .. }),
+            },
+        } if *target == l && *x == l && *o == op && *t == test.ty)
+    };
+    for id in &body {
+        let b = blocks[id];
+        if matches!(b.terminator, Terminator::Suspend { .. })
+            || b.params.iter().any(|p| *p == lo || *p == hi)
+            || !block_quiet(b, leaf, false)
+        {
+            return None;
+        }
+        // Each pointer is set only in a latch (whose way on is back to
+        // `h`, where `lo < hi` is tested again), once: there `lo < hi`
+        // still holds, so neither step wraps.
+        let latch = ls.contains(id)
+            && matches!(&b.terminator,
+                Terminator::Goto { target, args } if target.0 == h && args.is_empty());
+        let (mut ups, mut downs) = (0, 0);
+        for s in &b.stmts {
+            match crate::liveness::stmt_uses(s).1 {
+                Some(d) if d == lo && latch && step(s, lo, PrimOp::Add) => ups += 1,
+                Some(d) if d == hi && latch && step(s, hi, PrimOp::Sub) => downs += 1,
+                Some(d) if d == lo || d == hi => return None,
+                _ => {}
+            }
+        }
+        if ups != usize::from(ls.contains(id)) || downs > 1 {
+            return None;
+        }
+    }
+    Some((test, body))
+}
+
+/// Give the two-pointer loop of header `h` a copy marked short
+/// (`MirFunction::strips`), entered when `hi - lo <= SHORT_TRIPS`.
+fn short_copy(func: &mut MirFunction, h: u32, body: &HashSet<u32>, test: &Test) {
+    let (lo, hi, ty) = (test.ctr, test.hi.expect("two pointers"), test.ty);
+    let uty = unsigned(ty).expect("integer pointers");
+    let mut next = func.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+    let mut ids: Vec<u32> = body.iter().copied().collect();
+    ids.sort_unstable();
+    let map: HashMap<u32, u32> = ids
+        .into_iter()
+        .map(|b| {
+            next += 1;
+            (b, next - 1)
+        })
+        .collect();
+    let front = next;
+    let (dist, udist, small) = (
+        fresh(func, MirTy::Prim(ty)),
+        fresh(func, MirTy::Prim(uty)),
+        fresh(func, MirTy::Prim(PrimTy::Bool)),
+    );
+    for b in &mut func.blocks {
+        if !body.contains(&b.id.0) {
+            retarget(&mut b.terminator, h, front);
+        }
+    }
+    let mut copies: Vec<BasicBlock> = Vec::new();
+    for b in func.blocks.iter().filter(|b| map.contains_key(&b.id.0)) {
+        let mut c = b.clone();
+        c.id = BlockId(map[&b.id.0]);
+        for (&from, &to) in &map {
+            retarget(&mut c.terminator, from, to);
+        }
+        copies.push(c);
+    }
+    func.blocks.extend(copies);
+    // `lo >= hi` makes the distance wrap huge (or zero): the loop runs
+    // no iteration on either side.
+    func.blocks.push(BasicBlock {
+        id: BlockId(front),
+        params: vec![],
+        stmts: vec![
+            assign(
+                dist,
+                RValue::BinOp {
+                    op: PrimOp::WrappingSub,
+                    op_ty: MirTy::Prim(ty),
+                    lhs: Operand::Copy(hi),
+                    rhs: Operand::Copy(lo),
+                },
+            ),
+            assign(
+                udist,
+                RValue::Cast {
+                    source: Operand::Copy(dist),
+                    from_ty: MirTy::Prim(ty),
+                    to_ty: MirTy::Prim(uty),
+                },
+            ),
+            assign(
+                small,
+                RValue::BinOp {
+                    op: PrimOp::Le,
+                    op_ty: MirTy::Prim(uty),
+                    lhs: Operand::Copy(udist),
+                    rhs: int(SHORT_TRIPS, uty),
+                },
+            ),
+        ],
+        terminator: Terminator::If {
+            cond: Operand::Copy(small),
+            then_bb: BlockId(map[&h]),
+            then_args: vec![],
+            else_bb: BlockId(h),
+            else_args: vec![],
+        },
+    });
+    func.strips.push(map[&h]);
+}
+
+/// A nest of counted loops whose bounds are at most this runs at most
+/// `NEST * NEST` iterations of each inner loop: `SHORT_TRIPS`.
+const NEST: i128 = 8;
+
+/// Every way from `from` to `to` inside `body` passes through `via`.
+fn through(func: &MirFunction, body: &HashSet<u32>, from: u32, via: u32, to: u32) -> bool {
+    if via == from {
+        return true;
+    }
+    let mut seen: HashSet<u32> = HashSet::from([from, via]);
+    let mut work = vec![from];
+    while let Some(b) = work.pop() {
+        if b == to {
+            return false;
+        }
+        let Some(blk) = func.blocks.iter().find(|x| x.id.0 == b) else {
+            continue;
+        };
+        for s in succs(blk) {
+            if body.contains(&s) && seen.insert(s) {
+                work.push(s);
+            }
+        }
+    }
+    from != to
+}
+
+/// A nest of counted loops: its blocks, its inner headers and the
+/// values each loop's bound is when the nest is entered.
+struct Nest {
+    body: HashSet<u32>,
+    inner: Vec<u32>,
+    bounds: Vec<(Operand, PrimTy)>,
+}
+
+/// The counted loop of header `h` holding counted loops, all reaching no
+/// safepoint, with unsigned counters. With its bounds at most `NEST`,
+/// every loop of it runs at most that often an entry, so the nest needs
+/// no poll.
+fn nest(
+    func: &MirFunction,
+    h: u32,
+    latches: &HashMap<u32, Vec<u32>>,
+    headers: &HashSet<u32>,
+    leaf: &HashSet<FunctionId>,
+) -> Option<Nest> {
+    let (t, body) = eligible(func, h, &latches[&h], headers, leaf, true, true)?;
+    let inner: Vec<u32> = {
+        let mut v: Vec<u32> = body
+            .iter()
+            .copied()
+            .filter(|b| *b != h && headers.contains(b))
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    if inner.is_empty() || !t.ty.is_unsigned_int() {
+        return None;
+    }
+    let addressed = crate::addressed(func);
+    let defs = |l: LocalId| -> Vec<(u32, &Statement)> {
+        func.blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter().map(move |s| (b.id.0, s)))
+            .filter(|(_, s)| crate::liveness::stmt_uses(s).1 == Some(l))
+            .collect()
+    };
+    let fixed = |op: &Operand| match op {
+        Operand::Const(_) => true,
+        Operand::Copy(l) => {
+            !addressed.contains(l)
+                && defs(*l).iter().all(|(b, _)| !body.contains(b))
+                && func
+                    .blocks
+                    .iter()
+                    .filter(|b| body.contains(&b.id.0))
+                    .all(|b| !b.params.contains(l))
+        }
+    };
+    let mut bounds = vec![(t.bound.clone(), t.ty)];
+    for h2 in &inner {
+        let (t2, _) = eligible(func, *h2, &latches[h2], headers, leaf, false, true)?;
+        if !t2.ty.is_unsigned_int() {
+            return None;
+        }
+        // Its bound: fixed through the nest, or set in it (once, on every
+        // way to the inner loop) to a value that is.
+        let at_entry = match &t2.bound {
+            op if fixed(op) => op.clone(),
+            Operand::Copy(b2) if !addressed.contains(b2) => {
+                let ds = defs(*b2);
+                let [
+                    (
+                        d,
+                        Statement::Assign {
+                            rvalue: RValue::Use(v),
+                            ..
+                        },
+                    ),
+                ] = ds.as_slice()
+                else {
+                    return None;
+                };
+                if !body.contains(d) || !fixed(v) || !through(func, &body, h, *d, *h2) {
+                    return None;
+                }
+                v.clone()
+            }
+            _ => return None,
+        };
+        bounds.push((at_entry, t2.ty));
+    }
+    Some(Nest {
+        body,
+        inner,
+        bounds,
+    })
+}
+
+/// Give the nest of header `h` a copy marked short, every loop of it,
+/// entered when each of its bounds is at most `NEST`.
+fn nest_copy(func: &mut MirFunction, h: u32, n: &Nest) {
+    let Nest {
+        body,
+        inner,
+        bounds,
+    } = n;
+    let mut next = func.blocks.iter().map(|b| b.id.0 + 1).max().unwrap_or(0);
+    let mut ids: Vec<u32> = body.iter().copied().collect();
+    ids.sort_unstable();
+    let map: HashMap<u32, u32> = ids
+        .into_iter()
+        .map(|b| {
+            next += 1;
+            (b, next - 1)
+        })
+        .collect();
+    let front = next;
+    for b in &mut func.blocks {
+        if !body.contains(&b.id.0) {
+            retarget(&mut b.terminator, h, front);
+        }
+    }
+    let mut copies: Vec<BasicBlock> = Vec::new();
+    for b in func.blocks.iter().filter(|b| map.contains_key(&b.id.0)) {
+        let mut c = b.clone();
+        c.id = BlockId(map[&b.id.0]);
+        for (&from, &to) in &map {
+            retarget(&mut c.terminator, from, to);
+        }
+        copies.push(c);
+    }
+    func.blocks.extend(copies);
+    let mut stmts = Vec::new();
+    let mut all: Option<LocalId> = None;
+    for (op, ty) in bounds {
+        let c = fresh(func, MirTy::Prim(PrimTy::Bool));
+        stmts.push(assign(
+            c,
+            RValue::BinOp {
+                op: PrimOp::Le,
+                op_ty: MirTy::Prim(*ty),
+                lhs: op.clone(),
+                rhs: int(NEST, *ty),
+            },
+        ));
+        all = Some(match all {
+            None => c,
+            Some(a) => {
+                let both = fresh(func, MirTy::Prim(PrimTy::Bool));
+                stmts.push(assign(
+                    both,
+                    RValue::BinOp {
+                        op: PrimOp::BitAnd,
+                        op_ty: MirTy::Prim(PrimTy::Bool),
+                        lhs: Operand::Copy(a),
+                        rhs: Operand::Copy(c),
+                    },
+                ));
+                both
+            }
+        });
+    }
+    func.blocks.push(BasicBlock {
+        id: BlockId(front),
+        params: vec![],
+        stmts,
+        terminator: Terminator::If {
+            cond: Operand::Copy(all.expect("a bound")),
+            then_bb: BlockId(map[&h]),
+            then_args: vec![],
+            else_bb: BlockId(h),
+            else_args: vec![],
+        },
+    });
+    func.strips.push(map[&h]);
+    func.strips.extend(inner.iter().map(|i| map[i]));
+}
+
 pub fn strip(fns: &mut [MirFunction]) {
-    let leaf = leaves(fns);
+    let leaf = leaves(fns, false);
+    let quiet_but_panics = leaves(fns, true);
     for func in fns.iter_mut() {
         if func.facts.linkage != Linkage::Defined || func.blocks.is_empty() {
             continue;
+        }
+        let mut latches: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (latch, hs) in back_edges(func) {
+            for h in hs {
+                latches.entry(h).or_default().push(latch);
+            }
+        }
+        let headers: HashSet<u32> = latches.keys().copied().collect();
+        let mut hs: Vec<u32> = headers.iter().copied().collect();
+        hs.sort_unstable();
+        let nests: Vec<_> = hs
+            .into_iter()
+            .filter_map(|h| Some((h, nest(func, h, &latches, &headers, &quiet_but_panics)?)))
+            .collect();
+        for (h, n) in &nests {
+            nest_copy(func, *h, n);
         }
         let mut latches: HashMap<u32, Vec<u32>> = HashMap::new();
         for (latch, hs) in back_edges(func) {
@@ -376,15 +753,25 @@ pub fn strip(fns: &mut [MirFunction]) {
             .filter(|(h, _)| !short.contains_key(h))
             .collect();
         todo.sort_unstable_by_key(|(h, _)| *h);
+        let twos: Vec<(u32, HashSet<u32>, Test)> = todo
+            .iter()
+            .filter_map(|(h, ls)| {
+                let (t, body) = two_pointer(func, *h, ls, &headers, &leaf)?;
+                Some((*h, body, t))
+            })
+            .collect();
         let plans: Vec<(u32, Vec<u32>, Test)> = todo
             .into_iter()
             .filter_map(|(h, ls)| {
-                let (t, _) = eligible(func, h, &ls, &headers, &leaf)?;
+                let (t, _) = eligible(func, h, &ls, &headers, &leaf, false, false)?;
                 Some((h, ls, t))
             })
             .collect();
         for (h, ls, t) in &plans {
             apply(func, *h, ls, t);
+        }
+        for (h, body, t) in &twos {
+            short_copy(func, *h, body, t);
         }
     }
 }

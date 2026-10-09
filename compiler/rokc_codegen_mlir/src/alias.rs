@@ -239,7 +239,7 @@ impl ListAlias {
                 .is_some_and(|x| part.get(&x) == Some(&Part::List))
         };
         f.blocks.iter().all(|b| {
-            let skip = crate::emit::noreturn_call(b);
+            let skip = rokc_mir::noreturn_call(b);
             !matches!(b.terminator, Terminator::Suspend { .. })
                 && b.stmts.iter().enumerate().all(|(i, s)| match s {
                     Statement::Assign { rvalue, .. } => match rvalue {

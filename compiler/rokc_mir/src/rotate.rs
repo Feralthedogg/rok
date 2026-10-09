@@ -66,6 +66,30 @@ pub fn back_edges(f: &MirFunction) -> HashMap<u32, HashSet<u32>> {
     out
 }
 
+/// Index of the call that ends block `b` without returning (the last
+/// statement before an `Unreachable`, e.g. a panic): nothing of this
+/// frame is used after it, so it needs no roots here.
+#[must_use]
+pub fn noreturn_call(b: &BasicBlock) -> Option<usize> {
+    if !matches!(b.terminator, Terminator::Unreachable) {
+        return None;
+    }
+    let (i, s) = b
+        .stmts
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, s)| !matches!(s, Statement::Loc(..) | Statement::StorageDead(_)))?;
+    matches!(
+        s,
+        Statement::Assign {
+            rvalue: RValue::Call { .. },
+            ..
+        }
+    )
+    .then_some(i)
+}
+
 /// A loop running at most this many times needs no back-edge poll when
 /// its body reaches no safepoint (804 §8.4.2): it ends in bounded time.
 pub const SHORT_TRIPS: i128 = 64;

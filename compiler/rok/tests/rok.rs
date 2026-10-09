@@ -1236,7 +1236,14 @@ fn concurrent_script_runs_share_one_entry() {
         .collect();
     let mut left = left;
     left.sort();
-    assert_eq!(left, [".t.fp".to_owned(), exe("t"), "used".to_owned()]);
+    // Windows: the PDB of the scratch name the link wrote, which the
+    // executable names.
+    let mut want = vec![format!(".{}.fp", exe("t")), exe("t"), "used".to_owned()];
+    if cfg!(windows) {
+        want.push(format!(".{}.pdb", exe("t")));
+    }
+    want.sort();
+    assert_eq!(left, want);
 }
 
 // spec: §9.10.1
@@ -2752,7 +2759,8 @@ fn stone_features_round_trip() {
 }
 
 /// A closed stdout ends `rok` quietly (`rok help | head`): killed by
-/// SIGPIPE (Windows: exit 1), not an internal error (101).
+/// SIGPIPE (Windows: its own status, std dropping the writes), not an
+/// internal error (101).
 #[test]
 // spec: §9.10.1
 fn closed_output_ends_rok_quietly() {
@@ -2778,8 +2786,10 @@ fn closed_output_ends_rok_quietly() {
         Some(13),
         "{stderr}"
     );
+    // Windows' std drops writes to a pipe whose reader left: `help` ends
+    // as it would.
     #[cfg(not(unix))]
-    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
     assert_eq!(stderr, "");
 }
 
@@ -2908,9 +2918,9 @@ fn install_libraries_and_executables() {
         "libraries (environment `default`):\n  greet Dep::path({src})\nexecutables ({}):\n  hello \
          Dep::path({})\n  tool Dep::git({}, rev: \"{commit}\")\n  hi Dep::path({})\n",
         home.join("bin").display(),
-        q(hello.display()),
+        q(hello.display().to_string().replace('\\', "/")),
         q(tool.display()),
-        q(root.join("hi.rok").display()),
+        q(root.join("hi.rok").display().to_string().replace('\\', "/")),
     );
     assert_eq!(list, want);
     // The same commit again is kept; --force or a new commit rebuilds; a
@@ -3081,11 +3091,14 @@ fn scripts_use_their_blocks() {
         &app.join("helper.rok"),
         &block("\"greet\": Dep::path(\"../greet2\")", helper),
     );
+    let sep = std::path::MAIN_SEPARATOR;
     fails(
         &rok(&home, &root, &["app/hi.rok"]),
-        "`greet` is required as Dep::path(\"../greet\") in app/hi.rok and as \
-         Dep::path(\"../greet2\") in app/helper.rok: use one version, the same entry in both \
-         blocks (or keep it in one of them)",
+        &format!(
+            "`greet` is required as Dep::path(\"../greet\") in app{sep}hi.rok and as \
+             Dep::path(\"../greet2\") in app{sep}helper.rok: use one version, the same entry in \
+             both blocks (or keep it in one of them)"
+        ),
     );
     write(&app.join("helper.rok"), helper);
 

@@ -636,8 +636,9 @@ pub fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
 
 /// From a panic hook: end the process quietly if `output_closed`.
 ///
-/// As a C program does: killed by SIGPIPE (Windows: exit 1), saying
-/// nothing. Other pipes and sockets keep reporting `EPIPE`, so SIGPIPE
+/// As a C program does: killed by SIGPIPE, saying nothing (Windows:
+/// exit 1, though std drops writes to a pipe whose reader left, so it
+/// hardly gets here). Other pipes and sockets keep reporting `EPIPE`, so SIGPIPE
 /// stays ignored until now.
 pub fn end_if_output_closed(info: &std::panic::PanicHookInfo<'_>) {
     if !output_closed(info) {

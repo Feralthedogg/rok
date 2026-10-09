@@ -86,8 +86,10 @@ pub fn real_path(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
 /// What changes when the file at `p` is written or replaced.
 ///
 /// For a big file not worth reading: its size, its mtime, and its inode
-/// and status change time (Windows: its creation time), so a copy that
-/// keeps the mtime is another file. `-` when it is missing.
+/// and status change time (Windows: its file id and creation time; a file
+/// made again under a deleted one's name within seconds inherits its
+/// creation time), so a copy that keeps the mtime is another file. `-`
+/// when it is missing.
 #[must_use]
 pub fn file_stamp(p: &Path) -> String {
     let Ok(m) = std::fs::metadata(p) else {
@@ -103,9 +105,35 @@ pub fn file_stamp(p: &Path) -> String {
         use std::os::unix::fs::MetadataExt;
         format!("{:x}-{:x}.{:x}", m.ino(), m.ctime(), m.ctime_nsec())
     };
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let made = format!("{}-{:x}", windows_file_id(p), nanos(m.created()));
+    #[cfg(not(any(unix, windows)))]
     let made = format!("{:x}", nanos(m.created()));
     format!("{:x}-{:x}-{made}", m.len(), nanos(m.modified()))
+}
+
+/// The volume serial number and file index of `p` (`0.0` when it cannot
+/// be opened): what an inode is on Unix.
+#[cfg(windows)]
+fn windows_file_id(p: &Path) -> String {
+    use std::os::windows::io::AsRawHandle;
+    unsafe extern "system" {
+        // BY_HANDLE_FILE_INFORMATION is 13 DWORDs.
+        fn GetFileInformationByHandle(file: *mut std::ffi::c_void, info: *mut [u32; 13]) -> i32;
+    }
+    let mut info = [0u32; 13];
+    let ok = std::fs::File::open(p).is_ok_and(
+        |f| unsafe { GetFileInformationByHandle(f.as_raw_handle(), &raw mut info) } != 0,
+    );
+    if !ok {
+        return "0.0".to_owned();
+    }
+    // dwVolumeSerialNumber, nFileIndexHigh, nFileIndexLow.
+    format!(
+        "{:x}.{:x}",
+        info[7],
+        (u64::from(info[11]) << 32) | u64::from(info[12])
+    )
 }
 
 /// A Windows verbatim path without its `\\?\` prefix, when it has an

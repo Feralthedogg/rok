@@ -178,7 +178,10 @@ pub fn def_file(syms: &[(String, bool)], x86: bool) -> Result<String, String> {
             lines.len()
         ));
     }
-    Ok(format!("EXPORTS\n{}\n", lines.join("\n")))
+    // The import library names the module `rokc.exe`, the name it runs
+    // under, not the file cargo links (`deps/rokc-<hash>.exe`): a plugin
+    // bound to another name has the loader find and load a second copy.
+    Ok(format!("NAME rokc.exe\nEXPORTS\n{}\n", lines.join("\n")))
 }
 
 /// An MSVC name mentioning an anonymous namespace (`?A@`, `?A0x<hex>@`).

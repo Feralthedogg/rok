@@ -365,7 +365,7 @@ pub fn link_executable(
         std::fs::write(&p, o).map_err(|e| err(format!("cannot write {}: {e}", p.display())))?;
         paths.push(p);
     }
-    link_object(module, &paths, opts, out)?;
+    link_object(module, &paths, opts, out, tmp.path())?;
     Ok(counts)
 }
 
@@ -524,12 +524,15 @@ fn llvm(
 /// compiler driver `ROK_CC`.
 ///
 /// A Windows executable links its C runtime and system libraries
-/// through import libraries rokc makes (`windows::link_args`).
+/// through import libraries rokc makes (`windows::link_args`), written
+/// into `objs_dir` with the objects: the PDB names them, so the same
+/// paths in every build.
 pub fn link_object(
     module: &CompiledModule,
     objs: &[PathBuf],
     opts: &BuildOptions,
     out: &Path,
+    objs_dir: &Path,
 ) -> Result<(), RokDiagnostic> {
     let t = &*module.mir.target.spec;
     let apple = t.object_format == ObjectFormat::MachO;
@@ -600,7 +603,6 @@ pub fn link_object(
         link.arg("-o").arg(out);
         run(&mut link, "the link")?;
     } else if windows {
-        let tmp = TempDir::new(opts.keep_temps)?;
         let mut inputs: Vec<OsString> = objs.iter().map(|o| o.clone().into_os_string()).collect();
         inputs.extend(module.archives.iter().map(|a| a.clone().into_os_string()));
         inputs.push(rokr_arg(opts, t).into());
@@ -609,7 +611,7 @@ pub fn link_object(
         }
         inputs.extend(search);
         inputs.extend(
-            crate::windows::link_args(t, &libs, opts.subsystem, opts.debug, tmp.path())
+            crate::windows::link_args(t, &libs, opts.subsystem, opts.debug, objs_dir)
                 .map_err(|e| err(format!("the link failed:\n{e}")))?,
         );
         rokc_diagnostic::time("link", || {

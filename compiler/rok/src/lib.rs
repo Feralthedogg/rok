@@ -1841,7 +1841,7 @@ fn cmd_install(g: &Global, args: &[String]) -> Result<i32, String> {
                 .and_then(|a| Some(a.file_name()?.to_str()?.to_owned())),
             Source::Git { url, .. } => url
                 .trim_end_matches('/')
-                .rsplit(['/', ':'])
+                .rsplit(['/', ':', '\\'])
                 .next()
                 .map(|n| n.trim_end_matches(".git").to_owned()),
             Source::Registry { .. } => None,

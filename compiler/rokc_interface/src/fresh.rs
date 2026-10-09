@@ -63,11 +63,13 @@ impl Fingerprint {
             );
         }
         let mut files = Vec::new();
-        let covered = inputs
+        let covered: Vec<PathBuf> = inputs
             .iter()
             .filter_map(|i| i.canonicalize().ok())
             .collect();
-        for i in inputs {
+        // Canonical: `run s.rok` in two directories is two builds (the
+        // record lists the files read beside it by full path).
+        for i in &covered {
             if i.is_file() {
                 files.push(i.clone());
             } else {

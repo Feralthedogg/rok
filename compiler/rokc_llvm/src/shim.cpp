@@ -963,6 +963,14 @@ std::unique_ptr<llvm::TargetMachine> prepare(llvm::Module &m,
     for (llvm::Function &f : m)
       if (!f.isDeclaration())
         f.setUWTableKind(llvm::UWTableKind::Async);
+    // COFF merges duplicates only through a COMDAT: as clang, each
+    // linkonce / weak definition gets one of its own name, or a second
+    // object defining it (a scan table, a shared instance) is a
+    // duplicate symbol.
+    for (llvm::GlobalObject &g : m.global_objects())
+      if (!g.isDeclaration() && !g.hasComdat() &&
+          (g.hasLinkOnceLinkage() || g.hasWeakLinkage()))
+        g.setComdat(m.getOrInsertComdat(g.getName()));
   }
   std::string msg;
   llvm::raw_string_ostream os(msg);

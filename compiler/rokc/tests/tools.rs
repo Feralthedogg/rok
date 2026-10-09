@@ -1049,7 +1049,8 @@ fn closed_output(args: &[&str], out: bool, input: &str) -> std::process::ExitSta
 }
 
 /// Whether `status` is how a program ends writing to a closed pipe:
-/// killed by SIGPIPE (Windows: exit 1), not a panic or abort.
+/// killed by SIGPIPE (Windows: std drops the writes, and these `check`s
+/// end with their errors' exit 1), not a panic or abort.
 fn ended_by_closed_pipe(status: std::process::ExitStatus) -> bool {
     #[cfg(unix)]
     {

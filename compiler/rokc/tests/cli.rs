@@ -897,7 +897,7 @@ fn library_stage_persists_across_builds() {
     // toolchain's (beside a repository build of rokc); this one's name
     // the dependency's files.
     let stages_dir = Path::new(ROKC).parent().unwrap().join("rok-cache/library");
-    let dep_dir = fs::canonicalize(dir.join("dep"))
+    let dep_dir = rokc_core::real_path(dir.join("dep"))
         .unwrap()
         .display()
         .to_string();
