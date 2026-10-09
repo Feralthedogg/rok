@@ -37,6 +37,9 @@ pub(super) struct ParamInfo {
     all: Option<Vec<TraitRef>>,
     /// Associated types projected so far: (bound, name) → type.
     projs: Vec<(TraitRef, String, HirTy)>,
+    /// A bound names no trait (reported where it is written): method
+    /// lookups through the parameter stay quiet.
+    unknown: bool,
 }
 
 fn fresh(env: &Env<'_>, name: String) -> HirTy {
@@ -46,6 +49,7 @@ fn fresh(env: &Env<'_>, name: String) -> HirTy {
         bounds: Vec::new(),
         all: None,
         projs: Vec::new(),
+        unknown: false,
     });
     HirTy::Param(u32::try_from(ps.len() - 1).expect("type parameter overflow"))
 }
@@ -1050,8 +1054,14 @@ pub(super) fn in_scope<R>(
         if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
             for b in bounds {
                 let t = &subst[name];
-                if let (HirTy::Param(p), Some(r)) = (t, bound_on(&ctx, b, &module, t)) {
-                    add_bound(env, *p, r);
+                if let HirTy::Param(p) = t {
+                    match bound_on(&ctx, b, &module, t) {
+                        Some(r) => add_bound(env, *p, r),
+                        None if matches!(b.kind, AstTyKind::Path(_)) => {
+                            env.sink.params.borrow_mut()[*p as usize].unknown = true;
+                        }
+                        None => {}
+                    }
                 }
             }
         }
@@ -1065,6 +1075,9 @@ pub(super) fn in_scope<R>(
         for b in &w.bounds {
             match (&t, bound_on(&ctx, b, &module, &t)) {
                 (HirTy::Param(p), Some(r)) => add_bound(env, *p, r),
+                (HirTy::Param(p), None) if matches!(b.kind, AstTyKind::Path(_)) => {
+                    env.sink.params.borrow_mut()[*p as usize].unknown = true;
+                }
                 (_, Some(r)) => env.sink.assumed.borrow_mut().push((t.clone(), r)),
                 _ => {}
             }
@@ -1158,7 +1171,11 @@ pub(super) fn assoc_const(
 /// `t.method(..)` on a type parameter whose bounds don't declare it.
 pub(super) fn no_method(ctx: &LowerCtx<'_>, p: u32, method: &str, span: Span) -> HirExpr {
     let t = ctx.ty_name(&HirTy::Param(p));
-    let bounds: Vec<String> = ctx.env.sink.params.borrow()[p as usize]
+    let info = ctx.env.sink.params.borrow()[p as usize].clone();
+    if info.unknown {
+        return poison(span);
+    }
+    let bounds: Vec<String> = info
         .bounds
         .iter()
         .map(|r| format!("`{}`", leaf_name(&r.path)))
@@ -1192,5 +1209,6 @@ rokc_core::codec_struct!(ParamInfo {
     name,
     bounds,
     all,
-    projs
+    projs,
+    unknown
 });

@@ -90,6 +90,11 @@ struct NameSet<'b> {
     /// brings in only the items it can see (spec 5.6), so a private
     /// helper of `rok::core::x` never competes through `rok::core::**`.
     visible: &'b dyn Fn(&str) -> bool,
+    /// Does the path a deep glob matched before the written name end at
+    /// a type? Then the key is that type's associated item, not a module
+    /// item, and `**` does not reach it (variants are the items under a
+    /// type, spec 5.5.7: their set says no).
+    in_type: &'b dyn Fn(&str) -> bool,
 }
 
 /// Type-namespace index: every struct / union / enum / alias / trait
@@ -150,6 +155,13 @@ struct TypeNames {
     /// `pub use` alias key → the `const` / `static` its re-export chain
     /// ends at (both keys are in the const / static tables).
     value_reexports: HashMap<String, String>,
+}
+
+/// An unknown name's help: the `use` that brings it in, else a close
+/// name.
+fn join_help(import: Option<String>, typo: Option<String>) -> Option<String> {
+    // An item of exactly that name beats a close one.
+    import.or(typo)
 }
 
 /// Keys by their last `::` segment.
@@ -457,6 +469,7 @@ impl TypeNames {
             exists: &exists,
             keys: &keys,
             visible: &visible,
+            in_type: &|_| false,
         };
         let item = |k: &String| self.reexport(k).unwrap_or(k).clone();
         let mut full = match resolve_name(segments, module, local_uses, &self.uses, &set) {
@@ -530,6 +543,7 @@ impl TypeNames {
             exists: &exists,
             keys: &keys,
             visible: &visible,
+            in_type: &|_| false,
         };
         match resolve_name(segments, module, local_uses, &self.uses, &set) {
             Ok(r) => full_key(&r?),
@@ -642,6 +656,7 @@ impl TypeNames {
             exists: &exists,
             keys: &keys,
             visible: &visible,
+            in_type: &|k| self.has_type(k),
         };
         resolve_name(segments, module, &[], &self.uses, &set)
             .ok()
@@ -711,6 +726,71 @@ impl TypeNames {
         }
         incr::read(|| incr::Read::ModVis(def.clone()));
         resolve::hidden_module(&self.mod_vis, cur, full)
+    }
+
+    /// Help for a name `cur` can't find: the `use` lines bringing in an
+    /// item of that name from elsewhere (`keys`, their full paths) —
+    /// the package's own first, then the library, then dependencies,
+    /// shortest first, at most three; or, when the only ones are the
+    /// package's but hidden, which `pub` is missing.
+    fn import_help(
+        &self,
+        cur: &str,
+        mut keys: Vec<String>,
+        vis: impl Fn(&str) -> Option<Visibility>,
+    ) -> Option<String> {
+        keys.retain(|k| {
+            module_of(k) != cur && !k.contains('/') && !k.split("::").any(|s| s.starts_with("__"))
+        });
+        keys.sort();
+        keys.dedup();
+        let tier = |k: &str| match package_of(&module_of(k)) {
+            "" => 0,
+            p if p.starts_with("rok::") => 1,
+            _ => 2,
+        };
+        keys.sort_by_key(|k| (tier(k), k.matches("::").count()));
+        let open = |k: &str| {
+            self.hidden(cur, k).is_none()
+                && visible_from(cur, &module_of(k), vis(k).unwrap_or(Visibility::Pub))
+        };
+        let lines: Vec<String> = keys
+            .iter()
+            .filter(|k| open(k))
+            .take(3)
+            .map(|k| format!("`use {};`", resolve::use_path(cur, k)))
+            .collect();
+        // The package's own item, when only a private one has the name.
+        let private = (!keys.iter().any(|k| tier(k) == 0 && open(k)))
+            .then(|| keys.iter().find(|k| tier(k) == 0))
+            .flatten()
+            .map(|k| match self.hidden(cur, k) {
+                Some(m) => {
+                    format!(
+                        "`{k}` has that name, but module `{m}` is private: add `pub` to its `mod`"
+                    )
+                }
+                None => format!(
+                    "`{k}` has that name, but it is private to module `{}`: add `pub` to it",
+                    module_display(&module_of(k))
+                ),
+            });
+        let import = match lines.as_slice() {
+            [] => None,
+            [one] => Some(format!("add {one}")),
+            _ => Some(format!("add one of {}", lines.join(", "))),
+        };
+        match (private, import) {
+            (Some(p), Some(i)) => Some(format!("{p}; or {i}")),
+            (p, i) => p.or(i),
+        }
+    }
+
+    /// Value key `k` is a type's associated item (`Duration::MAX`,
+    /// `f32::MAX`): no `use` names it.
+    fn type_member(&self, k: &str) -> bool {
+        let owner = module_of(k);
+        self.has_type(&owner) || crate::ty::prim_named(&owner).is_some()
     }
 
     fn is_trait(&self, k: &str) -> bool {
@@ -3096,14 +3176,26 @@ impl<'a> LowerCtx<'a> {
                 (m == module).then_some(n)
             })
             .chain(PRIM_NAMES.iter().copied());
-        rokc_diagnostic::suggest(name, types).map(|s| format!("did you mean `{s}`?"))
+        let typo = rokc_diagnostic::suggest(name, types).map(|s| format!("did you mean `{s}`?"));
+        let import = (segs.len() == 1).then(|| {
+            let names = &self.env.names;
+            names.import_help(module, names.type_leaf(name), |k| names.type_vis(k))
+        });
+        join_help(import.flatten(), typo)
     }
 
     /// "did you mean" for an unknown value path (one segment): locals in
     /// scope, then functions / constants / statics of the current module.
     fn value_help(&self, segs: &[&str]) -> Option<String> {
         let [name] = segs else {
-            return self.import_help(segs);
+            // `T::f` with `T` a type not imported.
+            let names = &self.env.names;
+            return self.import_help(segs).or_else(|| match segs {
+                [ty, _] => names.import_help(&self.current_module, names.type_leaf(ty), |k| {
+                    names.type_vis(k)
+                }),
+                _ => None,
+            });
         };
         let name = *name;
         if let Some(k) = match name {
@@ -3137,8 +3229,21 @@ impl<'a> LowerCtx<'a> {
         if let Some(help) = resolve::own_library_import(name, public) {
             return Some(help);
         }
+        let mut keys = [
+            self.env.fn_leaf(name),
+            self.env.value_leaf(true, name),
+            self.env.value_leaf(false, name),
+        ]
+        .concat();
+        keys.retain(|k| !self.env.names.type_member(k));
+        let import = self
+            .env
+            .names
+            .import_help(module, keys, |k| self.env.item_vis(k));
         let items = all().filter_map(in_module);
-        rokc_diagnostic::suggest(name, locals.chain(items)).map(|s| format!("did you mean `{s}`?"))
+        let typo = rokc_diagnostic::suggest(name, locals.chain(items))
+            .map(|s| format!("did you mean `{s}`?"));
+        join_help(import, typo)
     }
 
     /// `m::f` naming an item of a module `m` that is not imported: the
@@ -3939,6 +4044,7 @@ impl<'a> LowerCtx<'a> {
             exists: &exists,
             keys: &keys,
             visible: &visible,
+            in_type: &|k| env.names.has_type(k),
         };
         match resolve_name(
             segments,
@@ -3978,6 +4084,7 @@ impl<'a> LowerCtx<'a> {
             exists: &exists,
             keys: &keys,
             visible: &visible,
+            in_type: &|k| env.names.has_type(k),
         };
         match resolve_name(
             segments,

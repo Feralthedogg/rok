@@ -1,0 +1,27 @@
+// spec: §5.7.1 §2.10.3 §2.8.4
+// A trait another module declares is not in scope without a `use`, in
+// any position that names one; each says which `use` brings it in, and
+// the parameter it bounds raises nothing more.
+// expect-error: 19:9: cannot find trait `Shape` (named in a bound)
+// expect-error: help: add `use geo::Shape;`
+// expect-error: 20:31: cannot find trait `Shape` (named in a bound)
+// expect-error: 21:6: cannot find trait `Shape` (named in a bound)
+// expect-error: 22:12: cannot find trait `Shape` (named in a bound)
+// expect-error: 23:13: cannot find trait `Shape` in this scope
+// expect-error: help: add `use geo::Shape;`
+mod geo {
+    pub trait Shape { fn area(self) -> i32; }
+    pub struct Sq { pub s: i32; }
+    impl Shape for Sq { fn area(self) -> i32 { return self.s * self.s; } }
+}
+struct R { w: i32; }
+
+fn f<T: Shape>(t: T) -> i32 { return t.area(); }
+fn g<T>(t: T) -> i32 where T: Shape { return t.area(); }
+impl Shape for R { fn area(self) -> i32 { return self.w; } }
+trait Big: Shape {}
+fn h(x: any Shape) -> i32 { return 0; }
+
+fn main() -> i32 {
+    return f(geo::Sq { s: 2 }) + g(geo::Sq { s: 3 });
+}

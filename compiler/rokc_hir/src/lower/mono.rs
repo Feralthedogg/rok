@@ -603,6 +603,10 @@ fn check_call_bounds(
             }) else {
                 continue;
             };
+            // A bound naming no trait was reported where it is written.
+            if !ctx.env.names.is_trait(&want.path) {
+                continue;
+            }
             if !ctx.implements_trait(concrete, &want, 0) {
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,

@@ -70,6 +70,7 @@ pub(super) fn lookup_in_use_entries_full(
                 for key in (set.keys)(leaf) {
                     if key.starts_with(&prefix_with_sep)
                         && key.ends_with(&suffix_with_sep)
+                        && !(set.in_type)(&key[..key.len() - suffix_with_sep.len()])
                         && (set.visible)(&key)
                         && !glob_hits.contains(&key)
                     {
@@ -351,6 +352,25 @@ pub(super) fn package_of(module: &str) -> &str {
     } else {
         ""
     }
+}
+
+/// How code in `cur` names `k` in a `use`: the library's and a
+/// dependency's items by their path, the package's own from the root
+/// (`a::K`), through `sup::` from below its module, else `pkg::a::K`.
+pub(super) fn use_path(cur: &str, k: &str) -> String {
+    let def = module_of(k);
+    if !package_of(&def).is_empty() || cur.is_empty() {
+        return k.to_owned();
+    }
+    if def.is_empty() || cur.starts_with(&format!("{def}::")) {
+        let depth = |m: &str| m.split("::").filter(|s| !s.is_empty()).count();
+        return format!(
+            "{}{}",
+            "sup::".repeat(depth(cur) - depth(&def)),
+            leaf_name(k)
+        );
+    }
+    format!("pkg::{k}")
 }
 
 pub(super) const fn module_display(m: &str) -> &str {
@@ -675,18 +695,37 @@ pub(super) fn resolve_ty_with_structs(
             for b in bounds {
                 let segs: Vec<&str> = b.segments.iter().map(|s| s.name.as_str()).collect();
                 let key = sc.names.trait_key(&segs, sc.module, sc.at);
-                let user_trait = sc.names.is_trait(&key);
-                // Bootstrap traits key by their last segment (see
-                // `trait_key`); anything else must name a declared trait.
-                if !user_trait && !sc.names.all_traits().iter().any(|t| leaf_name(t) == key) {
-                    sc.names.error(
-                        sc.at,
-                        format!(
-                            "`{}` in `any {}` is not a trait — `any` bounds must name traits",
-                            segs.join("::"),
-                            segs.join("::")
-                        ),
-                    );
+                if !sc.names.is_trait(&key) {
+                    let written = segs.join("::");
+                    if sc.names.canon(&segs, sc.module, &[], sc.at).is_some() {
+                        sc.names.error(
+                            sc.at,
+                            format!(
+                                "`{written}` in `any {written}` is not a trait — `any` bounds \
+                                 must name traits"
+                            ),
+                        );
+                    } else {
+                        let d = rokc_diagnostic::RokDiagnostic::error(
+                            rokc_diagnostic::ErrorKind::Resolve,
+                            b.span,
+                            format!("cannot find trait `{written}` in this scope"),
+                        );
+                        let keys = sc
+                            .names
+                            .all_traits()
+                            .iter()
+                            .filter(|t| segs.len() == 1 && leaf_name(t) == key)
+                            .cloned()
+                            .collect();
+                        let help = sc
+                            .names
+                            .import_help(sc.module, keys, |k| sc.names.type_vis(k));
+                        sc.names.diags.borrow_mut().push(match help {
+                            Some(h) => d.with_help(h),
+                            None => d,
+                        });
+                    }
                     return HirTy::Unknown;
                 }
                 refs.push(trait_ref(sc.names, b, sc.module, sc.at, rec));

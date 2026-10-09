@@ -114,27 +114,32 @@ fn const_expr_to_u32(c: &rokc_ast::ConstExpr) -> Option<u32> {
     crate::lower::const_eval::syntactic_int(c, &|_| None).and_then(|v| u32::try_from(v).ok())
 }
 
+/// The primitive type `name` spells, if any.
+pub fn prim_named(name: &str) -> Option<PrimTy> {
+    match name {
+        "i8" => Some(PrimTy::I8),
+        "i16" => Some(PrimTy::I16),
+        "i32" => Some(PrimTy::I32),
+        "i64" => Some(PrimTy::I64),
+        "isize" => Some(PrimTy::Isize),
+        "u8" => Some(PrimTy::U8),
+        "u16" => Some(PrimTy::U16),
+        "u32" => Some(PrimTy::U32),
+        "u64" => Some(PrimTy::U64),
+        "usize" => Some(PrimTy::Usize),
+        "f32" => Some(PrimTy::F32),
+        "f64" => Some(PrimTy::F64),
+        "bool" => Some(PrimTy::Bool),
+        "c_char" => Some(PrimTy::CChar),
+        "char" => Some(PrimTy::Char),
+        "str" => Some(PrimTy::Str),
+        _ => None,
+    }
+}
+
 fn resolve_path_ty(path: &Path) -> HirTy {
-    if path.segments.len() == 1 {
-        if let Some(prim) = match path.segments[0].name.as_str() {
-            "i8" => Some(PrimTy::I8),
-            "i16" => Some(PrimTy::I16),
-            "i32" => Some(PrimTy::I32),
-            "i64" => Some(PrimTy::I64),
-            "isize" => Some(PrimTy::Isize),
-            "u8" => Some(PrimTy::U8),
-            "u16" => Some(PrimTy::U16),
-            "u32" => Some(PrimTy::U32),
-            "u64" => Some(PrimTy::U64),
-            "usize" => Some(PrimTy::Usize),
-            "f32" => Some(PrimTy::F32),
-            "f64" => Some(PrimTy::F64),
-            "bool" => Some(PrimTy::Bool),
-            "c_char" => Some(PrimTy::CChar),
-            "char" => Some(PrimTy::Char),
-            "str" => Some(PrimTy::Str),
-            _ => None,
-        } {
+    if let [seg] = path.segments.as_slice() {
+        if let Some(prim) = prim_named(&seg.name) {
             return HirTy::Prim(prim);
         }
     }

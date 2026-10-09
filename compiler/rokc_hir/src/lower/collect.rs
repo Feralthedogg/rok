@@ -1541,11 +1541,20 @@ fn collect<'a>(
             } else {
                 // A path that names no type (other targets are templates above).
                 let name = target.split('<').next().unwrap_or(&target);
-                pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+                let d = rokc_diagnostic::RokDiagnostic::error(
                     rokc_diagnostic::ErrorKind::Resolve,
                     here,
                     format!("cannot find type `{name}` in this scope"),
-                ));
+                );
+                let help = (!name.contains("::"))
+                    .then(|| {
+                        names.import_help(&module, names.type_leaf(name), |k| names.type_vis(k))
+                    })
+                    .flatten();
+                pre_diags.push(match help {
+                    Some(h) => d.with_help(h),
+                    None => d,
+                });
             }
             continue;
         }
@@ -2643,7 +2652,7 @@ fn finish<'a>(
         reuse,
         summaries,
     };
-    module.diagnostics.extend(names.diags.into_inner());
+    module.diagnostics.extend(names.diags.take());
     module.diagnostics.extend(sink.diagnostics.into_inner());
     module
         .diagnostics
@@ -2665,6 +2674,7 @@ fn finish<'a>(
         &names.unknown_spans.take(),
         &generics_of,
         sources,
+        &names,
     );
     check_value_types(&mut module);
     check_packed(&mut module);
@@ -3201,6 +3211,7 @@ pub(super) fn check_unresolved_types(
     spans: &HashMap<String, rokc_diagnostic::Span>,
     generics_of: &dyn Fn(&str) -> Option<(rokc_ast::Generics, rokc_diagnostic::Span)>,
     sources: &rokc_diagnostic::SourceMap,
+    names: &TypeNames,
 ) {
     // Each unknown name is reported at the first item that mentions it.
     // The thread-local "current span" is whatever pass ran last (usually
@@ -3315,8 +3326,14 @@ pub(super) fn check_unresolved_types(
                 d.with_help(h)
             } else if let Some(h) = resolve::own_library_import(&t, public) {
                 d.with_help(h)
-            } else if let Some(s) = rokc_diagnostic::suggest(leaf_name(&t), known.iter().copied()) {
-                d.with_help(format!("did you mean `{s}`?"))
+            } else if let Some(h) = super::join_help(
+                (!t.contains("::"))
+                    .then(|| names.import_help(&at, names.type_leaf(&t), |k| names.type_vis(k)))
+                    .flatten(),
+                rokc_diagnostic::suggest(leaf_name(&t), known.iter().copied())
+                    .map(|s| format!("did you mean `{s}`?")),
+            ) {
+                d.with_help(h)
             } else {
                 d
             }
@@ -5136,16 +5153,27 @@ fn check_bound_names(
         let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
         let key = names.trait_key(&segs, module, b.span);
         // A bootstrap trait keys by its leaf (see `trait_key`).
-        let Some(found) = names
-            .traits
-            .get(&key)
-            .or_else(|| names.traits.iter().find(|t| leaf_name(t) == key))
-        else {
-            pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
+        let Some(found) = names.traits.get(&key) else {
+            let d = rokc_diagnostic::RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Resolve,
                 b.span,
                 format!("cannot find trait `{}` (named in a bound)", segs.join("::")),
-            ));
+            );
+            let keys = || {
+                names
+                    .traits
+                    .iter()
+                    .filter(|t| leaf_name(t) == key)
+                    .cloned()
+                    .collect()
+            };
+            let help = (segs.len() == 1)
+                .then(|| names.import_help(module, keys(), |k| names.type_vis(k)))
+                .flatten();
+            pre_diags.push(match help {
+                Some(h) => d.with_help(h),
+                None => d,
+            });
             return;
         };
         let written = p.segments.last().map_or(0, |s| {
