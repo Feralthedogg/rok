@@ -2288,6 +2288,21 @@ fn struct_decl_fields(def: &AstStructDef) -> Vec<(String, &Ty)> {
     }
 }
 
+/// Parameters and declared fields of generic struct or union `full`.
+fn generic_template<'a>(
+    ctx: &LowerCtx<'a>,
+    full: &str,
+) -> Option<(&'a rokc_ast::Generics, Vec<(String, &'a Ty)>)> {
+    if let Some(d) = ctx.env.defs.generic_struct(full) {
+        return Some((&d.generics, struct_decl_fields(d)));
+    }
+    let u = ctx.env.defs.generic_union(full)?;
+    Some((
+        &u.generics,
+        u.fields.iter().map(|f| (f.name.clone(), &f.ty)).collect(),
+    ))
+}
+
 /// `Self` of an impl of a struct, as a struct path (spec 4.9.4).
 pub(super) fn self_struct_id(ctx: &LowerCtx<'_>, segs: &[&str]) -> Option<StructId> {
     match (segs, &ctx.self_ty) {
@@ -2442,7 +2457,7 @@ pub(super) fn lower_struct_init(
         }
     } else if let Some(id) = ctx.lookup_struct(&full) {
         id
-    } else if let Some(def) = ctx.env.defs.generic_struct(&full) {
+    } else if let Some((generics, decl_fields)) = generic_template(ctx, &full) {
         // `Box { v: 5 }`: the expected type picks the instantiation;
         // otherwise infer the type arguments from the field values.
         match &hint {
@@ -2453,9 +2468,7 @@ pub(super) fn lower_struct_init(
                 *h
             }
             _ => {
-                let decl_fields = struct_decl_fields(def);
-                let generic_names: std::collections::HashSet<String> = def
-                    .generics
+                let generic_names: std::collections::HashSet<String> = generics
                     .params
                     .iter()
                     .map(|gp| match gp {
@@ -2472,7 +2485,7 @@ pub(super) fn lower_struct_init(
                     pre[i] = Some(v);
                 }
                 let mut args = Vec::new();
-                for gp in &def.generics.params {
+                for gp in &generics.params {
                     if let rokc_ast::GenericParam::Const { name, ty } = gp {
                         let c = subst
                             .get(name)
@@ -2523,14 +2536,13 @@ pub(super) fn lower_struct_init(
     // synthetic `__data` slot.
     if let Some(union_kind) = def.union_kind.clone() {
         if spread.is_some() {
-            return ctx.error_expr(span, format!("`..base` cannot build union `{}`", def.name));
+            return ctx.error_expr(span, format!("`..base` cannot build union `{ty_display}`"));
         }
         if fields.len() != 1 {
             return ctx.error_expr(
                 span,
                 format!(
-                    "union `{}` initializer must list exactly one field, found {}",
-                    def.name,
+                    "union `{ty_display}` initializer must list exactly one field, found {}",
                     fields.len()
                 ),
             );
@@ -2784,7 +2796,7 @@ pub(super) fn field_access(
                 format!(
                     "reading field `{name}` of union `{}` needs an `unsafe` block \
                      (spec 4.15.2: the bits may not be a valid `{name}`)",
-                    leaf_name(&def.name)
+                    ctx.ty_name(&HirTy::Struct(struct_id))
                 ),
             );
         }

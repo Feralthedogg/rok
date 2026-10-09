@@ -179,6 +179,7 @@ pub(super) enum Read {
     EnumDef(EnumId),
     GenericStruct(String),
     GenericEnum(String),
+    GenericUnion(String),
 }
 
 /// An `InstanceWarns` change.
@@ -348,6 +349,7 @@ codec_enum!(Read {
     EnumDef(x0),
     GenericStruct(x0),
     GenericEnum(x0),
+    GenericUnion(x0),
 });
 codec_enum!(WarnEvent {
     Instance(x0, x1),
@@ -1792,6 +1794,11 @@ impl Incr<'_> {
             }
             Read::GenericEnum(k) => {
                 f.opt(env.defs.generic_enums.get(k), |f, d| {
+                    f.add(*d);
+                });
+            }
+            Read::GenericUnion(k) => {
+                f.opt(env.defs.generic_unions.get(k), |f, d| {
                     f.add(*d);
                 });
             }

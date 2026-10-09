@@ -253,6 +253,7 @@ fn join_all<T>(jobs: Vec<Job<'_, Vec<T>>>) -> Option<Vec<T>> {
 enum Kind {
     Fn,
     Struct,
+    Union,
     Enum,
     Trait,
     Ty,
@@ -279,6 +280,7 @@ impl Locs {
             match item {
                 Item::Fn(f) => put(Kind::Fn, addr(f), WHOLE),
                 Item::Struct(s) => put(Kind::Struct, addr(s), WHOLE),
+                Item::Union(u) => put(Kind::Union, addr(u), WHOLE),
                 Item::Enum(e) => put(Kind::Enum, addr(e), WHOLE),
                 Item::Trait(t) => {
                     put(Kind::Trait, addr(t), WHOLE);
@@ -365,6 +367,15 @@ impl Located for AstStructDef {
     fn find(item: &'static Item, j: u32) -> Option<&'static Self> {
         match item {
             Item::Struct(s) if j == WHOLE => Some(s),
+            _ => None,
+        }
+    }
+}
+
+impl Located for rokc_ast::UnionDef {
+    fn find(item: &'static Item, j: u32) -> Option<&'static Self> {
+        match item {
+            Item::Union(u) if j == WHOLE => Some(u),
             _ => None,
         }
     }
@@ -468,6 +479,7 @@ fn enc_collected(c: &Collected<'_>, at: &Locs, e: &mut Enc) -> Option<()> {
     enc_blob(e, |e| t.method_info.enc(e));
     enc_blob(e, |e| enc_plain(c, e));
     enc_refs(&t.defs.generic_structs, Kind::Struct, at, e)?;
+    enc_refs(&t.defs.generic_unions, Kind::Union, at, e)?;
     enc_refs(&t.defs.generic_enums, Kind::Enum, at, e)?;
     enc_refs(&t.generic_fns, Kind::Fn, at, e)?;
     e.u(t.decls.len() as u64);
@@ -578,6 +590,7 @@ fn dec_plain(d: &mut Dec<'_>) -> Option<Collected<'static>> {
         enums: Codec::dec(d)?,
         enum_table: Codec::dec(d)?,
         generic_structs: HashMap::new(),
+        generic_unions: HashMap::new(),
         generic_enums: HashMap::new(),
         defaulted_leaves: Codec::dec(d)?,
     };
@@ -623,6 +636,7 @@ fn dec_plain(d: &mut Dec<'_>) -> Option<Collected<'static>> {
 /// The borrows `enc_collected` wrote after the plain part, into `c`.
 fn dec_borrows(p: &'static Program, d: &mut Dec<'_>, c: &mut Collected<'static>) -> Option<()> {
     c.t.defs.generic_structs = dec_refs(p, d)?;
+    c.t.defs.generic_unions = dec_refs(p, d)?;
     c.t.defs.generic_enums = dec_refs(p, d)?;
     c.t.generic_fns = dec_refs(p, d)?;
     let decls = d.u()?;

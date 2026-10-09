@@ -95,6 +95,14 @@ pub const LOCAL_ITEM_ATTR: &str = "#local_item";
 /// lifted from the block (spec 3.9.1).
 pub const INHERITED_USE_ATTR: &str = "#inherited_use";
 
+/// Marker attribute of an item lifted from a block with `use p::*`s
+/// (spec 3.9.1).
+///
+/// One string per glob, its prefix as written. HIR puts the paths of the
+/// names they bring in into the item's headers; its fn bodies have the
+/// `use`s themselves.
+pub const BLOCK_GLOB_ATTR: &str = "#block_glob";
+
 /// Marker attribute of a `const fn` (spec 5.2.5): callable in const
 /// contexts, evaluated at compile time there.
 pub const CONST_FN_ATTR: &str = "#const_fn";

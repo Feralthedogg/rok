@@ -4336,6 +4336,8 @@ impl<'a> Parser<'a> {
             headers_only: true,
             ..Default::default()
         };
+        // Other globs: their names are known only to HIR.
+        let mut module_globs = Vec::new();
         for s in &block.stmts {
             let StmtKind::Item(Item::Use(u)) = &s.kind else {
                 continue;
@@ -4343,7 +4345,7 @@ impl<'a> Parser<'a> {
             let (mut named, mut globs) = (Vec::new(), Vec::new());
             rokc_ast::rename::use_paths(&u.tree, &[], &mut named, &mut globs);
             // `use E::*` of a local enum: its variants.
-            for prefix in globs {
+            for mut prefix in globs {
                 let variants = block.stmts.iter().find_map(|s| match &s.kind {
                     StmtKind::Item(Item::Enum(e)) if prefix == [e.name.clone()] => Some(
                         e.variants
@@ -4353,9 +4355,17 @@ impl<'a> Parser<'a> {
                     ),
                     _ => None,
                 });
-                for v in variants.into_iter().flatten() {
-                    named.push((v.clone(), vec![prefix[0].clone(), v]));
+                if let Some(vs) = variants {
+                    named.extend(
+                        vs.into_iter()
+                            .map(|v| (v.clone(), vec![prefix[0].clone(), v])),
+                    );
+                    continue;
                 }
+                if let Some(head) = prefix.first().and_then(|h| uses.paths.get(h)) {
+                    prefix.splice(0..1, head.clone());
+                }
+                module_globs.push(prefix.join("::"));
             }
             for (name, mut path) in named {
                 // `use a::b; use b::c;`
@@ -4368,6 +4378,21 @@ impl<'a> Parser<'a> {
         if !uses.is_empty() {
             for item in &mut self.lifted[lifted..] {
                 uses.item(item);
+            }
+        }
+        if !module_globs.is_empty() {
+            let span = block.span;
+            for item in &mut self.lifted[lifted..] {
+                item.attrs_mut().push(Attribute {
+                    path: vec![rokc_ast::BLOCK_GLOB_ATTR.to_owned()],
+                    body: AttrBody::Args(
+                        (module_globs.iter())
+                            .map(|g| AttrArg::Lit(Literal::Str(g.clone())))
+                            .collect(),
+                    ),
+                    inner: false,
+                    span,
+                });
             }
         }
     }

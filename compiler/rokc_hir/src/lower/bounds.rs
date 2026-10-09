@@ -742,6 +742,17 @@ fn check_decl_types(env: &Env<'_>, wanted: &impl Fn(&str) -> bool) {
             owner: item(name),
         });
     }
+    for (name, u) in &env.defs.generic_unions {
+        todo.push(Decl {
+            generics: u.generics.params.iter().collect(),
+            where_clause: u.where_clause.iter().collect(),
+            module: module_of(name),
+            span: u.span,
+            self_of: SelfOf::None,
+            tys: u.fields.iter().map(|f| &f.ty).collect(),
+            owner: item(name),
+        });
+    }
     for (name, e) in &env.defs.generic_enums {
         let tys = e
             .variants

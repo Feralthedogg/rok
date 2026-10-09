@@ -537,7 +537,11 @@ fn collect<'a>(
     let (hiding_diags, hiding): (Vec<_>, Vec<_>) = hiding.into_iter().unzip();
     pre_diags.extend(hiding_diags);
     early.extend(check_tiers(raw_uses, &owned.items, item_modules));
+    let block_globs = block_glob_renames(&owned.items, item_modules, &all_items, &reexports, uses);
     drop(all_items);
+    for (i, r) in block_globs {
+        r.item(&mut owned.items[i]);
+    }
     add_lazy_static_inits(owned);
     implicit_generics(owned);
     let err = |pre: &mut Vec<rokc_diagnostic::RokDiagnostic>, at: Span, msg: String| {
@@ -807,7 +811,18 @@ fn collect<'a>(
         if let Item::Union(u) = item {
             if defs.struct_table.borrow().contains_key(&u.name)
                 || defs.generic_structs.contains_key(&u.name)
+                || defs.generic_unions.contains_key(&u.name)
             {
+                continue;
+            }
+            if !u.generics.params.is_empty() {
+                if u.fields.is_empty() {
+                    union_storage_strategy(&[], false, &u.name, u.span, &mut pre_diags);
+                }
+                if mono::all_defaulted(&u.generics) {
+                    defs.defaulted_leaves.insert(leaf_name(&u.name).to_owned());
+                }
+                defs.generic_unions.insert(u.name.clone(), u);
                 continue;
             }
             let id = struct_id(new_structs.len() + union_decls.len());
@@ -2912,6 +2927,53 @@ pub(super) fn reexport_key(re: &crate::uses::ReExport) -> String {
 /// methods and consts: HIR resolves the impl target and the bodies in
 /// that module, then strips it back to the leaf). Item keys are
 /// module-qualified from here on.
+/// The headers of items lifted from blocks with `use p::*`s
+/// (`#block_glob`) name what the globs bring in by path, as a block's
+/// named `use`s already do (spec 3.9.1).
+fn block_glob_renames(
+    items: &[Item],
+    item_modules: &[String],
+    all: &[&Item],
+    reexports: &[crate::uses::ReExport],
+    uses: &crate::uses::UseTable,
+) -> Vec<(usize, rokc_ast::rename::Renames)> {
+    let blocks = |item: &Item| -> Vec<Vec<String>> {
+        (item.attrs().iter())
+            .filter(|a| a.path == [rokc_ast::BLOCK_GLOB_ATTR])
+            .map(|a| match &a.body {
+                rokc_ast::AttrBody::Args(args) => (args.iter())
+                    .filter_map(|x| match x {
+                        rokc_ast::AttrArg::Lit(rokc_ast::Literal::Str(s)) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
+    };
+    let mut names = None;
+    let mut out = Vec::new();
+    for (i, (item, module)) in items.iter().zip(item_modules).enumerate() {
+        let blocks = blocks(item);
+        if blocks.is_empty() {
+            continue;
+        }
+        let names = names.get_or_insert_with(|| crate::uses::GlobNames::new(all, reexports));
+        let paths = names.block_paths(&blocks, module, uses);
+        if !paths.is_empty() {
+            out.push((
+                i,
+                rokc_ast::rename::Renames {
+                    paths,
+                    headers_only: true,
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    out
+}
+
 fn qualify(item: &mut Item, module: &str) {
     if module.is_empty() {
         return;
@@ -4066,15 +4128,24 @@ pub(super) fn lower_union_def(
     sc: Scope<'_>,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) -> HirStructDef {
+    let res = |t: &rokc_ast::Ty| resolve_ty_with_structs(t, defs, None, sc);
+    union_def(u, id, u.name.clone(), &res, Vec::new(), pre_diags)
+}
+
+/// `u` as a struct named `name` (a generic one's instance: `res`
+/// resolves under its substitution, `generic_args` are its arguments).
+pub(super) fn union_def(
+    u: &rokc_ast::UnionDef,
+    id: StructId,
+    name: String,
+    res: &dyn Fn(&rokc_ast::Ty) -> HirTy,
+    generic_args: Vec<HirTy>,
+    pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
+) -> HirStructDef {
     let aliases: Vec<(String, HirTy)> = u
         .fields
         .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                resolve_ty_with_structs(&f.ty, defs, None, sc),
-            )
-        })
+        .map(|f| (f.name.clone(), res(&f.ty)))
         .collect();
     let is_repr_c = u.attrs.iter().any(|a| {
         a.path.as_slice() == ["repr"]
@@ -4091,14 +4162,14 @@ pub(super) fn lower_union_def(
         id,
         repr: repr_of(&u.attrs).unwrap_or_default(),
         def_id: None,
-        name: u.name.clone(),
+        name,
         fields: vec![HirField {
             name: "__data".to_owned(),
             ty: storage_ty,
             default: None,
         }],
         span: u.span,
-        generic_args: Vec::new(),
+        generic_args,
         union_kind: Some(HirUnionKind {
             storage,
             aliases,
@@ -5158,18 +5229,27 @@ fn check_type_bounds(env: &Env<'_>) {
         let id = StructId(u32::try_from(i).expect("StructId overflow"));
         let d = ctx.struct_def(id);
         let base = d.name.split("__").next().unwrap_or_default().to_owned();
-        if let Some(def) = env
+        if d.generic_args.is_empty() {
+            continue;
+        }
+        let tmpl = env
             .defs
             .generic_structs
             .get(&base)
-            .filter(|_| !d.generic_args.is_empty())
-        {
+            .map(|s| (&s.generics, &s.where_clause));
+        let tmpl = tmpl.or_else(|| {
+            env.defs
+                .generic_unions
+                .get(&base)
+                .map(|u| (&u.generics, &u.where_clause))
+        });
+        if let Some((generics, where_clause)) = tmpl {
             insts.push((
                 ctx.ty_name(&HirTy::Struct(id)),
                 module_of(&base),
                 d.generic_args,
-                &def.generics,
-                &def.where_clause,
+                generics,
+                where_clause,
                 d.span,
             ));
         }

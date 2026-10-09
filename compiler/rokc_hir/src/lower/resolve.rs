@@ -519,12 +519,10 @@ pub(super) fn instance(
     if !open.is_empty() || args.contains(&HirTy::Unknown) {
         return None;
     }
-    if defs.generic_struct(full).is_some() {
+    if defs.is_generic_struct(full) {
         return defs
-            .instantiate_struct(full, args, span, |def, subst| {
-                mono::generic_struct_fields(def, &|t| {
-                    resolve_ty_with_structs(t, defs, Some(subst), sc)
-                })
+            .instantiate_struct(full, args, span, |subst, t| {
+                resolve_ty_with_structs(t, defs, Some(subst), sc)
             })
             .map(HirTy::Struct);
     }

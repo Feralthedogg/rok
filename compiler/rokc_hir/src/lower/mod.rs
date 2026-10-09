@@ -992,6 +992,7 @@ struct TypeDefs<'a> {
     enum_table: std::cell::RefCell<HashMap<String, EnumId>>,
     /// Generic templates by full name.
     generic_structs: HashMap<String, &'a AstStructDef>,
+    generic_unions: HashMap<String, &'a rokc_ast::UnionDef>,
     generic_enums: HashMap<String, &'a AstEnumDef>,
     /// Leaf names of templates whose parameters all have defaults: their
     /// bare name is an instance (spec 2.10.5).
@@ -1002,7 +1003,19 @@ impl<'a> TypeDefs<'a> {
     fn generics_of(&self, base: &str) -> Option<&rokc_ast::Generics> {
         self.generic_struct(base)
             .map(|d| &d.generics)
+            .or_else(|| self.generic_union(base).map(|d| &d.generics))
             .or_else(|| self.generic_enum(base).map(|d| &d.generics))
+    }
+
+    /// `base` is a generic struct or union template (their instances are
+    /// structs).
+    fn is_generic_struct(&self, base: &str) -> bool {
+        self.generic_struct(base).is_some() || self.generic_union(base).is_some()
+    }
+
+    fn generic_union(&self, base: &str) -> Option<&'a rokc_ast::UnionDef> {
+        incr::read(|| incr::Read::GenericUnion(base.to_owned()));
+        self.generic_unions.get(base).copied()
     }
 
     /// Generic struct template `base`.
@@ -1063,16 +1076,16 @@ impl<'a> TypeDefs<'a> {
         id
     }
 
-    /// Instance `base<args>` of a generic struct (the existing one, or a
-    /// new one first named at `span`): its id is taken before `fields`
-    /// resolves its field types under the instance's substitution, so a
-    /// field naming the instance itself (or another new one) finds it.
+    /// Instance `base<args>` of a generic struct or union (the existing
+    /// one, or a new one first named at `span`): its id is taken before
+    /// `res` resolves its field types under the instance's substitution,
+    /// so a field naming the instance itself (or another new one) finds it.
     fn instantiate_struct(
         &self,
         base: &str,
         args: Vec<HirTy>,
         span: rokc_diagnostic::Span,
-        fields: impl FnOnce(&AstStructDef, &TySubst) -> Vec<HirField>,
+        res: impl Fn(&TySubst, &Ty) -> HirTy,
     ) -> Option<StructId> {
         let key = mangle_inst(base, &args);
         let found = self.struct_table.borrow().get(&key).copied();
@@ -1083,23 +1096,41 @@ impl<'a> TypeDefs<'a> {
         if let Some(id) = found {
             return Some(id);
         }
-        let def = self.generic_struct(base)?;
+        let tmpl = match self.generic_struct(base) {
+            Some(d) => Ok(d),
+            None => Err(self.generic_union(base)?),
+        };
+        let (generics, attrs) = match tmpl {
+            Ok(d) => (&d.generics, &d.attrs),
+            Err(u) => (&u.generics, &u.attrs),
+        };
         let id = StructId(u32::try_from(self.structs.borrow().len()).expect("StructId overflow"));
         crate::name_type(false, id.0, base, &args);
         self.struct_table.borrow_mut().insert(key.clone(), id);
         self.structs.borrow_mut().push(HirStructDef {
             id,
-            repr: collect::repr_of(&def.attrs).unwrap_or_default(),
+            repr: collect::repr_of(attrs).unwrap_or_default(),
             def_id: None,
-            name: key,
+            name: key.clone(),
             fields: Vec::new(),
             span,
             generic_args: args.clone(),
             union_kind: None,
-            niche: collect::niche_args(&def.attrs).unwrap_or_default(),
+            niche: collect::niche_args(attrs).unwrap_or_default(),
         });
-        let fields = fields(def, &generic_subst(&def.generics, &args));
-        self.structs.borrow_mut()[id.0 as usize].fields = fields;
+        let subst = generic_subst(generics, &args);
+        let res = |t: &Ty| res(&subst, t);
+        match tmpl {
+            Ok(d) => {
+                let fields = generic_struct_fields(d, &res);
+                self.structs.borrow_mut()[id.0 as usize].fields = fields;
+            }
+            Err(u) => {
+                // Declaration errors were reported at the template.
+                let inst = collect::union_def(u, id, key, &res, args, &mut Vec::new());
+                self.structs.borrow_mut()[id.0 as usize] = HirStructDef { span, ..inst };
+            }
+        }
         Some(id)
     }
 
@@ -3029,6 +3060,7 @@ impl<'a> LowerCtx<'a> {
             .keys()
             .chain(enums.keys())
             .chain(defs.generic_structs.keys())
+            .chain(defs.generic_unions.keys())
             .chain(defs.generic_enums.keys())
             .filter_map(|k| {
                 let (m, n) = k.rsplit_once("::").unwrap_or(("", k.as_str()));
@@ -3708,21 +3740,21 @@ impl<'a> LowerCtx<'a> {
         span: rokc_diagnostic::Span,
     ) -> Option<StructId> {
         let mut args = args;
-        if let Some(def) = self.env.defs.generic_struct(base) {
-            mono::fill_defaults(&def.generics, &mut args, |subst, t| {
-                let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
-                rcx.current_module = module_of(base);
-                rcx.resolve_ast_ty(t)
-            });
-            self.check_const_args(&def.generics, &args)?;
-        }
-        self.env
+        let in_base = |subst: &TySubst, t: &Ty| {
+            let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
+            rcx.current_module = module_of(base);
+            rcx.resolve_ast_ty(t)
+        };
+        if let Some(g) = self
+            .env
             .defs
-            .instantiate_struct(base, args, span, |def, subst| {
-                let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
-                rcx.current_module = module_of(base);
-                generic_struct_fields(def, &|t| rcx.resolve_ast_ty(t))
-            })
+            .generics_of(base)
+            .filter(|_| self.env.defs.is_generic_struct(base))
+        {
+            mono::fill_defaults(g, &mut args, in_base);
+            self.check_const_args(g, &args)?;
+        }
+        self.env.defs.instantiate_struct(base, args, span, in_base)
     }
 
     fn enum_def(&self, id: EnumId) -> HirEnumDef {
@@ -4273,7 +4305,7 @@ impl<'a> LowerCtx<'a> {
                             .for_each(|a| collect_unknown_paths(a, &mut leftover));
                         // An inference variable is an argument like any type.
                         leftover.retain(|p| p != "_");
-                        if leftover.is_empty() && self.env.defs.generic_struct(&full).is_some() {
+                        if leftover.is_empty() && self.env.defs.is_generic_struct(&full) {
                             if let Some(id) = self.instantiate_struct(&full, args, at) {
                                 return HirTy::Struct(id);
                             }

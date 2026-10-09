@@ -1,0 +1,49 @@
+// spec: §3.9.1 §5.5.4
+// expect-exit: 0
+// expect-stdout:
+// 8 4 12 5 2 9
+// inner 1 top 30
+
+// A block's `use p::*` holds in the headers of its items, as in their
+// bodies: field types, signatures, `const` / `static` initializers, an
+// alias, an enum's variants. The module's own items win over the glob,
+// an inner block's glob over an outer one's, a generic parameter over
+// both.
+mod geo {
+    pub struct P { pub x: i32; }
+    pub const K: i32 = 3;
+    pub const fn three() -> i32 { 3 }
+    pub fn area(p: P) -> i32 { p.x * 2 }
+    pub const fn top() -> i32 { 0 }
+}
+mod inner {
+    pub const K: i32 = 1;
+}
+enum Color { Red, Green }
+
+const fn top() -> i32 { 30 }
+
+fn main() {
+    use geo::*;
+    use Color::*;
+    struct W { p: P; }
+    impl W {
+        fn get(self) -> P { self.p }
+    }
+    type Q = P;
+    const L: i32 = K + 1;
+    static S: i32 = three() + 1;
+    const C: Color = Green;
+    fn twice(p: Q) -> i32 { area(p) * 2 }
+    struct G<P> { v: P; }
+    const T: i32 = top();
+    let w = W { p: P { x: L } };
+    let g = G { v: 5 };
+    let c = match C { Red => 1, Green => 2 };
+    println(f"{twice(w.get()) / 2} {L} {S * 3} {g.v} {c} {K * K}");
+    {
+        use inner::*;
+        const N: i32 = K;
+        println(f"inner {N} top {T}");
+    }
+}

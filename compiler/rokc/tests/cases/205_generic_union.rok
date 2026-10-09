@@ -1,0 +1,60 @@
+// spec: §2.5.2 §2.10.1 §2.10.5 §2.10.6
+// expect-exit: 0
+// expect-stdout:
+// 7 1
+// 42
+// 1 2 8 8
+// 3 9
+// 5 4
+// 2 2
+// 2.5 1
+
+// Generic unions: one instance per argument list, each with its own
+// storage (a widest primitive or overlaid words).
+
+use rok::bare::mem::size_of;
+
+trait Num { fn zero() -> Self; }
+impl Num for i32 { fn zero() -> i32 { 0 } }
+
+union U<T> { a: T; b: u64; }
+
+impl<T> U<T> {
+    fn get(self) -> T { unsafe { self.a } }
+}
+
+union B<T: Num> { v: T; raw: u32; }
+
+union W<T> where T: Num { v: T; raw: u32; }
+
+#[repr(C)]
+union C<T> { v: T; raw: u8; }
+
+union D<T = u16> { v: T; raw: u8; }
+
+struct P { x: i32; y: i32; }
+
+struct Holder<T> { u: U<T>; tag: u8; }
+
+fn first<T>(u: U<T>) -> T {
+    unsafe { u.a }
+}
+
+fn main() {
+    let u = U::<i32> { a: 7 };
+    let one: U<f64> = U { b: 0x3FF0000000000000u64 };
+    println(f"{unsafe { u.a }} {unsafe { one.a }}");
+    let g = U { a: 41 };
+    println(f"{g.get() + 1}");
+    let p = first(U { a: P { x: 1, y: 2 } });
+    println(f"{p.x} {p.y} {size_of::<U<u8>>()} {size_of::<U<P>>()}");
+    let b = B { v: 3 };
+    let w: W<i32> = W { raw: 9u32 };
+    println(f"{unsafe { b.raw }} {unsafe { w.v }}");
+    let c = C { v: 5u32 };
+    println(f"{unsafe { c.raw }} {size_of::<C<u32>>()}");
+    let d: D = D { raw: 2u8 };
+    println(f"{size_of::<D>()} {unsafe { d.raw }}");
+    let h = Holder { u: U { a: 2.5f64 }, tag: 1u8 };
+    println(f"{unsafe { h.u.a }} {h.tag}");
+}

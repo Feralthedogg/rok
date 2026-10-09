@@ -725,6 +725,127 @@ const fn vis_word(v: Visibility) -> &'static str {
     }
 }
 
+/// Every item key a glob can reach (enum variants and re-exports
+/// included) → its visibility, the module that visibility is from and
+/// the item it ends at.
+pub struct GlobNames(HashMap<String, (Visibility, String, String)>);
+
+impl GlobNames {
+    #[must_use]
+    pub fn new(items: &[&rokc_ast::Item], reexports: &[ReExport]) -> Self {
+        use rokc_ast::{ExternItem, Item};
+        let mut out = HashMap::new();
+        let mut variants = Vec::new();
+        let module = |k: &str| {
+            k.rsplit_once("::")
+                .map_or(String::new(), |(m, _)| m.to_owned())
+        };
+        let mut put = |k: &str, vis| drop(out.insert(k.to_owned(), (vis, module(k), k.to_owned())));
+        for item in items {
+            match *item {
+                Item::Fn(f) => put(&f.name, f.vis),
+                Item::Struct(s) => put(&s.name, s.vis),
+                Item::Union(u) => put(&u.name, u.vis),
+                Item::Trait(t) => put(&t.name, t.vis),
+                Item::Const(c) => put(&c.name, c.vis),
+                Item::Static(s) => put(&s.name, s.vis),
+                Item::TypeAlias(a) => put(&a.name, a.vis),
+                Item::Mod(m) => put(&m.name, m.vis),
+                Item::Enum(e) => {
+                    put(&e.name, e.vis);
+                    // A variant is as visible as its enum (spec 5.6.9).
+                    for v in &e.variants {
+                        let k = format!("{}::{}", e.name, v.name);
+                        variants.push((k, e.vis, module(&e.name)));
+                    }
+                }
+                Item::Extern(b) => {
+                    for x in &b.items {
+                        match x {
+                            ExternItem::Fn(f) => put(&f.name, f.vis),
+                            ExternItem::Static(s) => put(&s.name, s.vis),
+                        }
+                    }
+                }
+                Item::Impl(_) | Item::Use(_) => {}
+            }
+        }
+        for (k, vis, from) in variants {
+            out.insert(k.clone(), (vis, from, k));
+        }
+        for r in reexports {
+            out.insert(
+                qualified(&r.module_path, &r.short_name),
+                (r.vis, r.module_path.clone(), r.full_path.clone()),
+            );
+        }
+        Self(out)
+    }
+
+    /// Spec 3.9.1: the names the `use p::*`s of the blocks around an
+    /// item lifted into `module` bring into its headers, each to its
+    /// path as written. `blocks`: their prefixes as written, innermost
+    /// block first. The module's own items win; an inner block over an
+    /// outer one; a name two globs of one block bring in from different
+    /// items stays the module's to resolve.
+    #[must_use]
+    pub fn block_paths(
+        &self,
+        blocks: &[Vec<String>],
+        module: &str,
+        table: &UseTable,
+    ) -> HashMap<String, Vec<String>> {
+        let earlier = table.get(module).map_or(&[][..], Vec::as_slice);
+        let end = |k: &str| {
+            let mut k = k.to_owned();
+            for _ in 0..8 {
+                match self.0.get(&k) {
+                    Some((_, _, next)) if *next != k => k.clone_from(next),
+                    _ => break,
+                }
+            }
+            k
+        };
+        let mut out: HashMap<String, Vec<String>> = HashMap::new();
+        for globs in blocks {
+            let mut here: HashMap<&str, (String, Vec<String>)> = HashMap::new();
+            let mut ambiguous = HashSet::new();
+            for written in globs {
+                let segs: Vec<String> = written.split("::").map(str::to_owned).collect();
+                let prefix = resolve_root(&segs, module, earlier).join("::");
+                for (k, (vis, from, _)) in &self.0 {
+                    let Some((parent, name)) = k.rsplit_once("::") else {
+                        continue;
+                    };
+                    if parent != prefix
+                        || !crate::lower::visible_from(module, from, *vis)
+                        || out.contains_key(name)
+                        || self.0.contains_key(&qualified(module, name))
+                    {
+                        continue;
+                    }
+                    let target = end(k);
+                    match here.get(name) {
+                        Some((t, _)) if *t != target => drop(ambiguous.insert(name)),
+                        Some(_) => {}
+                        None => {
+                            let mut path = segs.clone();
+                            path.push(name.to_owned());
+                            here.insert(name, (target, path));
+                        }
+                    }
+                }
+            }
+            for (name, (_, path)) in here {
+                if !ambiguous.contains(name) {
+                    out.insert(name.to_owned(), path);
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Public alias of `flatten_tree` for the lower pass to expand a
 /// function-local `use` into entries against the function's module.
 pub fn flatten_tree_for_local(tree: &UseTree, module_path: &str, out: &mut Vec<UseEntry>) {
