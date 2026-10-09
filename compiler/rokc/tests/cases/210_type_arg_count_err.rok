@@ -1,0 +1,41 @@
+// spec: §2.10.2 §2.10.5 §2.5.1 §2.8.5
+// expect-error: 210_type_arg_count_err.rok:27:13: `S` takes 1 generic argument but 2 were given
+// expect-error: help: `S` is declared `S<T>`; remove the last argument
+// expect-error: 210_type_arg_count_err.rok:28:12: `S` takes 1 generic argument but 2 were given
+// expect-error: 210_type_arg_count_err.rok:29:12: `E` takes 1 generic argument but 2 were given
+// expect-error: 210_type_arg_count_err.rok:30:13: `E` takes 1 generic argument but 3 were given
+// expect-error: help: `E` is declared `E<T>`; remove the last 2 arguments
+// expect-error: 210_type_arg_count_err.rok:31:12: `D` takes 1 to 2 generic arguments but 3 were given
+// expect-error: help: `D` is declared `D<T, U = i32>`; remove the last argument
+// expect-error: 210_type_arg_count_err.rok:32:13: `P` takes 2 generic arguments but 1 was given
+// expect-error: help: `P` is declared `P<T, U>`; add one for `U`
+// expect-error: 210_type_arg_count_err.rok:33:12: `P` takes 2 generic arguments but 1 was given
+// expect-error: 210_type_arg_count_err.rok:34:13: `Al` takes 1 generic argument but 2 were given
+// expect-error: help: `Al` is declared `Al<T>`; remove the last argument
+// expect-error: 210_type_arg_count_err.rok:35:12: `U` takes 1 generic argument but 2 were given
+// expect-error: 210_type_arg_count_err.rok:41:9: `Tr` takes at most 1 generic argument but 2 were given
+// expect-error: help: `Tr` is declared `Tr<R = i32>`; remove the last argument
+
+struct S<T> { a: T; }
+enum E<T> { A(T), B }
+struct D<T, U = i32> { a: T; b: U; }
+struct P<T, U> { a: T; b: U; }
+type Al<T> = S<T>;
+union U<T> { a: T; b: u64; }
+
+fn main() -> i32 {
+    let s = S::<i32, i32> { a: 1 };
+    let t: S<i32, bool> = S { a: 1 };
+    let f: E<i32, i32> = E::B;
+    let e = E::<i32, u8, u8>::A(1);
+    let d: D<i32, i32, i32> = D { a: 1, b: 2 };
+    let p = P::<i64> { a: 1, b: 2u8 };
+    let q: P<i64> = P { a: 1, b: 2 };
+    let al: Al<i32, i32> = S { a: 2 };
+    let u: U<i32, i32> = U { a: 1 };
+    // The misfit types above add no errors where they are used.
+    s.a + t.a + d.a + d.b + q.b + p.a as i32 + al.a
+}
+
+trait Tr<R = i32> { fn f(self) -> R; }
+fn g<T: Tr<i32, i64>>(x: T) {}

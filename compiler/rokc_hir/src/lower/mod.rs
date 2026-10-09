@@ -133,6 +133,9 @@ struct TypeNames {
     /// First use of each unresolved type path, for its "cannot find
     /// type" location.
     unknown_spans: std::cell::RefCell<HashMap<String, rokc_diagnostic::Span>>,
+    /// First use of each generic type written without arguments (a
+    /// leftover one is "needs generic arguments", not "cannot find").
+    bare_generics: std::cell::RefCell<HashMap<String, rokc_diagnostic::Span>>,
     /// `canon` results without local `use`s or diagnostics, by (path,
     /// module): its glob lookups scan every type name.
     canon_memo: std::cell::RefCell<HashMap<(String, String), Option<String>>>,
@@ -202,15 +205,40 @@ impl TypeNames {
         let alias = self
             .generic_alias(&full)
             .filter(|a| !a.generics.params.is_empty())?;
-        let map: HashMap<String, Ty> = alias
-            .generics
-            .params
+        let params = &alias.generics.params;
+        let min = params
             .iter()
-            .map(|gp| match gp {
-                rokc_ast::GenericParam::Type { name, .. }
-                | rokc_ast::GenericParam::Const { name, .. } => name.clone(),
+            .take_while(|p| {
+                !matches!(
+                    p,
+                    rokc_ast::GenericParam::Type {
+                        default: Some(_),
+                        ..
+                    }
+                )
             })
-            .zip(args.iter().cloned())
+            .count();
+        if args.len() < min || args.len() > params.len() {
+            let (msg, help) = mono::misfit(leaf_name(&full), &alias.generics, args.len());
+            self.error_help(if ty.span.is_dummy() { at } else { ty.span }, msg, help);
+        }
+        // A missing argument (reported above) reads as `any`.
+        let any = Ty {
+            kind: AstTyKind::Any,
+            span: ty.span,
+        };
+        let map: HashMap<String, Ty> = params
+            .iter()
+            .enumerate()
+            .map(|(i, gp)| match gp {
+                rokc_ast::GenericParam::Type { name, default, .. } => (
+                    name.clone(),
+                    args.get(i).or(default.as_ref()).unwrap_or(&any).clone(),
+                ),
+                rokc_ast::GenericParam::Const { name, .. } => {
+                    (name.clone(), args.get(i).unwrap_or(&any).clone())
+                }
+            })
             .collect();
         let mut out = alias.ty.clone();
         self.absolutize(&mut out, &module_of(&full), module, &map, at);
@@ -1624,6 +1652,7 @@ impl TypeNames {
             broken_aliases: std::cell::RefCell::default(),
             alias_uses: std::cell::RefCell::new(Vec::new()),
             unknown_spans: std::cell::RefCell::default(),
+            bare_generics: std::cell::RefCell::default(),
             canon_memo: std::cell::RefCell::default(),
             leaves: std::cell::OnceCell::new(),
             variant_leaves: std::cell::OnceCell::new(),
@@ -3751,7 +3780,9 @@ impl<'a> LowerCtx<'a> {
             .generics_of(base)
             .filter(|_| self.env.defs.is_generic_struct(base))
         {
-            mono::fill_defaults(g, &mut args, in_base);
+            if let Some(e) = mono::fit_args(leaf_name(base), g, &mut args, in_base) {
+                self.emit_arity(span, e);
+            }
             self.check_const_args(g, &args)?;
         }
         self.env.defs.instantiate_struct(base, args, span, in_base)
@@ -3785,11 +3816,14 @@ impl<'a> LowerCtx<'a> {
     ) -> Option<EnumId> {
         let mut args = args;
         if let Some(def) = self.env.defs.generic_enum(base) {
-            mono::fill_defaults(&def.generics, &mut args, |subst, t| {
+            let misfit = mono::fit_args(leaf_name(base), &def.generics, &mut args, |subst, t| {
                 let mut rcx = LowerCtx::new(self.env, subst, None, self.here());
                 rcx.current_module = module_of(base);
                 rcx.resolve_ast_ty(t)
             });
+            if let Some(e) = misfit {
+                self.emit_arity(span, e);
+            }
             self.check_const_args(&def.generics, &args)?;
         }
         self.env
@@ -3799,6 +3833,15 @@ impl<'a> LowerCtx<'a> {
                 rcx.current_module = module_of(base);
                 generic_enum_variants(def, &|t| rcx.resolve_ast_ty(t))
             })
+    }
+
+    /// A generic type's argument list that does not fit (`mono::fit_args`).
+    fn emit_arity(&self, span: Span, (msg, help): (String, String)) {
+        let at = if span.is_dummy() { self.here() } else { span };
+        self.emit_diag(
+            rokc_diagnostic::RokDiagnostic::error(rokc_diagnostic::ErrorKind::Type, at, msg)
+                .with_help(help),
+        );
     }
 
     /// A `char` const parameter takes a `char` argument, any other an

@@ -2311,6 +2311,27 @@ pub(super) fn self_struct_id(ctx: &LowerCtx<'_>, segs: &[&str]) -> Option<Struct
     }
 }
 
+/// `E::<i32>::V`: the enum instance its written arguments name (they
+/// take the place of the expected type).
+fn explicit_enum(ctx: &LowerCtx<'_>, p: &AstPath) -> Option<HirTy> {
+    let [.., e, _] = p.segments.as_slice() else {
+        return None;
+    };
+    if e.generics.is_empty() {
+        return None;
+    }
+    let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
+    ctx.enum_path(&segs)?;
+    let n = p.segments.len();
+    Some(ctx.resolve_ast_ty(&Ty {
+        kind: AstTyKind::Path(AstPath {
+            segments: p.segments[..n - 1].to_vec(),
+            span: p.span,
+        }),
+        span: p.span,
+    }))
+}
+
 /// Whether bare `segs` names a struct outside core while the implicit
 /// `rok::core::**` also brings in a core variant of that name (`struct
 /// Sha256` vs `HashAlgorithm::Sha256`): the program's struct wins.
@@ -2345,7 +2366,7 @@ pub(super) fn lower_struct_init(
     // `EnumName::Variant { x: ..., y: ... }` — enum named-form variant
     // initialiser (spec 2.4). Pack fields into the variant's tuple
     // payload according to declaration order.
-    let mut hint = ctx.current_expected().cloned();
+    let mut hint = explicit_enum(ctx, path).or_else(|| ctx.current_expected().cloned());
     match init_variant(ctx, &segs, hint.as_ref()) {
         EnumRes::Error => return poison(span),
         EnumRes::Found(..) if spread.is_some() => {
@@ -4532,11 +4553,11 @@ pub(super) fn bind_explicit(
         .filter(|n| !self_ty.is_some_and(|t| ast_ty_mentions(t, n)))
         .collect();
     if targs.len() > own.len() {
-        return Err(format!(
-            "`{}` takes {} generic argument(s) but {} were supplied",
+        return Err(super::mono::arity_msg(
             leaf_name(callee),
             own.len(),
-            targs.len()
+            own.len(),
+            targs.len(),
         ));
     }
     Ok(own
@@ -5556,13 +5577,7 @@ pub(super) fn method_call_on(
     check_method_visible(ctx, fn_id, method);
     if !type_args.is_empty() {
         lower_args_only(ctx);
-        return ctx.error_expr(
-            span,
-            format!(
-                "`{method}` takes no generic arguments, but `::<..>` gives {}",
-                type_args.len()
-            ),
-        );
+        return ctx.error_expr(span, super::mono::arity_msg(method, 0, 0, type_args.len()));
     }
     let sig = ctx.sig_by_id(fn_id);
     if sig.param_names.first().map(String::as_str) != Some("self") {
@@ -7276,10 +7291,11 @@ fn bind_explicit_generics(
     if explicit.len() > def.generics.params.len() {
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
-            format!(
-                "`{full}` takes {} generic argument(s) but {} were supplied",
+            super::mono::arity_msg(
+                leaf_name(full),
                 def.generics.params.len(),
-                explicit.len()
+                def.generics.params.len(),
+                explicit.len(),
             ),
         );
         return false;
@@ -7523,7 +7539,7 @@ fn lower_path_call(
     // picked from the argument types. `EnumName::f(..)` naming no
     // variant is an associated function (below).
     let not_variant = enum_lacks_variant(ctx, &segs);
-    let hint = ctx.current_expected().cloned();
+    let hint = explicit_enum(ctx, p).or_else(|| ctx.current_expected().cloned());
     let is_generic_enum_base = ctx.enum_path(&segs).is_some_and(|(full, _)| {
         ctx.lookup_enum(&full).is_none() && ctx.env.defs.generic_enum(&full).is_some()
     });
@@ -10918,7 +10934,7 @@ pub(super) fn lower_path(
     }
     // `EnumName::Variant` (unit form). Tuple variants come through
     // `lower_call` because the parser wraps them in a Call expression.
-    let hint = ctx.current_expected().cloned();
+    let hint = explicit_enum(ctx, path).or_else(|| ctx.current_expected().cloned());
     match resolve_enum_variant(ctx, &segs, hint.as_ref(), None) {
         EnumRes::Found(enum_id, idx) => {
             let variant = &ctx.enum_def(enum_id).variants[idx];

@@ -1,0 +1,24 @@
+// spec: §2.10.2 §2.10.5
+// expect-exit: 0
+// expect-stdout:
+// 3 7 i32
+// 9 4
+// 2 5
+
+// A default covers a left-out trailing argument; arguments written on
+// an enum's path (`E::<i64>::A`) name its instance.
+struct D<T, U = i32> { a: T; b: U; }
+enum E<T> { A(T), B }
+type Pair<T, U = u8> = (T, U);
+
+fn main() {
+    let d: D<i64> = D { a: 3, b: 7 };
+    let x = D::<u8, i64> { a: 9, b: 4 };
+    let p: Pair<i32> = (2, 5u8);
+    let e = E::<i64>::A(1);
+    let wide: E<i64> = e;
+    match wide { E::A(_) => {}, E::B => {} }
+    println(f"{d.a} {d.b} {if d.b is i32 { "i32" } else { "?" }}");
+    println(f"{x.a} {x.b}");
+    println(f"{p.0} {p.1}");
+}

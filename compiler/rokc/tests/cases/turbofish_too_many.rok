@@ -1,4 +1,4 @@
-// expect-error: `map_to` takes 1 generic argument(s) but 2 were supplied
+// expect-error: `map_to` takes 1 generic argument but 2 were given
 struct Boxed<T> { v: T; }
 impl<T> Boxed<T> {
     fn map_to<U>(self, u: U) -> U { return u; }

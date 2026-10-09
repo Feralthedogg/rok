@@ -508,15 +508,21 @@ pub(super) fn instance(
         ..sc
     };
     let mut args = args;
+    let mut misfit_pad = false;
     if let Some(g) = defs.generics_of(full) {
-        mono::fill_defaults(g, &mut args, |subst, t| {
+        let misfit = mono::fit_args(leaf_name(full), g, &mut args, |subst, t| {
             resolve_ty_with_structs(t, defs, Some(subst), sc)
         });
+        if let Some((msg, help)) = misfit {
+            let at = if span.is_dummy() { sc.at } else { span };
+            sc.names.error_help(at, msg, help);
+            misfit_pad = true;
+        }
     }
     let mut open = Vec::new();
     args.iter()
         .for_each(|a| collect::collect_unknown_paths(a, &mut open));
-    if !open.is_empty() || args.contains(&HirTy::Unknown) {
+    if !open.is_empty() || (args.contains(&HirTy::Unknown) && !misfit_pad) {
         return None;
     }
     if defs.is_generic_struct(full) {
@@ -621,7 +627,14 @@ pub(super) fn resolve_ty_with_structs(
                 return HirTy::Enum(id);
             }
             // Type alias (substituted later) or a generic base used
-            // without arguments.
+            // without arguments (its "needs generic arguments" location).
+            if !p.span.is_dummy() {
+                sc.names
+                    .bare_generics
+                    .borrow_mut()
+                    .entry(full.clone())
+                    .or_insert(p.span);
+            }
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {

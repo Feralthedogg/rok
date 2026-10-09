@@ -2648,7 +2648,24 @@ fn finish<'a>(
     module
         .diagnostics
         .extend(sink.instance_warns.into_inner().agreed());
-    check_unresolved_types(&mut module, &names.unknown_spans.into_inner(), sources);
+    let bare = names.bare_generics.take();
+    let generics_of = |full: &str| -> Option<(rokc_ast::Generics, rokc_diagnostic::Span)> {
+        let at = *bare.get(full)?;
+        defs.generic_structs
+            .get(full)
+            .map(|d| &d.generics)
+            .or_else(|| defs.generic_unions.get(full).map(|d| &d.generics))
+            .or_else(|| defs.generic_enums.get(full).map(|d| &d.generics))
+            .or_else(|| names.generic_aliases.get(full).map(|d| &d.generics))
+            .filter(|g| !g.params.is_empty())
+            .map(|g| (g.clone(), at))
+    };
+    check_unresolved_types(
+        &mut module,
+        &names.unknown_spans.take(),
+        &generics_of,
+        sources,
+    );
     check_value_types(&mut module);
     check_packed(&mut module);
     // The same root cause can be reached from several passes (e.g. a
@@ -3182,6 +3199,7 @@ fn habit_type_help(
 pub(super) fn check_unresolved_types(
     module: &mut HirModule,
     spans: &HashMap<String, rokc_diagnostic::Span>,
+    generics_of: &dyn Fn(&str) -> Option<(rokc_ast::Generics, rokc_diagnostic::Span)>,
     sources: &rokc_diagnostic::SourceMap,
 ) {
     // Each unknown name is reported at the first item that mentions it.
@@ -3243,6 +3261,16 @@ pub(super) fn check_unresolved_types(
     let mut diags = Vec::new();
     for (t, span, at) in unknown_types {
         let span = spans.get(&t).copied().unwrap_or(span);
+        // A generic type written bare: it exists, it lacks its arguments.
+        if let Some((g, at)) = generics_of(&t) {
+            let leaf = leaf_name(&t);
+            let (msg, help) = super::mono::bare_generic(leaf, &g);
+            diags.push(
+                rokc_diagnostic::RokDiagnostic::error(rokc_diagnostic::ErrorKind::Resolve, at, msg)
+                    .with_help(help),
+            );
+            continue;
+        }
         let elsewhere = named
             .iter()
             .filter(|k| !k.starts_with("rok::") && leaf_name(k) == t && module_of(k) != at)
@@ -5091,7 +5119,7 @@ fn check_bound_names(
     base: &HashMap<String, &rokc_ast::TraitDef>,
     pre_diags: &mut Vec<rokc_diagnostic::RokDiagnostic>,
 ) {
-    let arity: HashMap<&str, usize> = program
+    let arity: HashMap<&str, &rokc_ast::Generics> = program
         .items
         .iter()
         .filter_map(|item| match item {
@@ -5099,7 +5127,7 @@ fn check_bound_names(
             _ => None,
         })
         .chain(base.values().copied())
-        .map(|t| (t.name.as_str(), t.generics.params.len()))
+        .map(|t| (t.name.as_str(), &t.generics))
         .collect();
     let mut check = |b: &Ty, module: &str| {
         let AstTyKind::Path(p) = &b.kind else {
@@ -5126,22 +5154,22 @@ fn check_bound_names(
                 .filter(|g| rokc_ast::as_assoc_binding(g).is_none())
                 .count()
         });
-        let Some(&n) = arity.get(found.as_str()) else {
+        let Some(&g) = arity.get(found.as_str()) else {
             return;
         };
-        if written > n {
-            let takes = match n {
-                0 => "no type argument".to_owned(),
-                n => format!("{n} type argument(s)"),
-            };
-            pre_diags.push(rokc_diagnostic::RokDiagnostic::error(
-                rokc_diagnostic::ErrorKind::Type,
-                b.span,
-                format!(
-                    "`{}` takes {takes}, but the bound gives {written} (spec 2.8.5)",
-                    segs.join("::")
-                ),
-            ));
+        // Fewer is allowed: the bound holds for any of the rest
+        // (`S: Source<Item = i32>`).
+        let max = g.params.len();
+        if written > max {
+            let (msg, help) = mono::misfit(leaf_name(found), g, written);
+            pre_diags.push(
+                rokc_diagnostic::RokDiagnostic::error(
+                    rokc_diagnostic::ErrorKind::Type,
+                    b.span,
+                    msg,
+                )
+                .with_help(help),
+            );
         }
     };
     let mut generics = |g: &rokc_ast::Generics, w: &[rokc_ast::WherePred], module: &str| {

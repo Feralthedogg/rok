@@ -1,0 +1,33 @@
+// spec: §2.10.2 §2.10.5
+// expect-error: 210_bare_generic_err.rok:21:15: `S` needs generic arguments
+// expect-error: help: `S` is declared `S<T>`; write it with them, e.g. `S<i32>`
+// expect-error: 210_bare_generic_err.rok:22:9: `P` needs generic arguments
+// expect-error: help: `P` is declared `P<T, U = i32>`; write it with them, e.g. `P<i32>`
+// expect-error: 210_bare_generic_err.rok:23:11: `Al` needs generic arguments
+// expect-error: help: `Al` is declared `Al<T>`; write it with them, e.g. `Al<i32>`
+// expect-error: 210_bare_generic_err.rok:24:9: `E` needs generic arguments
+// expect-error: 210_bare_generic_err.rok:25:9: `Q` needs generic arguments
+// expect-error: help: `Q` is declared `Q<T>`; write it with them, e.g. `Q<i32>`
+
+mod m {
+    pub struct Q<T> { a: T; }
+}
+use m::Q;
+
+struct S<T> { a: T; }
+struct P<T, U = i32> { a: T; b: U; }
+enum E<T> { A(T), B }
+type Al<T> = S<T>;
+struct H { s: S; }
+fn f(p: P) -> i32 { 0 }
+fn g() -> Al { S { a: 1 } }
+fn h(e: E) -> i32 { 0 }
+fn k(q: Q) -> i32 { 0 }
+
+// All parameters defaulted: the bare name is that instance.
+struct D<T = i32> { a: T; }
+fn d(x: D) -> i32 { x.a }
+
+fn main() -> i32 {
+    d(D { a: 1 })
+}

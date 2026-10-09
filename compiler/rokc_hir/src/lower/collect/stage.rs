@@ -690,6 +690,7 @@ impl Codec for TypeNames {
         self.broken_aliases.enc(e);
         self.alias_uses.enc(e);
         self.unknown_spans.enc(e);
+        self.bare_generics.enc(e);
         self.canon_memo.enc(e);
         self.consts.enc(e);
         self.value_reexports.enc(e);
@@ -711,6 +712,7 @@ impl Codec for TypeNames {
         n.broken_aliases = Codec::dec(d)?;
         n.alias_uses = Codec::dec(d)?;
         n.unknown_spans = Codec::dec(d)?;
+        n.bare_generics = Codec::dec(d)?;
         n.canon_memo = Codec::dec(d)?;
         n.consts = Codec::dec(d)?;
         n.value_reexports = Codec::dec(d)?;
