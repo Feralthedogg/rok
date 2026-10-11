@@ -140,6 +140,10 @@ pub struct Emitter {
     lists: std::sync::Arc<HashSet<u32>>,
     /// `reentrant_functions` of the module.
     reentrant: std::sync::Arc<HashSet<FunctionId>>,
+    /// `entered_functions` of the module.
+    entered: std::sync::Arc<HashSet<FunctionId>>,
+    /// Functions whose function-value thunk this module defines.
+    thunks: BTreeSet<FunctionId>,
     /// What the `List` alias scopes rely on.
     list_alias: std::sync::Arc<crate::alias::ListAlias>,
     /// Emit codegen unit `.1` of a plan (`crate::units`), not the module.
@@ -166,7 +170,28 @@ pub(crate) struct FnSig {
     stdcall: bool,
     /// A runtime declaration (`extern "rok"`).
     runtime: bool,
+    /// The rok body takes the caller's `rok_tls` block address last
+    /// (`FnFacts::takes_tls`).
+    tls: bool,
 }
+
+impl FnSig {
+    /// The rok body's parameter and result types (`rok_fn_types`), the
+    /// hidden `rok_tls` address last.
+    fn rok_types(&self, target: &Target) -> (Vec<String>, Option<String>) {
+        let (mut params, ret) = rok_fn_types(&self.params, &self.ret, target);
+        if self.tls {
+            params.push("!llvm.ptr".to_owned());
+        }
+        (params, ret)
+    }
+}
+
+/// This thread's `rok_tls` block address as `%tls`, in a function no
+/// rok caller hands it to.
+const TLS_BASE: &str = "    %tlsg = llvm.mlir.addressof @rok_tls : !llvm.ptr
+    %tls = \"llvm.intr.threadlocal.address\"(%tlsg) : (!llvm.ptr) -> !llvm.ptr
+";
 
 /// What a C call goes through.
 #[derive(Clone, Copy)]
@@ -324,6 +349,8 @@ impl Emitter {
             quiet: std::sync::Arc::default(),
             lists: std::sync::Arc::default(),
             reentrant: std::sync::Arc::default(),
+            entered: std::sync::Arc::default(),
+            thunks: BTreeSet::new(),
             list_alias: std::sync::Arc::default(),
             unit: None,
             glue: true,
@@ -546,6 +573,7 @@ impl Emitter {
                 c_entry: None,
                 stdcall: c.as_ref().is_some_and(|a| a.stdcall),
                 runtime: f.facts.linkage == Linkage::Extern && f.facts.abi == Abi::Rok,
+                tls: f.facts.takes_tls(),
             };
             match c {
                 Some(abi) if f.facts.linkage == Linkage::Extern => sig.c = Some(abi),
@@ -596,6 +624,7 @@ impl Emitter {
             self.pkgs.lazy_statics.clone_from(&core.lazy_statics);
             self.quiet = core.quiet.clone();
             self.reentrant = core.reentrant.clone();
+            self.entered = core.entered.clone();
         } else {
             // A prebuilt library's static is initialized by its `.a`: the
             // initializer need not be here.
@@ -611,6 +640,7 @@ impl Emitter {
                 .collect();
             self.quiet = std::sync::Arc::new(quiet_functions(module, &self.pkgs, &self.target));
             self.reentrant = std::sync::Arc::new(reentrant_functions(module));
+            self.entered = std::sync::Arc::new(entered_functions(module));
         }
         self.list_alias = std::sync::Arc::new(crate::alias::ListAlias::new(
             module,
@@ -633,7 +663,55 @@ impl Emitter {
         }
         self.out.push_str(" {\n");
         self.emit_functions(module, sources, &view, &fns, &c_entries);
+        self.emit_thunks(module, &fns);
         self.emit_rest(module, &view, &fns);
+    }
+
+    /// `<f>.v` for each rok body a function value takes (`thunks`): its
+    /// own parameters and result, the `rok_tls` address read here and
+    /// passed on; internal to each module that takes such a value.
+    fn emit_thunks(&mut self, module: &MirModule, fns: &HashMap<FunctionId, FnSig>) {
+        if !self.thunks.is_empty() {
+            self.needs.insert("rok_tls");
+        }
+        for id in std::mem::take(&mut self.thunks) {
+            let sig = &fns[&id];
+            let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target);
+            let head: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(i, t)| format!("%arg{i}: {t}"))
+                .collect();
+            let mut args: Vec<String> = (0..params.len()).map(|i| format!("%arg{i}")).collect();
+            args.push("%tls".to_owned());
+            let (args, mut tys) = (args.join(", "), params);
+            tys.push("!llvm.ptr".to_owned());
+            let tys = tys.join(", ");
+            let name = &sig.name;
+            let (call, back) = match &ret {
+                Some(r) => (
+                    format!("%r = func.call @{name}({args}) : ({tys}) -> {r}"),
+                    format!("func.return %r : {r}"),
+                ),
+                None => (
+                    format!("func.call @{name}({args}) : ({tys}) -> ()"),
+                    "func.return".to_owned(),
+                ),
+            };
+            let arrow = ret
+                .as_ref()
+                .map_or_else(String::new, |r| format!(" -> {r}"));
+            let text = format!(
+                "  func.func private @{name}.v({}){arrow} attributes {{llvm.linkage = #llvm.linkage<internal>, passthrough = [\"nounwind\"]}} {{\n{TLS_BASE}    {call}\n    {back}\n  }}\n",
+                head.join(", ")
+            );
+            // A debugger shows a function value as the function itself.
+            let text = match module.functions.iter().find(|f| f.id == id) {
+                Some(f) => self.described(text, &f.name, f.span),
+                None => text,
+            };
+            self.out.push_str(&text);
+        }
     }
 
     /// The functions of `view` (a unit's other functions declared) and
@@ -714,8 +792,9 @@ impl Emitter {
                     MirTy::Unit => ("", "()".to_owned()),
                     t => ("%0 = ", mlir_type(t, &self.target)),
                 };
+                self.needs.insert("rok_tls");
                 let text = format!(
-                    "  func.func @rok_repl_cell() {{\n    func.call @rok.register_types() : () -> ()\n    {ret}func.call @{symbol}() : () -> {ty}\n    func.return\n  }}\n"
+                    "  func.func @rok_repl_cell() {{\n    func.call @rok.register_types() : () -> ()\n{TLS_BASE}    {ret}func.call @{symbol}(%tls) : (!llvm.ptr) -> {ty}\n    func.return\n  }}\n"
                 );
                 let text = self.described(text, "rok_repl_cell", m.span);
                 self.out.push_str(&text);
@@ -1020,14 +1099,15 @@ impl Emitter {
                 "func.func private @{sym}.init(%at: {s}) attributes {{llvm.linkage = #llvm.linkage<internal>}}"
             )
         };
+        self.needs.insert("rok_tls");
         let call = if by_addr {
             format!(
-                "    %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
-    func.call @{init}(%5) : (!llvm.ptr) -> ()"
+                "{TLS_BASE}    %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
+    func.call @{init}(%5, %tls) : (!llvm.ptr, !llvm.ptr) -> ()"
             )
         } else {
             format!(
-                "    %4 = func.call @{init}() : () -> {ty}
+                "{TLS_BASE}    %4 = func.call @{init}(%tls) : (!llvm.ptr) -> {ty}
     %5 = llvm.mlir.addressof @{sym} : !llvm.ptr
     llvm.store %4, %5 : {ty}, !llvm.ptr"
             )
@@ -1106,7 +1186,7 @@ impl Emitter {
             // library's rok functions are defined without extension
             // attributes, so they are declared without them.
             let (params, ret) = if f.facts.linkage == Linkage::Prebuilt {
-                let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target);
+                let (params, ret) = sig.rok_types(&self.target);
                 (params, ret.map_or_else(String::new, |r| format!(" -> {r}")))
             } else {
                 let params = sig
@@ -1130,7 +1210,11 @@ impl Emitter {
         }
         let private = !inline_copy && self.private_copy(f);
         let vis = if private { "private " } else { "" };
-        let (params, ret) = rok_fn_types(&f.param_tys, &f.ret_ty, &self.target);
+        let (mut params, ret) = rok_fn_types(&f.param_tys, &f.ret_ty, &self.target);
+        let tls_arg = sig.tls.then(|| {
+            params.push("!llvm.ptr".to_owned());
+            format!("%arg{}", params.len() - 1)
+        });
         let params: Vec<String> = params
             .iter()
             .enumerate()
@@ -1199,6 +1283,8 @@ impl Emitter {
         emit.list_alias = self.list_alias.clone();
         emit.list_scopes = self.list_alias.scoped(f, &self.lists);
         emit.entry_poll = self.reentrant.contains(&f.id);
+        emit.eager_poll = self.entered.contains(&f.id);
+        emit.tls_arg = tls_arg;
         emit.overflow_checks = self.overflow_checks;
         emit.gc_type_base = self.gc_type_base();
         emit.gc_types = std::mem::take(&mut self.gc_types);
@@ -1244,6 +1330,7 @@ impl Emitter {
         }
         self.str_globals = std::mem::take(&mut emit.str_globals);
         self.needs.append(&mut emit.needs);
+        self.thunks.append(&mut emit.thunks);
         self.gc_types = std::mem::take(&mut emit.gc_types);
         self.gc_syms = std::mem::take(&mut emit.gc_syms);
         for e in std::mem::take(&mut emit.errors) {
@@ -1265,7 +1352,7 @@ impl Emitter {
     /// A function another unit defines: its rok body (spec 8.6.6), and
     /// its C entry, which a function value may take.
     fn declare_unit_function(&mut self, sig: &FnSig) {
-        let (params, ret) = rok_fn_types(&sig.params, &sig.ret, &self.target);
+        let (params, ret) = sig.rok_types(&self.target);
         let ret = ret.map_or_else(String::new, |r| format!(" -> {r}"));
         let _ = writeln!(
             self.out,
@@ -1397,7 +1484,12 @@ impl Emitter {
                 }
             }
         }
-        let (tys, _) = rok_fn_types(&sig.params, &sig.ret, &self.target);
+        let (tys, _) = sig.rok_types(&self.target);
+        if sig.tls {
+            self.needs.insert("rok_tls");
+            b.push_str(TLS_BASE);
+            vals.push("%tls".to_owned());
+        }
         let unit = sig.ret == MirTy::Unit || by_ref_ret;
         // wasm32: the host may call an export before `_start` (or
         // without it): the runtime starts on the first call.
@@ -1575,8 +1667,13 @@ impl Emitter {
                 "    func.call @rok_runtime_init() : () -> ()\n    func.call @rok.register_types() : () -> ()\n",
             );
         }
+        self.needs.insert("rok_tls");
+        self.out.push_str(TLS_BASE);
         if matches!(user_ret_ty, MirTy::Unit) {
-            let _ = writeln!(self.out, "    func.call @{user_main}() : () -> ()");
+            let _ = writeln!(
+                self.out,
+                "    func.call @{user_main}(%tls) : (!llvm.ptr) -> ()"
+            );
             self.out.push_str(shutdown);
             self.out.push_str("    %0 = arith.constant 0 : i32\n");
             self.out.push_str("    func.return %0 : i32\n");
@@ -1584,7 +1681,10 @@ impl Emitter {
             return;
         }
         let ret = mlir_type(user_ret_ty, &self.target);
-        let _ = writeln!(self.out, "    %0 = func.call @{user_main}() : () -> {ret}");
+        let _ = writeln!(
+            self.out,
+            "    %0 = func.call @{user_main}(%tls) : (!llvm.ptr) -> {ret}"
+        );
         self.out.push_str(shutdown);
         // The OS wants an `i32` exit code.
         let conv = match user_ret_ty {
@@ -1657,9 +1757,11 @@ struct FnEmit<'a> {
     needs: BTreeSet<&'static str>,
     /// Lent `Emitter::gc_types`.
     gc_types: Vec<Vec<u32>>,
-    /// `(address of rok_tls_shadow_stack_top, caller's frame)` once this
-    /// function linked a shadow-stack frame; every return restores it.
-    gc_frame: Option<(String, String)>,
+    /// This function's shadow-stack frame, if it has one.
+    gc_frame: Option<GcFrame>,
+    /// Where the frame links and a reentrant function polls
+    /// (`plan_links`); `None`: at entry.
+    links: Option<Links>,
     /// Root slot of each GC-holding block param, stored on block entry.
     gc_param_slots: HashMap<u32, String>,
     /// Counter for the extra blocks runtime checks split off.
@@ -1725,8 +1827,11 @@ struct FnEmit<'a> {
     list_scopes: Vec<u32>,
     /// `rokc_mir::addressed`.
     addressed: HashSet<LocalId>,
-    /// In `Emitter::reentrant`: polls on entry.
+    /// In `Emitter::reentrant`: polls on entry, or before its first
+    /// safepoint on each path (`links`).
     entry_poll: bool,
+    /// In `Emitter::entered`: the entry poll stays at entry.
+    eager_poll: bool,
     /// Where the next rok call returning by address writes its result
     /// (`rok_call_args`): the target's slot instead of a temporary.
     sret_into: Option<String>,
@@ -1734,6 +1839,10 @@ struct FnEmit<'a> {
     /// and of the block at `u32::MAX` (`tls_addr`), computed once in the
     /// entry block.
     tls: HashMap<u32, String>,
+    /// The hidden parameter holding the block's address (`FnSig::tls`).
+    tls_arg: Option<String>,
+    /// Functions whose thunk a function value of them needs.
+    thunks: BTreeSet<FunctionId>,
 }
 
 /// Blocks with an edge to a block on the current DFS path (a loop
@@ -1799,6 +1908,100 @@ pub fn stmt_safepoint(
         },
         Statement::StaticStore { name, .. } => pkgs.lazy_statics.contains_key(name),
         _ => false,
+    }
+}
+
+/// A shadow-stack frame: the address of `rok_tls_shadow_stack_top`, of
+/// the frame's `prev` field, and what links it but the load of `prev`
+/// (constant stores of the entry block's values).
+pub(crate) struct GcFrame {
+    tls: String,
+    prev: String,
+    link: String,
+}
+
+/// Where a function links its shadow-stack frame (804 §8.4.7) and, if
+/// reentrant, polls (§8.4.2): before the first safepoint on each path,
+/// so a path that reaches none pays for neither.
+#[derive(Default)]
+pub(crate) struct Links {
+    /// Block id → the statement the link goes before (`usize::MAX`:
+    /// before the terminator).
+    pub at: HashMap<u32, usize>,
+    /// Blocks whose terminator runs with the frame linked.
+    pub linked: HashSet<u32>,
+}
+
+/// `Links` for `f`, given which statements are safepoints (`sp`, by
+/// block position and index) and which blocks end in one (`end`, a
+/// back-edge poll). Every block is entered either always linked or
+/// never: a block linked on some incoming paths links the others at
+/// their end. `None` when the entry block itself is linked on entry (a
+/// back edge to it): then the frame links at entry.
+pub(crate) fn plan_links(
+    f: &MirFunction,
+    sp: impl Fn(usize, usize) -> bool,
+    end: impl Fn(u32) -> bool,
+) -> Option<Links> {
+    let n = f.blocks.len();
+    let pos: HashMap<u32, usize> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(p, b)| (b.id.0, p))
+        .collect();
+    let mut preds = vec![Vec::new(); n];
+    for (p, b) in f.blocks.iter().enumerate() {
+        for s in rokc_mir::succs(b) {
+            preds[pos[&s]].push(p);
+        }
+    }
+    let first: Vec<Option<usize>> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(p, b)| (0..b.stmts.len()).find(|&i| sp(p, i)))
+        .collect();
+    let ends: Vec<bool> = f.blocks.iter().map(|b| end(b.id.0)).collect();
+    let mut force = vec![false; n];
+    loop {
+        let (mut inl, mut out) = (vec![false; n], vec![false; n]);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for p in 0..n {
+                let i = preds[p].iter().any(|&q| out[q]);
+                let o = i || first[p].is_some() || ends[p] || force[p];
+                if (i, o) != (inl[p], out[p]) {
+                    (inl[p], out[p]) = (i, o);
+                    changed = true;
+                }
+            }
+        }
+        if inl.first() == Some(&true) {
+            return None;
+        }
+        let mut grew = false;
+        for p in (0..n).filter(|&p| inl[p]) {
+            for &q in &preds[p] {
+                if !out[q] {
+                    force[q] = true;
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            let mut links = Links::default();
+            for (p, b) in f.blocks.iter().enumerate() {
+                if out[p] {
+                    links.linked.insert(b.id.0);
+                    if !inl[p] {
+                        links.at.insert(b.id.0, first[p].unwrap_or(usize::MAX));
+                    }
+                }
+            }
+            return Some(links);
+        }
     }
 }
 
@@ -1908,6 +2111,40 @@ pub fn reentrant_functions(module: &MirModule) -> HashSet<FunctionId> {
                     out.extend(scc.iter().map(|&w| module.functions[w].id));
                 }
             }
+        }
+    }
+    out
+}
+
+/// Functions entered other than by a direct rok call.
+///
+/// Called from C or
+/// through a pointer (the runtime's loops run those), exported, or the
+/// `any` dispatcher. Their entry poll stays at entry; another
+/// reentrant function polls before its first safepoint instead.
+pub fn entered_functions(module: &MirModule) -> HashSet<FunctionId> {
+    let mut out: HashSet<FunctionId> = module
+        .functions
+        .iter()
+        .filter(|f| {
+            f.facts.abi != Abi::Rok
+                || f.facts.role == FnRole::AnyDispatcher
+                || f.facts.export_name.is_some()
+        })
+        .map(|f| f.id)
+        .collect();
+    for s in module
+        .functions
+        .iter()
+        .flat_map(|f| &f.blocks)
+        .flat_map(|b| &b.stmts)
+    {
+        if let Statement::Assign {
+            rvalue: RValue::FnAddr { callee, .. },
+            ..
+        } = s
+        {
+            out.insert(*callee);
         }
     }
     out
@@ -2030,6 +2267,7 @@ impl<'a> FnEmit<'a> {
             needs: BTreeSet::new(),
             gc_types: Vec::new(),
             gc_frame: None,
+            links: None,
             gc_param_slots: HashMap::new(),
             next_check: 0,
             pkgs,
@@ -2060,8 +2298,11 @@ impl<'a> FnEmit<'a> {
             list_scopes: Vec::new(),
             addressed: rokc_mir::addressed(f),
             entry_poll: true,
+            eager_poll: true,
             sret_into: None,
             tls: HashMap::new(),
+            tls_arg: None,
+            thunks: BTreeSet::new(),
         }
     }
 
@@ -2078,24 +2319,35 @@ impl<'a> FnEmit<'a> {
         if let Some(a) = self.tls.get(&off).filter(|_| !inline) {
             return a.clone();
         }
-        let base = if let Some(b) = self.tls.get(&u32::MAX).filter(|_| !inline) {
-            b.clone()
-        } else {
-            let [g, b] = std::array::from_fn(|_| self.fresh_value());
-            let text = format!(
-                "    {g} = llvm.mlir.addressof @rok_tls : !llvm.ptr
-    {b} = \"llvm.intr.threadlocal.address\"({g}) : (!llvm.ptr) -> !llvm.ptr
-"
-            );
-            self.tls_text(inline, &text, u32::MAX, &b);
-            b
-        };
+        let base = self.tls_base();
         let a = self.fresh_value();
         let text = format!(
             "    {a} = llvm.getelementptr inbounds {base}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8\n"
         );
         self.tls_text(inline, &text, off, &a);
         a
+    }
+
+    /// The address of `rok_tls` on this thread: the caller's (`tls_arg`),
+    /// else one `threadlocal.address` in the entry block (or here, in an
+    /// `__mlir_op` region).
+    fn tls_base(&mut self) -> String {
+        self.needs.insert("rok_tls");
+        let inline = !self.region_outer.is_empty();
+        if let Some(a) = self.tls_arg.as_ref().filter(|_| !inline) {
+            return a.clone();
+        }
+        if let Some(b) = self.tls.get(&u32::MAX).filter(|_| !inline) {
+            return b.clone();
+        }
+        let [g, b] = std::array::from_fn(|_| self.fresh_value());
+        let text = format!(
+            "    {g} = llvm.mlir.addressof @rok_tls : !llvm.ptr
+    {b} = \"llvm.intr.threadlocal.address\"({g}) : (!llvm.ptr) -> !llvm.ptr
+"
+        );
+        self.tls_text(inline, &text, u32::MAX, &b);
+        b
     }
 
     /// `text` defining TLS address `a` (`tls` key `key`): in the region
@@ -2479,6 +2731,38 @@ impl<'a> FnEmit<'a> {
         } else {
             rokc_mir::block_local(self.f)
         };
+        // Link and poll lazily (`plan_links`), but with `__mlir_op`
+        // regions, or for a function entered from C or a pointer, which
+        // polls at entry.
+        if !(regions || self.entry_poll && self.eager_poll) {
+            let (quiet, pkgs, target) = (&*self.quiet, self.pkgs, self.target);
+            let f = self.f;
+            let skip: Vec<Option<usize>> = f.blocks.iter().map(rokc_mir::noreturn_call).collect();
+            self.links = plan_links(
+                f,
+                |p, i| {
+                    skip[p] != Some(i) && stmt_safepoint(&f.blocks[p].stmts[i], quiet, pkgs, target)
+                },
+                |b| self.back_edges.contains_key(&b),
+            );
+        }
+        // Where a lazy entry poll goes: before these statements, and at
+        // the end of these blocks.
+        let mut poll_stmts: HashSet<*const Statement> = HashSet::new();
+        let mut poll_ends: HashSet<u32> = HashSet::new();
+        if let (Some(links), true) = (&self.links, self.entry_poll) {
+            for b in &self.f.blocks {
+                match links.at.get(&b.id.0) {
+                    Some(&usize::MAX) => {
+                        poll_ends.insert(b.id.0);
+                    }
+                    Some(&i) => {
+                        poll_stmts.insert(&raw const b.stmts[i]);
+                    }
+                    None => {}
+                }
+            }
+        }
         // GC-holding locals no collection can see while they hold a
         // value (`live_across`) need no root: they may stay SSA values,
         // and their slots do not escape into the frame. With `__mlir_op`
@@ -2493,6 +2777,10 @@ impl<'a> FnEmit<'a> {
                         .is_empty()
                 },
                 |s| {
+                    // A poll before it holds its operands too.
+                    if poll_stmts.contains(&std::ptr::from_ref(s)) {
+                        return Some(true);
+                    }
                     stmt_safepoint(s, quiet, pkgs, target).then(|| match s {
                         // A rok function roots the arguments it uses
                         // after a collection itself.
@@ -2506,8 +2794,8 @@ impl<'a> FnEmit<'a> {
                         _ => true,
                     })
                 },
-                |b| self.back_edges.contains_key(&b.0),
-                self.entry_poll,
+                |b| self.back_edges.contains_key(&b.0) || poll_ends.contains(&b.0),
+                self.entry_poll && self.links.is_none(),
             )
         });
         self.rooted = rooted;
@@ -2625,8 +2913,20 @@ impl<'a> FnEmit<'a> {
         // loop's poll. A function that reaches no safepoint runs for a
         // bounded time and needs none; a recursive one always reaches
         // one (`quiet_functions`).
-        if self.entry_poll && self.reaches_safepoint() {
+        if self.entry_poll && self.links.is_none() && self.reaches_safepoint() {
             self.emit_poll();
+        }
+    }
+
+    /// Link the frame where `links` says, before statement `i` of block
+    /// `b` (`usize::MAX`: its terminator); a reentrant function polls
+    /// there too.
+    fn link_before(&mut self, b: u32, i: usize) {
+        if self.links.as_ref().and_then(|l| l.at.get(&b)) == Some(&i) {
+            self.emit_link();
+            if self.entry_poll {
+                self.emit_poll();
+            }
         }
     }
 
@@ -2715,33 +3015,51 @@ impl<'a> FnEmit<'a> {
         let tls = self.tls_addr(tls_abi::SHADOW_STACK_TOP);
         let n = roots.len();
         let frame_ty = format!("!llvm.struct<(ptr, i{pw}, array<{n} x ptr>)>");
-        let [frame, prev, count, f0, f1] = std::array::from_fn(|_| self.fresh_value());
+        let [frame, count, f0, f1] = std::array::from_fn(|_| self.fresh_value());
         let _ = write!(
             header,
             "    {frame} = llvm.alloca {one} x {frame_ty} : (i32) -> !llvm.ptr
-    {prev} = llvm.load {tls} : !llvm.ptr -> !llvm.ptr
     {f0} = llvm.getelementptr {frame}[0, 0] : (!llvm.ptr) -> !llvm.ptr, {frame_ty}
-    llvm.store {prev}, {f0} : !llvm.ptr, !llvm.ptr
     {count} = llvm.mlir.constant({n} : i{pw}) : i{pw}
     {f1} = llvm.getelementptr {frame}[0, 1] : (!llvm.ptr) -> !llvm.ptr, {frame_ty}
-    llvm.store {count}, {f1} : i{pw}, !llvm.ptr
 "
         );
+        let mut link = format!("    llvm.store {count}, {f1} : i{pw}, !llvm.ptr\n");
         for (i, r) in roots.iter().enumerate() {
             let a = self.fresh_value();
             let _ = writeln!(
                 header,
                 "    {a} = llvm.getelementptr {frame}[0, 2, {i}] : (!llvm.ptr) -> !llvm.ptr, {frame_ty}"
             );
-            let _ = writeln!(header, "    llvm.store {r}, {a} : !llvm.ptr, !llvm.ptr");
+            let _ = writeln!(link, "    llvm.store {r}, {a} : !llvm.ptr, !llvm.ptr");
         }
-        let _ = writeln!(
-            header,
-            "    llvm.store {frame}, {tls} : !llvm.ptr, !llvm.ptr"
-        );
+        let _ = writeln!(link, "    llvm.store {frame}, {tls} : !llvm.ptr, !llvm.ptr");
         self.body.push_str(&header);
-        self.gc_frame = Some((tls, prev));
+        self.gc_frame = Some(GcFrame {
+            tls,
+            prev: f0,
+            link,
+        });
         self.deaths = rokc_mir::deaths(self.f, |l| rooted.contains(&l.0));
+        if self.links.is_none() {
+            self.emit_link();
+        }
+    }
+
+    /// Link the frame: its caller's frame into `prev`, then it at the
+    /// top of the shadow stack.
+    fn emit_link(&mut self) {
+        if self.gc_frame.is_some() {
+            let p = self.fresh_value();
+            let fr = self.gc_frame.as_ref().unwrap();
+            let (tls, prev, link) = (&fr.tls, &fr.prev, &fr.link);
+            let _ = write!(
+                self.body,
+                "    {p} = llvm.load {tls} : !llvm.ptr -> !llvm.ptr
+    llvm.store {p}, {prev} : !llvm.ptr, !llvm.ptr
+{link}"
+            );
+        }
     }
 
     /// Null the root slot of dead local `l` (all its `GcRef` leaves).
@@ -2753,12 +3071,19 @@ impl<'a> FnEmit<'a> {
         self.emit_zero(&slot, &self.local_ty(l), "#rok_tbaa_gcroot");
     }
 
-    /// Unlink this function's shadow-stack frame (before every return).
+    /// Unlink this function's shadow-stack frame (before every return
+    /// where it is linked).
     fn emit_gc_frame_pop(&mut self) {
-        if let Some((tls, prev)) = &self.gc_frame {
-            let _ = writeln!(
+        let b = self.edge_from.0;
+        if self.gc_frame.is_some() && self.links.as_ref().is_none_or(|l| l.linked.contains(&b)) {
+            let p = self.fresh_value();
+            let fr = self.gc_frame.as_ref().unwrap();
+            let _ = write!(
                 self.body,
-                "    llvm.store {prev}, {tls} : !llvm.ptr, !llvm.ptr"
+                "    {p} = llvm.load {} : !llvm.ptr -> !llvm.ptr
+    llvm.store {p}, {} : !llvm.ptr, !llvm.ptr
+",
+                fr.prev, fr.tls
             );
         }
     }
@@ -2940,6 +3265,7 @@ impl<'a> FnEmit<'a> {
         }
         let parts = rokc_mir::part_stores(b);
         for (i, s) in b.stmts.iter().enumerate() {
+            self.link_before(b.id.0, i);
             match parts.get(&i) {
                 Some(part) => self.emit_part_store(s, part),
                 None => self.emit_stmt(s),
@@ -2957,6 +3283,7 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
+        self.link_before(b.id.0, usize::MAX);
         self.emit_terminator(b.id.0, &b.terminator);
     }
 
@@ -4190,6 +4517,12 @@ impl<'a> FnEmit<'a> {
                 ret.unwrap_or_else(|| "()".to_owned())
             )
         } else {
+            // A rok body taking `rok_tls`: its thunk (`emit_thunks`),
+            // since a function value's callers pass none.
+            if self.fns[&callee].tls {
+                self.thunks.insert(callee);
+                name.push_str(".v");
+            }
             mlir_fn_signature(args, ret, self.target)
         };
         let _ = writeln!(self.body, "    {typed} = func.constant @{name} : {sig}");
@@ -4621,8 +4954,11 @@ impl<'a> FnEmit<'a> {
         // Each argument at the callee's parameter type, so the operand
         // list matches the declaration.
         let into = self.sret_into.is_some();
-        let (arg_vals, sret) = self.rok_call_args(args, &sig.params, &sig.ret);
-        let (arg_tys, _) = rok_fn_types(&sig.params, &sig.ret, self.target);
+        let (mut arg_vals, sret) = self.rok_call_args(args, &sig.params, &sig.ret);
+        if sig.tls {
+            arg_vals.push(self.tls_base());
+        }
+        let (arg_tys, _) = sig.rok_types(self.target);
         let (name, list, tys) = (&sig.name, arg_vals.join(", "), arg_tys.join(", "));
         let scopes = self.call_scopes(callee, args);
         if let Some(r) = sret {

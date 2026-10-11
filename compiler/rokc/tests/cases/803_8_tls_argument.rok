@@ -1,0 +1,52 @@
+// spec: §8.3.8 §8.6.11
+// needs: threads
+// expect-exit: 0
+// gc-stress: 3
+// expect-stdout:
+// named 12 closure 15
+// stored 9 8
+// sorted 1 2 3 5 8
+// threads 0 2 4 6
+// gen 1 4 9
+
+// A rok body takes its caller's `rok_tls` address; a function value of
+// it (a named function, a closure, one the library calls back or a new
+// thread starts with) goes through a thunk that reads it. Every
+// allocation may collect, so a wrong thread state shows.
+use rok::std::thread;
+
+fn twice(x: i64) -> i64 { x * 2 }
+
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { f(x) }
+
+struct Ops { f: fn(i64) -> i64; g: fn(i64) -> i64; }
+
+fn tag(x: i64) -> str { f"t{x}" }
+
+yield fn squares(n: i64) -> i64 {
+    for i in 1..n + 1 { yield i * i; }
+}
+
+fn main() -> i32 {
+    let k = 9i64;
+    let add = |x: i64| x + k;
+    println(f"named {apply(twice, 6)} closure {apply(add, 6)}");
+    let ops = Ops { f: twice, g: |x: i64| x - 1 };
+    println(f"stored {(ops.g)(10)} {(ops.f)(4)}");
+    let xs: List<i64> = [5, 3, 8, 1, 2];
+    xs.sort_by(|a: i64, b: i64| a.cmp(b));
+    let line = "sorted";
+    for x in xs { line = f"{line} {tag(x).len() as i64 - 2 + x}"; }
+    println(line);
+    let hs: List<thread::JoinHandle<i64>> = [];
+    for i in 0..4i64 {
+        hs.push(thread::spawn(|| { let s = tag(i); twice(i) + s.len() as i64 - 2 }));
+    }
+    let t = "threads";
+    for h in hs { t = f"{t} {try! h.join()}"; }
+    println(t);
+    let g = "gen";
+    for s in squares(3) { g = f"{g} {s}"; }
+    println(g);
+    0
+}

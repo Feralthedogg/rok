@@ -259,6 +259,17 @@ impl FnFacts {
             .and_then(|n| n.strip_suffix(MONO_MARK))
             .unwrap_or(name)
     }
+
+    /// Whether the function's rok-ABI body takes its caller's `rok_tls`
+    /// block address as a hidden last argument (803 §8.3.8): every body
+    /// but the `any` dispatcher and an `#[export_name]` rok function,
+    /// which are reached by symbol from outside and read TLS themselves.
+    #[must_use]
+    pub fn takes_tls(&self) -> bool {
+        self.linkage != Linkage::Extern
+            && self.role != FnRole::AnyDispatcher
+            && !(self.abi == Abi::Rok && self.export_name.is_some())
+    }
 }
 
 /// Callee form after name resolution.

@@ -152,7 +152,9 @@ fn op(text: &str) -> Op<'_> {
         let n = r
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '$'))
             .unwrap_or(r.len());
-        refs.push(&r[..n]);
+        // A function value's thunk (`<f>.v`) stands for `f`.
+        let name = &r[..n];
+        refs.push(name.strip_suffix(".v").unwrap_or(name));
         rest = &r[n..];
     }
     let name = refs.first().copied().unwrap_or("");

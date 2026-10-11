@@ -80,9 +80,10 @@
 //! and reads as the default ([`rokr_common::env_knob`]).
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
-//! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` on
-//! entry and unlinks it on every return; each slot is the *address* of a
-//! word that holds a GC reference (0 = none).
+//! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` before
+//! the first safepoint of each path and unlinks it on every return of a
+//! path that linked it; each slot is the *address* of a word that holds a
+//! GC reference (0 = none).
 //!
 //! Children (802): `type_id → ScanTable` registered by
 //! [`register_type`] ([`for_each_ref`]): `STRONG_REF` / `INTERIOR_REF`

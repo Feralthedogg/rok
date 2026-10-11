@@ -46,7 +46,7 @@ use rokc_mir::{
     Terminator,
 };
 
-use crate::emit::{quiet_functions, reentrant_functions, scan_table};
+use crate::emit::{entered_functions, quiet_functions, reentrant_functions, scan_table};
 use crate::mangle::{self, Pkgs};
 
 /// Library generic instances are spread over this many units per module.
@@ -84,6 +84,7 @@ pub struct Core {
     pub renamed: HashSet<FunctionId>,
     pub quiet: Arc<HashSet<FunctionId>>,
     pub reentrant: Arc<HashSet<FunctionId>>,
+    pub entered: Arc<HashSet<FunctionId>>,
     /// Lazy statics: name → symbol of the initializer.
     pub lazy_statics: HashMap<String, String>,
     /// Per unit: the functions it refers to but does not define
@@ -342,6 +343,7 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         .collect();
     let quiet = quiet_functions(module, &pkgs, &module.target);
     let reentrant = reentrant_functions(module);
+    let entered = entered_functions(module);
 
     // GC types: every table the code allocates with, sorted.
     let fn_tables: HashMap<FunctionId, Vec<Vec<u32>>> = module
@@ -365,6 +367,7 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         renamed,
         quiet: Arc::new(quiet),
         reentrant: Arc::new(reentrant),
+        entered: Arc::new(entered),
         lazy_statics: pkgs.lazy_statics.clone(),
         refs: refs.into_iter().map(|r| r.into_iter().collect()).collect(),
         statics,
@@ -614,13 +617,14 @@ impl Key<'_> {
         let (s, c) = (self.s, self.s.core);
         let _ = write!(
             self.b,
-            "{} {:?} {} {} {} {} {} (",
+            "{} {:?} {} {} {} {} {} {} (",
             s.symbols[&f.id],
             f.facts,
             c.shared.contains(&f.id),
             c.renamed.contains(&f.id),
             c.quiet.contains(&f.id),
             c.reentrant.contains(&f.id),
+            c.entered.contains(&f.id),
             s.init_fns.contains(&f.id),
         );
         for t in &f.param_tys {

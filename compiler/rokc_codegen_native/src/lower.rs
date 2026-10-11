@@ -35,6 +35,9 @@ pub struct Sig {
     pub c_entry: Option<SymId>,
     /// Defined in this object (else reached through the GOT).
     pub local: bool,
+    /// The rok body takes the caller's `rok_tls` address last
+    /// (`FnFacts::takes_tls`).
+    pub tls: bool,
 }
 
 /// Module-wide state the functions share.
@@ -64,6 +67,8 @@ pub struct Ctx<'a> {
     pub reentrant: &'a HashSet<FunctionId>,
     /// Unsupported constructs, at their function (dummy outside one).
     pub errors: Vec<(rokc_diagnostic::Span, String)>,
+    /// Functions whose function-value thunk (`thunk`) this object needs.
+    pub thunks: std::collections::BTreeSet<FunctionId>,
 }
 
 impl Ctx<'_> {
@@ -115,6 +120,8 @@ pub struct FnLower<'c, 'a> {
     block_params: HashMap<u32, Vec<LocalId>>,
     /// This thread's `rok_tls` block address (filled in the prologue).
     tls: Option<Slot>,
+    /// In `lower` (not a generated function): the prologue fills `tls`.
+    lowering: bool,
     /// The shadow-stack frame: its slot and the TLS slot of the top.
     gc_frame: Option<(Slot, Mem)>,
     rooted: HashSet<u32>,
@@ -201,6 +208,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
             block_label,
             block_params,
             tls: None,
+            lowering: false,
             gc_frame: None,
             rooted: HashSet::new(),
             deaths: rokc_mir::Deaths::default(),
@@ -300,6 +308,26 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let base = *self.tls.get_or_insert_with(|| out.slot(8, 8));
         let off = slot.offset(self.pw() / 8);
         Mem::Ind(base, i32::try_from(off).expect("TLS offset"))
+    }
+
+    /// The `rok_tls` address a rok body takes last: this function's
+    /// (filled in the prologue), else (a generated function) read here.
+    fn tls_val(&mut self) -> Val {
+        let base = if let Some(s) = self.tls {
+            s
+        } else {
+            let s = self.out.slot(8, 8);
+            self.tls = Some(s);
+            if !self.lowering {
+                let sym = self.c.sym("rok_tls");
+                self.push(Inst::Tls {
+                    dst: Mem::Frame(s, 0),
+                    sym,
+                });
+            }
+            s
+        };
+        Val::S(V::M(Mem::Frame(base, 0)), K::I64)
     }
 
     fn call_rt(&mut self, name: &str, args: &[(V, K)], ret: Option<(Mem, K)>) {
@@ -853,7 +881,26 @@ impl<'c, 'a> FnLower<'c, 'a> {
         args: &[Val],
         dst: Option<Mem>,
     ) {
-        self.call_rok(Callee::Sym(sym), params, ret, args, dst);
+        self.call_rok(Callee::Sym(sym), params, ret, args, dst, false);
+    }
+
+    /// A call of the rok body `sig` (`call_sym`, `rok_tls` passed if it
+    /// takes it).
+    pub(crate) fn call_body(&mut self, sig: &Sig, args: &[Val], dst: Option<Mem>) {
+        self.call_rok(
+            Callee::Sym(sig.sym),
+            &sig.params,
+            &sig.ret,
+            args,
+            dst,
+            sig.tls,
+        );
+    }
+
+    /// A call of a rok body `sym` without arguments that takes `rok_tls`
+    /// (the user's `main`, a static's initializer).
+    pub(crate) fn call_tls(&mut self, sym: SymId, ret: &MirTy, dst: Option<Mem>) {
+        self.call_rok(Callee::Sym(sym), &[], ret, &[], dst, true);
     }
 
     /// A call to a runtime function codegen makes on its own: as
@@ -913,7 +960,12 @@ impl<'c, 'a> FnLower<'c, 'a> {
     /// argument (`abi::rok_by_ref`) is a pointer word; a by-address
     /// result comes back through a leading pointer (`true`), nothing
     /// returned.
-    fn rok_shapes(&self, params: &[MirTy], ret: &MirTy) -> (Vec<Shape>, Option<Shape>, bool) {
+    fn rok_shapes(
+        &self,
+        params: &[MirTy],
+        ret: &MirTy,
+        tls: bool,
+    ) -> (Vec<Shape>, Option<Shape>, bool) {
         let t = self.c.t;
         let lead = rok_by_ref(ret, t);
         let mut shapes = Vec::new();
@@ -927,6 +979,9 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 cc::shape(p, t)
             }
         }));
+        if tls {
+            shapes.push(cc::coerced("!llvm.ptr"));
+        }
         let rs = (*ret != MirTy::Unit && !lead).then(|| cc::shape(ret, t));
         (shapes, rs, lead)
     }
@@ -953,9 +1008,10 @@ impl<'c, 'a> FnLower<'c, 'a> {
         ret: &MirTy,
         args: &[Val],
         dst: Option<Mem>,
+        tls: bool,
     ) {
         let t = self.c.t;
-        let (shapes, rs, lead) = self.rok_shapes(params, ret);
+        let (shapes, rs, lead) = self.rok_shapes(params, ret, tls);
         let locs = cc::assign(self.c.conv, &shapes, rs.as_ref(), false, None);
         let dst = match (dst, ret) {
             (_, MirTy::Unit) => None,
@@ -976,6 +1032,10 @@ impl<'c, 'a> FnLower<'c, 'a> {
             } else {
                 vals.push((*v, ty));
             }
+        }
+        if tls {
+            let v = self.tls_val();
+            vals.push((v, &word));
         }
         let mut a = Vec::new();
         for ((v, ty), parts) in vals.into_iter().zip(&locs.params) {
@@ -1235,6 +1295,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 &MirTy::Prim(PrimTy::Usize),
                 &[Val::S(V::M(p), w)],
                 Some(o.at(self.pw() / 8)),
+                false,
             );
         }
         if let (MirTy::Prim(PrimTy::Bool), Some(o), RetAbi::Direct) = (ret, out, &abi.ret) {
@@ -1611,9 +1672,20 @@ impl<'c, 'a> FnLower<'c, 'a> {
     pub fn lower(mut self) -> Func {
         let t = self.c.t;
         let f = self.f;
-        // Incoming parameters.
-        let (shapes, rs, lead) = self.rok_shapes(&f.param_tys, &f.ret_ty);
+        self.lowering = true;
+        // Incoming parameters, the caller's `rok_tls` address last.
+        let tls = self.c.fns.get(&f.id).is_some_and(|s| s.tls);
+        let (shapes, rs, lead) = self.rok_shapes(&f.param_tys, &f.ret_ty, tls);
         let locs = cc::assign(self.c.conv, &shapes, rs.as_ref(), false, None);
+        if tls {
+            let s = self.out.slot(8, 8);
+            self.tls = Some(s);
+            let part = locs.params.last().expect("the rok_tls address")[0];
+            self.push(Inst::Param {
+                part,
+                dst: Mem::Frame(s, 0),
+            });
+        }
         let (mut param_locs, mut param_shapes) = (locs.params.iter(), shapes.iter());
         if lead {
             // The result's address: returned through like a hidden one.
@@ -1692,7 +1764,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
         }
         self.emit_panics();
         // The TLS block's address, right after the parameters.
-        if let Some(s) = self.tls {
+        if let Some(s) = self.tls.filter(|_| !tls) {
             let sym = self.c.sym("rok_tls");
             self.out.insts.insert(
                 head,
@@ -2036,7 +2108,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                     .zip(&sig.params)
                     .map(|(a, ty)| self.val(a, ty))
                     .collect();
-                self.call_rok(Callee::Sym(sig.sym), &sig.params, &sig.ret, &vals, dst);
+                self.call_body(sig, &vals, dst);
             }
             RValue::StructInit { ty, fields } => {
                 let d = out(self, ty);
@@ -2172,6 +2244,13 @@ impl<'c, 'a> FnLower<'c, 'a> {
                 let sig = &self.c.fns[callee];
                 let (sym, local) = match sig.c_entry {
                     Some(e) => (e, true),
+                    // A function value's callers pass no `rok_tls`: its
+                    // thunk (`module::thunk`).
+                    None if sig.tls => {
+                        let name = format!("{}.v", self.c.obj.syms[sig.sym as usize].name);
+                        self.c.thunks.insert(*callee);
+                        (self.c.sym(&name), true)
+                    }
                     None => (sig.sym, sig.local),
                 };
                 if let Some(d) = dst {
@@ -2199,7 +2278,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
                             .zip(arg_tys)
                             .map(|(a, ty)| self.val(a, ty))
                             .collect();
-                        self.call_rok(Callee::Ptr(cm), arg_tys, ret_ty, &vals, dst);
+                        self.call_rok(Callee::Ptr(cm), arg_tys, ret_ty, &vals, dst, false);
                     }
                     Abi::C { variadic, .. } => {
                         let Some(fa) = classify(

@@ -270,3 +270,69 @@ fn ops_follow_operand_types() {
     assert!(body(&one(PrimOp::Shr, &I32), "f").contains("arith.shrsi"));
     assert!(body(&one(PrimOp::Shr, &u32_), "f").contains("arith.shrui"));
 }
+
+/// A frame links before the first safepoint of each path (804 §8.4.7):
+/// not on a path that reaches none, before a loop whose back edge polls,
+/// and at the end of a block whose successor is linked from elsewhere.
+#[test]
+fn frames_link_before_the_first_safepoint() {
+    use crate::emit::plan_links;
+    let nop = || Statement::StorageDead(LocalId(0));
+    let goto = |t| Terminator::Goto {
+        target: BlockId(t),
+        args: vec![],
+    };
+    let branch = |a, b| Terminator::If {
+        cond: copy(0),
+        then_bb: BlockId(a),
+        then_args: vec![],
+        else_bb: BlockId(b),
+        else_args: vec![],
+    };
+    let ret = || Terminator::Return(None);
+    let f = |blocks| function(0, "f", (&I32, &MirTy::Unit), vec![], blocks);
+
+    // 0 → 1 (returns) | 2 (safepoint at 1, returns).
+    let g = f(vec![
+        block(0, vec![nop()], branch(1, 2)),
+        block(1, vec![nop()], ret()),
+        block(2, vec![nop(), nop()], ret()),
+    ]);
+    let l = plan_links(&g, |p, i| p == 2 && i == 1, |_| false).unwrap();
+    assert_eq!(l.at.len(), 1);
+    assert_eq!(l.at[&2], 1);
+    assert!(l.linked.contains(&2) && !l.linked.contains(&1) && !l.linked.contains(&0));
+
+    // 0 → 1 (header) → 2 (back edge, polls) → 1 | 3: linked before the
+    // loop, at the end of 0.
+    let g = f(vec![
+        block(0, vec![], goto(1)),
+        block(1, vec![], branch(2, 3)),
+        block(2, vec![nop()], goto(1)),
+        block(3, vec![], ret()),
+    ]);
+    let l = plan_links(&g, |_, _| false, |b| b == 2).unwrap();
+    assert_eq!(l.at.len(), 1);
+    assert_eq!(l.at[&0], usize::MAX);
+    assert!((0..4).all(|b| l.linked.contains(&b)));
+
+    // A join of a linked and an unlinked path: the unlinked one links at
+    // its end.
+    let g = f(vec![
+        block(0, vec![], branch(1, 2)),
+        block(1, vec![nop()], goto(3)),
+        block(2, vec![], goto(3)),
+        block(3, vec![], ret()),
+    ]);
+    let l = plan_links(&g, |p, _| p == 1, |_| false).unwrap();
+    assert_eq!(l.at[&1], 0);
+    assert_eq!(l.at[&2], usize::MAX);
+    assert!(l.linked.contains(&3) && !l.linked.contains(&0));
+
+    // A back edge into the entry block: linked at entry.
+    let g = f(vec![
+        block(0, vec![nop()], branch(0, 1)),
+        block(1, vec![], ret()),
+    ]);
+    assert!(plan_links(&g, |_, _| true, |_| false).is_none());
+}

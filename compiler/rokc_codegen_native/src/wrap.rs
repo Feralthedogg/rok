@@ -112,7 +112,7 @@ impl FnLower<'_, '_> {
         let reenter = self.c.sym("rok_native_reenter");
         self.call_sym(reenter, &[], &i32_, &[], Some(parked));
         let r = (sig.ret != MirTy::Unit).then(|| self.tmp(&sig.ret));
-        self.call_sym(sig.sym, &sig.params, &sig.ret, &vals, r);
+        self.call_body(sig, &vals, r);
         let resume = self.c.sym("rok_native_resume");
         let pv = self.val_of(parked, &i32_);
         self.call_sym(resume, &[i32_], &MirTy::Unit, &[pv], None);
@@ -167,7 +167,7 @@ impl FnLower<'_, '_> {
         self.call_sym(init, &[], &MirTy::Unit, &[], None);
         self.call_sym(register, &[], &MirTy::Unit, &[], None);
         let r = (*ret != MirTy::Unit).then(|| self.tmp(ret));
-        self.call_sym(user, &[], ret, &[], r);
+        self.call_tls(user, ret, r);
         let down = self.c.sym("rok_runtime_shutdown");
         self.call_sym(down, &[], &MirTy::Unit, &[], None);
         let part = Part {
@@ -209,7 +209,7 @@ impl FnLower<'_, '_> {
     pub fn repl_cell(mut self, user: SymId, ret: &MirTy, register: SymId) -> Func {
         self.call_sym(register, &[], &MirTy::Unit, &[], None);
         let r = (*ret != MirTy::Unit).then(|| self.tmp(ret));
-        self.call_sym(user, &[], ret, &[], r);
+        self.call_tls(user, ret, r);
         self.push(Inst::Ret { vals: Vec::new() });
         self.out
     }
@@ -271,7 +271,7 @@ impl FnLower<'_, '_> {
         });
         self.push(Inst::Label(run));
         let v = (*ty != MirTy::Unit).then(|| self.tmp(ty));
-        self.call_sym(init, &[], ty, &[], v);
+        self.call_tls(init, ty, v);
         if let Some(v) = v {
             let a = self.tmp_k(K::I64);
             self.push(Inst::Sym {

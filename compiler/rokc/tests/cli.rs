@@ -2427,7 +2427,7 @@ fn prebuilt_dependency_is_linked_and_instantiated() {
     let info = text(&out.stdout);
     for want in [
         "Package: geo\n",
-        "ROKHIR version: 6\n",
+        "ROKHIR version: 7\n",
         "Exports:\n",
         "  pub fn check(x: i32) throws -> i32\n",
         "Generic items (ROKHIR):\n  pub struct Stack<T>\n",
@@ -2518,7 +2518,7 @@ fn stale_rokhir_is_rejected() {
     // summaries (none: `one` has no value that is not `Sync`).
     let word = |i: usize| u32::from_le_bytes(good[i..i + 4].try_into().unwrap());
     assert_eq!(&good[..4], b"ROKH");
-    assert_eq!((word(4), word(8)), (6, 0));
+    assert_eq!((word(4), word(8)), (7, 0));
     let varint = |at: &mut usize| -> usize {
         let extra = good[*at].leading_ones() as usize;
         let mut v = usize::from(good[*at] & 0xffu8.checked_shr(extra as u32 + 1).unwrap_or(0));
@@ -3891,6 +3891,25 @@ fn emitted_code_follows_the_runtime_abi() {
     for unwanted in ["invoke ", "landingpad", "personality", "addrspace("] {
         assert!(!ll.contains(unwanted), "{unwanted:?} in the LLVM IR");
     }
+    // A rok body takes its caller's `rok_tls` address last (8.3.8): only
+    // what is entered from outside rok (the C `main`; a lazy static's
+    // initializer, off the hot path) reads TLS.
+    let readers: Vec<&str> = ll
+        .split("\ndefine ")
+        .skip(1)
+        .filter(|d| d[..d.find("\n}").unwrap_or(d.len())].contains("@llvm.threadlocal.address"))
+        .map(|d| d.lines().next().unwrap_or_default())
+        .filter(|d| !d.contains("_.init("))
+        .collect();
+    assert!(
+        readers.len() == 1 && readers[0].contains("@main("),
+        "TLS read outside the C `main`: {readers:#?}"
+    );
+    assert!(
+        ll.lines()
+            .any(|l| l.starts_with("define ") && l.contains("_keep_(i64 %0, ptr %1)")),
+        "`keep` takes no `rok_tls` address"
+    );
     assert!(
         ll.lines()
             .any(|l| l.starts_with("define ") && l.contains("_len_0of_(") && l.contains("ptr")),
@@ -3959,6 +3978,46 @@ fn cold_functions_stay_out_of_line() {
             .any(|l| l.contains("_slow_") && (l.contains("bl\t") || l.contains("call"))),
         "`#[cold]` was inlined"
     );
+}
+
+/// The shadow-stack frame links before the first safepoint of each path
+/// (804 §8.4.7): `walk`'s two returns that reach none neither link nor
+/// unlink it, so its slot at the top of the stack is stored twice (the
+/// link, the one unlink).
+// spec: §8.4.7
+#[test]
+fn frames_link_only_on_paths_that_reach_a_safepoint() {
+    let Some(_env) = setup() else { return };
+    let dir = scratch("lazylink");
+    let pkg = dir.join("lazylink");
+    let src = "fn walk(xs: List<str>, i: usize, acc: str) -> str {\n\
+               \x20   if i >= xs.len() { return acc; }\n\
+               \x20   if i % 3 == 0 { let s = f\"{acc}{xs[i]}\"; return walk(xs, i + 1, s); }\n\
+               \x20   acc\n\
+               }\n\
+               fn main() { println(walk([\"a\", \"b\"], 0, \"\")); }\n";
+    put(pkg.join("src/main.rok"), src).unwrap();
+    assert_exit(&rokc(None, &pkg, &["-q", "emit", "--emit=mlir"]), 0);
+    let mlir = fs::read_to_string(pkg.join("target/debug/build/lazylink.mlir")).unwrap();
+    let start = mlir.find("__walk_(").expect("no walk");
+    let start = mlir[..start].rfind("func.func").unwrap();
+    let walk = &mlir[start..start + mlir[start..].find("\n  }").unwrap()];
+    assert_eq!(walk.matches("func.return").count(), 3, "{walk}");
+    let top = walk
+        .lines()
+        .find_map(|l| {
+            let (v, rest) = l.trim().split_once(" = ")?;
+            rest.starts_with("llvm.getelementptr inbounds")
+                .then_some(())
+                .filter(|()| rest.contains("[0] : (!llvm.ptr) -> !llvm.ptr, i8"))
+                .map(|()| v)
+        })
+        .expect("no shadow-stack top");
+    let stores = walk
+        .lines()
+        .filter(|l| l.trim().starts_with("llvm.store") && l.contains(&format!(", {top} :")))
+        .count();
+    assert_eq!(stores, 2, "{walk}");
 }
 
 /// Every C symbol the runtime defines is `rok_`-prefixed (8.5.8), so it

@@ -133,6 +133,7 @@ pub fn compile(
                 c: sig_c,
                 c_entry,
                 local: false,
+                tls: f.facts.takes_tls(),
             },
         );
     }
@@ -233,6 +234,7 @@ pub fn compile(
         quiet: &quiet,
         reentrant: &reentrant,
         errors: Vec::new(),
+        thunks: std::collections::BTreeSet::new(),
     };
     let mut funcs: Vec<(Func, bool, bool)> = Vec::new();
 
@@ -248,6 +250,21 @@ pub fn compile(
             None => pkgs.link.in_prebuilt(f.path()),
         } && !shared(f.id);
         funcs.push((func, !private, weak));
+    }
+    // Thunks of the function values taken (lowering one takes none).
+    for id in std::mem::take(&mut ctx.thunks) {
+        let sig = &fns[&id];
+        let name = format!("{}.v", ctx.obj.syms[sig.sym as usize].name);
+        let sym = ctx.sym(&name);
+        let mut f = thunk(&name, id, sig);
+        // A debugger shows a function value as the function itself.
+        if let Some(g) = module.functions.iter().find(|g| g.id == id) {
+            f.name.clone_from(&g.name);
+            f.span = g.span;
+            let at = rokc_mir::Statement::Loc(g.span, rokc_mir::Scope::default());
+            f.blocks[0].stmts.insert(0, at);
+        }
+        funcs.push((FnLower::new(&mut ctx, &f, sym).lower(), false, false));
     }
     for (id, a, exported, span) in &c_entries {
         let sig = &fns[id];
@@ -282,6 +299,44 @@ pub fn compile(
         gc_types,
         errors,
     }
+}
+
+/// `<f>.v`, a function value of rok body `id`: takes `sig`'s parameters
+/// and passes them on, with this thread's `rok_tls` address.
+fn thunk(name: &str, id: FunctionId, sig: &Sig) -> rokc_mir::MirFunction {
+    use rokc_ir_common::LocalId;
+    use rokc_mir::{BasicBlock, LocalDecl, Operand, RValue, Statement, Terminator};
+    let n = u32::try_from(sig.params.len()).expect("parameter count");
+    let mut f = wrap::shell(name);
+    f.params = (0..n).map(LocalId).collect();
+    f.param_tys.clone_from(&sig.params);
+    f.ret_ty = sig.ret.clone();
+    f.locals = sig
+        .params
+        .iter()
+        .chain([&sig.ret])
+        .zip(0..)
+        .map(|(ty, i)| LocalDecl {
+            id: LocalId(i),
+            name: None,
+            ty: ty.clone(),
+        })
+        .collect();
+    let ret = (sig.ret != MirTy::Unit).then_some(Operand::Copy(LocalId(n)));
+    f.blocks = vec![BasicBlock {
+        id: rokc_ir_common::BlockId(0),
+        params: Vec::new(),
+        stmts: vec![Statement::Assign {
+            target: LocalId(n),
+            rvalue: RValue::Call {
+                callee: id,
+                args: (0..n).map(|i| Operand::Copy(LocalId(i))).collect(),
+                ret_ty: sig.ret.clone(),
+            },
+        }],
+        terminator: Terminator::Return(ret),
+    }];
+    f
 }
 
 /// What the program has once: the C `main`, the statics,

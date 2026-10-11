@@ -1,0 +1,83 @@
+// spec: §8.4.7 §8.4.2 §7.4.1
+// expect-exit: 0
+// gc-stress: 1
+// expect-stdout:
+// walk 86
+// throws 11 7 33 9 55 11
+// loop 0a2a4a6a8a
+// gen x0 x1 x2 x3
+// async x5
+// deep 3000
+
+// A frame links before the first safepoint of each path (8.4.7): roots
+// held only on the paths that allocate, a throw past a linked frame, a
+// loop whose polling back edge links it before the loop, and frames
+// crossing generator and async suspensions. Every allocation collects
+// and moves what it may, so a root missing from a linked frame shows.
+
+struct Bad { at: i64; }
+
+fn walk(xs: List<str>, i: usize, acc: str) -> str {
+    if i >= xs.len() { return acc; }
+    if i % 3 == 0 {
+        let s = f"{acc}{xs[i]}";
+        return walk(xs, i + 1, s);
+    }
+    acc
+}
+
+fn pick(xs: List<str>, i: i64) throws (Bad) -> str {
+    if i % 2 == 0 { throw Bad { at: i }; }
+    let s = f"{xs[i as usize]}{i}";
+    s
+}
+
+fn loop_some(n: i64) -> str {
+    let out = "";
+    for i in 0..n {
+        if i % 2 == 0 { out = f"{out}{i}a"; }
+    }
+    out
+}
+
+yield fn names(n: i64) -> str {
+    for i in 0..n {
+        if i >= 0 { yield f"x{i}"; }
+    }
+}
+
+async fn later(k: i64) -> str {
+    let s = f"x{k}";
+    s
+}
+
+fn deep(n: i64, tag: str) -> i64 {
+    if n == 0 { return tag.len() as i64; }
+    if n % 100 == 0 {
+        let t = f"{tag}";
+        return deep(n - 1, t) + 1;
+    }
+    deep(n - 1, tag) + 1
+}
+
+async fn main() -> i32 {
+    let xs: List<str> = [];
+    for i in 0..30i64 { xs.push(f"{i}"); }
+    let t = 0usize;
+    for r in 0..200usize { t += walk(xs, r % 7, "").len(); }
+    println(f"walk {t}");
+    let line = "throws";
+    for i in 1..7i64 {
+        let s = try pick(xs, i) catch e: Bad { f"{e.at + 5}" };
+        line = f"{line} {s}";
+    }
+    println(line);
+    println(f"loop {loop_some(10)}");
+    let g = "gen";
+    for s in names(4) { g = f"{g} {s}"; }
+    println(g);
+    let a = await later(5);
+    println(f"async {a}");
+    println(f"deep {deep(2999, "z")}");
+    return 0;
+}
