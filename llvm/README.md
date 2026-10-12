@@ -70,9 +70,13 @@ CC=clang` gives it. Nothing extra is fetched either way.
 An MSVC-ABI build names functions by MSVC mangling, which that profile
 does not have. `build.ps1` uses `rok-msvc.profdata.tar.xz` instead,
 with clang-cl (`CXX=clang-cl`) when it can read it; cl reads no clang
-profile. That profile is not in the repository yet: `train-pgo.ps1`
-makes it on a Windows host (below), and until then Windows builds have
-no PGO.
+profile, made by `train-pgo.ps1` (below) on a Windows x86_64 host; the
+dynamic CRT and clang-cl 22 read it (indexed v12). On that host (8
+cores, 2026-10-19), rokc's `-O2` builds of `bench/` as objects take
+6.97 s (best of 5) against 7.83 s with clang-cl and no profile (−11%)
+and 8.92 s with cl (−22%); the cases training left out, built and
+linked one after another, 66.1 s against 68.7 s and 71.1 s (best of 3).
+The file is 2 MB.
 
 `llvm/train-pgo.sh [profile...]` trains on the host (macOS, Xcode's
 clang; or Linux, clang and its llvm-profdata): an instrumented LLVM
@@ -100,7 +104,8 @@ and 0.5% on macOS, where the other host's alone costs 2.8% and 0.9%;
 the merged file is 3 MB.
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other
-Windows architecture) into `rok-msvc.profdata.tar.xz`. `train-pgo.sh`
+Windows architecture) into `rok-msvc.profdata.tar.xz` (26 min for the
+instrumented LLVM and 5.5 for the rest on 8 cores). `train-pgo.sh`
 peaks at ~5 GB of scratch space and takes about 35 minutes on a 10-core
 Apple Silicon machine (55 on a 16-thread x86_64 laptop with
 `ROK_LLVM_JOBS=12`). Regenerate after a change of the pinned LLVM or

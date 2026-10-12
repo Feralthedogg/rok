@@ -10,7 +10,8 @@
 # Environment: ROK_HOME, ROK_VERSION (default below), ROK_DIST (where
 # releases are downloaded from). Nothing else is needed: rokc links with
 # its own linker and import libraries (no MSVC or Windows SDK).
-param([string]$Archive, [string]$Version)
+# -NoModifyPath leaves the user's PATH alone and says what to add.
+param([string]$Archive, [string]$Version, [switch]$NoModifyPath)
 $ErrorActionPreference = 'Stop'
 
 if (-not $Version) { $Version = if ($env:ROK_VERSION) { $env:ROK_VERSION } else { '0.1.0' } }
@@ -75,7 +76,9 @@ Write-Output "rok $full is installed in $home_"
 $binDir = Join-Path $home_ 'bin'
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 $parts = if ($userPath) { $userPath.Split(';') } else { @() }
-if ($parts -notcontains $binDir) {
+if ($NoModifyPath) {
+    if ($parts -notcontains $binDir) { Write-Output "Add $binDir to your PATH to use it." }
+} elseif ($parts -notcontains $binDir) {
     [Environment]::SetEnvironmentVariable('Path', (@($binDir) + $parts | Where-Object { $_ }) -join ';', 'User')
     Write-Output "Added $binDir to your PATH (new terminals see it)."
 }

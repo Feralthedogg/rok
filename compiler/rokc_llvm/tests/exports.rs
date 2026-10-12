@@ -149,6 +149,7 @@ fn the_def_file_filters_like_extract_symbols() {
         ),
         s("??_GPass@mlir@@UEAAPEAXI@Z", false),
         s("??_EPass@mlir@@UEAAPEAXI@Z", false),
+        s("??_C@_04IAIHIHKK@$$J0?$AA@", true),
         s("?helper@?A0x1b2c3d4e@mlir@@YAXXZ", false),
         s("?h@?A@mlir@@YAXXZ", false),
         s("?Add@mlir@@YAXXZ", false),

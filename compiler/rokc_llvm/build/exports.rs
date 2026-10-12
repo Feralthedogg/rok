@@ -142,7 +142,8 @@ pub const MAX_EXPORTS: usize = 65535;
 
 /// rokc.exe's module definition file for `syms` (name, is data), filtered
 /// as `llvm/utils/extract_symbols.py` does for MSVC: no deleting destructors
-/// (link.exe refuses to export them), nothing in an anonymous namespace,
+/// (link.exe refuses to export them), no string literals (clang-cl's are
+/// COMDATs; link.exe refuses those too), nothing in an anonymous namespace,
 /// x86's decoration of C names dropped. Data is exported `DATA`: the
 /// import library then has only `__imp_<name>`, so a plugin reference that
 /// would bind to a jump thunk fails its link rather than reading the
@@ -152,7 +153,7 @@ pub fn def_file(syms: &[(String, bool)], x86: bool) -> Result<String, String> {
         .iter()
         .filter_map(|(s, data)| {
             let name = if s.starts_with('?') {
-                if s.starts_with("??_G") || s.starts_with("??_E") || anonymous(s) {
+                if ["??_G", "??_E", "??_C@"].iter().any(|p| s.starts_with(p)) || anonymous(s) {
                     return None;
                 }
                 s.as_str()

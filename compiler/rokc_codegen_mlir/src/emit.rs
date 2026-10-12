@@ -741,13 +741,13 @@ impl Emitter {
             .flatten()
             .collect();
         // One declaration per symbol: extern functions may share one
-        // (`#[link_name]`).
+        // (`#[link_name]`), and an `extern "C"` declaration may name a
+        // prebuilt dependency's `#[export_name]` function.
         let mut declared: HashSet<&str> = HashSet::new();
         for &f in view {
             let sym = fns[&f.id].name.as_str();
             if f.facts.linkage != Linkage::Defined
-                && (defined.contains(sym)
-                    || (f.facts.linkage == Linkage::Extern && !declared.insert(sym)))
+                && (defined.contains(sym) || !declared.insert(sym))
             {
                 continue;
             }

@@ -2326,6 +2326,39 @@ fn prebuilt_dependency_passes_large_aggregates_by_address() {
     }
 }
 
+/// An `extern "C"` declaration of a prebuilt dependency's
+/// `#[export_name]` function is that function, on both back ends.
+// spec: §9.5.8
+#[test]
+fn extern_declaration_names_a_dependency_export() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("prebuilt-export");
+    fs::create_dir_all(dir.join("dep")).unwrap();
+    put(
+        dir.join("dep/src/lib.rok"),
+        "#[export_name(\"dep_sum\")]\npub fn sum(x: i64, y: i64) -> i64 { x + y }\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("app")).unwrap();
+    put(
+        dir.join("app/src/main.rok"),
+        "extern \"C\" { fn dep_sum(x: i64, y: i64) -> i64; }\n\
+         println(f\"{dep::sum(1, 2)} {unsafe { dep_sum(3, 4) }}\");\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &dir, &["build", "dep"]);
+    assert_exit(&out, 0);
+    let ext = format!("dep={}", dir.join("dep/target/debug/dep.rokhir").display());
+    for opts in [&["-O0"][..], &["-O0", "-C", "backend=llvm"], &["-O2"]] {
+        let mut args = vec!["run", "-q"];
+        args.extend_from_slice(opts);
+        args.extend_from_slice(&["app", "--extern", &ext]);
+        let out = rokc(Some(&env), &dir, &args);
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "3 7\n", "{opts:?}");
+    }
+}
+
 // spec: §9.1.3 §9.4.7 §9.4.8 §9.4.9 §9.4.10 §9.9.2 §9.9.14
 #[test]
 fn prebuilt_dependency_is_linked_and_instantiated() {

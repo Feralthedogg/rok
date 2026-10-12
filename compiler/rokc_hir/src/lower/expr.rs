@@ -7725,8 +7725,25 @@ fn lower_path_call(
         }
     }
 
+    call_item_value(ctx, p, &segs, &display, args, span)
+}
+
+/// The rest of a path call: a `const` / `static` of `fn(...)` type is
+/// called through its value; anything else is unknown.
+fn call_item_value(
+    ctx: &mut LowerCtx<'_>,
+    p: &AstPath,
+    segs: &[&str],
+    display: &str,
+    args: &[CallArg],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    if ctx.resolve_in(segs, false).is_some() || ctx.resolve_in(segs, true).is_some() {
+        let callee_h = lower_path(ctx, p, p.span);
+        return call_value(ctx, callee_h, args, span);
+    }
     discard_args(ctx, args);
-    if let Some(help) = (segs.len() > 1).then(|| ctx.import_help(&segs)).flatten() {
+    if let Some(help) = (segs.len() > 1).then(|| ctx.import_help(segs)).flatten() {
         return ctx.unknown_name(
             span,
             format!(
@@ -7736,7 +7753,7 @@ fn lower_path_call(
             Some(help),
         );
     }
-    let help = habit_call_help(ctx, &segs, args).or_else(|| ctx.value_help(&segs));
+    let help = habit_call_help(ctx, segs, args).or_else(|| ctx.value_help(segs));
     ctx.unknown_name(
         span,
         format!("cannot find function `{display}` in this scope"),

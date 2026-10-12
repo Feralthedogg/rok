@@ -46,6 +46,12 @@ case $(uname -s) in
     build_llvm="powershell -NoProfile -ExecutionPolicy Bypass -File llvm/build.ps1"
     build_libclang="powershell -NoProfile -ExecutionPolicy Bypass -File llvm/build-libclang.ps1"
     cache=$(cygpath -u "${ROK_LLVM_CACHE:-$LOCALAPPDATA/rok}")
+    # MSYS's /usr/bin/link (coreutils) would be rustc's link.exe.
+    [ -n "${VCToolsInstallDir-}" ] || {
+      echo "dist.sh: run from a Developer prompt for the MSVC build tools" >&2
+      exit 1
+    }
+    PATH=$(cygpath -u "${VCToolsInstallDir}bin/Host$VSCMD_ARG_HOST_ARCH/$VSCMD_ARG_TGT_ARCH"):$PATH
     ;;
   *)
     exe="" rt=librokr.a ext=tar.gz build_llvm=./llvm/build.sh build_libclang=./llvm/build-libclang.sh

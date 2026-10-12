@@ -98,9 +98,22 @@ here=$(cd "$(dirname "$0")" && pwd)
 # The host's executable suffix.
 exe() { case $(uname -s) in MINGW* | MSYS* | CYGWIN*) echo .exe ;; esac; }
 cd "$here/.."
-cache=${ROK_LLVM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok}
+case $(uname -s) in
+# MSYS paths: GNU tar takes `C:/..` for a remote host.
+MINGW* | MSYS* | CYGWIN*)
+	cache=$(cygpath -u "${ROK_LLVM_CACHE:-$LOCALAPPDATA/rok}")
+	prefix=$(cygpath -u "${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}")
+	# MSYS's /usr/bin/link (coreutils) would be rustc's link.exe.
+	[ -z "${VCToolsInstallDir-}" ] ||
+		PATH=$(cygpath -u "${VCToolsInstallDir}bin/Host$VSCMD_ARG_HOST_ARCH/$VSCMD_ARG_TGT_ARCH"):$PATH
+	;;
+*)
+	cache=${ROK_LLVM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok}
+	prefix=${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}
+	;;
+esac
 cc=${CC:-clang}
-lld=${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}/bin/ld.lld
+lld=$prefix/bin/ld.lld
 out=${CARGO_TARGET_DIR:-target}/lib/rok/targets
 host=$(rustc -vV | sed -n 's/^host: //p')
 sysroot=$(rustc --print sysroot)
@@ -182,7 +195,10 @@ deb() {
 	name=${pkg}_${version}_$darch.deb
 	fetch "glibc-$GLIBC/$name" "$url/$name" "$(echo "$DEB_SHA256" | sed -n "s/^${pkg}_$darch //p")"
 	mkdir -p "$into"
-	"$ar" p "$cache/glibc-$GLIBC/$name" data.tar.xz | tar -xJf - -C "$into"
+	# Not the symlinks to /lib/.. (the loader, unversioned .so): unused,
+	# and MSYS cannot make them.
+	"$ar" p "$cache/glibc-$GLIBC/$name" data.tar.xz |
+		tar -xJf - -C "$into" --exclude './lib64' --exclude './lib/ld-linux*' --exclude './usr/lib/*/*.so'
 	touch "$into/.$pkg"
 }
 

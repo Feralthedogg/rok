@@ -44,6 +44,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://rok-lang.org/install.ps1 | ie
 powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-x86_64-pc-windows-msvc.zip
 ```
 
+`-NoModifyPath` leaves the user's `PATH` alone.
+
 Then add `~/.rok/bin` to `PATH` (the script tells you how).
 
 ```sh

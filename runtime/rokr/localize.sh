@@ -39,9 +39,9 @@ case $magic in
     # (compiler_builtins' members, which rustc keeps out of LTO) becomes
     # `rokr.<name>` in every member, references included, so it never
     # meets another staticlib's. The intrinsics are weak externals
-    # already and keep their names.
+    # already and keep their names. x86 spells C names `_rok*`.
     "$bin/llvm-nm$exe" --defined-only --extern-only "$tmp"/x/*.o |
-      awk '$2 ~ /^[TDRB]$/ && $3 !~ /^rok/ { print $3, "rokr." $3 }' | sort -u >"$tmp/names"
+      awk '$2 ~ /^[TDRB]$/ && $3 !~ /^_?rok/ { print $3, "rokr." $3 }' | sort -u >"$tmp/names"
     for o in "$tmp"/x/*.o; do
       "$bin/llvm-objcopy$exe" --redefine-syms="$tmp/names" "$o"
     done
@@ -63,9 +63,13 @@ case $magic in
     ;;
   *)
     # Mach-O. ld64 -r ignores archive members even under -all_load: pass
-    # the objects. -S: no debug info either.
+    # the objects. -S: no debug info either. The exports are listed by
+    # name: ld64 refuses to export a private extern (`_rok_tls_addr`)
+    # that a `_rok_*` pattern matches; private externs become local.
+    nm -gmU "$tmp"/x/*.o | awk '$0 !~ /private external/ && $NF ~ /^_rok_/ { print $NF }' |
+      sort -u >"$tmp/exports"
     cc -r -nostdlib -arch "$(lipo -archs "$first")" "$tmp"/x/*.o \
-      -Wl,-exported_symbol,'_rok_*' -Wl,-S -o "$tmp/rokr.o"
+      -Wl,-exported_symbols_list,"$tmp/exports" -Wl,-S -o "$tmp/rokr.o"
     format=darwin
     ;;
 esac
