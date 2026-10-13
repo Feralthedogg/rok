@@ -5,12 +5,7 @@
 // 5 7 13 2 105 4 B 6
 // 57 13
 
-// Where an item in a block is seen: in a method and a trait default, in
-// a top-level block; before its declaration (hoisted); a nested fn of
-// the block from a local impl; a `let` shadowing a local `static`; a
-// cfg-dropped item; `use` of a local enum's variants; an inner `use`
-// shadowing a local name or a nested fn; the block's `use`s and
-// `const`s in its nested fn, field defaults, `static` and impl.
+// Where block-local items, `use`s and `const`s are visible.
 mod m {
     pub const fn three() -> i32 { 3 }
     pub struct Pt { pub x: i32; }

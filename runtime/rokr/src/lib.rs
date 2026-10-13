@@ -2,14 +2,13 @@
 //! inlining (TLAB bump, safepoint polls, write barriers) survives the
 //! codegen boundary.
 //!
-//! ABI symbols follow spec 008-abi/805; the convenience symbols at the
-//! bottom are the 805 §8.5.12 appendix (no ABI stability). The task
-//! executor itself is rok code (`rok::core::task`) on top of OS threads
-//! (`thread`). The GC (`rokr_gc`) is an Immix-style mark-region (703)
-//! with opportunistic evacuation and sticky mark-bit generations (704),
-//! without concurrent marking (705). Objects a root reaches never move,
-//! so a GC pointer a runtime function got as an argument stays valid
-//! across its allocations and blocking calls.
+//! ABI symbols follow 805; those at the bottom are the 805 §8.5.12
+//! appendix (no ABI stability). The executor is rok code
+//! (`rok::core::task`) over OS threads. The GC (`rokr_gc`) is an
+//! Immix-style mark-region (703) with opportunistic evacuation, sticky
+//! mark-bit generations (704) and optional concurrent marking (705).
+//! Objects a root reaches never move, so a GC pointer a runtime function
+//! got as an argument stays valid across its allocations.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(not(test), no_main)]
@@ -113,14 +112,10 @@ fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
 }
 
 // The precompiled `core` / `compiler_builtins` reference
-// `rust_eh_personality` even under `panic = "abort"`. Define it *weak* so
-// linking librokr.a next to another Rust staticlib or std does not hit a
-// duplicate-symbol error (a strong `#[no_mangle]` stub did).
-//
-// Cargo's archive also exports every non-generic `core` /
-// `compiler_builtins` / mangled Rust symbol; `localize.sh` (run by
-// dist.sh, targets/build.sh) keeps only `rok_*` global in the shipped
-// one (ELF: and the weakened `__*` intrinsics).
+// `rust_eh_personality` even under `panic = "abort"`. It is weak so
+// librokr.a can link next to another Rust staticlib or std.
+// `localize.sh` keeps only `rok_*` (and on ELF the weakened `__*`
+// intrinsics) global in the shipped archive.
 #[cfg(all(not(test), target_vendor = "apple"))]
 core::arch::global_asm!(
     ".globl _rust_eh_personality",
@@ -162,9 +157,7 @@ core::arch::global_asm!(
     "bx lr",
 );
 
-// ---------------------------------------------------------------------
 // 8.5.1 GC
-// ---------------------------------------------------------------------
 
 /// GC allocation (702 §7.2.3, 805 §8.5.1).
 ///
@@ -290,9 +283,7 @@ pub extern "C" fn rok_gc_stats_moved_bytes() -> u64 {
     rokr_gc::moved_bytes()
 }
 
-// ---------------------------------------------------------------------
 // 8.5.2 Runtime
-// ---------------------------------------------------------------------
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_runtime_init() {
@@ -381,9 +372,7 @@ pub extern "C" fn rok_thread_shutdown() {
     thread::thread_exit();
 }
 
-// ---------------------------------------------------------------------
 // 8.5.3 Coroutine
-// ---------------------------------------------------------------------
 
 /// "Almost identical to `rok_gc_alloc_slow`" (805 §8.5.3).
 #[unsafe(no_mangle)]
@@ -412,9 +401,7 @@ pub unsafe extern "C" fn rok_coro_unpark(frame: *mut u8) {
     unsafe { (hooks().unpark)(frame) };
 }
 
-// ---------------------------------------------------------------------
 // 8.5.4 Scheduler
-// ---------------------------------------------------------------------
 
 /// A GC object's address as a parking key: from now on the collector
 /// never moves it, so the key stays its own. Only for keys that outlive
@@ -452,9 +439,7 @@ pub extern "C" fn rok_time_boot_ns() -> i64 {
     rokr_common::sys::boot_ns()
 }
 
-// ---------------------------------------------------------------------
 // 8.5.5 I/O / timer
-// ---------------------------------------------------------------------
 
 // `rok_io_register` / `rok_timer_register` and 8.5.3's `rok_coro_park` /
 // `rok_coro_unpark` act on `rok::core::task`'s parking table and timers,
@@ -552,9 +537,7 @@ pub unsafe extern "C" fn rok_timer_register(deadline: u64, waker: *mut u8) {
     unsafe { (hooks().timer)(deadline, waker) };
 }
 
-// ---------------------------------------------------------------------
 // 8.5.6 Errors
-// ---------------------------------------------------------------------
 // `throw` / `try` / `catch` are value-based (a throwing function returns
 // an `is_err` flag with its payload) and need no runtime support. Only
 // an error escaping a throwing `main` reaches the runtime.
@@ -580,9 +563,7 @@ fn uncaught(parts: &[&[u8]]) -> ! {
     exit(1)
 }
 
-// ---------------------------------------------------------------------
 // 8.5.7 Diagnostics
-// ---------------------------------------------------------------------
 
 /// Unrecoverable panic: `thread '<name>' panicked:`, `msg` and `\n` to
 /// stderr, then exit 101.
@@ -640,9 +621,7 @@ pub extern "C" fn rok_panic_str(msg: RokStr) -> ! {
     panic_at(msg.bytes(), None)
 }
 
-// ---------------------------------------------------------------------
 // 8.5.12 appendix: convenience symbols (no ABI stability)
-// ---------------------------------------------------------------------
 
 /// `rok::std::env::exit(code)` (spec 4.16.4): exit now with `code`.
 /// `finally` and `Drop` do not run; `exit` flushes buffered stdout.

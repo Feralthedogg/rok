@@ -6,12 +6,7 @@
 // 64 0 255
 // 8 32
 
-// 8.4.2: a loop with a constant trip count of at most 64 whose body
-// reaches no safepoint ends in bounded time, so its back edge has no
-// poll; LLVM may unroll and fold it. The counter forms: up, down, by 2,
-// `<=`, a `while` counter, a test that leaves on true; counters next to
-// their type's end (no wrap). Polled loops (a call that allocates, a
-// trip count of 65) and collections around them still work.
+// A loop of at most 64 safepoint-free trips needs no back-edge poll.
 fn tri() -> u64 {
     let s = 0u64;
     for i in 0..64 {

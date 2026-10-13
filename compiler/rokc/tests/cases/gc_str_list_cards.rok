@@ -5,11 +5,7 @@
 // n-3 n-1500 n-2999 3000
 // e- 2 mid tail
 
-// A loop storing young strings into an old `List<str>` buffer over 8 KiB
-// (a carded large object) while minor collections run: the list's length
-// may be kept out of the loop, but the card marks and the stored strings
-// must not be. Slices kept past their string (an empty one at its very
-// end, one in its middle) keep its bytes alive.
+// Card marks and stores stay in a loop over an old list; slices keep bytes.
 extern "C" {
     fn rok_gc_collect();
     fn rok_gc_collect_young();

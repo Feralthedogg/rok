@@ -8,11 +8,7 @@
 // q 9
 // 5 5
 
-// spec 9.2.16 / 9.5.7: symbols do not depend on the order things are
-// lowered in. A closure is named after the function that makes it (a
-// generic instance's after the instance), a nested one after its outer
-// closure; a method of a non-generic type after the type; a generic
-// trait impl's methods after the impl. Each is still one function.
+// Symbol names do not depend on lowering order.
 struct P { v: i64; }
 struct Q { v: i64; }
 

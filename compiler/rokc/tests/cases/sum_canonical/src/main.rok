@@ -7,11 +7,7 @@
 // generic: 7 5
 // cmp: Less Greater
 
-// Spec 2.6.4: a sum is a set. `A | B` and `B | A` are one type (no
-// conversion between differently-written spellings, same tags across
-// modules), `(A | B) | C` flattens, `A | A` is `A`. Ordering across
-// variants follows the canonical member order (the spec fixes none:
-// structural, `none` last), not the written order.
+// A sum is a set: spelling and order do not matter.
 mod other;
 
 use other::{Mixed, make, tag_of};

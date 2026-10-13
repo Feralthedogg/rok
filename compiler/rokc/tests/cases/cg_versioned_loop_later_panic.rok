@@ -1,12 +1,7 @@
 // spec: §3.13.3 std §2.9.2
-// Counted loops indexing lists with the counter, an invariant index or a
-// constant get an unchecked copy behind a bounds test in front of the
-// loop (an invariant index past the bound but in the list takes the
-// checked loop). In bounds every counter type gives the same sums; a bound past
-// the end runs the checked loop, which panics on the iteration that
-// steps out.
+// Versioned loops: in bounds the unchecked copy, else the checked loop panics.
 // expect-exit: 101
-// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_later_panic.rok:41:9:
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_later_panic.rok:36:9:
 // expect-stderr: List index out of bounds
 // expect-stdout:
 // 18 15 6 15 17

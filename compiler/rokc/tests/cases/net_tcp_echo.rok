@@ -28,7 +28,7 @@ let ip: Ipv4Addr = try! "10.1.2.3".parse::<Ipv4Addr>();
 let ip6: Ipv6Addr = try! "2001:db8:0:0:0:0:0:1".parse::<Ipv6Addr>();
 println(f"addr {any} {v6} {ip} {ip6}");
 
-// ---- blocking: a thread echoes one connection ----
+// Blocking: a thread echoes one connection.
 let listener = try! TcpListener::bind(any);
 let addr = try! listener.local_addr();
 let server = thread::spawn(|| {
@@ -55,7 +55,7 @@ println(f"peer is local: {(try! c.local_addr()).port() as i32 == peer_port}");
 c.close();
 listener.close();
 
-// ---- async: the server task accepts, a task per connection echoes ----
+// Async: the server task accepts, a task per connection echoes.
 let l2 = try! TcpListener::bind(any);
 let a2 = try! l2.local_addr();
 let srv = task::spawn(async {

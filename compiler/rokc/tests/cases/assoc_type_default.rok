@@ -8,12 +8,7 @@
 // let EA9
 // pair i64 7
 
-// Associated type defaults (spec 2.8.3): `type X = T;` in a trait. An
-// impl that omits `type X` gets the default — resolved in the trait's
-// module, with the trait's parameters replaced by the impl's
-// arguments — and one that writes it overrides it. `Self::X` in a
-// `throws` list, `T::X` through a generic bound and `<T as Tr>::X` all
-// see the chosen type.
+// An impl that omits `type X` gets the trait's default.
 
 mod errs {
     pub struct EA { pub n: i32; }

@@ -13,13 +13,7 @@
 // stat error NoEntry true
 // dropped true
 
-// Stdlib 1.8: a world of WASI imports through `ffi::wit::import`, the
-// host's own implementations. Records (`datetime`, `descriptor-stat`
-// with `option<datetime>`), enums (`descriptor-type`, `error-code`),
-// flags, `result` (thrown and caught), tuples, lists, strings, and
-// resources: owned ones from a list (`get-directories`) and a result
-// (`open-at`, `read-via-stream`), borrowed by methods, dropped by
-// `using`.
+// WASI imports with every WIT type kind, resources included.
 ffi::wit::import { "wit" }
 
 use wasi::random::random;

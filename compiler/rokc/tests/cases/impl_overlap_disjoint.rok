@@ -1,12 +1,7 @@
 // expect-exit: 0
 // expect-stdout: 1 2 3 4 5
 
-// Spec 2.9.5: generic impls with targets that don't unify are disjoint,
-// and so is a blanket `impl<T: Tr> X for T` beside `impl X for Box<U>`
-// when no impl of `Tr` targets `Box` (negative reasoning on a known
-// type constructor, like core's `impl<I: Iterator> IntoIterator for I`
-// beside `impl<T> IntoIterator for List<T>`). A bound on a parameter
-// the unification made concrete is checked too (`str: Num` fails).
+// Impls whose targets cannot unify, given the impls that exist, are disjoint.
 trait Num {}
 impl Num for i32 {}
 trait Tag { fn tag(self) -> i32; }

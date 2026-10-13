@@ -1,14 +1,8 @@
 // spec: §3.13.3 std §2.9.2
-// In a counted loop's unchecked copy, `xs[i]` read and written at an
-// index the loop does not change is kept in a local, entered when no
-// other list indexed at a fixed index is the same list, and each list
-// indexed by the counter is another one or `i` is below the counter.
-// Each runs the iterations of the loop as written: the kept element
-// below and inside the counter's range, the same list passed twice
-// (indexed at `i` or by the counter), an early exit, a signed counter,
-// a loop that never runs, and a panic past the end.
+// `xs[i]` at a loop-invariant index is kept in a local only when no other
+// list it is read or written beside can be the same list.
 // expect-exit: 101
-// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_kept_element.rok:53:17:
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_kept_element.rok:47:17:
 // expect-stderr: List index out of bounds
 // expect-stdout:
 // [10, 1, 1, 1, 1] [0, 2, 3, 4, 5]

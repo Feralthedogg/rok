@@ -10,11 +10,7 @@
 // 90 0 9
 // 126
 
-// Aggregates over 64 bytes go between rok functions by address (a
-// pointer to the caller's value, copied by the callee) and come back
-// through a leading result pointer: direct calls, exported functions,
-// function values, closures, generic instances, a lazy static's
-// initializer and the C entry of an `extern "C" fn`.
+// Aggregates over 64 bytes pass by address and return through a result pointer.
 
 struct Big { a: [i64; 10]; tag: u8; }
 

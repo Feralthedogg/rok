@@ -50,11 +50,7 @@
 // '\''
 // debug: [nan]
 
-// Spec 3.9.4: the canonical form — one line while it fits in 100
-// columns (counting the indent, the key and the trailing comma), else
-// one item per line, 4-space indent, a comma after every item; floats
-// in their shortest round-trip digits. Re-reading it gives the same
-// value. A NaN / infinity has no ROKON form: `to_string` panics.
+// The canonical ROKON form reads back as the same value.
 
 use rok::std::rokon;
 use rok::std::rokon::Value;

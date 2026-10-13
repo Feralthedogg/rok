@@ -1,20 +1,13 @@
 //! Executor lanes: blocking calls hand their worker to a new thread
 //! (706 §7.6.7).
 //!
-//! Each executor pool thread runs one lane, a malloc'd record its
-//! `rok_tls_task_lane` points at. While the lane is armed (the thread
-//! polls a task, [`rok_lane_arm`]), every blocking runtime call
-//! ([`block_begin`] / [`block_end`]) bumps the lane's tick and marks it
-//! blocked; the executor's own waits and locks, outside polls, do not.
-//! The executor's monitor thread (`rok::core::task`) scans the lanes
-//! once per tick; a lane blocked across a whole tick is taken
-//! ([`rok_lane_take`]): its worker (queues, sleep word) goes to a new
-//! thread on a fresh lane, and the blocked thread, back from its call,
-//! finishes its poll as an orphan guest (the heir the monitor left in
-//! the lane) and frees the lane.
-//!
-//! Only the word protocol lives here; it is OS-neutral (the waits go
-//! through `thread`'s wait queue).
+//! Each pool thread has one malloc'd lane (`rok_tls_task_lane`). While
+//! it is armed ([`rok_lane_arm`], i.e. polling a task), every blocking
+//! runtime call ([`block_begin`] / [`block_end`]) bumps its tick and
+//! marks it blocked. The monitor (`rok::core::task`) takes a lane blocked
+//! across a whole tick ([`rok_lane_take`]): its worker moves to a new
+//! thread, and the blocked thread finishes its poll as an orphan guest
+//! and frees the lane. Only the OS-neutral word protocol lives here.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 

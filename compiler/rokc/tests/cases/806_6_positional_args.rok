@@ -6,12 +6,7 @@
 // 654321
 // eq ne
 
-// rok-to-rok calls (spec 8.6.6) with arguments past every register:
-// on Windows x64 integer and float arguments share four positions, so
-// `str` halves, floats and struct leaves land in registers and stack
-// slots in an order unlike System V's; results of three or four words
-// come back in registers or through `sret`. The runtime's own `str`
-// helpers (length, equality) pass their strings by reference there.
+// rok calls with arguments past every register (Windows x64 shares positions).
 
 struct Big { a: i64; b: i64; c: i64; }
 struct Four { a: i64; b: i64; c: i64; d: i64; }

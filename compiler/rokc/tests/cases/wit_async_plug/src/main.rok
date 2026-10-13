@@ -17,15 +17,7 @@
 // drops 1
 // raw 7
 
-// Stdlib 1.8: the component model's async ABI between two components
-// (WASI preview 3, joined by `wac plug`). `plug/main.rok` is a reactor
-// exporting `svc`; this command exports `wasi:cli/run@0.3.0` as an
-// `async fn` and awaits `svc`'s async functions: an async method of a
-// resource from a fallible constructor (`throws`), a stream each way
-// (a channel `Receiver`), a future (`AsyncFuture`), an `error-context`
-// error. Also a fixed-size list (`[u8; 4]`), a nested option (`u32??`),
-// the exporter's `Drop` run by the resource's destructor, and a raw
-// import through `#[link(wasm_import_module)]` / `#[link_name]`.
+// The async component ABI between two components joined by `wac plug`.
 ffi::wit::import { "wit/consumer.wit" }
 
 use test::aio::svc;

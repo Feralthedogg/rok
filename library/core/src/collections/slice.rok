@@ -1,17 +1,12 @@
-// rok::core::collections::slice — `Slice<T>`, a zero-copy view (stdlib
-// spec 2.9.7): element `i` is `buf[start + i * stride]`. The view holds
-// its buffer, so the storage stays alive as long as the view does.
+// rok::core::collections::slice: `Slice<T>`, a zero-copy view (stdlib
+// 2.9.7); element `i` is `buf[start + i * stride]`, and the view keeps
+// its buffer alive.
 //
-// `xs[a:b]` desugars to `xs.slice(a..b)` (`Sliceable<Range<usize>>`, 2.3.4;
-// a missing bound is `0` / `xs.len()`), and `xs[a:b:k]` to
-// `xs.slice(r).step(k)` with `r = index::slice_range(a, b, k, len)`:
-// Python's semantics (bounds clamp, a negative step reads them from the
-// end, `xs[::-1]` reverses). `step` walks the selected range, from its
-// end when negative. A view of a `List` sees later
-// writes to the list's elements but not a regrowth (the list moves to a
-// new buffer and the view keeps the old one); a view of a fixed array
-// or a `StrBuf` views a copy, and `str::as_bytes` views the string's
-// own bytes.
+// `xs[a:b]` is `xs.slice(a..b)` (2.3.4) and `xs[a:b:k]` is
+// `xs.slice(index::slice_range(a, b, k, len)).step(k)`, with Python's
+// semantics (bounds clamp, `xs[::-1]` reverses). A view of a `List` sees
+// later element writes but not a regrowth, which moves the list to a new
+// buffer; a view of an array or `StrBuf` views a copy.
 
 pub struct Slice<T> {
     pub(pkg) buf: GcBuf<T>;

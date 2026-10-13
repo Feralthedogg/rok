@@ -1,19 +1,14 @@
-// rok::std::thread — OS threads, 1:1 (stdlib spec 304, refs-lang
-// 7.6.6). Each thread is a GC mutator: its frames are roots, it stops
-// at safepoints, and blocking calls (`join`, `sleep`, lock waits) let a
-// collection run without it.
+// rok::std::thread: OS threads, 1:1 (stdlib 304, refs-lang 7.6.6). Each
+// thread is a GC mutator; blocking calls let a collection run without it.
 //
-// A panic in any thread ends the whole process (exit 101): panics are
-// not catchable (2.14), so `join` never sees one. `JoinError` only
-// reports an OS join failure.
+// A panic in any thread ends the process (exit 101), so `join` never
+// sees one; `JoinError` is an OS join failure. A handle neither joined
+// nor `detach`ed keeps its OS thread record (there is no implicit drop).
 //
-// A handle that is neither joined nor `detach`ed keeps its OS thread
-// record (rok has no implicit drop to detach it).
-//
-// Each thread has one record (`Rec`: name, park token, thread-local
-// values) in `THREADS`, keyed by its id: a spawned thread's is made
-// before it starts and dropped when its closure returns; any other
-// thread's on its first `current()` / `park` / thread-local use.
+// `THREADS` maps a thread id to its `Rec` (name, park token, thread-local
+// values): made before a spawned thread starts and dropped when its
+// closure returns, or on another thread's first `current()` / `park` /
+// thread-local use.
 
 use rok::std::io::{IoError, IoErrorKind};
 use rok::std::time::Duration;

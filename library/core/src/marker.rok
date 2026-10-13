@@ -136,16 +136,14 @@ pub trait Drop {
     fn drop(ref self);
 }
 
-// Auto (structural) marker traits (E3). The compiler derives them: a
-// struct / enum / tuple / array / sum has one iff every component does;
-// primitives and `str` have both; a closure is `Sync` iff its captures
-// are, and `Send` iff they are `Send + Sync` (a capture copies a handle
-// the creator keeps); a `fn` type has the ones it names (`fn() -> T +
-// Send`, which implies `Sync`), and a named function (no captures) has
-// both. `unsafe impl Send for T {}` opts in,
-// `impl !Send for T {}` opts out (`Cell<T>`, `Ptr<T>` when they land).
-// `Send`: safe to move to another thread. `Sync`: safe to read through
-// shared references from several threads.
+// Auto marker traits, derived by the compiler: a struct / enum / tuple /
+// array / sum has one iff every component does; primitives and `str`
+// have both; a closure is `Sync` iff its captures are and `Send` iff
+// they are `Send + Sync` (a capture copies a handle the creator keeps);
+// a `fn` type has those it names (`+ Send` implies `Sync`), a named
+// function both. `unsafe impl Send for T {}` opts in, `impl !Send for T
+// {}` opts out. `Send`: safe to move to another thread. `Sync`: safe to
+// read through shared references from several threads.
 #[lang("send_trait")]
 pub trait Send {}
 

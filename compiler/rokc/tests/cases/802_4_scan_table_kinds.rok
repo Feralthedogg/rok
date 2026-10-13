@@ -9,14 +9,7 @@
 // word-traced: unchanged true, moved false, 41
 // bytes id 1, words id 2
 
-// spec 8.2: each registered type's ScanTable (registered before the
-// entry point, 8.2.13) names its reference slots: none for a Point of
-// floats (8.2.4), two STRONG_REFs for a Pair of lists (8.2.5), one
-// SUM_PAYLOAD for an enum whose variants differ (8.2.6), ANY_SLOTs for
-// `any` (8.2.7). The gc-stress runs move every object reached through
-// them. A type id 2 buffer (8.2.12) scans each payload word as an
-// AMBIGUOUS_WORD: what it points at stays alive and does not move; a
-// type id 1 buffer is bytes, never scanned.
+// Each ScanTable slot kind, and conservatively scanned (type id 2) buffers.
 use rok::bare::mem::transmute_unchecked;
 use rok::bare::ptr::ConstPtr;
 

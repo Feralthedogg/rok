@@ -4,11 +4,7 @@
 // expect-stdout:
 // true 14 true
 
-// 5.9.4: on 32-bit x86 Windows an `extern "system"` function is an
-// `extern "system" fn(..)` value: a stdcall callback handed to Windows
-// (`EnumSystemCodePagesW` calls it per code page) and called through
-// the pointer from rok (the callee pops its arguments: a caller that
-// popped them too would unbalance the stack).
+// A stdcall callback handed to Windows and called back through the pointer.
 use rok::bare::ptr::Ptr;
 
 extern "system" {

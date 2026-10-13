@@ -13,13 +13,7 @@
 // forbid-error: found `usize`
 // forbid-error: no method `title` found for type `Plain`
 
-// What a generic body may use is fixed by its declaration (spec
-// 2.10.9): associated types are opaque unless a bound binds or bounds
-// them, `Add`'s result is `T::Output` unless bound to `T`, a trait's
-// default body sees `Self` only through that trait, a generic impl's
-// method only through the impl's bounds, closures in a generic body
-// the same; calls into other generic code need their bounds met. A
-// template that fails its check reports nothing more at its calls.
+// A generic body sees only what its declaration and bounds give it.
 
 use rok::core::ops::Add;
 

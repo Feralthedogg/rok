@@ -9,11 +9,7 @@
 // kept none
 // 8
 
-// Spec 2.2.6: inside `x is T` an assignment of a `T` keeps the narrowing;
-// one of another member of the declared type writes the declared slot and
-// ends the narrowing on the paths after it. A path that skips it keeps the
-// narrowing; where paths join, and at the head of a loop whose body ends
-// it, `x` has the declared type.
+// Assigning a `T` keeps `x is T`; another member ends it until paths join.
 fn show(v: i32 | str) -> str {
     match v { n: i32 => f"{n} i32", s: str => f"{s} str" }
 }

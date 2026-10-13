@@ -7,12 +7,7 @@
 // typed 6 4
 // try 7 caught 3
 
-// Stdlib 2.8 / 2.20: an `async yield fn` call is an `AsyncStream<T>`
-// consumed with `for await` (2.8.4, 2.20.7-8), and its copies share one
-// frame (2.8.8a); `zip` pairs two streams and `select` takes from
-// whichever is ready (2.8.8); `async fn` / `async { }` values are
-// `AsyncFuture<T>`, a throwing one a `TryAsyncFuture` awaited with
-// `try await` (2.20.8a).
+// Async streams and futures as values.
 async yield fn nums(n: i32) -> i32 {
     for i in 1..=n {
         yield i;

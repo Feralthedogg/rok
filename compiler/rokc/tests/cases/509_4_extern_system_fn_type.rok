@@ -6,11 +6,7 @@
 // 0 1 2 3
 // 1 -1
 
-// 5.9.4: `extern "system" fn(..)` follows the rules of `extern "C"
-// fn(..)`, and where `"system"` is `"C"` (every 64-bit target) it is the
-// same type: an `extern "system"` callback goes to C's `qsort` through
-// either, and either kind of definition fills either slot. (32-bit x86
-// Windows, where it is `stdcall`: `509_2_extern_system_stdcall_value`.)
+// Where `"system"` is `"C"`, the two fn pointer types are one type.
 use rok::bare::alloc::{Layout, alloc};
 use rok::bare::ptr::{CPtr, Ptr};
 

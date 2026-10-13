@@ -20,15 +20,12 @@
 #       lib/rokc.lib                        (Windows) rokc.exe's import library
 #       example/answer.cpp README.md        docs/mlir-plugins.md
 #
-# and their .sha256, and dist/rok-version (the version, one line). Every
-# file is a release asset. Usage: ./dist.sh [--out <dir>] (on Windows from Git
-# Bash / MSYS2, in a Developer prompt for the MSVC build tools).
+# plus their .sha256 and dist/rok-version; every file is a release asset.
 #
-# rokc links the pinned LLVM / MLIR / lld statically: ROK_LLVM_PREFIX,
-# else llvm/build.sh's (llvm/build.ps1's on Windows; built here when
-# missing). The toolchain needs no LLVM install; on macOS only the SDK
-# (Xcode's command line tools). libclang is ROK_LIBCLANG_PREFIX's, else
-# llvm/build-libclang.sh's (build-libclang.ps1's; built here when missing).
+#   ./dist.sh [--out <dir>]    (Windows: Git Bash in a Developer prompt)
+#
+# LLVM comes from ROK_LLVM_PREFIX, libclang from ROK_LIBCLANG_PREFIX,
+# else llvm/build*.sh's (.ps1 on Windows), built here when missing.
 set -eu
 
 cd "$(dirname "$0")"

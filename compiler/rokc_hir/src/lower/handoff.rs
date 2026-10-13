@@ -1,59 +1,33 @@
-//! Use after hand-off (stdlib 2.13.9), an error: rok has no move
-//! semantics, so handing a value to another owner (`Mutex::new(xs)`,
-//! `tx.send(xs)`, `Handoff::new(xs)`) leaves `xs` pointing at the object
-//! the new owner shares with other threads, and a handle taken out of a
-//! guard (`g.get()`, given to it by `g.set(v)`, or reached by the
-//! closure of `g.update(f)`) is unprotected once the guard's `using`
-//! block ends. Using either afterwards races.
+//! Use after hand-off (stdlib 2.13.9) is an error. rok has no moves: after
+//! `Mutex::new(xs)`, `tx.send(xs)` or `Handoff::new(xs)`, `xs` still names
+//! an object other threads now share, and a handle taken from a guard
+//! (`g.get()`, `g.set(v)`, `g.update(f)`) is unprotected once its `using`
+//! block ends.
 //!
-//! A forward flow over each body's structured HIR. What is tracked is a
-//! place: a local and a field path into it (`s`, `s.items`, `t.0`). A
-//! place is "gone" on some path from the hand-off (or the guard's
-//! `drop`) on, and a use of a gone place, of a place inside it, or of
-//! one containing it is an error. Aliases are edges between places:
-//! `Same` (a copy: `let ys = xs`, `s.items = xs`, a struct or tuple
-//! literal field) makes two places one object, `In` (a closure
-//! capture, an array or enum literal, a `match` binding) holds one in
-//! the other both ways, and `Into` (an element stored into a buffer, a
-//! coroutine's arguments) holds one in the other: the buffer going away
-//! takes the element along, not the reverse. A place going away takes
-//! every place aliased to it along, and a value copied out of a gone
-//! one is gone too. Assigning a place re-arms it: its edges are joined
-//! past it and dropped, and a copy or gone place it is a field of is
-//! split into its other fields. Paths are kept apart by what they know
-//! of tags: a `bool`, a sum or enum variant, a carrier's error or its
-//! value's tag, set by a constant, a copy or a call (below), so a test
-//! of one (`if`, `while`, `match`, `catch`, `try?`, `??`) passes only
-//! the paths it may let through. Paths with the same places gone are
-//! one; past `MAX_PATHS`, or `MAX_SPLIT_PASSES` loop passes, all are
-//! one. Joins are unions (a use on any path counts); loops run to a
-//! fixpoint. Exempt: uses of a `Sync` type
-//! (numbers, `str`, `Mutex`, `Sender`, ...), uses inside `unsafe` (spec
-//! 4.15.2), a `match` on a variable (it reads the tag; its bindings are
-//! the uses), and compiler-made locals (what they are copied into is).
+//! A forward flow over structured HIR. A place is a local plus a field path
+//! (`s`, `s.items`, `t.0`); it is gone on a path from the hand-off (or the
+//! guard's drop) on, and using it, a place inside it or one containing it is
+//! an error. Aliases are edges: `Same` (a copy, a struct/tuple field) makes
+//! two places one object; `In` (a capture, an array/enum literal, a `match`
+//! binding) holds one in the other both ways; `Into` (an element stored in a
+//! buffer, coroutine arguments) one way only. Going away takes every alias
+//! along; assigning a place re-arms it. Paths split on known tags (`bool`,
+//! variant, carrier error) so `if`/`while`/`match`/`catch`/`try?`/`??`
+//! pass only the paths they let through; equal paths merge, and past
+//! `MAX_PATHS` or `MAX_SPLIT_PASSES` all do. Joins are unions; loops run to
+//! a fixpoint. Exempt: `Sync` types, `unsafe` (spec 4.15.2), a `match` on a
+//! variable (its bindings are the uses) and compiler-made locals.
 //!
-//! Calls are followed through summaries: what a function does with each
-//! parameter (hands it over, returns it or a part of it, stores it into
-//! another parameter's object, captures it into the returned closure,
-//! ties it to a guard parameter), its exit state projected onto its
-//! parameters as they were on entry and its return value, and what it
-//! hands over by the tag of the value it returns (an error, `none`,
-//! `false`): the caller's paths split by that tag at the call. An
-//! `async` body's future has the tag its body ends with, and polling it
-//! gives an error only if that is one, so a `catch` of `try await
-//! f(xs)` sees only what `f` hands over before throwing. Summaries are
-//! a fixpoint over the call graph (recursion), and a prebuilt library
-//! keeps those of its bodies in its ROKHIR. A call through a function
-//! value may reach any function used as a value with its parameter
-//! types (closed world, as for `any` dispatch); generic functions and
-//! trait methods are their instances' and `any` dispatchers' bodies;
-//! `extern` functions and intrinsics keep nothing. A `Handoff::new`
-//! stays inside its function: the `unsafe` code that made the protocol
-//! ends it before returning.
-// An element read out of a buffer is a value of its own (`pop`,
-// `remove` and iteration hand out items the buffer no longer shares, or
-// never touches again): reading an item back out of a buffer after
-// handing it, or the buffer, over is not caught.
+//! Calls go through per-function summaries: what happens to each parameter
+//! (handed over, returned, stored into another, captured, tied to a guard),
+//! the exit state on entry parameters and the return, split by the tag of
+//! the result (error, `none`, `false`). An `async` future carries its
+//! body's final tag. Summaries are a call-graph fixpoint and ship in ROKHIR.
+//! A call through a function value may reach any function used as a value
+//! with those parameter types (closed world, as for `any`); `extern` and
+//! intrinsics keep nothing; a `Handoff::new` never leaves its function.
+// An element read out of a buffer is a value of its own (`pop`, `remove`,
+// iteration): reading it back after handing the buffer over is not caught.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};

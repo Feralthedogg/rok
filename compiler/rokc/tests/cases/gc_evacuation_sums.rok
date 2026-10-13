@@ -6,12 +6,7 @@
 // sums ok
 // fields ok
 
-// Evacuation through enum / sum payloads (802 `SUM_PAYLOAD`): the
-// collector decodes each payload's tag and scans only the active
-// variant's reference words, so what a payload references moves like
-// anything else and every variant shape reads back intact. Only the
-// list buffers are rooted (and so pinned): every byte moved here was
-// reached through a payload.
+// Objects reached only through sum payloads move too.
 extern "C" {
     fn rok_gc_collect();
     fn rok_gc_stats_moved_bytes() -> u64;

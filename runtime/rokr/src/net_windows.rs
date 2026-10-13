@@ -660,9 +660,7 @@ pub fn close_socket(s: SOCKET) -> i32 {
     ok(unsafe { closesocket(s) })
 }
 
-// ---------------------------------------------------------------------
 // The I/O driver's poller (707 §7.7.1): AFD polls on a completion port
-// ---------------------------------------------------------------------
 
 const IOCTL_AFD_POLL: u32 = 0x0001_2024;
 const AFD_POLL_RECEIVE: u32 = 0x1;

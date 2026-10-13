@@ -4,11 +4,7 @@
 // expect-stdout:
 // kept 41 41
 
-// 8.2.3 / 8.2.10: a ScanTable is little-endian bytes: `total_size` (u32),
-// `version` (u16) = 1, `num_entries` (u16), then (`field_offset`,
-// `field_kind`) u32 pairs. One written by hand and registered for a
-// type id of its own (8.2.13) makes the collector trace (and, under
-// gc-stress, move) the object its STRONG_REF slot names.
+// A hand-written ScanTable makes the collector trace and move its referent.
 use rok::bare::mem::transmute_unchecked;
 use rok::bare::ptr::{addr_of, ConstPtr};
 

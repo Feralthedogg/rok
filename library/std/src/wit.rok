@@ -11,29 +11,22 @@ extern "rok" {
     fn rok_stdio_flush() -> i32;
 }
 
-// ---- the component model's async ABI (WASI preview 3) ----
+// The component model's async ABI (WASI preview 3).
 //
-// Async imports return a subtask; stream and future copies may block.
-// An async export call is a task lifted with a callback: its call and
-// each event the host delivers to it run every runnable rok task
-// (`task::host_run`), whichever call they serve. Calls run concurrently,
-// each with its own waitable set (its id is the task's context): what
-// blocks during a call's turn joins that call's set, and the host
-// delivers its event to that call. A call returns its result
-// (`task.return`) in its own turn: one whose future finished in another
-// call's turn is woken through its bell, a unit stream made when it
-// first rings, whose read waits in its set. With nothing left to run a call returns WAIT (the host
-// calls back with the next event in its set), or EXIT once it has
-// returned and nothing in its set or of the rok tasks waits. Sockets
-// (preview 2 pollables) and timers are waited on in the turn: until one
-// is ready while no event can come, else for a slice, then YIELD and
-// take the set's events (`waitable-set.poll`): nothing waits for a
-// pollable and the component model's events at once. A synchronous task
-// (`main`, a sync export) cannot block (the component model traps), so a
-// wait outside an async export is an error.
+// An async export call is a task lifted with a callback; the call and
+// every event delivered to it run all runnable rok tasks
+// (`task::host_run`). Each call has its own waitable set (its id is the
+// task's context), and whatever blocks during its turn joins that set.
+// A call returns its result (`task.return`) in its own turn: one whose
+// future finished during another call's turn is woken through its bell,
+// a unit stream whose read waits in its set. With nothing to run a call
+// returns WAIT, or EXIT once it has returned and nothing waits.
+// Sockets (preview 2 pollables) and timers are waited on in the turn
+// for a slice, then the call YIELDs to take the set's events: nothing
+// can wait on both at once. Sync tasks (`main`, sync exports) cannot
+// block (the component model traps), so waiting there is an error.
 //
-// `future<T>` is an `AsyncFuture<T>`, `stream<T>` a channel `Receiver<T>`:
-// a task copies between the component model's value and the rok one.
+// `future<T>` is an `AsyncFuture<T>`, `stream<T>` a channel `Receiver<T>`.
 
 #[cfg(target_os = "wasi")]
 #[link(wasm_import_module = "$root")]

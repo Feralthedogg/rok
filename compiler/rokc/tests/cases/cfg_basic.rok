@@ -4,11 +4,9 @@
 // expect-stdout:
 // 30 0 0
 
-// Items gated by `#[cfg(...)]` are filtered before HIR. Without the
-// matching flag the body item never enters the program — calls to it
-// would be unresolved. The host already provides a target_os match,
-// so we use a `target_family = "unix"` predicate that's true on macOS
-// and Linux build hosts.
+// Items gated by `#[cfg(...)]` are filtered before HIR: without the
+// matching flag an item never enters the program. `target_family =
+// "unix"` holds on both macOS and Linux hosts.
 #[cfg(target_family = "unix")]
 fn unix_only() -> i32 { 30i32 }
 

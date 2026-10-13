@@ -7,11 +7,7 @@
 // 3 [1, 2, 3]
 // 16 10
 
-// Stdlib 2.4: every arithmetic (2.4.2) and bitwise (2.4.3) compound
-// assignment on primitives, `%%=` floored, `bool` / `str` / `Dict`
-// forms; a user `AddAssign` updates its `ref self` in place (2.4.4) on
-// a type with no `Add` (no supertrait, 2.4.9), and through a `ref`
-// parameter the caller sees the change.
+// Compound assignment on primitives and through a user `AddAssign`.
 struct Bag { n: i32; items: List<i32>; }
 
 impl AddAssign<i32> for Bag {

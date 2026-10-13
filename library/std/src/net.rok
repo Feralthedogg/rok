@@ -1,24 +1,17 @@
-// rok::std::net (stdlib spec 302): TCP / UDP sockets, addresses, DNS.
+// rok::std::net (stdlib 302): TCP / UDP / Unix sockets, addresses, DNS.
 //
-// Sockets are non-blocking underneath. The blocking calls (`accept`,
-// `read`, ...) wait for readiness with `poll` — so read / write timeouts
-// are that wait's limit — and `set_nonblocking(true)` makes them throw
-// `WouldBlock` instead. The `*_async` calls suspend the task until the
-// I/O driver (`task::readable` / `writable`, refs-lang 7.7) sees the fd
-// ready: `try await s.read_async(buf)`.
+// Sockets are non-blocking underneath. Blocking calls wait in `poll`, so
+// `set_*_timeout` bounds that wait (async uses `task::timeout`), and
+// `set_nonblocking(true)` makes them throw `WouldBlock`. `*_async` calls
+// suspend until the I/O driver sees the fd ready (refs-lang 7.7).
 //
-// Read buffers are `List<u8>` (spec 302): `read(buf)` fills `buf[0..n]`
-// of a pre-sized list in place. The write side takes any `AsBytes`
-// (`str`, `List<u8>`, `Slice<u8>`).
+// Spec 302 lets the plain calls suspend inside a task; here they block
+// the worker, because a sync fn cannot suspend a stackless coroutine.
 //
-// Spec 302 makes the plain calls suspend inside a task; here they block
-// the worker and the `*_async` variants suspend (a sync fn cannot
-// suspend a stackless coroutine). Unix sockets reuse the same core; a
-// listener's `accept` gives the peer's bound path (`none`: unnamed)
-// instead of a `SocketAddr`, which has no Unix form. `sendfile` /
-// `splice` are Linux only. TLS 1.3 is `tls` (302.5). No IPv6 multicast or
-// `MSG_ZEROCOPY` (302.7). `set_*_timeout` applies to the blocking calls only
-// (`task::timeout` covers async).
+// `read(buf)` fills `buf[0..n]` of a pre-sized `List<u8>`; writes take
+// any `AsBytes`. A Unix listener's `accept` gives the peer's bound path
+// (`none`: unnamed). `sendfile` / `splice` are Linux only; no IPv6
+// multicast or `MSG_ZEROCOPY` (302.7). TLS 1.3 is `tls` (302.5).
 
 use rok::std::io::{IoError, IoErrorKind, RawFd, Reader, Writer, AsBytes, check, would_block, region, take_handle};
 use rok::std::time::Duration;
@@ -27,7 +20,7 @@ use rok::std::path::{AsPath, Path};
 
 pub mod tls;
 
-// ---- addresses (302.4) ----
+// addresses (302.4)
 
 pub struct Ipv4Addr {
     pub octets: [u8; 4];
@@ -215,8 +208,6 @@ impl Debug for SocketAddr {
     const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
 }
 
-// ---- parsing ----
-
 const fn bad_addr(s: str) -> ParseError {
     ParseError { input: s, pos: 0, reason: "invalid IP address syntax" }
 }
@@ -310,7 +301,7 @@ impl FromStr for SocketAddr {
     }
 }
 
-// ---- runtime marshalling: `[family, port, flow, scope, bytes..16]` ----
+// runtime marshalling: `[family, port, flow, scope, bytes..16]`
 
 const ADDR_WORDS: usize = 20;
 
@@ -358,7 +349,7 @@ const fn addr_at(w: GcBuf<i64>, at: usize) -> SocketAddr {
     }
 }
 
-// ---- DNS (302.4) ----
+// DNS (302.4)
 
 const MAX_ADDRS: usize = 32;
 
@@ -405,8 +396,6 @@ fn addrs_of(addr: str | SocketAddr) throws (IoError) -> List<SocketAddr> {
         s: str => try resolve(s),
     }
 }
-
-// ---- the socket core ----
 
 /// An fd shared by copies of a handle, plus `[nonblocking, read
 /// timeout ns, write timeout ns]` (timeouts -1: none).
@@ -638,7 +627,7 @@ impl Sock {
     }
 }
 
-// ---- TCP (302.1) ----
+// TCP (302.1)
 
 pub enum Shutdown {
     Read,
@@ -915,7 +904,7 @@ impl Iterator for Incoming {
     }
 }
 
-// ---- UDP (302.2) ----
+// UDP (302.2)
 
 /// A UDP socket. Copies share the socket.
 pub struct UdpSocket {
@@ -1060,7 +1049,7 @@ impl Drop for UdpSocket {
     fn drop(ref self) { self.sock.close(); }
 }
 
-// ---- Unix domain sockets (302.3) ----
+// Unix domain sockets (302.3)
 
 /// A Unix stream socket. Copies share the socket; `close()` (or leaving
 /// a `using` block) closes it for all.
@@ -1314,7 +1303,7 @@ impl Drop for UnixDatagram {
     fn drop(ref self) { self.sock.close(); }
 }
 
-// ---- zero-copy hooks (302.7, Linux) ----
+// zero-copy hooks (302.7, Linux)
 
 #[cfg(target_os = "linux")]
 impl TcpStream {
@@ -1363,7 +1352,7 @@ impl TcpStream {
     }
 }
 
-// ---- conveniences (302.6) ----
+// conveniences (302.6)
 
 /// Connect to the first address of `addr` that accepts (names are
 /// resolved).

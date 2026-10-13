@@ -75,12 +75,9 @@
 // wp-mlkem768: 3 cases, 0 failed
 // total: 595 cases, 0 failed
 
-// rok::core::crypto against official vectors: NIST CAVP (SHA-2, SHA-3 /
-// SHAKE, HMAC, AES-GCM, ECDSA, RSA PKCS #1 v1.5 / PSS) and Wycheproof
-// (AEAD, X25519, Ed25519, ECDSA, RSA, HMAC, HKDF, ML-KEM), one case per
-// line of vectors.txt, a subset that ../gen_vectors.py makes from the
-// pinned sources it lists. A line is `<suite> <op> <field>...`: hex
-// fields, `-` for empty, `@name` for a `def name <hex>` line before it.
+// Official vectors (NIST CAVP, Wycheproof), one case per vectors.txt line,
+// made by ../gen_vectors.py: `<suite> <op> <field>...`, hex fields, `-` for
+// empty, `@name` for an earlier `def name <hex>` line.
 use rok::core::crypto::{constant_time_eq, HashAlgorithm, Digest, Sha3_256, Sha3_512, Shake128, Shake256, Hmac, Hkdf, Aead, AeadAlgorithm, X25519, Ed25519, Ecdsa, EcCurve, RsaPublicKey, RsaPrivateKey, MlKem768, Secret};
 
 fn nib(c: u8) -> u8 {

@@ -168,8 +168,6 @@ impl Printer {
         self.s("}");
     }
 
-    // ---- attributes, items ----
-
     fn attr(&mut self, a: &Attribute) {
         self.s(if a.inner { "#![" } else { "#[" });
         self.s(&a.path.join("::"));
@@ -681,8 +679,6 @@ impl Printer {
         });
     }
 
-    // ---- types ----
-
     fn ty(&mut self, t: &Ty) {
         match &t.kind {
             TyKind::Path(p) => self.ty_path(p),
@@ -845,8 +841,6 @@ impl Printer {
             ConstExpr::Expr(e) => self.expr(e),
         }
     }
-
-    // ---- statements ----
 
     fn block(&mut self, b: &Block) {
         if let Some(l) = &b.label {
@@ -1021,8 +1015,6 @@ impl Printer {
             }
         }
     }
-
-    // ---- expressions ----
 
     /// `e` as an operand: grouped unless it is atomic.
     fn operand(&mut self, e: &Expr) {
@@ -1637,8 +1629,6 @@ impl Printer {
             Literal::None => self.s("none"),
         }
     }
-
-    // ---- patterns ----
 
     fn pat(&mut self, p: &Pattern) {
         match &p.kind {

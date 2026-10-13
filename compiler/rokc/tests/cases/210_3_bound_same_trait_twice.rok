@@ -8,14 +8,7 @@
 // 11 true
 // true
 
-// A bound that names one trait twice with different arguments
-// (`T: Add<i32> + Add<f64>`): each operator, method call and static
-// call goes through the bound its arguments select (3.1.3) — an
-// unsuffixed literal takes its default type's bound, else the one it
-// fits — and each associated type or const is its own bound's
-// (`<T as Tr<A>>::X`, 2.8.3, 2.13.4). A concrete type's impls of one
-// trait are picked the same way, by the first argument or, with none,
-// the expected type.
+// `T: Add<i32> + Add<f64>`: the arguments pick the bound, as for impls.
 use rok::core::ops::Add;
 
 struct V { n: i64; }

@@ -7,11 +7,7 @@
 // 7 none 42 none
 // 4 ok
 
-// Stdlib 2.14: the built-in error types carry their fields and a
-// `Display` message (2.14.4) and are thrown and caught by type (2.14.1);
-// `unreachable` and the `assert` family stay silent when they hold
-// (2.14.5); `Result::catching`, `get`, `ok` / `err` and `try?` convert
-// between held results and the throwing flow (2.14.7).
+// Built-in error types, the `assert` family, and `Result` conversions.
 fn pick(n: i32) throws (ConversionError | ValueError | OverflowError) -> i32 {
     if n == 0 { throw ConversionError { msg: "str" }; }
     if n == 1 { throw ValueError { msg: "bad input" }; }

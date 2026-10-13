@@ -2,11 +2,7 @@
 // expect-error: mismatched types: argument 1 of `rok::std::thread::spawn` expects `fn() -> usize + Send`
 // expect-error: the closure's captures don't meet the `fn` type's bounds
 
-// Collections are reference handles: a closure's capture is a copy of
-// the handle the spawning thread keeps using, so moving the closure to
-// another thread shares the list. Collections are `!Sync` (stdlib
-// 2.13.9), so a `+ Send` closure cannot capture one; `Mutex<List<T>>`
-// can (`send_mutex_list`).
+// Collections are `!Sync` handles, so a `+ Send` closure cannot capture one.
 use rok::std::thread;
 
 fn main() {

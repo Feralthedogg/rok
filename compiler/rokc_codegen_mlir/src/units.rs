@@ -1,39 +1,27 @@
-//! Codegen units (spec 9.2.16): a package cut into parts that compile
-//! to objects of their own.
+//! Codegen units (spec 9.2.16): a package cut into parts compiled to
+//! separate objects; an incremental build recompiles only units whose key
+//! changed.
 //!
-//! An incremental build compiles only the parts whose key changed and
-//! reuses the others' objects.
+//! A function's unit is its home module (a library's generic instance also
+//! keys on its type arguments). The *glue* unit holds what belongs to the
+//! whole package: statics, the C `main`, `rok.register_types`.
 //!
-//! A function's unit is its home module (a generic instance from a
-//! library also by a hash of its type arguments): an edit to one module
-//! leaves the others' units as they were. A *glue* unit holds what is
-//! the whole package's: the statics, the C `main`,
-//! `rok.register_types`.
+//! Units of one plan agree on what none sees alone:
 //!
-//! The units of one plan agree on everything a unit cannot see alone:
-//!
-//! - GC type ids: the program's `ScanTable`s in order (`Plan::gc_tables`),
-//!   as a clean build numbers them; a unit's code reads an id from a
-//!   symbol named by its table (`gc_symbol`), which the glue defines, so
-//!   a type another unit adds or drops does not change the unit's code;
-//! - linkage: a function another unit uses is external, and a private
-//!   copy of another package's code that is (a prebuilt package's
-//!   generic instance; in a library, any) gets the symbol
-//!   `<symbol>.copy_Y<hash>_` (the user package's hash), as that
-//!   package's `.a`, other libraries and the program may define the same
-//!   code; so do a library's copies of other packages' statics
+//! - GC type ids, in clean-build order (`Plan::gc_tables`); code reads an
+//!   id from a glue-defined symbol (`gc_symbol`), so other units' types
+//!   don't change it;
+//! - linkage: a function another unit uses is external; a private copy of
+//!   another package's code (a prebuilt generic instance; in a library,
+//!   any) is `<symbol>.copy_Y<hash>_`, since that package may define it too
 //!   (`Pkgs::unit_copies`);
-//! - the user package's hash in symbols: a placeholder
-//!   ([`Plan::placeholder`]) the driver replaces in the objects, so a
-//!   source edit (which changes the content hash) does not change every
-//!   unit's code;
-//! - the whole-program analyses (`quiet_functions`,
-//!   `reentrant_functions`).
+//! - the package hash in symbols, a placeholder ([`Plan::placeholder`]) the
+//!   driver patches, so a source edit doesn't touch every unit;
+//! - whole-program analyses (`quiet_functions`, `reentrant_functions`).
 //!
-//! A unit's key hashes what its object depends on: its functions' MIR
-//! (ids replaced by symbols and type names), the signatures and facts
-//! of what it calls in other units, the statics and GC types it uses,
-//! and the build's options (`salt`).
+//! A unit's key hashes its functions' MIR (ids as symbols and type names),
+//! the signatures and facts of its callees in other units, the statics and
+//! GC types it uses, and the build options (`salt`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write;

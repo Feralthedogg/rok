@@ -6,11 +6,7 @@
 // yielder: 1000000 x-999
 // native: 300000
 
-// spec 8.4.11: user code may call `rok_runtime_yield` itself (the
-// spec's example loop); spec 8.4.10: a thread in a C call counts as
-// PARKED. While two threads run those loops, holding a GC reference
-// across every poll (8.4.7), main stops the world repeatedly (8.4.4 /
-// 8.4.6) and every thread finishes with its data intact.
+// Threads calling `rok_runtime_yield` or C keep roots across stop-the-world.
 use rok::std::thread;
 
 extern "C" {

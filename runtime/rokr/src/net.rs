@@ -4,17 +4,13 @@
 //! §8.5.12 appendix). Conventions as in `os`: results are `>= 0` or
 //! `-errno`; byte data is a `GcBuf<u8>` region.
 //!
-//! WASI preview 2 (`wasm32-wasi`) has the whole BSD API through
-//! wasi-libc (`wasi:sockets`). Preview 1 (`wasm32-wasi-threads`, the
-//! browser) only uses sockets the host hands in ([`rok_net_listeners`]):
-//! accept, send, recv, shutdown; the rest fails with `ENOSYS`.
+//! WASI preview 2 has the BSD API through wasi-libc. Preview 1
+//! (`wasm32-wasi-threads`, the browser) only uses sockets the host hands
+//! in ([`rok_net_listeners`]); the rest fails with `ENOSYS`.
 //!
-//! Every socket is created non-blocking: the library's blocking calls
-//! wait for readiness with [`rok_net_wait`] (so read / write timeouts
-//! are the `poll` timeout), its async calls park the task until the
-//! driver thread sees the fd ready.
+//! Sockets are non-blocking; blocking calls wait in [`rok_net_wait`].
 //!
-//! Addresses cross as a `GcBuf<i64>` of [`ADDR_WORDS`] words:
+//! Addresses cross as [`ADDR_WORDS`] words of a `GcBuf<i64>`:
 //! `[family (4 / 6), port, flow_info, scope_id, byte0 .. byte15]`.
 
 #[cfg(any(unix, target_env = "p2"))]
@@ -726,9 +722,7 @@ pub extern "C" fn rok_net_resolve(host: RokStr, port: u16, out: *mut u8, max: us
     n as i32
 }
 
-// ---------------------------------------------------------------------
 // Unix domain sockets (302.3)
-// ---------------------------------------------------------------------
 
 /// `path` as a `sockaddr_un` and its length; `None` when it does not fit
 /// `sun_path` (with its NUL).
@@ -1154,9 +1148,7 @@ pub extern "C" fn rok_net_splice(sock: i32, file: i32, count: usize) -> isize {
     }
 }
 
-// ---------------------------------------------------------------------
 // The I/O driver's poller (707 §7.7.1)
-// ---------------------------------------------------------------------
 
 #[cfg(not(target_os = "wasi"))]
 static POLLER: AtomicI32 = AtomicI32::new(-1);

@@ -3,7 +3,7 @@
 // expect-error: write one type pattern: `n: i32 | i64`
 
 // 3.11.4: alternatives bind each name at one type; `(n: i32) | (n: i64)`
-// does not (it used to reach MIR with `n` untyped).
+// does not.
 fn f(v: i32 | i64 | str) -> str {
     match v {
         (n: i32) | (n: i64) => "num",

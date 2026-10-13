@@ -1,18 +1,14 @@
-// expect-error: error[E202]: `xs` was moved into the `Mutex` at line 25
-// expect-error: handoff_lock_errors.rok:26:5: `xs` was moved into the `Mutex` at line 25
+// expect-error: error[E202]: `xs` was moved into the `Mutex` at line 21
+// expect-error: handoff_lock_errors.rok:22:5: `xs` was moved into the `Mutex` at line 21
 // expect-error: help: it belongs to the `Mutex` now; use it through the lock: `using g = m.lock() { g.get().push(3) }`, or hand over `xs.clone()` to keep a separate copy (stdlib 2.13.9)
-// expect-error: handoff_lock_errors.rok:32:5: `ys` was moved into the `RwLock` at line 31
-// expect-error: handoff_lock_errors.rok:40:5: `xs` was moved into the `Mutex` at line 38
-// expect-error: handoff_lock_errors.rok:47:29: `xs` was already moved into the `Mutex` by this call, on an earlier pass of the loop
-// expect-error: handoff_lock_errors.rok:56:19: `xs` was moved into the `Mutex` at line 55
-// expect-error: handoff_lock_errors.rok:64:5: `xs` was moved into the `Mutex` at line 63
+// expect-error: handoff_lock_errors.rok:28:5: `ys` was moved into the `RwLock` at line 27
+// expect-error: handoff_lock_errors.rok:36:5: `xs` was moved into the `Mutex` at line 34
+// expect-error: handoff_lock_errors.rok:43:29: `xs` was already moved into the `Mutex` by this call, on an earlier pass of the loop
+// expect-error: handoff_lock_errors.rok:52:19: `xs` was moved into the `Mutex` at line 51
+// expect-error: handoff_lock_errors.rok:60:5: `xs` was moved into the `Mutex` at line 59
 // spec: std 213-marker §2.13.9 / std 216-sync §2.16.3 / §2.16.4
 
-// rok has no move semantics: after `Mutex::new(xs)` the caller's `xs`
-// still points at the object the lock now guards, so a later use on
-// any path would race with the lock's users. It is a compile error:
-// after a use on one branch, the next loop iteration's hand-off, or
-// beside a parallel loop whose closure goes through the lock.
+// Using a value after `Mutex::new` took it is an error on any path.
 
 fn main() {
     println(f"{after()} {rw([1])} {one_branch(true)} {allowed()}");

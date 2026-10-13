@@ -13,15 +13,7 @@
 // pinned true, kept true 9
 // survivor sticky true, pinned false
 
-// spec 7.1.1 / 8.1.1-8.1.9: every GC object starts with a 16-byte
-// header, `type_id` (u32) at 0, `gc_flags` (u32) at 4, `gc_word` (u64,
-// the total size, a multiple of 8) at 8, the payload at 16; total size
-// = 16 + payload rounded up to 8 (an i32 object is 24 bytes, a 2048 x
-// i64 list buffer 16400 bytes, in the LOS with LARGE = bit 4). Over-8
-// alignment goes to the LOS with the payload aligned (7.1.2 /
-// 8.1.6). PINNED (bit 2) keeps an object in place across evacuating
-// collections (the gc-stress runs evacuate everything movable); a
-// survivor of a collection is STICKY (bit 1).
+// The 16-byte object header, sizes, LOS placement and the PINNED / STICKY bits.
 use rok::bare::mem::transmute_unchecked;
 use rok::bare::ptr::ConstPtr;
 

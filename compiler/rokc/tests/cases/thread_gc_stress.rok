@@ -6,11 +6,7 @@
 // holders ok
 // ok
 
-// Multi-mutator GC: four threads allocate garbage as fast as they can
-// (lists, strings, boxed `any` values) while two others hold live
-// structures and keep re-checking them. Collections triggered by any
-// thread stop all of them at safepoints and scan every shadow stack:
-// nothing live is freed (the checks pass) and the heap stays bounded.
+// Four threads make garbage while two check live data across collections.
 use rok::std::thread;
 
 extern "C" {
@@ -73,7 +69,7 @@ fn hold(seed: i64, rounds: i64, peak: Atomic<usize>) -> i64 {
     let bad: i64 = 0;
     let r: i64 = 0;
     while r < rounds {
-        // A little garbage of our own, so we collect too.
+        // Garbage of its own, so this thread collects too.
         let tmp: List<i64> = [r, r + 1, r + 2];
         if tmp[2] != r + 2 { bad += 1; }
         if r % 50 == 0 {

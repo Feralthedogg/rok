@@ -26,13 +26,7 @@
 // mutated server flights (plaintext): 40, under 5 s each: true
 // mutated DER / PEM: 900, hostile DER rejected: 12 of 12
 
-// Stdlib 3.2.5: net::tls against hostile peers. A TLS 1.3 server and
-// client written here (X25519, AES-128-GCM, Ed25519) send bad
-// certificates, unrequested extensions, forged CertificateVerify and
-// Finished messages and bad post-handshake messages, then mutated
-// flights; mutated plaintext ClientHellos and server flights and hostile
-// DER / PEM go into the parsers. Each ends in an error with the right
-// alert, never a panic or a hang; a failed handshake closes its socket.
+// TLS against hostile peers and inputs: an alert, never a panic or a hang.
 use rok::std::net::{tcp_listen, tcp_connect, TcpStream, Shutdown};
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, CipherSuite};
 use rok::std::thread;
@@ -144,7 +138,7 @@ const HRR_RANDOM: [u8; 32] = [
 
 const SEED: str = "78d9db35abd0139a9db0a4d968ecd2ab7042c83da59b57a921e671b72fac0755";
 
-// ---- helpers ----
+// Helpers.
 
 struct Rng { s: u64; }
 
@@ -327,7 +321,7 @@ fn verify_msg(tr: List<u8>, ctx: str) -> List<u8> {
     msg(15u8, cat([8u8, 7u8], v16(try! Ed25519::sign(unhex(SEED), tbs))))
 }
 
-// ---- a server written here, against tls::Client ----
+// A server written here, against tls::Client.
 
 /// How the server misbehaves.
 struct Evil {
@@ -550,7 +544,7 @@ fn fuzz_evil_server(n: usize) {
     println(f"mutated server flights: {n}, forged CertificateVerify / Finished accepted: {forged}, under 5 s each: {slow < 5000}");
 }
 
-// ---- a client written here, against tls::Server ----
+// A client written here, against tls::Server.
 
 /// One connection with an Ed25519 client certificate; `what` mutates:
 /// 0 Certificate, 1 CertificateVerify, 2 Finished, 3 the flight, 4
@@ -694,7 +688,7 @@ fn fuzz_evil_client(n: usize) {
     try! t.join();
 }
 
-// ---- plaintext flights and certificate parsing ----
+// Plaintext flights and certificate parsing.
 
 /// A real ClientHello and the real server's first flight for it.
 fn capture() -> (List<u8>, List<u8>) {

@@ -28,14 +28,7 @@
 // g 9000 6000 500 1521305655631681838 16000
 // fib 1 12345 83309
 
-// stdlib spec 2.1.2: `int` past the subquadratic cut-offs. Barrett
-// (mu) division by divisors and quotients of 3000 limbs and up, its
-// remainders from products mod B^n - 1, with divisors of every shape
-// (random, B^n - 1, a power of two, 2^k + 1); radix conversion whose
-// Barrett reciprocals come from the next power's; half-gcd above 2400
-// limbs (shared factors, consecutive Fibonacci numbers); Newton isqrt
-// on such divisions. Results are reduced mod 2^61 - 1 or hashed;
-// expected values computed by Python.
+// `int` past the subquadratic cut-offs; Python-computed results.
 
 fn gen(seed: u64, limbs: usize) -> int {
     let x: int = 0;

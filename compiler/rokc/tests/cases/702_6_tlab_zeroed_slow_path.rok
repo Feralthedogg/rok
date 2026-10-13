@@ -6,12 +6,7 @@
 // slow path: id 1 large true size 8216
 // unused overflow next
 
-// spec 7.2.6: a TLAB is zeroed before the fast path (7.2.1 / 7.2.2)
-// hands it out, so a fresh object reads all zero even where garbage
-// lived before the collection. Spec 7.2.3: the slow path called
-// directly fills in the header (a 8 KiB+ object goes to the LOS).
-// Spec 7.2.12: an allocation whose size overflows reaches "allocation
-// too large" even when nothing ever uses it (no elision).
+// Fresh objects read zero; the slow path fills the header; overflow aborts.
 use rok::bare::mem::transmute_unchecked;
 use rok::bare::ptr::ConstPtr;
 

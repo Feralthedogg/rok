@@ -5,11 +5,7 @@
 // 0 5 1 7
 // 12 22
 
-// Spec 3.5.3: a method path without a call is a `fn` value — a static
-// method `fn(args) -> R`, an instance one `fn(Self, args) -> R`.
-// `#[intrinsic]` methods (`i32::add`) get a thunk, generic ones take
-// their type arguments from the path or the expected `fn` type, and a
-// throwing method gives a throwing `fn`.
+// A method path without a call is a `fn` value.
 struct Point { x: f64; y: f64; }
 impl Point {
     fn new(x: f64, y: f64) -> Point { return Point { x: x, y: y }; }

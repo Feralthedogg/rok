@@ -7,11 +7,7 @@
 // 3.140000104904175 212 42 caught
 // 8 8 8 3000005
 
-// Stdlib 2.11: lossless `from` / `into` (2.11.2-3; a generic bound is
-// written `U: From<T>`), `saturating_into` / `wrapping_into` (2.11.5),
-// `as` casts (2.11.6), an annotated literal converts at compile time
-// (2.11.7), user `From` / `TryFrom` (2.11.9), and arithmetic results
-// convert only explicitly (2.11.10).
+// `from` / `into`, saturating / wrapping, `as`, and literal conversions.
 struct Celsius { degree: f64; }
 struct Fahrenheit { degree: f64; }
 

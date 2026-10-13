@@ -6,12 +6,7 @@
 // concurrent 1000 sum 499500 bounded true
 // cancelled job finished true
 
-// `task::spawn_blocking` runs jobs on a persistent pool: awaited one at
-// a time they reuse one thread (it is idle again before a job's result
-// is seen, even by the awaiter's first poll); 16 tasks awaiting jobs in
-// a loop never need more than 16 threads (a job a busy thread took
-// meanwhile starts none); 1000 at once stay within the pool's cap (512
-// threads) and all complete.
+// `spawn_blocking` reuses idle pool threads and stays within the cap.
 use rok::std::thread;
 use rok::std::time::Duration;
 

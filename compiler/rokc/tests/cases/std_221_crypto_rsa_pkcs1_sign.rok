@@ -14,11 +14,7 @@
 // pss default salt: hash length true
 // modulus round trip true, exponent 010001
 
-// rok::core::crypto::rsa: PKCS #1 v1.5 signing (deterministic, so the
-// signatures must equal OpenSSL's), PSS verification with explicit salt
-// lengths (OpenSSL signatures with salts of 0, 20, 64 and the maximum
-// 222 bytes), and the public key accessors. The 2049-bit key has a
-// 257-byte modulus.
+// RSA PKCS #1 v1.5 signing (must equal OpenSSL's) and PSS verification.
 
 use rok::core::crypto::sha2::HashAlgorithm;
 use rok::core::crypto::rsa::{RsaPrivateKey, RsaPublicKey};

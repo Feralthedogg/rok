@@ -43,8 +43,6 @@ pub fn sign(key: &[u8], frames: &[&[u8]]) -> String {
     hex(&hmac_sha256(key, frames))
 }
 
-// --- ZMTP 3.0 -----------------------------------------------------------
-
 /// Greeting and `READY` both ways, as a socket of `kind` (`ROUTER`,
 /// `PUB`, `REP`, or a client's `DEALER` / `SUB` / `REQ`).
 pub fn handshake(s: &mut TcpStream, kind: &str) -> io::Result<()> {
@@ -133,8 +131,6 @@ pub fn write_msg(s: &mut impl Write, frames: &[Vec<u8>]) -> io::Result<()> {
     }
     s.write_all(&buf)
 }
-
-// --- Jupyter messages ---------------------------------------------------
 
 pub struct Msg {
     /// Routing frames before `<IDS|MSG>`.
@@ -240,8 +236,6 @@ fn iso8601(secs: u64, micros: u32) -> String {
         t % 60
     )
 }
-
-// --- the kernel ---------------------------------------------------------
 
 /// A ROUTER connection's writing end.
 type Conn = Arc<Mutex<TcpStream>>;

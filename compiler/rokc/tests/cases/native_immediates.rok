@@ -5,12 +5,7 @@
 // floats ok
 // loops ok
 
-// The native backend's immediate operands (add / sub / logical /
-// shift / multiply / compare forms, and constants that do not encode)
-// agree with the same operations on a value from a call, in every
-// integer width; comparisons feeding a branch take the flags; values
-// stay in registers across straight-line code and through loops.
-// Generated: each check is `(x op c) != (x op id(c))`.
+// Native backend immediates against the same operation on a call result.
 
 fn id<T>(x: T) -> T {
     return x;

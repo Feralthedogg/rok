@@ -3,26 +3,18 @@
 //! (closures, instances, type instances, `any` tags, warnings), is kept
 //! as a unit and replayed in a later build instead of lowered again.
 //!
-//! A unit is keyed by what every lowering sees alike (`global_key`:
-//! target, flags, operators, lang slots) and the declaration itself
-//! (its name and its body with positions). Lowering a body reads the
-//! program's interface and the shared state; each read is logged: of
-//! the interface (`Read`: a signature, a type, a trait, an impl list,
-//! a name resolution ..) with a fingerprint of its answer, of the
-//! shared state (`Lookup`) with the answer. A unit replays when every
-//! read answers alike now and the files its spans point into outside
-//! its body are unchanged, so an edit elsewhere re-lowers only the
-//! bodies that read what it changed. The functions, types and inference
-//! variables it made are renumbered from where this build's counters
-//! stand, and the older ones it names by name or by what the reads
-//! answer now. Otherwise the body is lowered and the unit made anew: a
-//! miss is always safe.
+//! A unit is keyed by `global_key` (target, flags, operators, lang slots)
+//! and the declaration with its body and positions. Every read a lowering
+//! makes is logged: interface reads (`Read`) with a fingerprint of the
+//! answer, shared-state reads (`Lookup`) with the answer. A unit replays
+//! when every read answers alike and the files its spans point into are
+//! unchanged; the functions, types and inference variables it made are
+//! renumbered from this build's counters. A miss just lowers again.
 //!
-//! A body is plain when it is lowered once as itself: not generic, not
-//! `const`, not a trait's default. An inferred return type is derived
-//! from the body, so such a body stays in the interface (`interface_key`)
-//! while its unit records the type it gave. A lowering that reports an
-//! error or touches state beyond what it logs makes no unit.
+//! Only plain bodies (not generic, `const` or a trait default) make units.
+//! An inferred return type stays in the interface (`interface_key`) and
+//! the unit records it. A lowering that errors or touches unlogged state
+//! makes no unit.
 
 use std::collections::{HashMap, HashSet};
 

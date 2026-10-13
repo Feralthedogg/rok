@@ -10,12 +10,7 @@
 // buffered: 99990 true
 // pipes: 1000 true true
 
-// `io::copy` hands two OS descriptors to the runtime, which picks the
-// kernel path per pair (Linux `copy_file_range` file -> file, `sendfile`
-// file -> socket / pipe, `splice` from a socket or pipe; macOS
-// `sendfile` file -> socket) or the read / write loop. Copies start at
-// the reader's offset and leave it at the end. A socket with a timeout
-// and a buffered reader go through `read` / `write`.
+// `io::copy` takes each kernel path, or the loop, from the reader's offset.
 use rok::std::io;
 use rok::std::io::{IoError, Reader, Writer, BufReader, byte_buf};
 use rok::std::fs;

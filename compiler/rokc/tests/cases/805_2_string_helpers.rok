@@ -6,11 +6,7 @@
 // int 0:-42 1 2 3 0:255
 // float 0:2.5 2
 
-// spec 8.5.2: the runtime's string helpers called directly: `rok_str_eq`
-// is 1 / 0, `rok_str_byte` the i-th byte, `rok_str_parse_int` returns 0
-// ok (value in out[0]), 1 empty, 2 invalid digit, 3 out of range,
-// `rok_str_parse_float` 0 ok or 2 invalid. Declared with the runtime
-// ABI (`extern "rok"`, 8.5 preamble): a `str` crosses as (ptr, len).
+// The runtime's string helpers called directly through `extern "rok"`.
 extern "rok" {
     fn rok_str_eq(a: str, b: str) -> i32;
     fn rok_str_byte(s: str, i: usize) -> u8;

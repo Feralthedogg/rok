@@ -10,11 +10,7 @@
 // equal first bigger second bigger
 // 3 [1, 2] 6 2
 
-// spec 3.11.1: literal (numbers, str, bool, none, char), identifier,
-// wildcard and typed wildcard, tuple with rest, `enum`, `struct`, range,
-// or- and `@` binding patterns. 3.11.2: a false guard fails the arm.
-// 3.11.5 / 3.11.6: irrefutable patterns in `let` / `for`, refutable ones
-// in `match` / `if let` / `let-else`.
+// Every pattern kind, refutable and irrefutable positions.
 enum Shape { Circle(f64), Rectangle(f64, f64), Pending, Click { x: i32; y: i32; } }
 struct Point { x: i32; y: i32; }
 

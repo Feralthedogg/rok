@@ -1,26 +1,22 @@
-// rok::std::process (stdlib spec 307): child processes.
+// rok::std::process (stdlib 307): child processes.
 //
-// Spawning is `posix_spawnp` in the runtime (the program is looked up
-// in this process's `PATH` unless it contains `/`, even when `env`
-// replaces the child's); every fd the library opens is close-on-exec,
-// and an exec failure comes back as the `IoError`.
-// Windows: `CreateProcessW` with the arguments quoted for the MSVC CRT
-// (the program is looked up in `PATH` unless it holds a separator, `.exe`
-// added without an extension); the child inherits only its three
-// standard handles; a batch file refuses arguments holding `"`, `%`
-// or a line break. `ExitStatus` holds the exit code; `kill` / `signal`
-// end the process with `TerminateProcess`; `signal` routes console
-// events: Ctrl-C (2), Ctrl-Break (21), console close (1).
+// Spawning is `posix_spawnp`; the program is looked up in this
+// process's `PATH` (not the child's `env`) unless it contains `/`. Every
+// fd the library opens is close-on-exec, and an exec failure comes back
+// as the `IoError`. On Linux each child also has a pidfd, so a signal
+// never hits a recycled pid.
 //
-// On Linux each child is also tracked by a pidfd (opened right after
-// the spawn, closed once reaped), and signals go through it, so a
-// recycled pid is never hit. `output()` drains stdout and stderr
-// together (`poll`; Windows polls the pipes). The pipe ends wrap `File`s.
+// Windows: `CreateProcessW` with arguments quoted for the MSVC CRT
+// (`.exe` added when there is no extension); the child inherits only its
+// standard handles; batch files refuse arguments holding `"`, `%` or a
+// line break. `kill` / `signal` use `TerminateProcess`; `signal` routes
+// console events: Ctrl-C (2), Ctrl-Break (21), close (1).
 //
-// `signal(sig, f)`: the C handler writes the signal number to a pipe;
-// one dispatcher thread (`rok-signal`, started by the first `signal`)
-// reads it and calls `f` there — never in signal context, so `f` may do
-// anything. A burst that fills the pipe drops signals.
+// `output()` drains stdout and stderr together.
+//
+// `signal(sig, f)`: the C handler writes the signal number to a pipe and
+// a dispatcher thread (`rok-signal`) calls `f`, never in signal context.
+// A burst that fills the pipe drops signals.
 
 use rok::std::fs::File;
 use rok::std::io::{IoError, RawFd, Reader, Writer, check, byte_buf, read_more, take_handle};

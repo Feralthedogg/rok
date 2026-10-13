@@ -17,12 +17,7 @@
 // 7 true 9
 // true 13
 
-// Niche layout (refs-lang 2.7): `T | none` keeps `T`'s size when `T`
-// has a bit pattern no value uses — `bool` (2), `char` (a surrogate),
-// payload-less / reference-free enums (an unused tag), `Ptr` and C fn
-// pointers (null), `#[niche(..)]` newtypes, and structs / tuples holding
-// one. Round trips, widening into a tagged sum and back, `??`, and
-// zeroed storage reading back as `none`.
+// `T | none` reuses a bit pattern no `T` uses, so it stays `T`'s size.
 
 use rok::bare::mem::size_of;
 use rok::bare::ptr::Ptr;

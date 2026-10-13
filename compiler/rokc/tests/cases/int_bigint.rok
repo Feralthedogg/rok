@@ -20,12 +20,7 @@
 // five x 2 123456789012345678901234567890 123456789012345678900246913574 true true true true
 // 0 0 true 0 0
 
-// stdlib spec 2.1.2 / 2.1.6 / 2.1.7 / 2.10.5: `int`, the arbitrary
-// precision integer — literals in `int` slots (past i64 too), the
-// operator traits, Karatsuba-sized products, Knuth division, parse /
-// print in any radix, bit ops on infinite two's complement, the
-// conversion policies and f-string formatting. Values checked against
-// Python.
+// `int`: literals, operators, radix I/O, bit ops, conversions; values from Python.
 
 fn fact(n: i64) -> int {
     let acc: int = 1;

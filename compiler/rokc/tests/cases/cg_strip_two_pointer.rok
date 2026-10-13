@@ -1,12 +1,7 @@
 // spec: §3.13.2
-// A two-pointer loop whose body reaches no safepoint runs a copy that
-// polls nowhere when `hi - lo <= 64` (it runs at most that many times),
-// the loop as written otherwise. Both run the same iterations: empty,
-// crossed, at and past the limit, signed pointers near the type's
-// limits, one pointer moving, an early exit, a panic in the copy (at
-// the access, as the loop as written does).
+// Two-pointer loops with `hi - lo <= 64` run a copy that polls nowhere.
 // expect-exit: 101
-// expect-stderr: thread 'main' panicked at tests/cases/cg_strip_two_pointer.rok:73:27:
+// expect-stderr: thread 'main' panicked at tests/cases/cg_strip_two_pointer.rok:68:27:
 // expect-stderr: List index out of bounds
 // expect-stdout:
 // 0 0 1 32 33 500

@@ -11,15 +11,7 @@
 // waited true
 // stdin 0 bytes, done true
 
-// Stdlib 1.8: a WASI preview 3 command. Without `main` the component
-// exports only what its world says: `wasi:cli/run@0.3.0`'s `run`, an
-// `async func`, is the `#[wit::export] async fn run`, which the host
-// runs on its event loop. It awaits the host's async imports (a
-// subtask: `monotonic-clock.wait-for`), writes stdout through a
-// `stream<u8>` (a channel `Receiver<u8>`), awaits the `future` the host
-// answers with (an `AsyncFuture`), and reads stdin's stream to its end.
-// The other async exports are called by the host (`--invoke`): one
-// throwing (`result<s32, string>`), one returning a list.
+// A WASI preview 3 command: async `run`, async imports, streams, futures.
 ffi::wit::import { "wit" }
 
 use wasi::clocks::monotonic_clock;

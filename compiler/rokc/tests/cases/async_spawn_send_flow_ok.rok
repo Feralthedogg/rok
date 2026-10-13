@@ -2,11 +2,7 @@
 // expect-stdout:
 // param 1, field 2, helper 3, list 30, local 5, nested 6, consumed 7, pinned 8
 
-// The `Send` check of `task::spawn` follows futures through parameters,
-// fields, helpers and lists, but only rejects the ones whose frame is
-// not `Send`: non-`Send` futures of the same type elsewhere (on
-// `spawn_local`) and non-`Send` values dropped before an `await` are
-// fine.
+// `task::spawn` rejects only futures whose frame is not `Send`.
 
 fn launch<F: Future + Send>(f: F) -> Task<F::Output>
 where

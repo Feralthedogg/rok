@@ -20,13 +20,7 @@
 // optional server: peer 0 certs, names 0, resumed false
 // optional server: peer 1 certs, names 1, resumed false
 
-// Stdlib 3.2.5: client certificates. A server with `client_roots` sends
-// a CertificateRequest and validates the client's chain (clientAuth,
-// keyUsage, the path to a root) and CertificateVerify; without a
-// certificate it fails with certificate_required unless
-// `require_client_cert` is off. A resumed connection keeps the original
-// client certificates. A client key that does not match its certificate
-// fails before anything is sent.
+// TLS client certificates.
 use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, SessionCache, TicketStore};
 use rok::std::thread;

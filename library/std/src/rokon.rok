@@ -242,7 +242,7 @@ const fn last_seg(path: str) -> str {
     }
 }
 
-// ---- derive support (used by `#[derive(Rokon)]`) ----
+// derive support (used by `#[derive(Rokon)]`)
 
 /// The named fields read into a struct or a named variant.
 pub struct Fields {
@@ -489,8 +489,6 @@ pub @derive {
         }
     }
 }
-
-// ---- impls for the standard types ----
 
 impl ToRokon for Value {
     const fn to_rokon(self) -> Value { self }

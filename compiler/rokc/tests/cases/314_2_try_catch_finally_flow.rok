@@ -10,15 +10,7 @@
 // new
 // throw-arg handler
 
-// spec 3.14.2: `try` covers everything to its right (nested calls, a
-// chain, a block); after a binary operator it covers that operand.
-// 3.14.3: `try?` gives `T | none`. 3.14.4: `catch` clauses are tried top
-// to bottom by pattern (typed, struct, `any Error`); a sum-typed catch
-// binds the subset; a bare `catch` is `catch _`. 3.14.5 / 3.14.9:
-// `finally` runs on normal exit, after a handled error, before a
-// propagating one and on `return` / `break`; a `catch` throwing anew
-// wins. 3.14.6: the value is the left side's or the handler's. 3.14.7:
-// typed `throws (A | B)`. 3.14.9: a `throw` evaluates its operand first.
+// What `try` covers, `catch` order, and when `finally` runs.
 #[derive(Debug)]
 struct TimeoutError { secs: i32; }
 impl Error for TimeoutError {}

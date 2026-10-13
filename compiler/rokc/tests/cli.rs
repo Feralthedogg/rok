@@ -1,4 +1,4 @@
-//! CLI behavior (spec 901 / 902 / 905): spawn the built `rokc` on
+//! CLI behavior (spec 9.1 / 9.2 / 9.5): spawn the built `rokc` on
 //! scratch package directories. Tests that build native code skip
 //! when rokc is built without LLVM (see `common::setup`).
 
@@ -48,7 +48,7 @@ fn new_bin_package_runs_from_its_directory() {
     assert_eq!(text(&out.stdout), "Hello, world!\n");
     assert!(text(&out.stderr).contains("Compiling app"));
 
-    // A file inside the package builds the package (902.2), and `-q`
+    // A file inside the package builds the package (9.2.2), and `-q`
     // silences progress.
     put(app.join("src/util/x.rok"), "fn unused() {}\n").unwrap();
     let out = rokc(Some(&env), &dir, &["-q", "build", "app/src/util/x.rok"]);
@@ -91,10 +91,8 @@ fn files_outside_src_are_not_the_package() {
     );
 }
 
-/// 0.3.1: a package with `src/lib.rok` and `src/main.rok` is a library
-/// and an executable that uses it by the package's name. `build` makes
-/// both, `test` runs the library's tests and then the executable's,
-/// `check` checks both, `doc` documents the library.
+/// A package with `src/lib.rok` and `src/main.rok` is both, the executable
+/// using the library by the package's name.
 // spec: §0.3.1 §9.1.2 §9.2.15 §9.2.16
 #[test]
 fn lib_and_main_package() {
@@ -238,7 +236,7 @@ fn library_build_drops_code_its_package_does_not_reach() {
     assert!(mir.matches("\nfn ").count() < 44, "{mir}");
 }
 
-/// 902.16: an unchanged package is not rebuilt; a changed source, a
+/// 9.2.16: an unchanged package is not rebuilt; a changed source, a
 /// different option or a replaced output rebuilds it.
 // spec: §9.1.2
 #[test]
@@ -387,7 +385,7 @@ fn runtime_change_relinks_script() {
     assert!(!run());
 }
 
-/// 902.15: the `debug` profile has debug info and symbols; the `release`
+/// 9.2.15: the `debug` profile has debug info and symbols; the `release`
 /// one neither (unless `-g`), and a panic still names its location.
 #[test]
 fn profiles_differ() {
@@ -502,10 +500,8 @@ fn included_file_is_a_build_input() {
     );
 }
 
-/// 902.16: a package builds by codegen units (one per module); an edit
-/// recompiles the units it changed, those of a function's callers when
-/// its signature changes, and the executable is the one a clean build
-/// makes, byte for byte.
+/// An edit recompiles only the units it changed (and callers' units for a
+/// signature); the result is a clean build's, byte for byte.
 #[test]
 fn edited_module_recompiles_its_unit_alone() {
     let Some(env) = setup() else { return };
@@ -620,11 +616,8 @@ fn edited_module_recompiles_its_unit_alone() {
     }
 }
 
-/// 902.16: the front end takes an unchanged file's parse and an
-/// unchanged body's lowering from the incremental directory (`-v` counts
-/// them), and its warnings and program are a clean build's; under
-/// `ROKC_INCR_VERIFY` a replay that differs from a clean lowering fails
-/// the build.
+/// Unchanged parses and lowerings replay from the incremental directory;
+/// `ROKC_INCR_VERIFY` fails a replay that differs from a clean lowering.
 // spec: §9.1.7
 #[test]
 fn front_end_reuses_parses_and_bodies() {
@@ -749,10 +742,7 @@ fn front_end_reuses_parses_and_bodies() {
     assert_eq!((w, out), (clean(), "1 4 g\n".to_owned()));
 }
 
-/// 902.16: `rokc check` takes the library's collected stage from the
-/// toolchain's cache too, and its lints read the library's items from
-/// it: a dependency's `#[must_use]` holds and a library trait's import
-/// is no unused one, as when the library was parsed.
+/// `rokc check` reads the library's items from the cached stage too.
 // spec: §9.1.2 §9.2.16
 #[test]
 fn check_takes_the_library_stage() {
@@ -796,14 +786,8 @@ fn check_takes_the_library_stage() {
     assert!(!check());
 }
 
-/// 902.16: what collecting the library's items made (the toolchain's
-/// library and the prebuilt dependencies) is kept across processes, in
-/// the toolchain's cache (`rok-cache/library/`). An
-/// edit in the package (a body, a signature, a `const`, a trait impl)
-/// takes it; an edit of a dependency's item the package uses collects
-/// again; a corrupt store is a miss and is written anew. Each build's
-/// program and warnings are a clean build's, and `ROKC_INCR_VERIFY`
-/// fails a build whose lowering differs from one without the store.
+/// The collected library stage is cached across processes and taken or
+/// redone per edit; a corrupt store is a miss.
 // spec: §9.1.7
 #[test]
 fn library_stage_persists_across_builds() {
@@ -930,7 +914,7 @@ fn library_stage_persists_across_builds() {
     assert_eq!(build(), (true, "6 28 8 0\n".to_owned()));
 }
 
-/// 2.10.9 / 902.16: a generic body is checked against its bounds in
+/// 2.10.9 / 9.2.16: a generic body is checked against its bounds in
 /// every build, incremental or not: breaking it fails the build while
 /// the plain bodies replay, and fixing it builds again.
 #[test]
@@ -980,13 +964,8 @@ fn incremental_checks_generic_bodies() {
     assert_eq!(text(&out.stdout), "6 2\n");
 }
 
-/// A library package builds by units: an edit recompiles its unit
-/// alone, the archive is a clean build's, and two such libraries with
-/// copies of the same instances link into one program. A library names
-/// no symbol of a dependency it does not use: built against the edited
-/// dependency, it recompiles nothing, and its archive built against the
-/// old one still links (lld fails on what a member it pulls leaves
-/// undefined). Cross targets (`targets/build.sh`) link only.
+/// A library builds by units, links with another holding the same
+/// instances, and names no symbol of a dependency it does not use.
 // spec: §9.2.13 §9.3.1 §9.3.3
 #[test]
 fn library_builds_by_units() {
@@ -1176,7 +1155,7 @@ fn new_file_under_debug_info_recompiles_its_importers() {
     assert_eq!(text(&run.stdout), "1 2 3\n");
 }
 
-/// `-vv` (909.5): the files read and the generic instances made.
+/// `-vv` (9.9.5): the files read and the generic instances made.
 // spec: §9.1.5 §9.9.5
 #[test]
 fn very_verbose_lists_files_and_instances() {
@@ -1422,12 +1401,7 @@ fn fmt_writes_lf_and_keeps_literal_crlf() {
     );
 }
 
-/// Spec 9.5 in a host executable's symbol table: `_Y<pkg>_<path>_<name>_
-/// <typehash>`, one symbol per generic instance (9.5.1, 9.5.2); the same
-/// instance has the same typehash in another package's build while the
-/// package hash tells the two apart (9.5.7); `#[export_name]` is as
-/// written (9.5.8); the implicit `main` is mangled beside the platform
-/// `main` (9.5.9).
+/// Symbol mangling in a host executable's symbol table.
 // spec: §9.5.1 §9.5.2 §9.5.5 §9.5.7 §9.5.9
 #[test]
 fn symbols_follow_the_mangling_scheme() {
@@ -1586,15 +1560,8 @@ fn sysroot_is_beside_rokc() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// `--target` links what the sysroot ships for it
-/// (`lib/rok/targets/<triple>/`, `targets/build.sh`): Linux ELF
-/// executables (musl static, glibc PIE through the system's loader; the
-/// 32-bit ones ELFCLASS32), a 32-bit Windows PE (run with
-/// `ROK_TEST_WINE=<wine>`, which needs its 32-bit support), Mach-O for
-/// the other macOS arch, run here under Rosetta, and wasm32 modules (a
-/// WASI preview 2 component, preview 1 command modules), run by `node`
-/// with the shipped `rok.mjs` host and by `ROK_TEST_WASM_RUNNER`
-/// (wasmtime) when there. A target it does not ship is named.
+/// `--target` links what the sysroot ships and runs what this host can
+/// (Rosetta, `ROK_TEST_WINE`, node, `ROK_TEST_WASM_RUNNER`).
 // spec: §0.2.4 §9.1.2 §9.2.14 §9.2.15 §9.2.18 §9.5.9
 #[test]
 fn cross_targets_link_from_the_sysroot() {
@@ -1701,10 +1668,7 @@ fn cross_targets_link_from_the_sysroot() {
     }
 }
 
-/// `h.rok` built for wasm32 target `t` at -O0 / -O2: a module that
-/// exports `_start` (the browser's, a reactor: `_initialize`) and
-/// imports WASI preview 1, printing `ok` under the target's host when
-/// one is there.
+/// `h.rok` for a wasm32 target at -O0 / -O2, run under its host if there.
 fn wasm_target_runs(dir: &Path, targets: &Path, spec: &TargetSpec) {
     let t = spec.name.as_str();
     for o in ["-O0", "-O2"] {
@@ -1754,10 +1718,7 @@ fn wasm_target_runs(dir: &Path, targets: &Path, spec: &TargetSpec) {
     }
 }
 
-/// A browser module (wasm32-unknown-unknown) is a reactor: `rok.mjs`'s
-/// `load` initializes it, `main` runs the program, and its
-/// `#[export_name]` functions stay callable from JS afterwards,
-/// allocating and collecting, their output flushed after each call.
+/// A browser module is a reactor; its exports stay callable from JS.
 // spec: §9.5.9
 #[test]
 fn browser_module_exports_to_js() {
@@ -1983,7 +1944,7 @@ fn extern_dependencies_are_top_level_names() {
     let out = rokc(Some(&env), &dir, &["run", "app", "--extern", "greet=greet"]);
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "41 42\n");
-    // Prebuilt into deps/ with its fingerprint (902.3).
+    // Prebuilt into deps/ with its fingerprint (9.2.3).
     for f in ["libgreet.a", "greet.rokhir", "greet.fp"] {
         assert!(dir.join("app/target/debug/deps").join(f).is_file(), "{f}");
     }
@@ -2098,14 +2059,9 @@ fn extern_dependency_is_a_package_boundary() {
     );
 }
 
-/// A library built once (`lib<name>.a` + `<name>.rokhir`, spec 904) and
-/// linked prebuilt: its concrete code comes from the archive, its
-/// generics are instantiated by the user, `any` values (a thrown error,
-/// a trait object) cross the boundary both ways, and a lazy static is
-/// one static. `rokhir-text` / `inspect` show the interface.
-/// Parameter and field defaults resolve in the package declaring them,
-/// not in the caller's (spec 4.2.3): the app's own `one` / `LIMIT` / `S`
-/// don't capture them.
+/// A prebuilt library: code from the archive, generics instantiated by the
+/// user, `any` across the boundary, one lazy static, defaults resolved in
+/// the declaring package.
 #[test]
 fn defaults_resolve_in_the_declaring_package() {
     let Some(env) = setup() else { return };
@@ -2183,12 +2139,7 @@ fn prebuilt_dependency_sums_keep_their_tags() {
     assert_eq!(text(&out.stdout), "list 3\ndict 1\nzebra 4\ndict 0\n");
 }
 
-/// A prebuilt dependency's bodies are cut from its ROKHIR, their
-/// use-after-hand-off summaries kept (stdlib 2.13.9): a value its
-/// function hands to a `Mutex` (through another of its functions, a
-/// method or a struct it builds) is gone in the app, one it only reads,
-/// or a clone, is not; one it hands over unless it returns `none` is
-/// still the app's where the result is `none`.
+/// Hand-off summaries survive in a prebuilt dependency's ROKHIR.
 #[test]
 fn prebuilt_dependency_keeps_handoff_summaries() {
     let Some(env) = setup() else { return };
@@ -2542,13 +2493,8 @@ fn stale_rokhir_is_rejected() {
     );
 
     let good = fs::read(&rokhir).unwrap();
-    // The layout (9.4.3 - 9.4.7): a 16-byte little-endian header (`ROKH`,
-    // version 6, flags 0, body offset), PrefixVarInt-sized strings (9.4.5):
-    // the producer, then the meta (mount name, package hash — 0.3.3: the
-    // SHA-256 of `path \0 text \0` per file, 8 hex digits — and source
-    // directory, GC type range, features); at the body offset, the files
-    // with concrete function bodies cut to `;`, then the hand-off
-    // summaries (none: `one` has no value that is not `Sync`).
+    // The layout (9.4.3 - 9.4.7): header, sized strings (producer, meta),
+    // then at the body offset the cut files and hand-off summaries.
     let word = |i: usize| u32::from_le_bytes(good[i..i + 4].try_into().unwrap());
     assert_eq!(&good[..4], b"ROKH");
     assert_eq!((word(4), word(8)), (7, 0));
@@ -2631,10 +2577,8 @@ fn check_library_checks_every_body() {
     );
 }
 
-/// Spec 9.1 / 0.6.4: `-C target-feature` / `-C target-cpu` reach LLVM
-/// (`+avx2` widens a vectorized loop to `ymm` registers; the baseline
-/// stays SSE2), `native` is the build machine's CPU, and the native
-/// backend says it builds for the baseline.
+/// `-C target-feature` / `-C target-cpu` reach LLVM; the native backend
+/// builds for the baseline.
 // spec: §9.1.2 §0.6.4
 #[test]
 fn target_cpu_and_features() {
@@ -2770,10 +2714,8 @@ fn library_tiers_depend_only_downward() {
 // spec: §9.9.1 §9.9.10
 #[test]
 fn emit_expanded_prints_meta_expansions() {
-    // Spec 6.9.9: `--emit=expanded` writes what user derives /
-    // attributes generate, as source (the nested expansion of `Tag`'s
-    // derive, used in the template at 11:5, is listed after the
-    // attribute's).
+    // `--emit=expanded` lists the nested expansion of `Tag`'s derive
+    // (used at 11:5) after the attribute's.
     let dir = scratch("expanded");
     let src = "trait Named { fn type_name() -> str; }\n\
                #[impl_derive(Named)]\n\
@@ -2962,10 +2904,7 @@ fn missing_mlir_plugins_are_errors() {
     }
 }
 
-/// A dialect + pass plugin (`tests/plugin/answer.cpp`) built as
-/// docs/mlir-plugins.md says, from the plugin development tree with its
-/// MLIR symbols unresolved (Windows: bound to rokc.lib), runs on rokc's
-/// own MLIR.
+/// An MLIR plugin built as docs/mlir-plugins.md says runs on rokc's MLIR.
 // spec: std §1.10.2 §1.10.3 §1.10.4
 #[test]
 fn mlir_plugin_binds_to_rokcs_mlir() {
@@ -3355,12 +3294,8 @@ fn o3_compiles_std_from_source() {
     }
 }
 
-/// Profile-guided optimization: `-C profile-generate[=<dir>]` instruments
-/// (LLVM at every level, so `-O0` too), the run writes a raw profile
-/// (`LLVM_PROFILE_FILE` overrides where), `rokc profdata merge` indexes
-/// it, and `-C profile-use` optimizes with it; a profile older than the
-/// code is a warning (again when the build is Fresh). The REPL,
-/// `-C backend=native` and wasm32-unknown-unknown refuse it.
+/// PGO: instrument, run, merge, use; a stale profile warns. The REPL, the
+/// native backend and wasm32-unknown-unknown refuse it.
 // spec: §9.1.2 §9.1.7 §9.2.10 §9.9.7
 #[test]
 fn profile_guided_optimization_round_trip() {
@@ -3494,10 +3429,7 @@ const PGO_MAIN: &str = "fn classify(n: i64) -> i64 {\n    if n % 7 == 0 { 3 } el
                         0i64..100000i64 {\n        s += classify(i);\n    }\n    \
                         println(f\"{s}\");\n}\n";
 
-/// `rokc profdata show` summarizes a profile (`--all-functions`,
-/// `--topn`); a merge that overflows a counter warns and still writes
-/// the profile; context-sensitive PGO: `-C cs-profile-generate` on top of
-/// `-C profile-use`, its runs merged with the first profile, used again.
+/// `rokc profdata show`, an overflowing merge, and context-sensitive PGO.
 // spec: §9.1.2 §9.9.7
 #[test]
 fn profdata_show_merge_warnings_and_context_sensitive_pgo() {
@@ -3641,10 +3573,8 @@ fn profile_guided_optimization_on_wasm32_wasi() {
     build(&["-C", "profile-use=p.profdata", "-o", "pgo.wasm"]);
 }
 
-/// `ROK_CC` links a `wasm32-wasi` component with its WIT (stdlib 1.8):
-/// the driver gets the component type and the exports through `-Wl,`,
-/// clang's name of the target and, for a component without `main`, the
-/// reactor exec model. A stand-in driver records its arguments.
+/// `ROK_CC` gets what a `wasm32-wasi` component link needs. A stand-in
+/// driver records its arguments.
 // spec: §9.1.7 §9.2.14
 #[cfg(unix)]
 #[test]
@@ -3707,12 +3637,8 @@ fn rok_cc_links_wit_components() {
     );
 }
 
-/// `rokc run` passes arguments after `--` and exits with the program's
-/// code, `128 + n` for a signal (9.1.2); a lone file must be `.rok`
-/// (1.1.1); an internal compiler error exits 101 (9.1.6); progress verbs
-/// (9.1.8), `ROKC_VERBOSE` and `ROK_TIME_PASSES` (9.1.7, 9.9.5),
-/// `rokc emit` (MLIR by default; several kinds take no `-o`), `help
-/// <command>` (9.1.4), and the runtime's `ROK_GC_STATS` (9.9.8).
+/// `rokc run` exit codes, argument passing, progress output and the
+/// diagnostic knobs.
 // spec: §1.1.1 §9.1.2 §9.1.4 §9.1.6 §9.1.7 §9.1.8 §9.9.1 §9.9.5 §9.9.8
 #[test]
 fn run_passes_arguments_codes_and_progress() {
@@ -3808,21 +3734,10 @@ fn run_passes_arguments_codes_and_progress() {
     assert_exit(&out, 101);
 }
 
-/// The runtime ABI in emitted code. MLIR uses upstream dialects only
-/// (0.2.3, 8.7.4): functions are `func` ops, arithmetic `arith`, branches
-/// `cf`, memory `llvm` (8.7.3); runtime functions are external
-/// `llvm.func` declarations called with `llvm.call`, coroutines use no
-/// `llvm.coro.*` (8.7.6). The TLS block `rok_tls` is an external thread-local the code
-/// reaches at fixed offsets: the safepoint poll loads the yield flag at
-/// 10p+8 and calls `rok_runtime_yield` (8.3.1, 8.3.8, 8.4.12, 8.7.7,
-/// 8.9.11); the TLAB fast path takes the cursor at p and the limit at 2p
-/// and falls back to `rok_gc_alloc_slow` (8.5.11); a 32-bit target has
-/// p = 4 (8.3.4, 8.3.5); each target reaches the block its own way
-/// (8.3.2). Runtime functions are plain C declarations (8.5.10), errors
-/// pass by value with no unwinding (8.5.6), GC references are plain
-/// pointers (8.6.4), volatile access is `load` / `store volatile`
-/// (stdlib 1.5.5). At -O2 `#[inline(never)]` keeps its call (8.6.8) and
-/// a self tail call runs in constant stack (8.6.7).
+/// The runtime ABI in emitted code: upstream dialects only, the TLS block
+/// passed as a hidden last argument and read only by the C `main`, fixed
+/// slot offsets (`p` is the pointer size), plain C runtime declarations,
+/// no unwinding.
 // spec: §0.2.3 §8.3.1 §8.3.2 §8.3.4 §8.3.5 §8.3.8 §8.4.12 §8.5.6 §8.5.10 §8.5.11 §8.6.4 §8.6.7
 // spec: §8.6.8 §8.7.3 §8.7.4 §8.7.6 §8.7.7 §8.9.11 §9.2.12 / std §1.5.5
 #[test]
@@ -4013,10 +3928,7 @@ fn cold_functions_stay_out_of_line() {
     );
 }
 
-/// The shadow-stack frame links before the first safepoint of each path
-/// (804 §8.4.7): `walk`'s two returns that reach none neither link nor
-/// unlink it, so its slot at the top of the stack is stored twice (the
-/// link, the one unlink).
+/// `walk`'s two safepoint-free returns neither link nor unlink its frame.
 // spec: §8.4.7
 #[test]
 fn frames_link_only_on_paths_that_reach_a_safepoint() {
@@ -4053,10 +3965,7 @@ fn frames_link_only_on_paths_that_reach_a_safepoint() {
     assert_eq!(stores, 2, "{walk}");
 }
 
-/// Every C symbol the runtime defines is `rok_`-prefixed (8.5.8), so it
-/// cannot collide with user code or a C library; the normative ones sit
-/// under their area's prefix. Toolchain symbols (Rust-mangled, compiler
-/// builtins) are not the runtime's.
+/// Every C symbol the runtime defines is `rok_`-prefixed.
 // spec: §8.5.8
 #[test]
 fn runtime_symbols_carry_the_rok_prefix() {
@@ -4488,10 +4397,8 @@ int use_vcb(vcb f);
 #define HALF_ONE 1.0f16
 ";
 
-/// What rok has no type for (128-bit integers, `_Float16`, a 16-byte
-/// `long double`, variadic function pointers) is skipped; a struct
-/// holding one is bytes, and is never passed by value. A target that is
-/// not this machine's gets no system headers but clang's own.
+/// Types rok cannot express are skipped; a struct holding one is opaque
+/// bytes. A cross target gets only clang's own headers.
 // spec: std §1.7.6
 #[test]
 fn bindgen_skips_what_rok_cannot_express() {
@@ -4864,11 +4771,8 @@ fn vs_s_client(
     (seen, report)
 }
 
-/// `net::tls` against OpenSSL 3 on loopback, both directions: each cipher
-/// suite, X25519 and the X25519MLKEM768 hybrid (OpenSSL 3.5+), a
-/// stateless `HelloRetryRequest` and one for the hybrid, resumption,
-/// client certificates, an Ed25519 server, and the alert for an expired
-/// certificate. Skipped (with a notice) without OpenSSL 3.
+/// `net::tls` against OpenSSL 3 on loopback, both directions. Skipped
+/// without OpenSSL 3.
 // spec: §3.2.5
 #[test]
 fn tls_interop_openssl() {

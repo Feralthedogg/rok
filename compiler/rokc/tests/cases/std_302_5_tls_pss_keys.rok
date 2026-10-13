@@ -8,11 +8,7 @@
 // config pss leaf, another pss key: Certificate private key does not match the certificate
 // config ec leaf, other ec key: Certificate private key does not match the certificate
 
-// Stdlib 3.2.5: id-RSASSA-PSS (PSS-restricted) server keys, signed with
-// rsa_pss_pss_* (a key whose parameters fix SHA-256 signs with
-// rsa_pss_pss_sha256 only), and `ServerConfig::new` refusing a private
-// key that is not the leaf's. Keys and certificates from OpenSSL 3.6
-// (`genpkey -algorithm RSA-PSS`).
+// PSS-restricted server keys; a key that is not the leaf's is refused.
 use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, TlsError};
 use rok::std::thread;

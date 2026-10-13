@@ -5,11 +5,7 @@
 // 7
 // 7 7 0 9
 
-// An associated function called through an associated type (2.8.3,
-// 2.13): the bare name `Elem` and `Self::Elem` inside the trait and its
-// impls, the projection `T::Elem` of a bound parameter, and the
-// qualified `<S as Bag>::Elem::m(..)` (2.13.4), a method taking `self`
-// as its first argument too.
+// Associated functions called through an associated type, in every spelling.
 
 use rok::core::num::Zero;
 

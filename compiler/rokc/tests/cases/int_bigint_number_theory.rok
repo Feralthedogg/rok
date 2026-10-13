@@ -24,12 +24,7 @@
 // 1 4 20827
 // 1899872977833965494 1791585529112335911 148552 95425 790041299783450136 790041299783450137
 
-// stdlib spec 2.1.2: `int` isqrt / checked_isqrt, div_euclid /
-// rem_euclid, modpow, gcd / lcm, on one-word values and past them
-// (Lehmer's gcd on operands of every length, Newton square roots
-// across the multiplication cut-offs). Expected values from Python
-// (math.isqrt, divmod, pow, math.gcd, math.lcm); big results reduced
-// mod 2^61 - 1.
+// `int` isqrt, euclidean division, modpow, gcd / lcm; Python-computed results.
 
 fn p(b: i64, e: u32) -> int { int::from(b).pow(e) }
 

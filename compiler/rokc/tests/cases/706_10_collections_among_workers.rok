@@ -5,12 +5,7 @@
 // 16 tasks: t0-0..t0-299 t15-0..t15-299
 // collections ran: true
 
-// spec 7.6.10: the thread whose allocation (or `rok_gc_collect`) starts
-// a stop-the-world collection runs it while the other workers wait at
-// safepoints, then they go back to their tasks. 7.2.7: a task resumed
-// by another worker allocates from that worker's TLAB. Tasks allocate
-// across `yield_now`s (so they move between workers) while collections
-// start on whichever thread runs out; every list reads back intact.
+// Collections start on any worker while tasks move between workers.
 extern "C" {
     fn rok_gc_collect();
     fn rok_gc_stats_collections() -> u64;

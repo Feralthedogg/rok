@@ -9,13 +9,7 @@
 // 20 99 none 3
 // grid 5 7
 
-// Stdlib 2.9: `{k: v}` is a `Dict`, `{a, b}` / `{a,}` a `Set`, `{a}` a
-// block, `[..]` a `List` unless the slot is `[T; N]`; collections are
-// shared handles (2.9.1). Tuples: fields, destructuring, lexicographic
-// order, multiple returns (2.9.6). `Slice` views see list element
-// writes, `step`, `first` / `last`, view of a view, variadic args
-// (2.9.7). `[]` / `[i] = v` go through `Index` / `IndexSet`, user types
-// included (2.9.8, 2.3.4).
+// Collection literals, tuples, `Slice` views, `Index` / `IndexSet`.
 struct Grid { w: usize; cells: List<i32>; }
 
 impl Index<(usize, usize)> for Grid {

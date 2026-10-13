@@ -9,12 +9,7 @@
 // sl 2..4 | sl 0..1
 // [2, 3] [1, 2, 3, 4, 5]
 
-// spec 3.6.1: a negative signed index counts from the end (literal or
-// variable), an unsigned index is a plain position; `Dict` keys are
-// unaffected; `.get` gives `T | none`; for `arr[i] = v` the target, the
-// index, then the value are evaluated. 3.6.5: `Index` / `IndexSet` /
-// `Sliceable` impls give a user type brackets, `a[x:y]` and `a[x..y]`
-// both reaching `slice`.
+// Negative signed indexes count from the end; user types index via traits.
 struct Grid { cells: List<i32>; }
 impl Index<(i32, i32)> for Grid {
     type Output = str;

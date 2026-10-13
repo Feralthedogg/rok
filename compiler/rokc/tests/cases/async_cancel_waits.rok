@@ -7,11 +7,7 @@
 // cancelled as it parks, held lock untouched: true
 // registrations left: 0
 
-// Cancelling a task at an async wait never loses or duplicates work:
-// `recv_async` does not take a value on a cancelled poll (it stays in
-// the channel), and `Condvar::wait_async` leaves without blocking the
-// worker on a mutex another task holds — and its guard's drop does
-// not unlock that task's lock.
+// Cancelling at an async wait neither loses a value nor unlocks another's lock.
 
 // recv: the send wakes the receiver, the cancel lands at the same time.
 let lost = 0;

@@ -412,8 +412,6 @@ const fn extension(ref info: CertInfo, oid: str, critical: bool, value: Slice<u8
     }
 }
 
-// ---- names ----
-
 const fn lower(s: str) -> str { s.to_lowercase() }
 
 /// Whether DNS name `pattern` from a certificate matches `host`

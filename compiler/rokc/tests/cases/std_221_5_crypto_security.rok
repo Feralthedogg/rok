@@ -12,13 +12,7 @@
 // ok tag comparison
 // ok forged tag rejected
 
-// Stdlib 2.21.5: every random input is an argument (seeds, `m`, secrets),
-// so the same inputs give the same outputs and signing needs no random
-// source (RFC 6979 nonces); ML-KEM decapsulation of a ciphertext that
-// does not re-encrypt returns the implicit-rejection key J(z ‖ c) on the
-// same path; tag comparisons answer by value. The timing guarantee
-// itself is checked off-line (block counters of an instrumented -O2
-// build run with two secrets).
+// Crypto is deterministic in its inputs. Timing is checked off-line.
 use rok::core::crypto::{constant_time_eq, Ecdsa, EcCurve, Ed25519, HashAlgorithm, Hmac, X25519};
 use rok::core::crypto::mlkem::MlKem768;
 use rok::core::crypto::sha3::Shake256;

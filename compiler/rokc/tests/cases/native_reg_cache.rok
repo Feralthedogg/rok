@@ -10,11 +10,7 @@
 // field 10 20 30 60
 // mix 12.5 -7 13 true
 
-// Values the native backend keeps in registers between instructions:
-// arguments that trade places, values read as the shift amount and the
-// shifted value at once, narrow values extended both ways, float bits
-// moved between register files, division's fixed registers, fields
-// read through one pointer, calls with stack arguments.
+// Values the native backend keeps in registers between instructions.
 
 fn pair(a: i64, b: i64) -> str {
     return f"{a} {b}";

@@ -225,7 +225,7 @@ const fn canonical(b: Slice<u8>) -> bool {
     false
 }
 
-// ---- edwards25519: -x^2 + y^2 = 1 + d x^2 y^2, extended coordinates ----
+// edwards25519: -x^2 + y^2 = 1 + d x^2 y^2, extended coordinates
 
 /// A point `(X : Y : Z : T)`, `x = X/Z`, `y = Y/Z`, `xy = T/Z`.
 pub(pkg) struct EdPoint {
@@ -333,7 +333,7 @@ pub(pkg) fn ge_mul_ct(k: [u8; 32], p: EdPoint) -> EdPoint {
     r
 }
 
-// ---- scalars mod L = 2^252 + 27742317777372353535851937790883648493 ----
+// scalars mod L = 2^252 + 27742317777372353535851937790883648493
 
 const L_WORDS: [u32; 8] = [
     0x5cf5d3edu32, 0x5812631au32, 0xa2f79cd6u32, 0x14def9deu32,

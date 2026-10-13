@@ -1,19 +1,15 @@
-// rok::core::convert — conversion traits (stdlib spec 2.11) and their
-// primitive impls (2.11.8). Four policies, each named at the call:
-// lossless `into`, fallible `try_into` (throws the target's
-// `TryFrom::Error`; `OverflowError` for numbers),
-// `saturating_into`, `wrapping_into` (= `as`).
+// rok::core::convert: conversion traits (stdlib 2.11) and primitive
+// impls (2.11.8). Four policies, each named at the call: lossless `into`,
+// fallible `try_into` (throws `TryFrom::Error`, `OverflowError` for
+// numbers), `saturating_into`, and `wrapping_into` (= `as`).
 //
-// Spec 2.11.3 / 2.11.4 / 2.11.5 write the `Into`-side traits
-// as `trait Into<T> { fn into(self) -> T; }`, mirrored automatically
-// from `From`. A blanket `impl<T, U: From<T>> Into<U> for T` cannot fix
-// `U` from the receiver here, so each `*Into` trait has one generic
-// method instead (`T` comes from the expected type, like `parse`), with
-// one blanket impl over every type; the conversions themselves are the
-// `*From` impls. `SaturatingFrom` / `WrappingFrom` are not in the spec;
-// they are what `saturating_into` / `wrapping_into` dispatch to.
-// No `#[intrinsic("rok.cast.FROM.TO")]` (2.11.12): the bodies are `as`,
-// the same machine op.
+// The spec writes `trait Into<T> { fn into(self) -> T; }`, but a blanket
+// `impl<T, U: From<T>> Into<U> for T` cannot fix `U` from the receiver,
+// so each `*Into` trait has one generic method (`T` from the expected
+// type, like `parse`) and one blanket impl; the conversions are the
+// `*From` impls. `SaturatingFrom` / `WrappingFrom` back the last two
+// policies. The lossless impls are also `rok.cast.*` intrinsics
+// (2.11.12); their bodies are the same `as`.
 
 /// A lossless conversion from `U` (2.11.2).
 pub trait From<U> {

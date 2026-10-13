@@ -327,8 +327,6 @@ impl ServerConfig {
     }
 }
 
-// ---- resumption ----
-
 /// A ticket the client holds (RFC 8446 4.6.1).
 pub(pkg) struct Ticket {
     pub(pkg) host: str;
@@ -496,8 +494,6 @@ impl TicketStore {
     }
 }
 
-// ---- the trust store ----
-
 /// CA bundle files, first found wins (Debian / Ubuntu / Arch, Fedora /
 /// RHEL, openSUSE, RHEL's extracted bundle, Alpine / BSDs).
 const BUNDLES: [str; 5] = [
@@ -552,8 +548,6 @@ fn load_roots() throws (TlsError) -> List<Certificate> {
 /// The OS's trusted root certificates, read on each call (reuse a
 /// `ClientConfig` to read them once).
 pub fn system_roots() throws (TlsError) -> List<Certificate> { try load_roots() }
-
-// ---- connections ----
 
 /// `s` as an IP address's bytes, if it is one.
 const fn ip_bytes(s: str) -> List<u8> | none {

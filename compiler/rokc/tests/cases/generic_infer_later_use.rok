@@ -8,11 +8,7 @@
 // 5
 // 30
 
-// A type parameter that only appears in the return type, with no
-// expected type at the call, is fixed by how the binding is used later
-// in the block: an argument slot, an annotated `let`, a struct field,
-// the function's return value; a method chain returning its receiver's
-// type takes the chain's expected type.
+// A parameter only in the return type is inferred from the binding's later use.
 struct Box<T> { v: T; }
 struct Holder { b: Box<i32> | none; }
 

@@ -1,28 +1,20 @@
-// rok::core::num::bigint — `int`, the arbitrary-precision integer
-// (stdlib spec 2.1.2, 2.1.6, 2.1.7). `#[keyword("int")]` routes the
-// lowercase type name here in every package; an unsuffixed integer
-// literal in an `int` slot is built by `Int::from_i64` /
-// `Int::from_literal` (refs-lang 1.6.3, HIR `lower_literal`).
+// rok::core::num::bigint: `int`, the arbitrary-precision integer
+// (stdlib 2.1.2, 2.1.6, 2.1.7). `#[keyword("int")]` routes the type name
+// here; an unsuffixed literal in an `int` slot is built by
+// `Int::from_i64` / `Int::from_literal` (refs-lang 1.6.3).
 //
-// Representation: a value that fits `i64` lives in `small` (`big` is
-// `none`); anything larger is a sign + magnitude (`IntMag`, base-2^32
-// limbs). The form is canonical: every result that fits `i64` drops
-// back to `small` (spec 2.1.2 says promoted values stay big; canonical
-// form keeps `==` / `hash` a field compare and is not observable).
-// Values are immutable: a limb buffer is never written once it sits in
-// an `Int`, so copies share it (spec 2.13.3: `int` is `Copy`).
+// A value that fits `i64` lives in `small`, anything larger is sign +
+// magnitude (`IntMag`, base-2^32 limbs). Results that fit `i64` always
+// drop back to `small`, so `==` / `hash` stay a field compare (spec
+// 2.1.2 keeps promoted values big; the difference is not observable).
+// Limb buffers are never written once in an `Int`, so copies share them
+// (`int` is `Copy`, 2.13.3).
 //
-// Algorithms: add / sub / shifts / products (also mod B^n - 1) / Knuth D
-// / gcd (half-gcd, Lehmer) are runtime kernels (`rokr/src/bignum.rs`:
-// 64-bit limbs on 64-bit targets, schoolbook, Karatsuba, Toom-3,
-// three-prime NTT). Here: Burnikel-Ziegler division above `BZ` limbs,
-// Barrett (mu) division above `MU`; divide-and-conquer radix conversion
-// over the powers chunk^(2^i) both ways, output dividing by Barrett
-// reciprocals of the powers. A remainder known to be small comes from a
-// product mod B^m - 1 (Newton steps, Barrett). A fixed operand
-// multiplied many times (a divisor half, a power, a reciprocal) keeps
-// its NTT transforms. Square-and-multiply `pow` / `modpow`, Newton
-// `isqrt`.
+// add / sub / shifts / products / Knuth D / gcd are runtime kernels
+// (`rokr/src/bignum.rs`). Here: Burnikel-Ziegler division above `BZ`
+// limbs, Barrett above `MU`, divide-and-conquer radix conversion over
+// chunk^(2^i), small remainders from a product mod B^m - 1, and cached
+// NTT transforms for an operand multiplied many times.
 
 use rok::core::collections::raw::{GcBuf, buf_new};
 
@@ -1314,7 +1306,7 @@ impl FromStr for Int {
     }
 }
 
-// ---- conversions (stdlib 2.11.8, 2.1.7) ----
+// conversions (stdlib 2.11.8, 2.1.7)
 
 const fn overflow(ty: str) -> OverflowError { OverflowError { op: "try_from", ty: ty } }
 

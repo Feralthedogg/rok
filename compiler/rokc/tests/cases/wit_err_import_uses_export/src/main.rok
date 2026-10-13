@@ -1,11 +1,7 @@
 // spec: std §1.8.2
 // expect-error: imported interface `test:lend/inspect` uses types of `test:lend/res`, which this component exports
 
-// Stdlib 1.8: an import's types are imports. An imported interface that
-// uses a resource of an interface this component exports would name a
-// distinct, imported copy of it (as `wit-parser` elaborates the world),
-// never the component's own value: a `borrow` of an exported resource
-// cannot reach an import, so the world is refused.
+// An import naming an exported resource is refused.
 ffi::wit::import { "lend.wit" }
 
 #[wit::export]

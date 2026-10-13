@@ -1,36 +1,24 @@
-//! `task::spawn` moves a future to another worker (stdlib 2.18.1), so
-//! the coroutine frame must be `Send`. The future types are shared
-//! library wrappers (`AsyncFuture<T>` is `Send` when `T` is), so a
-//! wrapper's type says nothing about the frame inside. This pass checks
-//! the frames themselves:
+//! `task::spawn` moves a future to another worker (stdlib 2.18.1), so its
+//! coroutine frame must be `Send`. Future types are shared wrappers
+//! (`AsyncFuture<T>` is `Send` when `T` is) and say nothing about the
+//! frame, so this pass checks frames:
 //!
-//! 1. A coroutine body's frame is not `Send` when one of its captures, a
-//!    local it holds across an `await`, or a temporary it holds across
-//!    one (`f(cell, await x)`) has a non-`Send` type. "Held across" is
-//!    read off the HIR in evaluation order (declared before a suspend
-//!    point, used after it; loop bodies are walked twice for the back
-//!    edge).
-//! 2. A flow analysis over the whole (monomorphized) program tracks
-//!    which of those coroutines each value may hold: through locals,
-//!    parameters, returns, struct / tuple / sum fields, buffers a
-//!    callee stores into, closure captures and calls, and other
-//!    coroutines' frames (a future built inside an `async` body and held
-//!    across its `await` is part of that frame).
-//! 3. Each argument of `task::spawn` (and of the thread-crossing
-//!    `thread::spawn` / `Builder::spawn` / `par` `Scope::spawn` /
-//!    `task::spawn_blocking`, whose closures may carry a future to
-//!    another thread) must hold none.
+//! 1. A frame is not `Send` when a capture, or a local or temporary held
+//!    across an `await` (`f(cell, await x)`), is not. "Held across" is read
+//!    off the HIR in evaluation order; loop bodies are walked twice.
+//! 2. A whole-program flow tracks which such coroutines each value may
+//!    hold: through locals, parameters, returns, fields, buffers a callee
+//!    stores into, captures, calls and other frames.
+//! 3. No argument of `task::spawn`, `thread::spawn`, `Builder::spawn`,
+//!    `Scope::spawn` or `task::spawn_blocking` may hold one.
 //!
-//! A value whose type cannot hold a coroutine (no `fn` / closure value
-//! anywhere inside), or whose type opts into `Send` by an explicit
-//! `unsafe impl` (`Task<T>`: the future stays with its worker), holds
+//! A type with no `fn` / closure value inside, or with an explicit
+//! `unsafe impl Send` (`Task<T>`: the future stays with its worker), holds
 //! none.
-// The flow is context-insensitive (all calls of one function instance
-// share its parameters and result), and a store through an alias the
-// callee did not get as a parameter is not seen: two
-// `List<AsyncFuture<i32>>` that `push` fills look like one list. Exact
-// would be per-coroutine future types (4.1.11) checked by the `Send`
-// bound itself.
+// The flow is context-insensitive, and a store through an alias the callee
+// did not get as a parameter is missed: two `List<AsyncFuture<i32>>` filled
+// by `push` look like one. Exact would be per-coroutine future types
+// (4.1.11) checked by the `Send` bound itself.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -413,8 +401,6 @@ impl Walk<'_> {
         }
     }
 }
-
-// ---- the flow analysis ----
 
 /// What a value may hold: a coroutine with a non-`Send` frame, or a
 /// function / closure body (to route calls through `fn` values).

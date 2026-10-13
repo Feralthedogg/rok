@@ -42,12 +42,7 @@
 // Shape::Rect { w: 1, h: none }
 // true
 
-// Spec 3.9.2 / 3.9.5: `#[derive(Rokon)]` on structs (named / tuple /
-// unit / generic) and enums (unit / tuple / named variants) round-trips
-// through `to_string` / `from_str`, together with the standard impls
-// (primitives, `int` / `float`, `T | none`, List / Set / Dict /
-// OrderedDict / OrderedSet, tuples, arrays). Missing fields take their
-// default or `none`.
+// `#[derive(Rokon)]` and the standard impls round-trip.
 
 use rok::std::rokon;
 use rok::std::rokon::{Value, RokonError, ToRokon, FromRokon};

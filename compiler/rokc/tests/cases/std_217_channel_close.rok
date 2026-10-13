@@ -8,11 +8,7 @@
 // bounded full: Full(8)
 // mpsc total 30
 
-// spec 2.17.3: after every sender `close()`s, buffered values still drain,
-// then `recv()` returns none; `try_recv` is none when empty. 2.17.2: a
-// closed sender's `send` throws `SendError::Closed(v)`; a full bounded
-// channel's `try_send` throws `TrySendError::Full(v)`. 2.17.4: cloned
-// senders feed one receiver, which closes once all senders closed.
+// Closing a channel: buffered values drain, then `recv` returns none.
 fn show(v: i32 | none) -> str {
     match v { x: i32 => f"{x}", none => "none" }
 }

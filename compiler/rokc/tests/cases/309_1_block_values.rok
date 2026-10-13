@@ -9,12 +9,7 @@
 // a b c
 // 5
 
-// spec 3.9.1 / 3.9.5 / 3.9.7: a tail expression is the block's value;
-// with `;` (or empty) the block is unit. 3.9.2: blocks go anywhere an
-// expression does. 3.9.3: an inner `let` shadows only inside its block.
-// 3.9.5 / 3.9.6: a tail is the same as `return` / `break 'label`.
-// 3.9.8: a divergent block fits any type. 3.9.9: statements run in
-// order and stop at an exit. 3.9.11: `unsafe { }` yields its tail.
+// A block's tail is its value; `;` makes it unit; divergent blocks fit any type.
 extern "C" {
     fn abs(x: i32) -> i32;
 }

@@ -128,7 +128,7 @@ impl<T> Stream for AsyncStream<T> {
     }
 }
 
-// ---- adapters (2.8.5) ----
+// adapters (2.8.5)
 
 pub struct Map<S, U> {
     s: S;
@@ -306,7 +306,7 @@ async fn for_each_of<S: Stream>(s: S, f: fn(S::Item)) {
     }
 }
 
-// ---- combinators (2.8.8) ----
+// combinators (2.8.8)
 
 /// Both streams' items as they come; ends when both have.
 pub const fn merge<S1: Stream, S2: Stream>(a: S1, b: S2) -> Merge<S1, S2> {

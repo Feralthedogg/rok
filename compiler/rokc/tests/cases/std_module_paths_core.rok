@@ -9,12 +9,7 @@
 // ab c 1 none true
 // 5 [2, 4] 3 2s
 
-// The module paths the stdlib's module-mapping tables name: iter / range
-// (2.7.11), the conversion traits (2.11.12), reflect (2.12.5), the
-// `none` type `NoneSentinel` (2.13.8), the error types' `Display` /
-// `Debug` / `Error` (2.14.8: `IndexError` reads "index 10 out of bounds
-// (len 3)"), the string types (2.15.8), task / time / future (2.18.7)
-// and par (2.19.7).
+// Module paths the stdlib's mapping tables name.
 use rok::core::iter::{Iterator, IntoIterator, DoubleEndedIterator, ExactSizeIterator, FromIterator};
 use rok::core::range::Step;
 use rok::core::range::Range;

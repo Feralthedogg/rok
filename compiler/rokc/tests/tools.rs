@@ -145,7 +145,7 @@ x
     );
 }
 
-/// Piped input that ends inside a cell (907.8 continuation) is an error,
+/// Piped input that ends inside a cell (9.7.8 continuation) is an error,
 /// not a silently dropped cell.
 #[test]
 #[cfg_attr(
@@ -173,10 +173,7 @@ fn repl_reports_input_ending_inside_a_cell() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
 }
 
-/// A cell of several statements runs them all and shows its last
-/// one's value (907.7): a statement or a `let` first does not make it a
-/// statement cell, a block statement last does not make it an
-/// expression to wrap.
+/// A cell of several statements shows its last one's value.
 #[test]
 #[cfg_attr(
     not(any(
@@ -208,7 +205,7 @@ b
     );
 }
 
-/// `repl <lib>` (901.2): the library is loaded and its items
+/// `repl <lib>` (9.1.2): the library is loaded and its items
 /// are in scope from the first cell, also after `:reset`.
 #[test]
 #[cfg_attr(
@@ -420,10 +417,8 @@ bump()
     assert!(stderr.contains("[repl] jit + run"), "{stderr}");
 }
 
-/// Library code (and unchanged items) is compiled once per session: a
-/// later cell declares what an earlier one compiled. A redefinition
-/// still takes effect from the next cell, also in code compiled before
-/// it that a later cell reaches again (`g`, compiled with the old `f`).
+/// Library code and unchanged items compile once per session; a
+/// redefinition takes effect from the next cell, also in older code.
 #[test]
 #[cfg_attr(
     not(any(
@@ -515,10 +510,8 @@ fn repl_collects_the_library_once() {
     assert_eq!(reads, 1, "{stderr}");
 }
 
-/// `repl <path>`: the program runs in the session, which goes on with its
-/// bindings and items. A failure keeps the bindings made before the
-/// cell (the stretch ending at a top-level `let`) that failed; panic
-/// locations and diagnostics point into the file.
+/// `repl <path>` runs the program in the session; a failure keeps the
+/// bindings made before the failing cell.
 #[test]
 #[cfg_attr(
     not(any(
@@ -617,11 +610,8 @@ let never = 0;
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A cell that faults, panics deep in calls or exits fails alone: the
-/// session goes on as it was before it. A definition the failed cell
-/// made is gone (a later cell that names `f` with its old text links the
-/// old `f`, not the failed cell's), so are its changes to an earlier
-/// binding's object and to a static, and the thread it started.
+/// A failing cell is undone: its definitions, its writes to earlier
+/// objects and statics, and the thread it started are gone.
 #[test]
 #[cfg_attr(
     not(any(
@@ -679,10 +669,8 @@ C.load()
     assert!(stderr.contains("deep") && stderr.contains("v2"), "{stderr}");
 }
 
-/// Threads from earlier cells and a failed cell: the task executor's
-/// threads (started by earlier cells, some of them running the failed
-/// cell's tasks) serve later cells, and a thread that was running while
-/// the cell failed is gone (its join says so).
+/// Executor threads survive a failed cell; a thread running when it
+/// failed is gone.
 #[test]
 #[cfg_attr(
     not(any(
@@ -727,12 +715,8 @@ task::block_on(async { let ts = [task::spawn(async { 1 }), task::spawn(async { 2
     );
 }
 
-/// A failed cell loses nothing that ran on the session's threads: the
-/// session is saved once no task is mid-poll and no blocking job mid-run
-/// (each one started before the cell finishes first, so its effect
-/// survives a cell that fails at once), and the locks of a thread that
-/// is gone afterwards (it held them while blocked) are released: a
-/// `Mutex`, an `RwLock` read lock and a running `Once`.
+/// A failed cell loses nothing that ran on the session's threads, and the
+/// locks of a thread gone afterwards are released.
 #[test]
 #[cfg_attr(
     not(any(
@@ -773,10 +757,8 @@ once.call_once(|| { println(\"ran again\"); });
     let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    // The holder sits in `call_once`, holding both locks, until `GO`,
-    // however slow the cells are. Windows keeps it (back where it was:
-    // waiting): it finishes the `Once` and lets the locks go; a fork
-    // host's copy has no such thread, and its locks are released.
+    // The holder sits in `call_once` with both locks until `GO`. Windows
+    // keeps that thread, which then lets them go; a fork host has none.
     let again = if cfg!(windows) { "" } else { "ran again\n" };
     assert_eq!(
         stdout,
@@ -1096,10 +1078,7 @@ fn repl_closed_output_ends_quietly() {
     assert!(ended_by_closed_pipe(st), "stdout closed: {st}");
 }
 
-/// Errors in a cell point into its text: in each statement of a cell
-/// of several (its last one wrapped as the cell's value), after a
-/// failed cell, after a redefinition, past non-ASCII text, on a later
-/// line of the cell.
+/// Errors in a cell point into its text.
 #[test]
 #[cfg_attr(
     not(any(
@@ -1241,10 +1220,8 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
     write_msg(&mut hb, &[Vec::new(), b"ping".to_vec()]).unwrap();
     assert_eq!(read_msg(&mut hb).unwrap(), [Vec::new(), b"ping".to_vec()]);
 
-    // The kernel adds a subscriber on its own thread after the handshake
-    // and publishes nothing to it before (ZeroMQ's slow joiner): send
-    // `kernel_info_request` until iopub has something. (`request` skips
-    // what these probes publish.)
+    // ZeroMQ's slow joiner: iopub gets the subscriber only after the
+    // handshake, so probe with `kernel_info_request` until it answers.
     iopub
         .set_read_timeout(Some(Duration::from_millis(200)))
         .unwrap();

@@ -5,11 +5,7 @@
 // local tasks finished: 3
 // on this thread: true
 
-// 2.18.3: tasks still running when `block_on` returns keep running. A
-// `spawn_local` task is pinned to the worker that made it: on a
-// `block_on` caller, that thread, which no other thread can stand in
-// for (its future need not be `Send`). So `block_on` returns once those
-// are done too (it does not wait for its `spawn` tasks).
+// `block_on` waits for its `spawn_local` tasks, which only its thread can run.
 static DONE: Atomic<i32> = Atomic::new(0);
 
 let here = rok::std::thread::current().id();

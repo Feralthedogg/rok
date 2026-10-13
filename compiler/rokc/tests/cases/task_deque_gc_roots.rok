@@ -4,11 +4,7 @@
 // expect-stdout:
 // spawned 640, sum 20448000
 
-// Tasks queued in a worker's work-stealing deque are reachable only
-// through its ring (a runtime word buffer the collector scans word by
-// word): collections, evacuating ones too, run while hundreds of them
-// wait there. On a 32-bit target a scan that stepped 8 bytes saw every
-// other pointer-size slot only.
+// Tasks reachable only through a worker's deque ring survive collections.
 extern "C" {
     fn rok_gc_collect();
 }

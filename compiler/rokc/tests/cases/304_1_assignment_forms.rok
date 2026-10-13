@@ -6,11 +6,7 @@
 // idx=1 [1, 2, 4]
 // Acc(15) adds=2 Plain(7)
 
-// spec 3.4.1: every lvalue form (variable, field, tuple position,
-// index) takes `=`. 3.4.2: `let` declares, plain `=` reassigns.
-// 3.4.3: every compound token; an `AddAssign` impl is called in place,
-// without one `a += b` is `a = a + b`; the lvalue's index is evaluated
-// once.
+// Every lvalue takes `=` and the compound forms; the index runs once.
 struct P { x: i32; y: i32; }
 struct Pair(i32, i32);
 struct Acc { total: i32; adds: i32; }

@@ -5,11 +5,7 @@
 // 5 0.9272952180016122 3.141592653589793 13
 // 4 2147483647
 
-// spec 8.6.3: C's `double complex` / `float complex` are passed as a
-// struct of two floats: in float registers (RISC-V LP64D: `fa0` /
-// `fa1`, an HFA on AAPCS, two SSE eightbytes or one on System V).
-// 32-bit integers are sign-extended for the C callee where the ABI
-// says so (RISC-V: `u32` too).
+// C complex types pass as two floats; small ints extend as the C ABI says.
 struct Cd { re: f64; im: f64; }
 struct Cf { re: f32; im: f32; }
 

@@ -1,4 +1,4 @@
-//! `rokc lint`, `rokc doc`, `rokc bench` (spec 901) on scratch packages.
+//! `rokc lint`, `rokc doc`, `rokc bench` (spec 9.1) on scratch packages.
 //! Lint and doc need no LLVM; bench builds native code and skips without
 //! the toolchain (see `common::setup`).
 

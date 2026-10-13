@@ -5,8 +5,8 @@
 // none 0
 
 // A relative path's ancestors end with the empty path, whose parent is
-// none and which has no components (on Windows too, where the prefix
-// check used to read byte 0 of it).
+// none and which has no components (on Windows too, whose prefix check
+// must not read its byte 0).
 use rok::std::path::Path;
 
 fn main() {

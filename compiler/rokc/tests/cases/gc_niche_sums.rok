@@ -6,11 +6,7 @@
 // dict ok
 // enums ok
 
-// Niche sums holding GC references (refs-lang 2.7.4 propagation): a
-// struct with `str` / `List` fields and a `NonZero` field is its own
-// size in `Rec | none`, `none` is all zero (null references), and
-// collections that move survivors keep every field intact. An enum with
-// reference payloads keeps its tag (the collector reads it).
+// Niche sums with GC references: `none` is all zero, fields survive moves.
 extern "C" {
     fn rok_gc_collect();
 }

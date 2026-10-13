@@ -5,11 +5,7 @@
 // 7 -1 14 20 -3 3
 // 17 16 5 true
 
-// spec 3.1: each operator token is a trait method call. Several impls of
-// one trait are selected by the right operand's type (`Mul<i32>` vs
-// `Mul<f64>`); an unsuffixed literal picks by its default type.
-// The same `-` is prefix (`Neg`) and binary (`Sub`) by position.
-// Precedence and associativity are the language's (3.2), not the impl's.
+// Operators are trait calls; the right operand's type picks the impl.
 struct V { x: i32; y: i32; }
 
 impl Add for V {

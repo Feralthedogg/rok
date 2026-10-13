@@ -7,11 +7,7 @@
 // str 5 h
 // written 99
 
-// stdlib 1.6: `rok::bare::gc::pin` keeps a list's buffer in place while
-// its `Pinned` guard lives (bound with `using`; pins count, so an inner
-// guard's end leaves the outer pin), and raw pointers into it stay
-// valid across collections (the gc-stress runs evacuate everything
-// movable).
+// A `Pinned` guard keeps a buffer in place; pins nest.
 use rok::bare::gc;
 use rok::bare::ptr::Ptr;
 

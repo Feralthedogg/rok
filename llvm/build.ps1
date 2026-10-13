@@ -3,23 +3,20 @@
 #
 #   powershell -ExecutionPolicy Bypass -File llvm\build.ps1 [prefix]
 #
-# prefix defaults to $env:ROK_LLVM_CACHE\llvm-<version>, ROK_LLVM_CACHE to
-# %LOCALAPPDATA%\rok. The source and build trees live beside the prefix
-# and are deleted once the install succeeds. Build rokc against the
-# result with ROK_LLVM_PREFIX=<prefix> (or leave it at the default).
+# prefix defaults to $env:ROK_LLVM_CACHE\llvm-<version> (ROK_LLVM_CACHE:
+# %LOCALAPPDATA%\rok); the source and build trees beside it are deleted
+# after the install. rokc finds it there, or through ROK_LLVM_PREFIX.
 #
-# Release static libraries only, with the dynamic CRT (/MD, what rustc
-# links), no DIA SDK, zlib, zstd or libxml2. Needs, on PATH: cmake,
-# ninja, Python 3 and the MSVC C++ build tools (run from a "Developer PowerShell
-# for VS" / "x64 Native Tools" prompt; ARM64 hosts: the arm64 one).
-# CC / CXX pick another compiler (clang-cl). Only building rok needs
-# these: the toolchain it makes needs no MSVC or Windows SDK.
+# Release static libraries with the dynamic CRT (/MD, as rustc links), no
+# DIA SDK, zlib, zstd or libxml2. Needs cmake, ninja, Python 3 and the
+# MSVC C++ build tools on PATH (a Developer PowerShell; arm64 on ARM64
+# hosts); CC / CXX pick another compiler. The toolchain built from it
+# needs no MSVC or Windows SDK.
 #
-# PGO: build.sh's rok.profdata.xz names functions by their Itanium
-# mangling, which an MSVC-ABI build does not have; rok-msvc.profdata.tar.xz
-# (made by train-pgo.ps1) is the profile for it. clang-cl uses it when it
-# can read it; cl reads no clang profile. ROK_LLVM_INSTRUMENT=1 builds the
-# instrumented libraries train-pgo.ps1 profiles instead (clang-cl).
+# PGO: MSVC-ABI names differ from build.sh's Itanium ones, so this uses
+# rok-msvc.profdata.tar.xz (train-pgo.ps1), read by clang-cl only.
+# ROK_LLVM_INSTRUMENT=1 builds the instrumented libraries train-pgo.ps1
+# profiles instead.
 param([string]$Prefix)
 $ErrorActionPreference = 'Stop'
 

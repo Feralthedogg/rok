@@ -1,17 +1,14 @@
-//! For the REPL's session host (`rokc_tools/src/repl_host.c`): the world
-//! stopped at a quiet moment while it saves the session before a cell,
-//! and the runtime put back together after a failed cell when the
-//! session is as it was before it but some threads are gone (POSIX: a
-//! forked copy has only the host's main thread; Windows: threads the
-//! host ended because they no longer match the restored memory).
+//! For the REPL's session host (`rokc_tools/src/repl_host.c`): stop the
+//! world at a quiet moment to save the session before a cell, and put
+//! the runtime back together after a failed cell restored it with some
+//! threads gone (POSIX: a forked copy keeps only the main thread;
+//! Windows: threads the host ended).
 //!
-//! Quiet: no executor thread is inside a task's poll, a blocking job or
-//! its own bookkeeping (each passes a gate between them, `rok_session_*`
-//! below), and no other thread is stopped inside a lock's critical
-//! section. So whatever ran on a thread that is gone afterwards was
-//! between steps whose state is all in memory: the executor's threads
-//! start again where they were, and the locks a gone thread held (only
-//! while blocked in a call) are released.
+//! Quiet: no executor thread is inside a poll, a blocking job or its own
+//! bookkeeping (each passes a `rok_session_*` gate between them), and no
+//! thread is stopped inside a critical section. A gone thread was
+//! therefore between steps whose state is all in memory, so executor
+//! threads restart where they were and its locks are released.
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 

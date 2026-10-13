@@ -7,11 +7,7 @@
 // echo: again (server read 5) before the wait: true
 // waited true
 
-// Stdlib 1.8: sockets inside an async export (a WASI preview 3
-// command's `run`). Their readiness is waited on in the export's turn:
-// with nothing else pending until a socket is ready, and while a
-// subtask (`wait-for`) is pending too, in slices between the host's
-// events, so the echo is done long before the subtask returns.
+// Sockets in an async export are waited on between the host's events.
 ffi::wit::import { "wit" }
 
 use wasi::clocks::monotonic_clock;

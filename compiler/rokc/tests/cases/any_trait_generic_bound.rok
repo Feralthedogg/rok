@@ -8,11 +8,7 @@
 // 9
 // 3
 
-// `any Get<i32>` admits only `impl Get<i32>` types, and its methods
-// that use the trait parameter dispatch with the bound's arguments.
-// `any Get<i32>` widens to `any Get` (arguments open) and to `any`.
-// Methods mentioning `Self` stay callable on the concrete type; the
-// trait's other methods dispatch normally.
+// `any Get<i32>` admits only `impl Get<i32>` and widens to `any Get`.
 trait Get<I> { fn get(self, i: I) -> I; fn n(self) -> i32; }
 struct A { v: i32; }
 struct B { v: i32; }

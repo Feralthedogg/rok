@@ -9,11 +9,7 @@
 // in
 // drop r
 
-// Stdlib 0.4.6, the compiler's slot lookups: the `none` literal and the
-// types of unsuffixed `42` / `3.14` / `"hello"` (0.4.2); `for`, `[i]`,
-// `[i] = v`, `[a:b]`, `{x}` / `{x:?}`, `await`, every operator, `==` and
-// literal patterns, `<` and range patterns, `derive(Clone, Ord, Hash)`
-// (0.4.3); a `using` release calls `Drop::drop` (0.4.5).
+// Every place the compiler looks up a core lang slot.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 struct K { a: i32; }
 

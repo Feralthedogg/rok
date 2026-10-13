@@ -7,11 +7,7 @@
 // D D none
 // 1 2
 
-// spec 3.8.3: a `?.` chain ending in a plain field is `T | none`.
-// 3.8.4: `a ?? b` with `b: T | none` stays `T | none`; a non-none last
-// alternative removes `none`. 3.8.5: `??` is right-associative, weaker than `+` and calls,
-// tighter than `..`. 3.8.6: chain then default. 3.8.9: the explicit
-// `match` form gives the same value.
+// Types and precedence of `?.` chains and `??`.
 struct Profile { name: str; }
 struct User { profile: Profile | none; }
 struct C { d: str; }

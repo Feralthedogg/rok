@@ -1,16 +1,13 @@
-// rok::core::num::ints — the integer primitives' inherent methods and
-// limits (stdlib spec 2.1.4): bit operations, byte order, and the
-// overflow-explicit `checked_` / `wrapping_` / `saturating_` /
-// `overflowing_` families. Plain `+ - *` panic on overflow in debug and
-// wrap in release (2.3); these spell the policy out.
+// rok::core::num::ints: the integer primitives' methods and limits
+// (stdlib 2.1.4): bit operations, byte order, and the `checked_` /
+// `wrapping_` / `saturating_` / `overflowing_` families that spell out
+// what plain `+ - *` leave to the profile (2.3).
 //
-// `wrapping_add` / `_sub` / `_mul` and the bit counts are intrinsics
-// (no overflow check; `llvm.intr.ctpop` ..); everything else is built
-// on them. One block per type; keep them regular.
+// `wrapping_add` / `_sub` / `_mul` and the bit counts are intrinsics;
+// the rest is built on them. One regular block per type.
 //
-// Spec 2.1.4 lists `fn min() -> i32` / `fn max() -> i32`; a
-// zero-argument inherent `min` would shadow `Ord::min(self, rhs)`, so
-// the limits are the `MIN` / `MAX` consts (refs-lang 2.13 `i32::MAX`).
+// The limits are `MIN` / `MAX` consts rather than 2.1.4's `fn min()` /
+// `fn max()`, which would shadow `Ord::min(self, rhs)`.
 
 #[cfg(target_endian = "little")]
 const BIG_ENDIAN: bool = false;

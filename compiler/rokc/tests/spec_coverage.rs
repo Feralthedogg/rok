@@ -1,18 +1,13 @@
-//! Spec coverage report: the numbered sections of the spec
-//! (`refs-lang`, `refs-standard-libraries`) against the `// spec:` tags
-//! of `tests/cases`. Writes `target/spec-coverage.md` and
-//! `target/spec-coverage.json`; prints the per-part summary
-//! (`cargo test --test spec_coverage -- --nocapture`).
+//! Spec sections against the cases' `// spec:` tags. Writes
+//! `target/spec-coverage.{md,json}` and prints a per-part summary.
 //!
-//! The spec is found at `$ROK_SPEC_DIR`, else at the first `spec/en` (then
-//! `spec/ko`) above the workspace; without one the report is skipped.
+//! The spec is `$ROK_SPEC_DIR`, else the first `spec/en` (then `spec/ko`)
+//! above the workspace; without one the report is skipped.
 //!
-//! A section (`3.11.4`, three or more numbers) is covered when a tag names
-//! it or one of its subsections. A chapter tag (`3.11`) covers no section;
-//! it is counted on the chapter's row.
+//! A section (three or more numbers) is covered by a tag naming it or a
+//! subsection; a chapter tag covers no section.
 //!
-//! Tag forms: `003.05.1-name` (lang, zero-padded), `std 209-name §2.9.4`
-//! (std; `§` numbers are in the current domain), `std-216.5-name`,
+//! Tag forms: `003.05.1-name`, `std 209-name §2.9.4`, `std-216.5-name`,
 //! `refs-lang 004.12 §4.12.9`, ranges `§4.11.3-4.11.5`.
 
 mod common;

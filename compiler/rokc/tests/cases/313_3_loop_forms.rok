@@ -9,12 +9,7 @@
 // w1 w2 w3 n1 n2 n3 n4
 // -1
 
-// spec 3.13.1: `break v` is the `loop`'s value; `break;` alone makes it
-// unit. 3.13.2 / 3.13.3: `while` and `for` are unit. 3.13.3: `for` takes
-// irrefutable patterns (tuple, struct). 3.13.4: `break 'outer v` leaves
-// a labeled loop with a value. 3.13.5: an unlabeled `break` exits the
-// innermost loop. 3.13.6: `while` checks before each pass, `for` calls
-// `next` before each. 3.13.7: a `loop` without `break` fits any type.
+// `break v` values, labels, and when `while` / `for` test.
 struct Point { x: i32; y: i32; }
 
 fn find(xs: List<i32>, want: i32) -> i32 | str {

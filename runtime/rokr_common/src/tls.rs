@@ -1,27 +1,20 @@
 //! Mutator TLS (spec 008-abi/803).
 //!
 //! The slots of 803 §8.3.1 are one exported `thread_local` block,
-//! `rok_tls`, at the offsets of `tls_abi`: compiled code takes the
-//! block's address once per function and addresses a slot as the block
-//! plus its offset. Defined in per-target assembly below because stable `no_std`
-//! Rust cannot define exported TLS symbols (`#[thread_local]` is
-//! unstable). The runtime reaches its own thread's block through a
-//! hidden accessor, `rok_tls_addr`; another thread's slot through the
-//! address its owner published in the thread registry
-//! (`rokr_gc::world`).
+//! `rok_tls`, at the offsets of `tls_abi`. A rok function gets the
+//! block's address from its caller as a hidden last argument (8.3.8);
+//! code entered from outside rok reads it once. Defined in assembly
+//! because stable `no_std` Rust cannot export TLS symbols. The runtime
+//! reaches its own block through the hidden `rok_tls_addr`, another
+//! thread's through the thread registry (`rokr_gc::world`).
 //!
-//! Targets: Mach-O `arm64` / `x86_64` (`__thread_vars`: the block's
-//! descriptor), ELF `x86_64`
-//! (initial-exec) / `aarch64` / `x86` (`%gs`) / `arm` (`TPIDRURO`, what
-//! `__aeabi_read_tp` reads on Linux) / `riscv64` (`tp`) (local-exec: the runtime is always
-//! linked into the executable), COFF `x86_64` / `aarch64` / `x86`
-//! (`.tls$`, through `_tls_index` and the TEB's TLS array; rokc's
-//! startup object defines `_tls_index` and the TLS directory). wasm32
-//! without threads: a plain global; `wasm32-wasi-threads`: rokc's
-//! startup object defines the block and its accessor in wasm TLS
-//! (`__tls_base`).
+//! Mach-O: `__thread_vars`. ELF: initial-exec on `x86_64`, local-exec
+//! elsewhere (the runtime is always linked into the executable; arm reads
+//! `TPIDRURO`). COFF: `.tls$` through `_tls_index`, which rokc's startup
+//! object defines with the TLS directory. wasm32: a plain global, or wasm
+//! TLS on `wasm32-wasi-threads` (defined by rokc's startup object).
 //!
-//! The block's size is spliced into the assembly as `{size}`.
+//! `{size}` in the assembly is the block's size.
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 

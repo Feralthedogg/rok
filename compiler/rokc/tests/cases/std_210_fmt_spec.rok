@@ -16,11 +16,7 @@
 // [[1, 2]] [  "x"] [none]
 // (1, "a") 7 Ok(3) Err("e") {"k"}
 
-// Stdlib 2.10: f-string holes dispatch to `Display` / `Debug`
-// (`{:?}`), numbers apply the spec themselves, other values are padded
-// by the `Formatter`; the examples of 2.10.3-2.10.8 and the derived
-// `Debug` forms of 2.10.10; containers, tuples, sums and `Result` have
-// `Debug` (2.10.9).
+// Format specs and the `Debug` forms of every built-in type.
 struct Point { x: f64; y: f64; }
 
 impl Display for Point {

@@ -3,20 +3,16 @@
 //! what preview 1 lacks (processes, signals, `mmap`, locks, `dup`)
 //! fails with `-ENOSYS`.
 //!
-//! Conventions:
-//! - `str` arguments are rok strings; libc gets them through [`cs`]
-//!   (a slice need not be NUL-terminated).
-//! - Results: `>= 0` success, `-errno` failure. Resolver failures use
-//!   codes from [`EAI_BASE`] up; only this module interprets codes.
-//! - Byte data lives in the caller's `GcBuf<u8>` (header pointer) as a
-//!   region `(buf, off, len)`; reads fill it in place. Variable-length
-//!   results (paths, names, values) are copied in up to `len` bytes and
-//!   return their full length, so the caller can retry with more room.
-//! - Calls that may block are bracketed by `lane::block_begin` /
-//!   `block_end` (804 §8.4.10): a collection need not wait on them, and
-//!   a long one hands its executor worker on (706 §7.6.7). Nothing
-//!   allocates GC memory while parked. The caller roots every GC
-//!   argument, so it stays in place throughout.
+//! - `str` arguments reach libc through [`cs`] (a slice need not be
+//!   NUL-terminated).
+//! - Results are `>= 0` or `-errno`; resolver failures use codes from
+//!   [`EAI_BASE`] up.
+//! - Byte data is a region `(buf, off, len)` of the caller's
+//!   `GcBuf<u8>`. Variable-length results are copied in up to `len`
+//!   bytes and return their full length, so the caller can retry.
+//! - Blocking calls are bracketed by `lane::block_begin` / `block_end`
+//!   (804 §8.4.10, 706 §7.6.7) and allocate no GC memory meanwhile; the
+//!   caller roots every GC argument.
 
 use core::mem::size_of;
 use core::ptr;
@@ -124,9 +120,7 @@ fn until_nul(buf: &[u8]) -> &[u8] {
     &buf[..buf.iter().position(|&b| b == 0).unwrap_or(buf.len())]
 }
 
-// ---------------------------------------------------------------------
 // Errors
-// ---------------------------------------------------------------------
 
 /// First resolver code: `getaddrinfo` failure `e` is `EAI_BASE + |e|`.
 pub const EAI_BASE: i32 = 100_000;
@@ -192,9 +186,7 @@ pub extern "C" fn rok_os_strerror(code: i32) -> RokStr {
     build(&[until_nul(&buf)])
 }
 
-// ---------------------------------------------------------------------
 // File descriptors
-// ---------------------------------------------------------------------
 
 /// `AT_FDCWD` for a negative `dir` (the root / cwd capability).
 const fn at(dir: i32) -> i32 {
@@ -721,9 +713,7 @@ fn rw_copy(src: i32, dst: i32, mut total: i64) -> Result<i64, i32> {
     }
 }
 
-// ---------------------------------------------------------------------
 // Paths and directories
-// ---------------------------------------------------------------------
 
 /// Reflink `from` (a regular file) to a new `to`, both under `dir`
 /// (macOS `clonefileat`: same-volume APFS copies share their blocks).
@@ -989,9 +979,7 @@ pub const extern "C" fn rok_os_current_exe(_buf: *mut u8, _off: usize, _len: usi
     UNSUPPORTED as isize
 }
 
-// ---------------------------------------------------------------------
 // Environment
-// ---------------------------------------------------------------------
 
 /// `environ` (Apple: through `_NSGetEnviron`, as executables only see it
 /// there; WASI: wasi-libc's, filled on first use).
@@ -1195,9 +1183,7 @@ pub extern "C" fn rok_os_setenv(name: RokStr, value: RokStr, unset: i32) -> i32 
     ret(r as isize) as i32
 }
 
-// ---------------------------------------------------------------------
 // Processes
-// ---------------------------------------------------------------------
 
 /// Pointers to the NUL-separated pieces of `blob` (`count` of them),
 /// null-terminated, in a malloc block.
@@ -1575,9 +1561,7 @@ pub extern "C" fn rok_os_abort() -> ! {
     unsafe { libc::abort() }
 }
 
-// ---------------------------------------------------------------------
 // Randomness and trust anchors (crypto, net::tls)
-// ---------------------------------------------------------------------
 
 /// Fill `buf[off..off + len]` from the OS random source (Linux
 /// `getrandom`, else `getentropy`; WASI `random_get` underneath): 0 or

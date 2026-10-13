@@ -415,10 +415,8 @@ pub extern "C" fn rok_thread_yield_now() {
     }
 }
 
-// ---------------------------------------------------------------------
 // This thread's task-executor worker (`rok::core::task`): a GC object
 // held in `rok_tls_task_worker`, pinned while installed.
-// ---------------------------------------------------------------------
 
 /// 1 if this thread is an executor worker.
 #[unsafe(no_mangle)]
@@ -455,13 +453,11 @@ pub extern "C" fn rok_task_worker_clear() {
     rok_task_worker_set(0);
 }
 
-// ---------------------------------------------------------------------
 // Wait queue: futex semantics over a fixed table of buckets keyed by
 // address. Each bucket holds a list of its waiters (address + own
 // condvar), so a wake reaches only the waiters of its word, and
 // `wake_one` exactly one of them. Spurious wakeups are allowed (callers
 // re-check). A waiter counts as stopped for the GC.
-// ---------------------------------------------------------------------
 
 /// A thread blocked in [`wait_on`]: a node on its stack, linked into
 /// its bucket while it waits.
@@ -708,10 +704,8 @@ pub extern "C" fn rok_sync_wake_one(buf: *mut u8, index: usize) {
     wake_waiters(ptr::from_ref(word(buf, index)) as usize, false);
 }
 
-// ---------------------------------------------------------------------
 // Lazily initialized statics: compiled code checks the state byte
 // (0 new, 1 running, 2 ready) and calls these around the initializer.
-// ---------------------------------------------------------------------
 
 /// This thread's running initializers, innermost first: a malloc'd
 /// list headed in `rok_tls_static_inits` (no limit on nesting or

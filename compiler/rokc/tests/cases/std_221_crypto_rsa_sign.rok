@@ -6,11 +6,7 @@
 // ok rsa2048 sha512: bits 2048, signature matches, verifies true, other message false
 // rejected: short salt true, damaged key true, malformed true
 
-// rok::core::crypto::rsa PSS signing: RsaPrivateKey from PKCS #1 DER,
-// signatures with fixed salts against an independent reference
-// (Python, checked with OpenSSL), the CRT fault check and bad input.
-// The 2049-bit key has emBits a multiple of 8 (a leading zero byte)
-// and primes of different widths.
+// RSA PSS signing against a reference; the 2049-bit key's leading zero byte.
 
 use rok::core::crypto::sha2::HashAlgorithm;
 use rok::core::crypto::rsa::RsaPrivateKey;

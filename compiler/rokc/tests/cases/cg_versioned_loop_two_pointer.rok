@@ -1,11 +1,7 @@
 // spec: §3.13.2 §3.13.3 std §2.9.2
-// Two-pointer loops (`lo < hi`, `lo += 1`, `hi -= 1`) and indexes
-// `ctr + k` get the unchecked copy too: in front, `hi < len` and
-// `bound + k <= len`. In bounds the results match the checked loop; an
-// index past the end takes the checked loop, which panics at the
-// access that steps out, on the iteration it does.
+// Two-pointer loops and `ctr + k` indexes are versioned too.
 // expect-exit: 101
-// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_two_pointer.rok:28:18:
+// expect-stderr: thread 'main' panicked at tests/cases/cg_versioned_loop_two_pointer.rok:24:18:
 // expect-stderr: List index out of bounds
 // expect-stdout:
 // [5, 4, 3, 2, 1] [1, 2, 3, 4, 5] [2, 1, 3]

@@ -12,12 +12,7 @@
 // moved
 // done
 
-// Stdlib 1.8: a resource across components. `plug/main.rok` exports
-// `counters` (its `Counter` kept in a table while this component holds
-// a handle); this one imports it, `wac plug` joins the two. Owned
-// handles from constructors, results, lists and records; borrowed ones
-// to methods and statics; owned ones handed back (`take`), so the value
-// here no longer has one; `using` drops one (the exporter's destructor).
+// A resource across two components: owned, borrowed, handed back, dropped.
 ffi::wit::import { "../plug/counters.wit" }
 
 use test::res::counters;

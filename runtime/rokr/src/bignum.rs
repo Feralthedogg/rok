@@ -516,7 +516,6 @@ const fn packed(n: usize) -> usize {
     n.div_ceil(PER)
 }
 
-// ---- three-prime NTT ----
 //
 // The `u32` digits of both operands are coefficients; their cyclic
 // convolution is computed modulo three primes p < 2^30 with 2^23 | p - 1

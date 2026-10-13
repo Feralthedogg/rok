@@ -4,11 +4,7 @@
 // expect-stdout:
 // true 21 6 6
 
-// 5.9.2: on 32-bit x86 Windows `"system"` is `stdcall`: the callee pops
-// its arguments and the symbol is `_name@N`. Kernel32 functions are
-// called that way; an `extern "system" fn` definition is entered that
-// way (here through a declaration of its exported symbol, so a caller
-// and callee disagreeing on who pops would unbalance the stack).
+// 32-bit Windows `"system"` is stdcall: the callee pops, the symbol is `_name@N`.
 extern "system" {
     fn GetTickCount() -> u32;
     fn MulDiv(a: i32, b: i32, c: i32) -> i32;

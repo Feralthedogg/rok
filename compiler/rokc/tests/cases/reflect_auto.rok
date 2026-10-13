@@ -15,11 +15,7 @@
 // Sq/Sq
 // 7
 
-// Spec 6.10.1 / stdlib 2.12.2: `Reflect` on every type with no impl —
-// static `type_name` / `size` / `align` (module paths dropped), and
-// `type_name_of` / `size_of` switching on what an `any` / `any Tr` /
-// sum holds (an `any` holding a sum looks inside it). `Reflect::m(x)`
-// names the trait; a type's own method of the same name wins.
+// `Reflect` on every type; a type's own method of the same name wins.
 trait Shape { fn area(self) -> i32; }
 struct Sq { s: i32; }
 impl Shape for Sq { fn area(self) -> i32 { self.s * self.s } }

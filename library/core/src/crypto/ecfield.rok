@@ -12,7 +12,7 @@ pub(pkg) type Fe = [u32; 12];
 
 pub(pkg) const fn fe_zero() -> Fe { [0u32; 12] }
 
-// ---- P-256: p = 2^256 - 2^224 + 2^192 + 2^96 - 1 ----
+// P-256: p = 2^256 - 2^224 + 2^192 + 2^96 - 1
 
 const P256: [u32; 8] = [0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0x00000000u32, 0x00000000u32, 0x00000000u32, 0x00000001u32, 0xffffffffu32];
 
@@ -107,7 +107,7 @@ pub(pkg) fn sub_p256(a: Fe, b: Fe) -> Fe {
     d
 }
 
-// ---- P-384: p = 2^384 - 2^128 - 2^96 + 2^32 - 1 ----
+// P-384: p = 2^384 - 2^128 - 2^96 + 2^32 - 1
 
 const P384: [u32; 12] = [0xffffffffu32, 0x00000000u32, 0x00000000u32, 0xffffffffu32, 0xfffffffeu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32, 0xffffffffu32];
 

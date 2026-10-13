@@ -12,12 +12,7 @@
 // 0 1 2 shared
 // try 1 2 caught 3
 
-// Stdlib 2.7: `for` goes through `IntoIterator` (a user collection, and
-// any `Iterator` as itself, 2.7.2); `Step` drives ranges, user types
-// included, and `char` skips surrogates (2.7.3); per-collection items
-// and orders (2.7.6); `take` bounds an infinite range (2.7.7); function
-// broadcast is a `map` / `zip` (2.7.8); a generator's `GenIter` copies
-// share one frame, a throwing one is a `TryGenIter` (2.7.10a).
+// `IntoIterator`, `Step`, per-collection orders, generator iterators.
 struct Pairs { xs: List<i32>; }
 
 impl IntoIterator for Pairs {

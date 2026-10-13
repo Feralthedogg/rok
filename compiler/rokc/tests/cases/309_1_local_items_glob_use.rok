@@ -4,11 +4,7 @@
 // 8 4 12 5 2 9
 // inner 1 top 30
 
-// A block's `use p::*` holds in the headers of its items, as in their
-// bodies: field types, signatures, `const` / `static` initializers, an
-// alias, an enum's variants. The module's own items win over the glob,
-// an inner block's glob over an outer one's, a generic parameter over
-// both.
+// A block's `use p::*` reaches its items' headers too; nearer names win.
 mod geo {
     pub struct P { pub x: i32; }
     pub const K: i32 = 3;

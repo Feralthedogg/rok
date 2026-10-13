@@ -9,11 +9,7 @@
 // async x5
 // deep 3000
 
-// A frame links before the first safepoint of each path (8.4.7): roots
-// held only on the paths that allocate, a throw past a linked frame, a
-// loop whose polling back edge links it before the loop, and frames
-// crossing generator and async suspensions. Every allocation collects
-// and moves what it may, so a root missing from a linked frame shows.
+// A frame links before each path's first safepoint; every allocation moves.
 
 struct Bad { at: i64; }
 

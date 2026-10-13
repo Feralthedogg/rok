@@ -5,12 +5,7 @@
 // Pair { a: 42, b: "twice" }
 // twice=42
 
-// Stdlib 1.8: worlds. `wit/` is one package in three files; naming a
-// file binds only what it defines (world `consumer` here, `provider` in
-// the plug). A world-level function is imported under module `$root`
-// (`test::w::consumer::answer` here), an inline interface by its plain
-// name (`tools`), and a world's `use` brings a type of another
-// interface into it.
+// Worlds across files: `$root` functions, inline interfaces, world `use`.
 ffi::wit::import { "wit/consumer.wit" }
 
 use test::w::consumer;

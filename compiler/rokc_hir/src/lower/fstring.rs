@@ -1,4 +1,3 @@
-//!
 //! `f"..."` (refs-lang 1.7.3, stdlib 2.10) written into one runtime
 //! text (a `core::fmt::Formatter`'s; `rok_fmt_*` return it, maybe moved):
 //!
@@ -16,15 +15,12 @@
 //!          rok_fmt_finish(#t) }
 //! ```
 //!
-//! Holes (and `${..}` spec expressions) are evaluated left to right into
-//! temps, then written in order. Primitives go to the runtime directly;
-//! any other value through its `Display::fmt` / `Debug::fmt`
-//! (`fstr_display` / `fstr_debug`). A number (every integer and float
-//! type, `int` / `float` included) is written under its spec; any other
-//! value is written plain, then cut and padded as text. A static spec is
-//! checked here against the hole's type with the runtime's own parser; a
-//! dynamic one (`${..}`, an f-string itself) is parsed and checked at
-//! run time.
+//! Holes and `${..}` specs are evaluated left to right into temps, then
+//! written in order: primitives by the runtime, other values through
+//! `Display::fmt` / `Debug::fmt` (`fstr_display` / `fstr_debug`). Numbers
+//! honour their spec; anything else is written plain, then cut and padded.
+//! A static spec is checked here with the runtime's own parser, a dynamic
+//! one at run time.
 
 use super::bignum::Big;
 #[allow(clippy::wildcard_imports)]

@@ -1,22 +1,15 @@
-//! Seeded fuzzing of the front end. Inputs are mutations of the case
-//! corpus (lexeme- and line-level: delete, duplicate, swap, replace,
-//! splice from another case) and programs from a small grammar of
-//! expressions / types / patterns.
+//! Seeded fuzzing of the front end with mutated corpus cases and grammar
+//! generated programs.
 //!
-//! - `front_end_in_process`: lexer, parser and formatter in this process
-//!   (thousands of inputs a second): no panic; a cleanly parsing input
-//!   formats to text that parses cleanly and formats to itself.
-//! - `rokc_check`: `rokc check -` on each input: a diagnostic or success,
-//!   never an internal error (exit 101), a signal or a hang.
+//! - `front_end_in_process`: lexer, parser and formatter in process: no
+//!   panic; clean input formats to text that parses and formats to itself.
+//! - `rokc_check`: `rokc check -` gives a diagnostic or success, never an
+//!   internal error, a signal or a hang.
 //!
-//! Budget: `ROK_FUZZ_SECS` (default 5) per test; `ROK_FUZZ_SEED` picks
-//! another input sequence (default fixed, so a run is reproducible: input
-//! `i` is always the same). A crash is minimized and written to
-//! `tests/fuzz_crashes/<target>_<hash>.rok` with its signature (panic
-//! file + message with digits masked, `stack overflow`, `signal`,
-//! `timeout`). A crash whose signature is already there is known (an
-//! expected failure); a new one fails the test. `known_crashes` replays
-//! the files and names the ones that no longer crash.
+//! `ROK_FUZZ_SECS` (default 5) per test; `ROK_FUZZ_SEED` picks another
+//! input sequence. A crash is minimized into
+//! `tests/fuzz_crashes/<target>_<hash>.rok`; one whose signature is already
+//! there is known, a new one fails. `known_crashes` lists fixed ones.
 
 mod common;
 
@@ -70,8 +63,6 @@ fn input_rng(i: usize) -> Rng {
 fn crash_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz_crashes")
 }
-
-// ---------------------------------------------------------------- corpus
 
 fn corpus() -> Vec<String> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/cases");
@@ -314,8 +305,6 @@ fn mutate_lines(rng: &mut Rng, pool: &Pool, src: &str) -> String {
     }
     lines.join("\n") + "\n"
 }
-
-// ------------------------------------------------------------- generator
 
 /// Random programs from a small grammar: mostly ill-typed, which is the
 /// point — every path from parse to codegen must end in a diagnostic.
@@ -593,8 +582,6 @@ fn input(i: usize, pool: &Pool) -> String {
     }
 }
 
-// ------------------------------------------------------------- triage
-
 /// Digits masked, first line, at most 160 bytes.
 fn mask(msg: &str) -> String {
     let line = msg.lines().next().unwrap_or("").trim();
@@ -828,8 +815,6 @@ fn report(target: &str, found: Found, same: &dyn Fn(&str, &str) -> bool) {
         new.join("\n  ")
     );
 }
-
-// --------------------------------------------------------- in-process
 
 /// Remember the file of each panic for the signature (the parser panics
 /// on its own thread, so every thread records and the caller looks at

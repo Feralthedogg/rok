@@ -98,11 +98,7 @@
 // r3 1500 30286 16253562542871365918
 // fact 77338 8018946280474985488 181920632023 595664956631061411 95425
 
-// stdlib spec 2.1.2: `int` arithmetic past every algorithm cut-off
-// (schoolbook / Karatsuba / Toom-3 / NTT products and squares, Knuth D
-// / Burnikel-Ziegler division, divide-and-conquer radix conversion with
-// Barrett reciprocals). Operands come from an LCG; results are reduced
-// mod 2^61 - 1 or hashed. Expected values computed by Python.
+// `int` past every algorithm cut-off; LCG operands, Python-computed results.
 
 fn gen(seed: u64, limbs: usize) -> int {
     let x: int = 0;

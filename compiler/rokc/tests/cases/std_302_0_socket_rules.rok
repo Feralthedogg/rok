@@ -8,11 +8,7 @@
 // closed: InvalidInput
 // using closed it: 2 0
 
-// stdlib 3.2.0 / 3.2.6: writes take `str`, `List<u8>` and slices;
-// `read` fills a sized buffer and returns 0 at the end; a copied socket
-// value is the same socket, `try_clone` duplicates the handle; a closed
-// socket is `InvalidInput`; `using` closes it. `tcp_listen` /
-// `tcp_connect` take a `str` address.
+// Socket rules: write / read forms, copies, `try_clone`, close.
 use rok::std::net;
 use rok::std::net::{Shutdown, TcpStream};
 use rok::std::io::{IoError, IoErrorKind, byte_buf};

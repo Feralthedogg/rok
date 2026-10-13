@@ -22,13 +22,7 @@
 // wasm-invoke: bits(1.5, 7, true) => ok(3)
 // wasm-invoke: bits(1.5, 7, false) => err(8)
 
-// Stdlib 1.8: `ffi::wit::export` of an interface with every kind of
-// type, each export called by the host (`wasmtime run --invoke`):
-// records, variants with payloads, enums, flags, options, results (a
-// throwing function), tuples, lists of records and of lists, chars,
-// floats, 17 parameters (passed in memory), joined variant slots
-// (`result<f32, u64>`). `Counter` is an exported resource: `--invoke`
-// cannot pass one, so its methods are only built and linked here.
+// Every WIT type kind through an export. `--invoke` cannot pass a resource.
 ffi::wit::export { "kinds.wit" }
 
 use test::kinds::kinds::{Color, Perms, Point, Shape};

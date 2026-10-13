@@ -1,10 +1,9 @@
 //! C ABI lowering of aggregate parameters / results of `extern "C"`
 //! functions (spec 8.6.3).
 //!
-//! LLVM does not classify aggregates: like
-//! clang, the front end rewrites a by-value `struct` into the registers
-//! / memory the platform C ABI uses, and the call site converts through
-//! memory.
+//! LLVM does not classify aggregates, so, like clang, the front end rewrites
+//! a by-value `struct` into what the platform C ABI uses and converts
+//! through memory at the call site.
 //!
 //! - AAPCS64 (Linux / Windows / Apple arm64): a homogeneous float
 //!   aggregate (HFA, 1-4 members of one float type) goes in `v`
@@ -29,10 +28,9 @@
 //!   when 8-aligned: an even register pair) through `r0`-`r3` and the
 //!   stack, bigger ones `byval`; results ≤ 4 bytes in `r0`, HFAs in
 //!   VFP registers, others through `sret`.
-//! - WebAssembly: an aggregate of one scalar (no padding) as that
-//!   scalar, others as a pointer to a caller copy (clang marks it `byval`:
-//!   the same machine code, but -O2 builds passed a stale slot as a
-//!   `byval` runtime argument) / `sret`.
+//! - WebAssembly: an aggregate of one scalar (no padding) as that scalar,
+//!   others as a pointer to a caller copy (not `byval`: LLVM's -O2 then
+//!   passes a stale slot) / `sret`.
 //! - RISC-V LP64D: a struct of one float, two floats, or a float and an
 //!   integer of at most 8 bytes (flattened) goes in `fa` / `a` registers
 //!   as `f32` / `f64` / `{t1, t2}` while enough of both are left; other
@@ -237,22 +235,14 @@ pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) 
 /// A runtime (`extern "rok"`) declaration (spec 8.5): the C ABI, with
 /// `str` a by-value `(ptr, len)` C struct like `RokFn`.
 ///
-/// LLVM splits a first-class two-word pair (`str`, a `fn` value) into
-/// its words, which agrees with C while every integer word fits in
-/// argument registers; past that a pair could straddle the last
-/// register and the stack, where C passes it whole on the stack.
-/// `None`: a plain call does the same. Any other aggregate (bigger,
-/// or holding floats) is always classified. Windows x64 and
-/// WebAssembly pass and return a pair by reference, so a signature with
-/// one is always classified.
-/// On the 32-bit targets a pair's words land where C puts the struct's
-/// (i386: consecutive stack slots; AAPCS: core registers then the
-/// stack, a struct may straddle them), but a by-value result comes back
-/// in memory (or, on Windows x86, in `edx:eax`): such a signature is
-/// classified. On RISC-V a pair is C's 16-byte integer struct both ways:
-/// `a` registers, the last one and the stack when one is left (where LLVM
-/// splits it too), a result in `a0` / `a1`. No runtime runs on the other
-/// targets.
+/// `None` means a plain call already matches C: LLVM splits a two-word pair
+/// (`str`, a `fn` value) into words, which agrees with C while all integer
+/// words fit in registers. Otherwise the signature is classified: a pair
+/// that could straddle the last register and the stack, any bigger or float
+/// aggregate, any pair on Windows x64 / WebAssembly (by reference), and a
+/// by-value pair result on 32-bit targets (memory, or `edx:eax` on Windows
+/// x86). RISC-V passes a pair as C's 16-byte integer struct both ways,
+/// which LLVM matches. No runtime runs on other targets.
 #[must_use]
 pub fn classify_rok(target: &Target, params: &[MirTy], ret: &MirTy) -> Option<FnAbi> {
     let by_value = |t: &MirTy| is_aggregate(t) || *t == MirTy::Prim(PrimTy::Str);

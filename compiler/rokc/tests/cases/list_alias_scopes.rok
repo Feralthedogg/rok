@@ -10,11 +10,7 @@
 // 2 3 3 3
 // 6 7 8 9
 
-// Lists only ever taken fresh from a call get alias scopes, so their
-// loads move past stores into other such lists. Handles that share one
-// list, out of the optimizer's sight, must still see every store: each
-// loop reads `x[0]` and stores into `y`, which is `x` (no bounds check
-// before the load, which could otherwise leave the loop).
+// Alias scopes only for fresh lists; a shared handle still sees every store.
 #[inline(never)]
 fn id(xs: List<f64>) -> List<f64> {
     xs

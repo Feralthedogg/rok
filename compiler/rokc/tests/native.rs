@@ -1,7 +1,5 @@
-//! Native-code behavior checked against the platform: the C ABI (spec
-//! 8.6) against clang-compiled C, the runtime's stack-overflow report,
-//! and `-g` DWARF. Skips without the LLVM toolchain (`common::setup`).
-//! Unix only: the C side is built with `clang .. -lm`.
+//! Native code against the platform: the C ABI against clang-built C, the
+//! stack-overflow report, `-g` DWARF. Unix only; skips without LLVM.
 #![cfg(unix)]
 
 mod common;
@@ -335,12 +333,8 @@ async fn main() {
 }
 "#;
 
-/// `rok_runtime_shutdown` (spec 8.5.2): once `main` returns, threads
-/// still running and the executor's workers stop at their next
-/// safepoint, after leaving the runtime code they are in, so the exit
-/// path (the stdout flush) never waits on a lock one of them holds.
-/// And the flush is registered before the first byte is buffered: it
-/// used to be lost when another thread wrote first.
+/// Once `main` returns, other threads stop at their next safepoint outside
+/// runtime code, so the exit flush never waits on a lock they hold.
 #[test]
 fn shutdown_stops_other_threads() {
     let Some(env) = setup() else { return };
@@ -607,15 +601,8 @@ fn call(g: fn(i32) -> i32, k: i32) -> i32 {
 }
 ";
 
-/// `-g`, both back ends: a sum is a DWARF variant part (each variant a
-/// struct over the whole value, selected by its stored tag), and so is an
-/// `any` (over the types stored into one, by their tags), a `GcBuf`
-/// reference points at its object (header, then the elements), a
-/// `[ref]`-captured variable is its value, a `fn` value is `{code, env}`
-/// (the code a pointer to its subroutine type), and the C `main` and
-/// `rok.register_types` have subprograms. With `lldb` (rok's formatters
-/// loaded) and `gdb` (DWARF only), a sum or an `any` shows its active
-/// variant only, a `fn` value its target function.
+/// `-g` DWARF for sums, `any`, `GcBuf`, captured variables and `fn`
+/// values, as lldb (with rok's formatters) and gdb show them.
 #[test]
 fn debug_info_shows_sums_and_gc_objects() {
     let Some(env) = setup() else { return };
@@ -784,11 +771,8 @@ fn debug_info_shows_sums_and_gc_objects() {
     assert_eq!(units[0], units[1], "llvm vs native DIEs");
 }
 
-/// The output of `lldb --batch` running `cmds` on `exe` with rok's
-/// formatters loaded (`rokc --print lldbinit`), then `kill`; `None`
-/// without an lldb that can run it (none, a wedged debug service that
-/// makes `run` hang a minute, no stop), or on an `x86_64` Mac (no debugger
-/// on Rosetta processes).
+/// `lldb --batch` output for `cmds` on `exe`; `None` without a usable lldb
+/// (a wedged debug service hangs `run`; Rosetta processes take none).
 fn lldb(exe: &Path, cmds: &[&str]) -> Option<String> {
     if cfg!(target_os = "macos") && std::env::consts::ARCH != "aarch64" {
         return None;
@@ -877,13 +861,8 @@ fn held(w: any) -> i32 {
 }
 ";
 
-/// `-g` at `-O0` (both back ends) and `-O2`: the unit says whether it
-/// is optimized; a coroutine's locals (reloaded from its frame) show in
-/// its resume function, named by its creator (`evens::{coroutine#0}`);
-/// compiler temporaries (`__env`) are no variables; at `-O2` a line breakpoint stops, live locals
-/// show and `finish` returns with the value. A closure local shows its
-/// environment object, an `any` inside a type stored in an `any` is
-/// that variant part again; both back ends write the same entries.
+/// `-g` at `-O0` and `-O2`: coroutine locals, closures, nested `any`, and
+/// `-O2` breakpoints; both backends write the same entries.
 #[test]
 fn debug_info_optimized_coroutines_closures() {
     let Some(env) = setup() else { return };
@@ -1002,12 +981,8 @@ fn debug_info_optimized_coroutines_closures() {
     assert_eq!(units[0], units[1], "llvm vs native DIEs");
 }
 
-/// `-g` ELF executables for Linux, linked by the embedded lld from
-/// several rok objects (the program, a dependency, the cached library)
-/// by both back ends: each unit finds its own abbreviations and line
-/// table, lexical blocks name their code exactly (no overlapping
-/// siblings), and code `--gc-sections` dropped leaves no bad ranges.
-/// Link only: nothing runs here.
+/// `-g` ELF executables linked from several units by the embedded lld:
+/// per-unit tables, exact lexical blocks, no ranges left by `--gc-sections`.
 #[test]
 fn elf_debug_info_of_several_objects() {
     if setup().is_none() {
@@ -1111,11 +1086,8 @@ fn elf_debug_info_of_several_objects() {
     }
 }
 
-/// `-O0` objects put each function and data object in a section of its
-/// own (Mach-O: subsections), so the linker drops a prebuilt
-/// dependency's code nothing calls: each function's string constant is
-/// in the executable only while the function is. Link only for the
-/// targets other than the host's.
+/// `-O0` puts each function in its own section, so unused prebuilt code
+/// is dropped at link time.
 // spec: §9.2.14
 #[test]
 fn unused_dependency_code_is_dropped() {
@@ -1262,11 +1234,8 @@ fn main() {
 }
 "#;
 
-/// Spec 5.9.4 null niche: `extern "C" fn(..) | none` is one pointer,
-/// null = `none`, through C arguments / results, struct fields, a
-/// `List`, a `static`, widening into a tagged sum and back, and `??`.
-/// `NonZero<i32> | none` is a C `int` (0 = `none`) and `Ptr<T> | none`
-/// a nullable `T*` (spec 2.7.2).
+/// Null niches across the C ABI: nullable fn pointers, `NonZero<i32> |
+/// none` as `int`, `Ptr<T> | none` as `T*`.
 #[test]
 fn c_fn_ptr_null_niche() {
     let Some(env) = setup() else { return };
@@ -2075,12 +2044,8 @@ fn pe_header(exe: &[u8]) -> (u16, u16, bool) {
     )
 }
 
-/// Windows executables from this host, with no Windows SDK: both
-/// backends for `x86_64`, the native one for arm64, LLVM for x86 (no
-/// unwind table there), a GUI subsystem; the C side and a stand-in
-/// runtime are compiled by clang; a package builds `<name>.exe`. With
-/// `ROK_TEST_WINE=<wine>` the `x86_64` and x86 ones run and print what
-/// the C ABI (spec 8.6.3) and the rok one (8.6.6) agree on.
+/// Windows executables from this host without an SDK; run under
+/// `ROK_TEST_WINE` where given.
 // spec: §9.2.14 §9.5.9
 #[test]
 fn windows_executables() {
@@ -2300,10 +2265,8 @@ fn main() -> i32 {
     assert_eq!(polls, 2, "the nest as written polls in both loops");
 }
 
-/// `a[i]` read and written in a versioned loop at an index the loop does
-/// not change gets a copy keeping it in a local: no access to `a[i]` in
-/// the loop, one load in front and one store on the way out. An integer
-/// sum, whose overflow panics, keeps it in memory.
+/// A versioned loop keeps invariant `a[i]` in a local: one load in front,
+/// one store on exit. An overflow-checked sum keeps it in memory.
 #[test]
 fn versioned_loop_keeps_an_element() {
     let Some(env) = setup() else { return };

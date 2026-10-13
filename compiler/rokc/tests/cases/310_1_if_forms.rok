@@ -8,12 +8,7 @@
 // c1 c2 picked 2
 // 0
 
-// spec 3.10.1: `if` / `else if` / `else` chains. 3.10.2: without `else`
-// an `if` is unit; differing branch types fit a sum-typed slot.
-// 3.10.3: any `bool` expression is a condition; a struct literal there
-// needs parentheses (or an argument position). 3.10.4: a divergent
-// branch fits any type. 3.10.8: conditions are checked top to bottom
-// and only the chosen body runs.
+// `if` chains: unit without `else`, sum-typed branches, top-down checks.
 struct S { a: i32; }
 impl S { fn ok(self) -> bool { self.a > 0 } }
 fn check(s: S) -> bool { s.ok() }

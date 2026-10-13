@@ -1,18 +1,14 @@
 #!/bin/sh
-# Rewrite the archive <in> as <out>: one relocatable object in which only
-# the `rok_*` symbols stay global (ELF: and compiler_builtins' `__*`
-# intrinsics, weak). The `core` / mangled Rust symbols cargo leaves
-# exported become local, so librokr.a links next to another Rust
-# staticlib. <in> is built with fat LTO
-# (dist.sh, targets/build.sh): its Rust code is one object exporting only
-# `rok_*`.
+# Rewrite the archive <in> as <out>, one relocatable object in which only
+# `rok_*` stays global (ELF: also compiler_builtins' `__*`, weak), so
+# librokr.a links next to another Rust staticlib. <in> is built with fat
+# LTO (dist.sh, targets/build.sh).
 #
-# ELF (any host): the pinned LLVM's ld.lld -r (ROK_LLVM_PREFIX, else
-# llvm/build.sh's), then llvm-objcopy and llvm-ar from rustup's
-# llvm-tools component. Mach-O (macOS hosts): the system cc -r (ld64).
-# COFF (any host): llvm-nm, llvm-objcopy and llvm-ar.
+#   runtime/rokr/localize.sh <in.a> <out.a>   (or <in.lib> <out.lib>)
 #
-# Usage: runtime/rokr/localize.sh <in.a> <out.a>   (or <in.lib> <out.lib>)
+# ELF: the pinned LLVM's ld.lld -r, then llvm-objcopy / llvm-ar from
+# rustup's llvm-tools. Mach-O (macOS hosts): cc -r. COFF: llvm-nm,
+# llvm-objcopy, llvm-ar.
 set -eu
 
 in=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")

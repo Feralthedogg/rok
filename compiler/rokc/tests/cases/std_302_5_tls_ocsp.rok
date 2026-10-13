@@ -12,14 +12,7 @@
 // must-staple, none stapled: Certificate certificate requires a stapled OCSP response (alert 113)
 // must-staple, good: hello
 
-// Stdlib 3.2.5: stapled OCSP responses (status_request). The client
-// asks for one; the server staples `ocsp_response`. A response must be
-// signed by the leaf's issuer or a responder it delegated to, be
-// current, and say "good" for the leaf (CertIDs with SHA-1 or SHA-256);
-// a revoked leaf fails with certificate_revoked, anything else with
-// bad_certificate_status_response. A must-staple leaf (TLS feature
-// status_request) without a response fails; other leaves pass without
-// one. Responses made by OpenSSL 3.6 (`openssl ocsp`).
+// Stapled OCSP responses; a must-staple leaf without one fails.
 use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};
 use rok::std::thread;

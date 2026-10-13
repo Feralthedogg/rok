@@ -4,11 +4,7 @@
 // freed 65
 // 5 3
 
-// Spec 5.9: an `extern "C"` block declares C functions (implicitly
-// unsafe; called inside `unsafe`) with per-item visibility; raw
-// pointers cross as `Ptr<T>`, nullable as `Ptr<T> | none`; extern
-// functions share one global name space, so any module calls them
-// unprefixed.
+// `extern "C"` blocks: unsafe calls, `Ptr<T>`, one global name space.
 use rok::bare::ptr::Ptr;
 
 extern "C" {

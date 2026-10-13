@@ -4,12 +4,8 @@
 // fan-out 1000 x 20 yields: 20000
 // no slowdown: true
 
-// Executor throughput: 100k tiny tasks spawned and joined, then tasks
-// that yield repeatedly. No wall-clock bound (a loaded machine or
-// `ROK_GC_STRESS` makes everything slower): the fastest batch of the
-// second half stays within 10x the fastest of the first (load only adds
-// time, so minimums filter it out), while cost growing with the tasks
-// already run (quadratic) would be 50x or more.
+// Executor cost does not grow with tasks already run. Load only adds time,
+// so the fastest batches are compared: 10x allowed, quadratic is 50x+.
 let fastest = [i64::MAX, i64::MAX];
 // In batches of 1000, so the live heap (and the GC's work) stays small.
 let sum: i64 = 0;

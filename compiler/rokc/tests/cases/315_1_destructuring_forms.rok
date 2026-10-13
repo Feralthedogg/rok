@@ -7,11 +7,7 @@
 // 1 2 | calls=1 7
 // [2, 3]
 
-// spec 3.15.2: tuple destructuring, `_` discards. 3.15.4: nesting,
-// including a struct inside a tuple. 3.15.5: struct fields bound,
-// partly (`..`) or renamed. 3.15.6: per-position or whole-pattern type.
-// 3.15.9: all bindings are in scope after the `let`. 3.15.10: the
-// right-hand side runs once. 3.15.11: swap and split in one `let`.
+// Destructuring `let`: nesting, rest, renames, types; the right side runs once.
 struct Point { x: i32; y: i32; }
 
 fn divmod(a: i32, b: i32) -> (i32, i32) { (a / b, a % b) }

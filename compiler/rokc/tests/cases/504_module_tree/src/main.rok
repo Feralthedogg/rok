@@ -8,11 +8,7 @@
 // 5 2 1
 // 3 4
 
-// Spec 5.4 / 5.8: `mod name;` maps `name.rok` (single file) or
-// `name.rok` + `name/` (folder, recursively); the package directory is
-// the root's folder. A body may only re-export its submodules (5.4.11);
-// `pub use` exposes an item again under another path, with aliases,
-// groups and whole modules, at no cost.
+// `mod name;` maps files and folders; `pub use` re-exports at no cost.
 mod geom;
 pub mod parsing;
 pub(pkg) mod tools;

@@ -135,8 +135,6 @@ fn insert(
     Ok(append(text, &list_of(tokens, v)?, &entry))
 }
 
-// ---- the token-level list ----
-
 /// One comma-separated entry of a bracketed list, as byte offsets.
 struct Entry {
     start: usize,

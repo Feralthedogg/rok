@@ -9,13 +9,8 @@
 // slept
 // sorted 0 1 2 3
 
-// Spec 8.4.10: a thread inside a blocking `extern "C"` call counts as
-// PARKED, so collections on other threads go on without it. One thread
-// sleeps in `usleep` for 3 s while main collects, and is still asleep
-// when the collections are done (they did not wait for it); another blocks in
-// `read` on a pipe that main writes only after collecting (it used to
-// deadlock: the collector waited for the reader, the reader for main).
-// A rok callback C calls meanwhile (`qsort`) runs as a mutator again.
+// A thread blocked in C is parked: collections go on without it, and a
+// rok callback C makes meanwhile (`qsort`) runs as a mutator again.
 use rok::bare::alloc::{Layout, alloc};
 use rok::bare::ptr::{CPtr, Ptr};
 use rok::std::thread;

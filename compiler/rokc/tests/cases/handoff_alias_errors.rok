@@ -1,20 +1,16 @@
-// expect-error: error[E202]: `ys` shares `xs`, which was moved into the `Mutex` at line 33
-// expect-error: handoff_alias_errors.rok:34:5: `ys` shares `xs`, which was moved into the `Mutex` at line 33
+// expect-error: error[E202]: `ys` shares `xs`, which was moved into the `Mutex` at line 29
+// expect-error: handoff_alias_errors.rok:30:5: `ys` shares `xs`, which was moved into the `Mutex` at line 29
 // expect-error: help: it belongs to the `Mutex` now; use it through the lock: `using g = _m.lock() { g.get().len() }`, or hand over `xs.clone()` to keep a separate copy (stdlib 2.13.9)
-// expect-error: handoff_alias_errors.rok:41:5: `xs` shares `ys`, which was moved into the `Mutex` at line 40
-// expect-error: handoff_alias_errors.rok:47:5: `s.items` was moved into the `Mutex` at line 46
-// expect-error: handoff_alias_errors.rok:54:5: `xs` shares `s`, which was moved into the `Mutex` at line 53
-// expect-error: handoff_alias_errors.rok:61:5: `ys` shares `s`, which was moved into the `Mutex` at line 60
-// expect-error: handoff_alias_errors.rok:68:5: `f` shares `xs`, which was moved into the `Mutex` at line 67
-// expect-error: handoff_alias_errors.rok:77:5: `xs` shares `all`, which was moved into the `Mutex` at line 76
-// expect-error: handoff_alias_errors.rok:87:5: `t.items` shares `s`, which was moved into the `Mutex` at line 86
+// expect-error: handoff_alias_errors.rok:37:5: `xs` shares `ys`, which was moved into the `Mutex` at line 36
+// expect-error: handoff_alias_errors.rok:43:5: `s.items` was moved into the `Mutex` at line 42
+// expect-error: handoff_alias_errors.rok:50:5: `xs` shares `s`, which was moved into the `Mutex` at line 49
+// expect-error: handoff_alias_errors.rok:57:5: `ys` shares `s`, which was moved into the `Mutex` at line 56
+// expect-error: handoff_alias_errors.rok:64:5: `f` shares `xs`, which was moved into the `Mutex` at line 63
+// expect-error: handoff_alias_errors.rok:73:5: `xs` shares `all`, which was moved into the `Mutex` at line 72
+// expect-error: handoff_alias_errors.rok:83:5: `t.items` shares `s`, which was moved into the `Mutex` at line 82
 // spec: std 213-marker §2.13.9 / std 216-sync §2.16.3
 
-// No move semantics: every handle to the object a new owner took shares
-// it, not just the local that was passed. A copy made before the
-// hand-off, a field passed on its own (`Mutex::new(s.items)`), a handle
-// reached through a struct or a list, and a closure capturing it are
-// all gone afterwards.
+// Every handle to a handed-off object is gone, not just the passed local.
 
 struct Bag {
     items: List<i32>;

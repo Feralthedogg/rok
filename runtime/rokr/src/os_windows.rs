@@ -2,21 +2,16 @@
 //! No ABI stability (805 §8.5.12 appendix). The same `rok_os_*` symbols
 //! and conventions as the POSIX `os`, with these differences:
 //!
-//! - An "fd" is a kernel handle value (0 / 1 / 2: the standard handles,
-//!   see `rokr_common::sys`). A socket from `net` is its handle with bit
-//!   0 set ([`sock_of`]), so the generic calls (`close`, `read`, `write`,
-//!   `dup`) can tell.
-//! - Error codes are Win32 / Winsock codes (`GetLastError`), negated.
-//! - Text (paths, names, variables, arguments) is WTF-8 on the rok side,
-//!   UTF-16 on the Windows side.
-//! - A directory capability is a directory handle; a path under it is
-//!   resolved against the handle's final path (lexically: `.` dropped,
-//!   `..` pops — the library refuses `..` under a capability anyway).
-//! - Processes: `CreateProcessW` (the program is looked up in `PATH`
-//!   unless it holds a separator); the runtime keeps each child's process
-//!   handle until it is reaped, so its pid cannot be reused meanwhile.
-//! - Signals: console control events (Ctrl-C → 2 `SIGINT`, Ctrl-Break →
-//!   21 `SIGBREAK`, console close → 1 `SIGHUP`).
+//! - An "fd" is a handle value (0 / 1 / 2: the standard handles). A
+//!   socket has bit 0 set ([`sock_of`]) so `close` / `read` / `write` /
+//!   `dup` can tell.
+//! - Errors are negated Win32 / Winsock codes.
+//! - Text is WTF-8 on the rok side, UTF-16 on the Windows side.
+//! - A directory capability is a handle; paths under it resolve
+//!   lexically against its final path.
+//! - A child's process handle is kept until it is reaped, so its pid is
+//!   not reused meanwhile.
+//! - Signals are console events: Ctrl-C 2, Ctrl-Break 21, close 1.
 
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -204,9 +199,7 @@ pub const fn fd_of(s: win::SOCKET) -> i32 {
     s as i32 | 1
 }
 
-// ---------------------------------------------------------------------
 // Errors
-// ---------------------------------------------------------------------
 
 /// `IoErrorKind` discriminants (library/std/src/io.rok declares the same).
 mod kind {
@@ -307,9 +300,7 @@ fn decimal(v: i32, out: &mut [u8; 12]) -> &[u8] {
     &out[i..]
 }
 
-// ---------------------------------------------------------------------
 // Paths
-// ---------------------------------------------------------------------
 
 /// `path` under directory capability `dir` (negative: the process's
 /// own resolution, relative to the working directory) as a Win32 path.
@@ -418,9 +409,7 @@ fn open_meta(path: &mut Wide, follow: bool) -> Result<Owned, i32> {
     }
 }
 
-// ---------------------------------------------------------------------
 // Handles
-// ---------------------------------------------------------------------
 
 /// `FILE_GENERIC_WRITE` without `FILE_WRITE_DATA`: appends only.
 const APPEND_ACCESS: DWORD = 0x0012_0114;
@@ -869,9 +858,7 @@ pub extern "C" fn rok_os_copy_fd(src: i32, dst: i32) -> i64 {
     if r < 0 { -i64::from(e) } else { r }
 }
 
-// ---------------------------------------------------------------------
 // Paths and directories
-// ---------------------------------------------------------------------
 
 /// Copy `from` to a new `to`, both under `dir` (`CopyFileExW`: block
 /// cloning where the volume supports it, attributes included). 0 or
@@ -1207,9 +1194,7 @@ pub extern "C" fn rok_os_current_exe(buf: *mut u8, off: usize, len: usize) -> is
     }
 }
 
-// ---------------------------------------------------------------------
 // Arguments and environment
-// ---------------------------------------------------------------------
 
 fn args() -> &'static Args {
     static ARGS: AtomicPtr<Args> = AtomicPtr::new(ptr::null_mut());
@@ -1309,9 +1294,7 @@ pub extern "C" fn rok_os_setenv(name: RokStr, value: RokStr, unset: i32) -> i32 
     if ok == 0 { fail() } else { 0 }
 }
 
-// ---------------------------------------------------------------------
 // Processes
-// ---------------------------------------------------------------------
 
 /// Children not reaped yet: `(pid, process handle)`.
 struct Children {
@@ -1868,9 +1851,7 @@ pub extern "C" fn rok_os_abort() -> ! {
     unsafe { libc::abort() }
 }
 
-// ---------------------------------------------------------------------
 // Randomness and trust anchors (crypto, net::tls)
-// ---------------------------------------------------------------------
 
 /// Fill `buf[off..off + len]` from the system RNG (`BCryptGenRandom`): 0
 /// or `-error`.

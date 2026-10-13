@@ -21,7 +21,7 @@ fn text(buf: List<u8>, n: usize) -> str {
 
 let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
 
-// ---- UDP, blocking ----
+// UDP, blocking.
 let a = try! UdpSocket::bind(any);
 let b = try! net::udp_bind("127.0.0.1:0");
 let a_addr = try! a.local_addr();
@@ -34,7 +34,7 @@ let (m, _) = try! b.recv_from(buf);
 let local = if from == (try! b.local_addr()) { "b" } else { "?" };
 println(f"udp blocking: {ping} from {local} -> {text(buf, m)}");
 
-// ---- UDP, async: the receiver task suspends between datagrams ----
+// UDP, async: the receiver task suspends between datagrams.
 let rx = task::spawn(async {
     let sum: i32 = 0;
     let count: i32 = 0;
@@ -57,13 +57,13 @@ while i < 10u8 {
 let (count, sum) = await rx;
 println(f"udp async: {count} datagrams, sum {sum}");
 
-// ---- UDP, connected ----
+// UDP, connected.
 try! b.connect(a_addr);
 try! b.send("hi".as_bytes());
 let got = try! a.recv(buf);
 println(f"udp connected: {text(buf, got)}");
 
-// ---- modes ----
+// Modes.
 try! a.set_nonblocking(true);
 let wb = false;
 try a.recv(buf) catch e: IoError { wb = e.kind() == IoErrorKind::WouldBlock; };
@@ -76,7 +76,7 @@ println(f"timed out: {to}");
 a.close();
 b.close();
 
-// ---- many concurrent TCP connections on the pool ----
+// Many concurrent TCP connections on the pool.
 let l = try! TcpListener::bind(any);
 let addr = try! l.local_addr();
 let open = Atomic::new(0);

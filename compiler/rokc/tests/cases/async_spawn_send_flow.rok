@@ -6,11 +6,7 @@
 // expect-error: it holds `to_thread: Cell<i32>`, which is not `Send`, across an `await`
 // expect-error: it captures `via_closure: Cell<i32>`, which is not `Send`
 
-// The `Send` check of `task::spawn` (stdlib 2.18.1) follows a future
-// with a non-`Send` frame wherever it goes: through a parameter, a
-// struct field, a helper's result, another coroutine's frame, a closure,
-// and into `thread::spawn`. A non-`Send` temporary live across an
-// `await` makes the frame non-`Send` too.
+// `task::spawn`'s `Send` check follows a non-`Send` frame wherever it goes.
 use rok::std::thread;
 
 fn launch<F: Future + Send>(f: F) -> Task<F::Output> {

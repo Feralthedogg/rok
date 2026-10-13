@@ -1,20 +1,19 @@
-//! `-g` (spec 9.9.6): DWARF through MLIR's LLVM-dialect debug
-//! attributes. Each function with a source span gets a
-//! `#llvm.di_subprogram` named by its rok path as its fused location (no
-//! linkage name: lldb would show the `_Y` symbol, which it cannot
-//! demangle, instead of the name); each op gets the `file:line:col` of
-//! the MIR `Statement::Loc` before it; named locals get an
-//! `llvm.intr.dbg.declare` of their stack slot, typed by `di_type`
-//! (primitives; structs with their field names, tuples, `str`, `any`
-//! and arrays as composites; a tagged sum as a variant part, and an
-//! `any` as one over the types stored into one, by their tags (an `any`
-//! inside them is the same, recursive type); a `GcBuf` reference as a
-//! pointer to its object, header then elements; a `[ref]`-captured
-//! variable as its value, through its cell; a function value as `{code,
-//! env}`, the code a pointer to its subroutine type, the env pointing at
-//! its object when the closure is known; other GC references as
-//! pointers). Scalar returns are typed. The unit's language is Rust:
-//! debuggers read variant parts in it (lldb only there).
+//! `-g` (spec 9.9.6): DWARF through MLIR's LLVM-dialect debug attributes.
+//! A function with a span gets a `#llvm.di_subprogram` named by its rok
+//! path (no linkage name: lldb can't demangle `_Y` and would show it), each
+//! op the `file:line:col` of the preceding `Statement::Loc`, and each named
+//! local an `llvm.intr.dbg.declare` of its slot typed by `di_type`:
+//!
+//! - structs, tuples, `str`, arrays: composites;
+//! - a tagged sum, and an `any` over the types stored into it: a variant
+//!   part by tag (recursive through nested `any`);
+//! - a `GcBuf`: a pointer to header then elements;
+//! - a `[ref]` capture: its value through the cell;
+//! - a function value: `{code, env}`, env typed when the closure is known;
+//! - other GC references: pointers.
+//!
+//! Scalar returns are typed. The unit's language is Rust, the only one in
+//! which lldb reads variant parts.
 //!
 //! The attribute aliases are module-level text placed before `module`;
 //! op locations are appended to the op lines of a finished function

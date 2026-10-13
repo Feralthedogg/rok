@@ -5,18 +5,16 @@
 #
 #   llvm/train-pgo.sh [profile...]
 #
-# Builds an instrumented LLVM (build.sh with ROK_LLVM_INSTRUMENT=1) and a
-# release rokc against it, then has that rokc build three quarters of
-# compiler/rokc/tests/cases at -O2: two of three for the host (linked),
-# the third as Linux objects of the other architecture (x86_64 on an
-# arm64 host, aarch64 on an x86_64 one), so both main back ends are warm.
-# The rest of the cases and bench/ are left to measure the result. The
-# host's profile is kept as $ROK_LLVM_CACHE/rok-<os>.profdata, to pass to
-# the run on the other host.
-# macOS with Xcode's command line tools, or Linux with clang, its
-# llvm-profdata and targets/build.sh's C library for the host (RUSTFLAGS,
-# e.g. the nix shell's run path, is kept); $ROK_LLVM_CACHE/pgo peaks at
-# ~5 GB and is deleted afterwards; about 35 minutes on 10 cores.
+# Builds an instrumented LLVM (ROK_LLVM_INSTRUMENT=1 build.sh) and a
+# release rokc against it, which builds three quarters of
+# compiler/rokc/tests/cases at -O2: two of three linked for the host, the
+# third as Linux objects of the other architecture, so both main back
+# ends are trained. The rest and bench/ are left to measure the result.
+# This host's profile is kept as $ROK_LLVM_CACHE/rok-<os>.profdata for the
+# run on the other host.
+#
+# Needs Xcode's command line tools, or on Linux clang, llvm-profdata and
+# targets/build.sh's host C library. Peaks at ~5 GB; ~35 min on 10 cores.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)

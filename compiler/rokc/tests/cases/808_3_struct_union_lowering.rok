@@ -12,14 +12,7 @@
 // if value: big small
 // error returns: 300 kept k-299
 
-// spec 8.8.3: a struct is a value without a header: assignment and
-// argument passing copy its fields, a field write changes only that
-// copy, and in a `List` buffer it sits inline (a reference field stored
-// there takes the write barrier, 8.9.10). 8.8.7: a union is as big as
-// its largest field and every field reads the same bytes. 8.8.13 /
-// 8.8.14: locals and a list literal. 8.9.1: `if` as a value. 8.9.12: a
-// function's shadow-stack frame is unlinked on its error return too, so
-// collections after many of them still find every root.
+// Structs copy by value and sit inline; unions overlap; error returns unlink.
 use rok::bare::mem::size_of;
 
 extern "C" {

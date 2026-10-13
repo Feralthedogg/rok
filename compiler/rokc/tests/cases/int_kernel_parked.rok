@@ -6,12 +6,7 @@
 // collected while multiplying
 // 32000000 true
 
-// A long `int` kernel runs parked, like a blocking runtime call: one
-// thread squares a 16M-bit number (one product kernel, about 0.1 s)
-// while main, once it is inside, collects ten times. The collections
-// go on without waiting for the product (they used to stop until it
-// returned, taking about as long), and its buffers survive them
-// (gc-stress: they never move while parked).
+// A long `int` kernel runs parked: collections do not wait for it.
 
 static STARTED: Atomic<i64> = Atomic::new(0);
 

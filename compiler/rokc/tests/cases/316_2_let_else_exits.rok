@@ -7,11 +7,7 @@
 // 2 2 | calls=1
 // circle 2 0 none
 
-// spec 3.16.1 / 3.16.2: on a match the bindings continue past the
-// `let-else`, otherwise the divergent `else` runs. 3.16.7: `return`,
-// `break`, `continue`, `throw` and a `loop` without `break` all exit.
-// 3.16.8: same meaning as the `match` form. 3.16.9 / 3.16.5: the right
-// side runs once; bindings are visible after it.
+// `let-else`: bindings continue, every divergent `else` form exits.
 enum Shape { Circle(i32), Square(i32) }
 
 fn get(v: i32 | none) -> i32 {

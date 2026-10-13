@@ -299,8 +299,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
         s
     }
 
-    // ---- thread-locals, polls, native edges ----
-
     /// Slot `slot` of this thread's TLS block `rok_tls` (803 §8.3.1):
     /// the block's address is taken once, in the prologue.
     fn tls(&mut self, slot: tls_abi::Slot) -> Mem {
@@ -431,8 +429,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
         self.push(Inst::Label(fast));
     }
 
-    // ---- checks ----
-
     fn panic_label(&mut self, msg: &'static str) -> Label {
         let at = if self.f.facts.track_caller {
             "#caller".to_owned()
@@ -513,8 +509,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
             self.push(Inst::Trap);
         }
     }
-
-    // ---- operands ----
 
     /// `op` read at type `ty` (the emitter's `materialize_operand`).
     fn val(&mut self, op: &Operand, ty: &MirTy) -> Val {
@@ -656,8 +650,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
             Operand::Const(c) => const_ty(c),
         }
     }
-
-    // ---- casts ----
 
     /// A value conversion (the emitter's `cast_value`).
     fn cast(&mut self, v: Val, from: &MirTy, to: &MirTy) -> Val {
@@ -868,8 +860,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
             });
         }
     }
-
-    // ---- calls ----
 
     /// A rok-ABI call (`callee` takes `params`, returns `ret`) of `args`;
     /// the result into `dst`.
@@ -1303,8 +1293,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
         }
     }
 
-    // ---- GC ----
-
     /// A zeroed GC object with a `ty` payload; its address in a word temp
     /// (the emitter's `emit_gc_object`).
     fn gc_object(&mut self, ty: &MirTy) -> Mem {
@@ -1575,8 +1563,6 @@ impl<'c, 'a> FnLower<'c, 'a> {
         let Mem::Frame(qs, _) = q else { unreachable!() };
         qs
     }
-
-    // ---- function body ----
 
     /// Whether a collection can run while this function is active.
     fn reaches_safepoint(&self) -> bool {

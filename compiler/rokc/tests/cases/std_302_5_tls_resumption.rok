@@ -13,12 +13,7 @@
 // 0-rtt to a server without it: resumed true, peer 1, early false, cache 1 -> read:GET /late
 // served: 8 and 2; store: 5 sessions
 
-// Stdlib 3.2.5: session resumption from tickets (psk_dhe_ke) between
-// our client and server: the server issues one single-use ticket per
-// connection, the client resumes from its `SessionCache` (per server
-// name, a hash its suites share) and sends `early_data` as 0-RTT when
-// the server allows it (`max_early_data`) and the data fits, else after
-// the handshake.
+// TLS ticket resumption and 0-RTT between our client and server.
 use rok::std::net::{tcp_listen, tcp_connect, TcpListener};
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey, CipherSuite, SessionCache, TicketStore};
 use rok::std::thread;

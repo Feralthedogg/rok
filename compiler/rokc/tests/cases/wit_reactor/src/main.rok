@@ -8,11 +8,7 @@
 // wasm-invoke: deep(some(some("a"))) => none
 // wasm-invoke: deep(some(some("b"))) => some(some("bb"))
 
-// Stdlib 1.8: a library world, only exports: without `main` the
-// component is a reactor (no `wasi:cli/run`; the host only calls its
-// exports). `include base with { greet as hello }` renames an export of
-// the included world. A nested option keeps both layers
-// (`option<option<string>>` is `str??`).
+// A world of exports only is a reactor; `include .. with` renames.
 ffi::wit::export { "wit/lib.wit" }
 
 #[wit::export]

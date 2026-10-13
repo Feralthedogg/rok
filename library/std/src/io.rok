@@ -10,8 +10,6 @@
 // `write_fmt` takes the formatted `str` (an f-string), not `FmtArgs`
 // (f-strings desugar to `str`).
 
-// ---- errors ----
-
 // The runtime's numbering of the kinds (`rok_os_errno_kind`).
 const KIND_OTHER: i32 = 0;
 const KIND_NOT_FOUND: i32 = 1;
@@ -185,8 +183,6 @@ pub(pkg) fn would_block(r: i64) -> bool {
 /// An OS file descriptor (Windows: a handle value).
 pub type RawFd = i32;
 
-// ---- bytes ----
-
 /// Bytes a write takes (301.0); defined in core (`Slice<u8>::find`).
 pub use rok::core::collections::slice::AsBytes;
 
@@ -309,7 +305,7 @@ pub(pkg) const fn text_of(bytes: List<u8>) throws (IoError) -> str {
     }
 }
 
-// ---- traits (305.1) ----
+// traits (305.1)
 
 pub trait Reader {
     /// Read up to `buf.len()` bytes into `buf[0..n]`; `0` = end of stream.
@@ -456,7 +452,7 @@ impl<R: Reader> Iterator for Bytes<R> {
     }
 }
 
-// ---- buffering (305.3) ----
+// buffering (305.3)
 
 /// Reads `inner` in `cap`-byte chunks, so small reads (`read_line`,
 /// `bytes`) do not each cost a system call.
@@ -647,7 +643,7 @@ pub fn copy<R: Reader, W: Writer>(ref reader: R, ref writer: W) throws (IoError)
     }
 }
 
-// ---- standard streams (305.2) ----
+// standard streams (305.2)
 
 /// The process's standard input, through the runtime's shared buffer.
 pub struct Stdin {}

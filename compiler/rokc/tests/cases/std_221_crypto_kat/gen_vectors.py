@@ -141,7 +141,7 @@ def msg_of(e):
     return '' if n == 0 else m
 
 
-# ---- CAVP SHA-2 / SHA-3 / SHAKE ----
+# CAVP SHA-2 / SHA-3 / SHAKE.
 for alg, name in [('sha256', 'SHA256'), ('sha384', 'SHA384'), ('sha512', 'SHA512')]:
     for kind in ['ShortMsg', 'LongMsg']:
         for _, e in rsp_blocks(zread('shabytetestvectors.zip', f'{name}{kind}.rsp')):
@@ -179,13 +179,13 @@ for alg, name in [('shake128', 'SHAKE128'), ('shake256', 'SHAKE256')]:
             out = e['Output'].lower()
             add(f'cavp-{alg}-varout', None, 'shake', alg, e['Msg'].lower(), str(len(out) // 2), out)
 
-# ---- CAVP HMAC ----
+# CAVP HMAC.
 for hd, e in rsp_blocks(zread('hmactestvectors.zip', 'HMAC.rsp')):
     alg = {'32': 'sha256', '48': 'sha384', '64': 'sha512'}.get(hd.get('L'))
     if alg and 'Mac' in e:
         add(f'cavp-hmac-{alg}', None, 'hmac', alg, e['Key'].lower(), e['Msg'].lower(), e['Mac'].lower(), '1')
 
-# ---- CAVP AES-GCM (96-bit IV, 128-bit tag) ----
+# CAVP AES-GCM (96-bit IV, 128-bit tag).
 for kl, alg in [('128', 'aes128gcm'), ('256', 'aes256gcm')]:
     for hd, e in rsp_blocks(zread('gcmtestvectors.zip', f'gcmEncryptExtIV{kl}.rsp')):
         if hd.get('IVlen') == '96' and hd.get('Taglen') == '128' and 'Tag' in e:
@@ -195,7 +195,7 @@ for kl, alg in [('128', 'aes128gcm'), ('256', 'aes256gcm')]:
             ok = 'FAIL' not in e
             add(f'cavp-gcm-dec-{kl}', None, 'aead', alg, e['Key'], e['IV'], h(e['AAD']), h(e.get('PT', '')), h(e['CT']), e['Tag'], '1' if ok else '0')
 
-# ---- CAVP ECDSA ----
+# CAVP ECDSA.
 CURVES = {'P-256': ('p256', 32), 'P-384': ('p384', 48)}
 
 
@@ -259,7 +259,7 @@ for text_name in ['SigVer.rsp', 'SigGen.rsp', 'KeyPair.rsp']:
             if 'd' in e:
                 add(f'cavp-ecdsa-siggen-{cname}-{alg}', None, 'ecdsa-pub', cname, e['d'], pk)
 
-# ---- CAVP RSA ----
+# CAVP RSA.
 
 
 def factor(n, e, d):
@@ -352,7 +352,7 @@ for name, scheme in [('SigGen15_186-3.txt', 'pkcs1'), ('SigGenPSS_186-3.txt', 'p
         if der is not None and (scheme == 'pkcs1' or len(salt) // 2 == HLEN[alg]):
             add(f'cavp-rsa-siggen-{scheme}', None, 'rsa-sign', scheme, alg, ref(der), e['Msg'].lower(), h(salt if scheme == 'pss' else ''), sig)
 
-# ---- Wycheproof ----
+# Wycheproof.
 
 
 def wp(name):
@@ -450,7 +450,7 @@ for g in wp('mlkem_768_test')['testGroups']:
     for t in g['tests']:
         add('wp-mlkem768', key_of(t), 'mlkem-seed', t['seed'][:64], t['seed'][64:], sha(t['ek']) if t.get('ek') else '-', h(t['c']), h(t.get('K', '')), res(t))
 
-# ---- output ----
+# Output.
 LIMIT = collections.defaultdict(lambda: 16)
 for s in suites:
     if 'mlkem' in s:

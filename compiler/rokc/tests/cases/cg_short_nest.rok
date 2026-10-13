@@ -1,12 +1,7 @@
 // spec: §3.13.3
-// A nest of counted loops reaching no safepoint, every bound at most 8
-// when it is entered, runs a copy that polls nowhere; the nest as
-// written runs otherwise. Both run the same iterations: bounds at, past
-// and far past the limit, an inner bound of its own, an inner loop
-// starting past the outer counter, early exits, u8 counters, and a
-// panic in an inner loop.
+// Short counted-loop nests run a copy that polls nowhere; same iterations.
 // expect-exit: 101
-// expect-stderr: thread 'main' panicked at tests/cases/cg_short_nest.rok:65:18:
+// expect-stderr: thread 'main' panicked at tests/cases/cg_short_nest.rok:60:18:
 // expect-stderr: List index out of bounds
 // expect-stdout:
 // 0 0 2464 3564 5445000

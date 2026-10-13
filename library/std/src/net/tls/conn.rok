@@ -133,8 +133,6 @@ const fn proto(msg: str, alert: u8) -> TlsError {
 
 const fn decode_err(what: str) -> TlsError { proto(f"malformed {what}", ALERT_DECODE_ERROR) }
 
-// ---- byte building / reading ----
-
 const fn put_u16(out: List<u8>, v: usize) {
     out.push((v >> 8) as u8);
     out.push(v as u8);
@@ -272,7 +270,7 @@ const fn find_ext(exts: List<(usize, Slice<u8>)>, t: u16) -> Slice<u8> | none {
     none
 }
 
-// ---- key schedule (RFC 8446 7.1) ----
+// key schedule (RFC 8446 7.1)
 
 pub(pkg) const fn suite_hash(s: CipherSuite) -> HashAlgorithm {
     match s {
@@ -356,8 +354,6 @@ const fn nonce(d: Dir) -> List<u8> {
     }
     n
 }
-
-// ---- the connection ----
 
 /// Connection state; `Client` / `Server` share one through a GC cell.
 pub(pkg) struct Conn {
@@ -450,7 +446,6 @@ pub(pkg) const fn io_tls(e: IoError) -> TlsError {
 }
 
 impl Conn {
-    // ---- records ----
 
     /// Read more bytes from the socket into `inbuf`.
     fn fill(ref self) throws (TlsError) {
@@ -610,8 +605,6 @@ impl Conn {
         throw TlsError { kind: TlsErrorKind::PeerAlert, msg: f"peer sent alert {data[1]}", alert: data[1] };
     }
 
-    // ---- handshake messages ----
-
     /// The next handshake message `(type, body, whole message)`.
     fn message(ref self) throws (TlsError) -> (u8, List<u8>, List<u8>) {
         loop {
@@ -653,8 +646,6 @@ impl Conn {
     const fn boundary(self) throws (TlsError) {
         if self.hs.len() != 0 { throw proto("handshake message spans a key change", ALERT_UNEXPECTED_MESSAGE); }
     }
-
-    // ---- application data ----
 
     /// Up to `buf.len()` bytes of application data into `buf`; 0 after
     /// close_notify.
@@ -791,8 +782,6 @@ impl Conn {
         try self.send_record(ALERT, [1u8, ALERT_CLOSE_NOTIFY][0:2]);
     }
 
-    // ---- handshake ----
-
     /// Run the handshake to completion, one peer message at a time
     /// (`client_on` / `server_on`). Without blocking (`nb`), it stops
     /// with `need` set when input runs out and resumes on the next call.
@@ -802,8 +791,6 @@ impl Conn {
             if self.is_client { try self.client_on(t, body, all); } else { try self.server_on(t, body, all); }
         }
     }
-
-    // ---- client handshake ----
 
     /// Send the ClientHello (and any 0-RTT data); `handshake` does the
     /// rest.
@@ -1059,8 +1046,6 @@ impl Conn {
         x.transcript = tr;
         self.x = x;
     }
-
-    // ---- server handshake ----
 
     /// Wait for the ClientHello; `handshake` does the rest.
     pub(pkg) fn server_start(ref self, cfg: ServerConfig) {
@@ -1362,8 +1347,6 @@ const fn choose_alpn(mine: List<List<u8>>, theirs: List<List<u8>>) throws (TlsEr
     throw proto("no common ALPN protocol", ALERT_NO_APPLICATION_PROTOCOL);
 }
 
-// ---- handshake state ----
-
 const C_HELLO: u8 = 1u8;
 const C_HELLO2: u8 = 2u8;
 const C_EE: u8 = 3u8;
@@ -1469,8 +1452,6 @@ impl Hs {
         self.early_dir.wipe();
     }
 }
-
-// ---- messages ----
 
 const fn suite_code(s: CipherSuite) -> u16 {
     match s {

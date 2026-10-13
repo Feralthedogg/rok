@@ -7,12 +7,7 @@
 // wrong name: Certificate certificate is not valid for example.com
 // server saw: PeerAlert peer sent alert 42
 
-// Stdlib 3.2.0 / 3.2.5: the `*_async` TLS methods on tasks: handshakes
-// (`Client::with_config_async`, `Server::new_async`), a 300 KB echo
-// through `write_all_async` / `read_to_end_async` with a key update and
-// close_notify on the way, and a failed handshake on both sides. With
-// tasks only, a method that blocked its worker would stall the other
-// side (the server task is local to the client's worker).
+// TLS `*_async` methods. Both sides run on one worker, so a blocking call stalls.
 use rok::std::net::{TcpListener, TcpStream, SocketAddr};
 use rok::std::net;
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};

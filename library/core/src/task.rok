@@ -1,80 +1,53 @@
-// rok::core::task — tasks on the work-stealing executor (stdlib spec
-// 2.18, refs-lang 7.6), `block_on` (2.20.6); time is `task::time`.
+// rok::core::task: tasks on the work-stealing executor (stdlib 2.18,
+// refs-lang 7.6) and `block_on` (2.20.6); time is `task::time`.
 //
-// One executor per process, started on first use: N workers (N = online
-// CPUs, or `ROK_WORKERS`) on OS threads that live as long as the process, the blocking
-// lane (`spawn_blocking`) and the I/O driver. `block_on` and the sync
-// `par::*` entry points attach the calling thread as a guest worker
-// until their future and the `spawn_local` tasks pinned to it are done;
-// nothing is started per call.
+// One executor per process, started on first use: N workers on threads
+// that live as long as the process (N = online CPUs or `ROK_WORKERS`),
+// the blocking lane and the I/O driver. `block_on` and `par::*` attach
+// the calling thread as a guest until their future and its
+// `spawn_local` tasks are done. Without threads (wasm32-wasi, the
+// browser) the guest runs everything itself, waiting in `rok_io_wait`.
 //
-// Without threads (`rok_cpu_count() == 0`: wasm32-wasi, the browser) the
-// pool is solo: no pool, monitor or driver thread; the guest runs every
-// task, waits for I/O and timers itself (`rok_io_wait`), and runs
-// `spawn_blocking` jobs inline.
+// A worker has a local queue (`spawn_local`, never stolen) and a
+// Chase-Lev deque; guests have neither and push to the shared injector.
+// A worker takes from its local queue, its deque, the injector, then
+// steals; the owner takes FIFO too, since LIFO lets a self-waking task
+// (`yield_now`) starve the rest of its deque.
 //
-// Each worker has a local queue (`spawn_local` tasks, never stolen) and
-// a Chase-Lev deque (`rok_deque_*`, of boxed `TaskRef`s); a guest has no
-// deque, and its spawns and other threads' wakes go to the shared
-// injector. A worker takes from its local queue, its deque, the
-// injector, then steals from the other deques; with nothing to run it
-// fires due timers and sleeps on its own word until a push or its next
-// timer. The owner takes FIFO too (a steal from its own deque): LIFO
-// would let a task that keeps waking itself (`yield_now`) starve the
-// rest of its deque.
+// A task's state goes IDLE -> SCHEDULED -> RUNNING -> IDLE / DONE; a wake
+// while RUNNING marks it NOTIFIED and it is queued again after the poll.
 //
-// A task is polled by one worker at a time: its state word goes IDLE →
-// SCHEDULED (queued) → RUNNING → IDLE / DONE, and a wake while RUNNING
-// marks it NOTIFIED so it is queued again after the poll.
-//
-// An idle worker raises its sleep flag, looks once more, then waits on
-// that flag; a push wakes only one flagged worker (a `spawn_local` push
-// the task's home worker), which searches until it finds a task or
-// sleeps again. Pushes while a woken worker searches wake nobody more;
-// the last searcher to find a task wakes the next (tokio's scheme). No
-// worker spins or yields before sleeping: a push never waits for one to
-// get the CPU back.
+// Idle workers sleep on a flag; a push wakes one flagged worker, which
+// searches until it finds work, and the last searcher to find a task
+// wakes the next (tokio's scheme). No worker spins before sleeping.
 //
 // I/O (707): a driver thread blocks in kqueue / epoll and unparks the
-// tasks waiting on a ready fd (`readable` / `writable`).
+// tasks waiting on a ready fd.
 //
-// Blocking calls (706 §7.6.7): every pool thread runs a runtime lane
-// (`rok_lane_*`), armed while it polls a task, that the runtime marks
-// blocked for the duration of each blocking call (file / socket /
-// process syscalls, sync locks, sleep, join). A monitor thread scans the lanes once a millisecond; a lane
-// blocked across a whole scan loses its worker: a spare thread, else a
-// new one, takes the worker over (its queues, sleep word and place in
-// the pool), and the blocked thread, once its call returns, finishes its
-// poll as an orphan guest; when its own `spawn_local` tasks are done it
-// waits as a spare for the next handoff (10 s, then it exits). At most
-// 512 threads beyond the workers: past that a blocked worker waits. A worker
-// with live `spawn_local` tasks is never handed on (they must stay on
-// its thread). The monitor sleeps while no lane blocks.
+// Blocking calls (706 §7.6.7): each pool thread has a runtime lane that
+// is marked blocked for the length of a blocking call. A monitor scans
+// the lanes every millisecond; a worker blocked across a whole scan is
+// handed to a spare or new thread, and the blocked thread finishes its
+// poll as an orphan guest, then waits as a spare (10 s, then exits).
+// At most 512 extra threads. A worker with live `spawn_local` tasks is
+// never handed on.
 //
-// Cancellation (2.18.4, 707 §7.7.10): `Task::cancel` sets the flag and
-// wakes the task; every `await` checks it (`cancel_requested`) on entry
-// and after each resume, and leaves the coroutine body like a `return`,
-// running the `finally` / `using` cleanups it passes.
+// Cancellation (2.18.4, 707 §7.7.10): `Task::cancel` sets a flag and
+// wakes the task; each `await` checks it on entry and after each resume
+// and leaves the body like a `return`, running `finally` / `using`.
 //
-// Timers are one binary heap behind a `Mutex` (707 §7.7.5 allows a heap;
-// a timing wheel would make insertion O(1)).
+// Timers: one binary heap behind a `Mutex` (707 §7.7.5).
 //
-// Options, read when the executor starts (`rok_sched_*`):
-// `ROK_WORKERS=<n>` sets N. `ROK_THREAD_PER_CORE=1` (706 §7.6.8) pins
-// every task to one worker: the spawning pool worker, else the next in
-// turn; it is queued only on that worker's local queue, so no worker
-// steals. `ROK_DYNAMIC_WORKERS=1` (707 §7.7.8) keeps only the active
-// workers as wake targets: the last active one going idle parks, and a
-// push that finds every active worker busy activates one more. A worker
-// blocked in a call is replaced (above) in every mode.
+// `ROK_THREAD_PER_CORE=1` (706 §7.6.8) keeps every task on one worker's
+// local queue, so nothing is stolen. `ROK_DYNAMIC_WORKERS=1` (707
+// §7.7.8) wakes only active workers and activates one more when all are
+// busy.
 //
-// A REPL session host saves the session between cells at a quiet moment
-// (`rok_session_hold`): every executor thread (worker, guest, blocking
-// lane, monitor, driver) counts as busy from `rok_session_enter` to
-// `rok_session_leave` except while it sleeps, and waits at
-// `rok_session_pass` (between two tasks, jobs or scans, holding no lock)
-// while a hold is requested. So no task is mid-poll and no job mid-run
-// in a saved session, and its threads can start again from it.
+// REPL sessions are saved between cells (`rok_session_hold`): every
+// executor thread is busy from `rok_session_enter` to
+// `rok_session_leave` except while asleep, and parks at
+// `rok_session_pass` (between tasks, holding no lock) while a hold is
+// requested, so no task is mid-poll in a saved session.
 
 pub mod time;
 
@@ -87,8 +60,6 @@ use rok::core::rt::{atomic_add, atomic_cas, atomic_load, atomic_xchg, key};
 fn now_ns() -> i64 {
     unsafe { rok_time_now_ns() }
 }
-
-// ---- tasks ----
 
 const IDLE: i32 = 0;
 const SCHEDULED: i32 = 1;
@@ -212,8 +183,6 @@ fn finish(t: TaskRef) {
         }
     }
 }
-
-// ---- the executor ----
 
 /// A FIFO of tasks behind a lock; `len` is readable without it.
 struct Queue {
@@ -1134,8 +1103,6 @@ pub fn block_on_try<T, E>(fut: TryAsyncFuture<T, E>) throws (E) -> T {
     }
 }
 
-// ---- a host-driven event loop ----
-
 // A WebAssembly component's async exports (stdlib 1.8) run on the host's
 // event loop: each export call and event enters, runs what is runnable
 // and returns to the host, which calls back with the next event. The
@@ -1220,7 +1187,7 @@ pub fn cpu_count() -> usize {
     unsafe { rok_cpu_count() }.max(1)
 }
 
-// ---- sync jobs on the executor (`par`) ----
+// sync jobs on the executor (`par`)
 
 struct RunOnce {
     f: fn() -> bool;
@@ -1278,8 +1245,6 @@ pub(pkg) fn help_until(t: Task<bool>) {
     atomic_add(pool.signal, HELPERS, -1, SeqCst);
     unsafe { rok_lane_arm(armed) };
 }
-
-// ---- spawning ----
 
 /// A spawned task; `await` it for its result (2.18.2).
 pub struct Task<T> {
@@ -1592,8 +1557,6 @@ impl<T> Future for FirstDone<T> {
     }
 }
 
-// ---- time ----
-
 /// Completes once `dur` has passed since its first poll (2.18.1).
 pub async fn sleep(dur: Duration) {
     await Sleep { deadline: now_ns() + dur.as_ns() };
@@ -1679,7 +1642,7 @@ impl Debug for TimeoutError {
 
 impl Error for TimeoutError {}
 
-// ---- parking: async waits on sync primitives and fds ----
+// parking: async waits on sync primitives and fds
 
 /// Tasks waiting on a key (a primitive's GC address, or an fd's
 /// `io_key`): `Mutex::lock_async`, `Receiver::recv_async`, socket I/O
@@ -1806,7 +1769,7 @@ pub fn unpark(key: usize) {
     }
 }
 
-// ---- the I/O driver (707) ----
+// the I/O driver (707)
 
 /// The parking key of `fd`'s read (`write == 0`) or write readiness:
 /// odd, so never a GC address (8-aligned) at any pointer width.
@@ -1968,7 +1931,7 @@ impl Future for IoReady {
     }
 }
 
-// ---- runtime ABI hooks (805 §8.5.3, §8.5.5) ----
+// runtime ABI hooks (805 §8.5.3, §8.5.5)
 //
 // `rok_io_register` / `rok_timer_register` / `rok_coro_park` /
 // `rok_coro_unpark` call these, for hand-written futures and foreign
@@ -2015,7 +1978,7 @@ extern "C" fn hook_unpark(frame: GcBuf<u8>) {
     unpark(key(frame));
 }
 
-// ---- the blocking lane (regular files) ----
+// the blocking lane (regular files)
 
 /// Run `f` on the executor's blocking lane; the future completes with
 /// its result (tokio's `spawn_blocking`). For syscalls with no readiness

@@ -13,11 +13,7 @@
 // drop inner 1
 // 5
 
-// `rok::bare` pointers to locals (stdlib 1.1.2 / 1.1.4): `addr_of` /
-// `many_addr_of` point at the variable itself, so writes through them
-// are seen by the variable and the other way round; `MaybeUninit`
-// (1.3.2) is filled through `as_mut_ptr`; `ManyPtr::slice` views memory
-// outside the GC; `drop_in_place` (1.3.4) runs the drop glue.
+// `addr_of` points at the variable itself; `MaybeUninit`, `drop_in_place`.
 use rok::bare::alloc::Allocation;
 use rok::bare::mem::{MaybeUninit, drop_in_place};
 use rok::bare::ptr::{ManyPtr, Ptr, addr_of, many_addr_of};

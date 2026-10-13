@@ -3,13 +3,7 @@
 // expect-stdout: 3 2 1 4 1 5 3 2 4 2 7 4 2 2 3 2 5 9 3 2 2 3 4 1 2 3 3
 // spec: std 213-marker §2.13.9 / std 216-sync §2.16.3 / refs-lang §4.15.2
 
-// What stays usable after a hand-off: a `clone()` handed over in place
-// of the value, a variable or field given a new value, the value used
-// through the lock, a field of another struct, a `Sync` value, a value
-// a helper only reads, the items of a list sent one by one, a value
-// `set` replaced, a tag test, a use inside `unsafe`, and a value on a
-// path where it was not handed over (a callee's error, `none` or
-// `false` exit, a flag, a loop left on the pass that sent).
+// What stays usable after a hand-off.
 use rok::core::marker::Handoff;
 
 struct Bag {

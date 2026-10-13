@@ -10,11 +10,7 @@
 // registrations left: 0
 // still works: hi
 
-// Cancelling a task suspended in async I/O (2.18.4): the cancel wakes
-// it, its `await` leaves the body through `finally`, and its parking /
-// timer registrations (socket readiness, a 1 h `sleep`, `lock_async`,
-// `recv_async`) are dropped instead of waiting for a wake that may never
-// come.
+// Cancelling a task in async I/O runs `finally` and drops its registrations.
 use rok::std::net::{TcpListener, TcpStream, SocketAddr};
 use rok::std::io::byte_buf;
 

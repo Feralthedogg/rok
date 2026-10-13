@@ -315,8 +315,6 @@ impl Em<'_> {
         self.d32(0);
     }
 
-    // ---- what registers hold ----
-
     /// Register `r` (`fp`: an `xmm`) is about to be written: the stores
     /// waiting on it go out first, and what it held is gone.
     fn w(&mut self, r: u32, fp: bool) {

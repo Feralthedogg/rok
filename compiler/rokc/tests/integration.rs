@@ -172,11 +172,8 @@ fn run_case(
             ));
         }
     }
-    // `// gc-stress: N`: again with a collection every N allocations and
-    // every full one evacuating all it may (objects move all the time),
-    // then once more with every automatic full collection marking
-    // concurrently (mutators store while the marker runs; explicit
-    // collections still stop the world and evacuate).
+    // Again with a collection every N allocations, each full one
+    // evacuating, then with concurrent marking too.
     if let Some(n) = directive(&source, "gc-stress:") {
         let env = [("ROK_GC_STRESS", n.trim()), ("ROK_GC_EVAC", "always")];
         check_run(&source, &exe, expected, &env).map_err(|e| format!("gc-stress: {e}"))?;

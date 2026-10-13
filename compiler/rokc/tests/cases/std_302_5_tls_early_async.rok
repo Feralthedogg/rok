@@ -8,11 +8,7 @@
 // server: resumed true, early 10 bytes, got GET /async
 // server: resumed true, early 10 bytes, got GET /async
 
-// Stdlib 3.2.0 / 3.2.5: resumption and 0-RTT data through the `*_async`
-// handshakes on tasks: the early data goes out with the ClientHello and
-// reaches `Server::early_data` (the first, full handshake sends it
-// after the handshake); each connection resumes from the ticket the one
-// before it left.
+// TLS resumption and 0-RTT through the async handshakes.
 use rok::std::net::{TcpListener, SocketAddr};
 use rok::std::net;
 use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};

@@ -1388,35 +1388,23 @@ void rok_set_exit_hook(void (*)(int));
 // `ROK_TLS_YIELD_FLAG` comes from `tls_abi` (build.rs).
 unsigned char *rok_tls_addr(void);
 
-// A failed cell leaves the session as it was before it, like a forked
-// snapshot: before the cell, with the runtime's other threads stopped at
-// a quiet moment (`quiesce`) and every other thread suspended, the
-// session's writable memory is copied (private and image
-// read / write pages: the GC heap, malloc heaps, statics, thread-local
-// blocks, runtime and loader state; and writable image sections sealed
-// read-only, `sealed_part`), and so are the other threads'
-// registers and stacks. When the cell fails, the threads started since
-// are terminated, the copy is put back, memory committed since is
-// decommitted (or released with its allocation when that is new), and
-// the main thread resumes at its recovery point. A thread from before
-// the cell that is back where it was then (waiting at the same place:
-// an idle executor worker) gets its registers and stack back; one that
-// moved on or ended cannot be put back: a runtime thread among them is
-// ended, its stack as it was then (the restored memory may link to it)
-// and the runtime told it is gone (`rok_session_restored`: the task
-// executor starts its own again); others go on. Not saved with the
-// memory: thread stacks and TEBs (the main thread's frames above the
-// recovery point stay as they are), cell code (written only when linked)
-// and this bookkeeping.
+// Windows stand-in for fork: before a cell, with runtime threads quiesced
+// and the rest suspended, copy the session's writable memory (GC and
+// malloc heaps, statics, TLS blocks, runtime and loader state, sealed image
+// sections: `sealed_part`) and the other threads' registers and stacks. On
+// failure: end threads started since, put the copy back, decommit memory
+// committed since, and resume the main thread at its recovery point. A
+// thread waiting where it was (an idle worker) gets its state back; a
+// runtime thread that moved on is ended and the runtime told
+// (`rok_session_restored`); others go on. Not saved: thread stacks and
+// TEBs, cell code, this bookkeeping.
 //
-// Saved by copying, not by copy-on-write page protection: the kernel
-// writes into buffers (ReadFile, recv, ..) without faulting, so a
-// protected page would fail those calls instead of being saved. The
-// runtime's own memory (the GC heap, large blocks: `rok_watch_writes`)
-// is write-watched, and a shadow copy of it is kept in step: a
-// checkpoint copies only the pages written since the last one, a
-// rollback puts back only those written since the checkpoint (all of
-// it when the runtime changed pages without a write: `rok_page_epoch`).
+// Copy, not copy-on-write: the kernel writes into buffers (ReadFile, recv)
+// without faulting, so a protected page would fail the call. The runtime's
+// own memory is write-watched (`rok_watch_writes`) against a shadow copy,
+// so a checkpoint copies only pages written since the last one and a
+// rollback only those written since the checkpoint (everything when
+// `rok_page_epoch` moved).
 // Other writable memory is copied whole each time.
 
 typedef struct {

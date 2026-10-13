@@ -5,11 +5,7 @@
 // 2000 2000
 // minor ok: true
 
-// Card marking: an old `List` buffer over 8 KiB is a large object whose
-// stores dirty 512-byte cards. Young strings stored into it (24-byte
-// elements, some straddling a card boundary: element 63's `str` is in
-// the card after its start) are reachable only through those cards
-// across minor collections.
+// Young strings reachable only through an old large list's dirty cards.
 extern "C" {
     fn rok_gc_collect();
     fn rok_gc_collect_young();

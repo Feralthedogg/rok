@@ -341,8 +341,6 @@ impl Em<'_> {
         });
     }
 
-    // ---- encoders ----
-
     fn movz(&mut self, rd: u32, imm: u32, hw: u32) {
         self.ins(0xd280_0000 | (hw << 21) | (imm << 5) | rd);
     }

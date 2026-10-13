@@ -1,11 +1,9 @@
-// Operator traits — the bootstrap source for every operator token.
+// Operator traits: the source of every operator token.
 //
-// `rokc` reads the `#[infix]` / `#[prefix]` / `#[postfix]` attributes on
-// these methods to bind each operator token to its trait method;
-// precedence and associativity are fixed by the language (spec 3.2.3)
-// and cannot be set here. The `#[lang(...)]` attributes (spec 6.4) bind each trait to a compiler
-// slot so future passes can swap hardcoded primitive lowering for
-// trait dispatch.
+// `rokc` binds each token to the trait method carrying its `#[infix]` /
+// `#[prefix]` / `#[postfix]`; precedence and associativity are fixed by
+// the language (3.2.3). `#[lang(...)]` (6.4) binds each trait to a
+// compiler slot.
 
 #[lang("add_trait")]
 pub trait Add<Rhs = Self> {

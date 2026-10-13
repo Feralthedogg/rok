@@ -10,12 +10,7 @@
 // int 5 str 3
 // 4
 
-// spec 3.12.1 / 3.12.2: arms with a trailing comma, block arms whose
-// tail is the value. 3.12.3: first match wins. 3.12.4: a sum-typed slot
-// receives differing arm types. 3.12.7: or-patterns. 3.12.8: guards.
-// 3.12.9: a type pattern narrows. 3.12.10: the scrutinee runs once, a
-// guard only when its arm is reached. 3.12.11 / 3.12.12: a divergent
-// arm (or scrutinee) fits any type.
+// First arm wins; the scrutinee runs once, a guard only when reached.
 fn name(v: i32) -> str {
     match v {
         1 => "one",

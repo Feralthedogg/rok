@@ -7,11 +7,7 @@
 // pinned true 41 42
 // many 499500
 
-// stdlib 1.6.3: `GcPtr<T>` is a managed reference to one `T` on the GC
-// heap. Copies share the object; the collector keeps it alive through
-// every holder and moves it (the gc-stress runs evacuate everything
-// movable) without the program noticing. A raw pointer to the value
-// exists only under a pin, which keeps it in place.
+// `GcPtr<T>`: shared, moved by the collector, raw access only under a pin.
 use rok::bare::gc;
 use rok::bare::gc::GcPtr;
 

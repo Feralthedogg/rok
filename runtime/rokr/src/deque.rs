@@ -3,17 +3,12 @@
 //! Lê, Pop, Cohen, Zappa Nardelli (`PPoPP` 2013); `t` / `b` / `r` name
 //! top, bottom and ring as in the paper.
 //!
-//! The deque and its ring are GC objects of the word-traced type
-//! ([`SCAN_WORDS_TYPE_ID`]): deque `[top, bottom, ring]`, ring
-//! `[mask, slots..]`. So every item between `top` and `bottom` is traced
-//! through the deque handle the rok side keeps (an item referenced only
-//! by the deque stays alive), and a ring replaced by growth is garbage
-//! once no thread is inside a deque operation — which a collection
-//! guarantees (these functions have no safepoint).
-//!
-//! Slots below `top` keep their stale references until
-//! overwritten (one ring's worth of retention at most); the ring never
-//! shrinks.
+//! The deque `[top, bottom, ring]` and ring `[mask, slots..]` are
+//! word-traced GC objects ([`SCAN_WORDS_TYPE_ID`]), so queued items stay
+//! alive through the deque, and a ring replaced by growth is garbage once
+//! no thread is inside an operation, which holds at any collection since
+//! these functions have no safepoint. Slots below `top` keep stale
+//! references until overwritten; the ring never shrinks.
 
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::cast_ptr_alignment)] // GC payloads are word-aligned

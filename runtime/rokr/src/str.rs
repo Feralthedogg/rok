@@ -272,9 +272,7 @@ pub unsafe extern "C" fn rok_str_parse_float(s: RokStr, out: *mut u8) -> i32 {
     0
 }
 
-// ---------------------------------------------------------------------
 // Byte buffers (`GcBuf<u8>` regions: `StrBuf`, byte lists, I/O)
-// ---------------------------------------------------------------------
 
 /// Address of `s`'s first byte (stdlib 2.15 `str::as_ptr`).
 #[unsafe(no_mangle)]
@@ -382,9 +380,7 @@ pub unsafe extern "C" fn rok_buf_slice_str(
     build(&[&b[start..end]])
 }
 
-// ---------------------------------------------------------------------
 // Unicode (`unicode`): `char` properties, case, trimming
-// ---------------------------------------------------------------------
 
 /// Property bits of `c`: 1 Alphabetic, 2 Lowercase, 4 Uppercase,
 /// 8 `White_Space`, 16 numeric (general category Nd / Nl / No).

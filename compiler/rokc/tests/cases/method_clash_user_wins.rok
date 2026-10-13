@@ -6,11 +6,7 @@
 // 10 20
 // 3
 
-// Spec 4.9.6: when several traits give a type the same method name, a
-// trait of the current package beats one visible only through the
-// implicit `use rok::core::**` (core's `Zero::zero`, `Iterator::any`);
-// core code keeps seeing its own traits (`sum` still starts at 0).
-// `Trait::method(x)` names one explicitly.
+// A package trait's method beats a core one of the same name.
 
 trait MyZero { fn zero() -> Self; }
 impl MyZero for i32 { fn zero() -> i32 { return 7; } }

@@ -9,11 +9,7 @@
 // literal 98 99
 // ok
 
-// Slicing shares the source's bytes (stdlib 2.15.3): `lines`, `split`,
-// `trim` and `strip_*` pieces point into the source, survive collections
-// and evacuation after the source itself is dead, and still reach C as
-// NUL-terminated `char*` (a copy when the slice is not a tail).
-// `as_bytes` and `byte` read the string's own bytes.
+// Slices share their source's bytes and keep them alive.
 extern "C" {
     fn strlen(s: str) -> usize;
     fn strchr(s: str, c: i32) -> str;

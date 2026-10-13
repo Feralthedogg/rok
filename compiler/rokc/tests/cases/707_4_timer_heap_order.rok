@@ -5,13 +5,7 @@
 // cancelled sleeper: true, others on time: true
 // after idle: 3 tasks ran
 
-// spec 7.7.4: sleeps wait in a heap ordered by deadline, so tasks wake
-// in deadline order whatever order they started in; a cancelled task's
-// timer is just discarded. The deadlines are fixed from one start, past
-// the tasks' first polls: a sleep whose deadline has passed when first
-// polled completes then, in poll order (an emulator under load first
-// polled the 10 ms task 20 to 70 ms in). 7.7.7: idle workers park and a later spawn
-// unparks them.
+// Timers fire in deadline order; a sleep already due completes in poll order.
 async fn nap(ms: i64) -> i64 {
     await task::sleep(Duration::ms(ms));
     ms

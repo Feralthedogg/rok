@@ -5,11 +5,7 @@
 // log: 3 lines, full true, minor true, fields true
 // dump: exit 101, out of memory true, totals true, types true, large true
 
-// 9.9.8: `ROK_GC_LOG=1` prints a line per collection (kind, pause,
-// objects marked, live bytes before -> after the sweep) to stderr;
-// `ROK_HEAP_DUMP=on_oom` prints the heap's object count and bytes per
-// type and its largest objects when the program runs out of memory.
-// The program runs itself with each variable set.
+// `ROK_GC_LOG=1` and `ROK_HEAP_DUMP=on_oom`; the program reruns itself with each.
 use rok::bare::gc;
 use rok::std::env;
 use rok::std::process::Command;

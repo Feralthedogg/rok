@@ -6,11 +6,7 @@
 // 42 [1.5, 2.5]
 // 6 6 3
 
-// spec 3.5.2: an inherent method wins over a trait method of the same
-// name; a trait method is reachable through the qualified path. A
-// `ref self` receiver is passed without writing `ref`. Turbofish names a
-// method's type arguments. 3.5.3: `Type::item` needs no instance, and
-// `obj.method(a)` is `Type::method(obj, a)`.
+// Inherent methods win over trait methods; paths reach either.
 struct P { x: i32; y: i32; }
 
 trait Named { fn name(self) -> str; }

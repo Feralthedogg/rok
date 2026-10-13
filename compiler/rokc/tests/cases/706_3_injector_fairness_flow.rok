@@ -8,14 +8,7 @@
 // timer woke while workers busy: true
 // 20000 tasks: 199990000
 
-// spec 7.6.3: a task spawned from a thread outside the pool enters
-// through the global injector and runs. 7.6.1: `block_on` attaches the
-// caller as a guest worker; tasks it spawned keep running after it
-// returns. 7.6.11 / 7.6.13: a task's locals live in its frame across
-// `await`s, whichever worker resumes it, and `await`ing the `Task<T>`
-// delivers its output. 7.6.9: a worker that always has work still fires
-// due timers. 7.6.12: spawning is only a frame allocation, so tens of
-// thousands of tasks are cheap.
+// Injected tasks run, locals survive migration, busy workers still fire timers.
 use rok::std::thread;
 
 async fn steps() -> str {

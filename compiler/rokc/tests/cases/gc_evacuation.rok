@@ -10,13 +10,7 @@
 // enums ok
 // nested ok
 
-// Evacuation (703 opportunistic defragmentation): survivors of every
-// kind sit among 15x as much garbage, so after the garbage dies their
-// blocks are sparse and full collections move them. Every reference
-// to a moved object is rewritten — list / dict buffers (per-element
-// scan tables), `str` interior pointers (slices), boxed `any` payloads
-// (inline ones are numbers and stay), closure environments, struct
-// fields — and every value reads back intact.
+// Full collections move sparse survivors and rewrite every reference kind.
 extern "C" {
     fn rok_gc_collect();
     fn rok_gc_stats_moved_bytes() -> u64;

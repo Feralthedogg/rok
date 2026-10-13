@@ -1,26 +1,18 @@
-// rok::std::fs (stdlib spec 301): files and directories over POSIX
-// (`openat` family, so a `Dir` handle is a capability).
+// rok::std::fs (stdlib 301): files and directories over the `openat`
+// family, so a `Dir` handle is a capability.
 //
-// `Dir::root()` is the process's default capability: its relative paths
-// resolve against the working directory. A `Dir` opened from it confines
-// paths to itself: absolute paths and `..` are refused.
+// `Dir::root()` resolves relative paths against the working directory;
+// a `Dir` opened from it refuses absolute paths and `..`.
 //
-// `copy` reflinks into a new target where the OS can (macOS
-// `clonefileat`, Windows `CopyFileExW`), else copies the bytes (Linux:
-// `copy_file_range`, itself a reflink where the file system can).
-// Windows: a `Dir` is a directory handle, paths under it resolve against
-// its final path; permissions are the read-only attribute (no write bit
-// for anyone). `File` / `Dir` / `Mmap` close through `close()` /
-// `unmap()` or on leaving `using`; a `ReadDir` also closes at its end.
+// `copy` reflinks where the OS can (`clonefileat`, `CopyFileExW`,
+// `copy_file_range`), else copies bytes. Windows: a `Dir` is a directory
+// handle and permissions are the read-only attribute.
 //
-// Async (`*_async`, as in std::net): kqueue / epoll cannot wait on a
-// regular file, so each call runs its sync twin on its own thread
-// (`task::spawn_blocking`) and the task suspends until it is done.
-// Errors are thrown as by the sync call. A cancelled task leaves the
-// call to finish in the background (a `read_async` still fills its
-// buffer); the result is dropped. `Dir` has the same `*_async` methods;
-// `Dir::read_dir_async` is a `Stream` of entries read in batches, while
-// the free `read_dir_async` lists the whole directory at once (301).
+// `*_async`: kqueue / epoll cannot wait on regular files, so each call
+// runs its sync twin on the blocking lane (`task::spawn_blocking`). A
+// cancelled task leaves the call to finish in the background (a
+// `read_async` still fills its buffer). `Dir::read_dir_async` streams
+// entries in batches; the free `read_dir_async` lists them all at once.
 
 use rok::std::io::{IoError, IoErrorKind, Reader, Writer, Seek, AsBytes, check, region, read_all, take_handle, write_region, text_of, byte_buf, list_of};
 pub use rok::std::io::SeekFrom;
@@ -38,8 +30,6 @@ const O_TRUNCATE: i32 = 8;
 const O_CREATE: i32 = 16;
 const O_CREATE_NEW: i32 = 32;
 const O_DIRECTORY: i32 = 64;
-
-// ---- OpenOptions ----
 
 /// How `open_with` opens a file (301.1).
 pub struct OpenOptions {
@@ -82,8 +72,6 @@ impl OpenOptions {
         b
     }
 }
-
-// ---- Metadata / Permissions ----
 
 /// Unix permission bits.
 pub struct Permissions {
@@ -154,8 +142,6 @@ fn stat_at(dir: i32, path: str, follow: bool, fd: i32) throws (IoError) -> Metad
         }
     }
 }
-
-// ---- File ----
 
 /// An open file. `fd` is shared by copies of the handle, so `close()`
 /// through any copy closes it for all.
@@ -312,7 +298,7 @@ impl File {
     }
 }
 
-// ---- Mmap (301.3) ----
+// Mmap (301.3)
 
 /// A read-only shared mapping from `File::mmap`. Unmapped by `unmap` or
 /// on leaving `using`; reads after that see an empty mapping.
@@ -366,7 +352,7 @@ impl Drop for Mmap {
     fn drop(ref self) { self.unmap(); }
 }
 
-// ---- async (see the top) ----
+// async (see the top)
 
 /// `f()` on a blocking thread, its error thrown here.
 async fn off<T: Send>(f: fn() throws (IoError) -> T + Send) throws (IoError) -> T {
@@ -593,7 +579,7 @@ impl Drop for File {
     }
 }
 
-// ---- Dir (301.2) ----
+// Dir (301.2)
 
 /// A directory capability. `fd < 0` is `root()`: the whole namespace,
 /// relative paths from the working directory.
@@ -828,8 +814,6 @@ impl Drop for Dir {
     }
 }
 
-// ---- ReadDir / DirEntry / Walk ----
-
 /// One directory entry, with its `lstat` metadata.
 pub struct DirEntry {
     path: Path;
@@ -942,7 +926,7 @@ impl Iterator for Walk {
     }
 }
 
-// ---- convenience functions (301.4) over Dir::root() ----
+// convenience functions (301.4) over Dir::root()
 
 pub fn open<P: AsPath>(path: P) throws (IoError) -> File { try Dir::root().open(path) }
 pub fn create<P: AsPath>(path: P) throws (IoError) -> File { try Dir::root().create(path) }
@@ -1038,7 +1022,7 @@ pub fn walk<P: AsPath>(root: P) -> Walk {
     w
 }
 
-// ---- async convenience functions (see the top) ----
+// async convenience functions (see the top)
 
 pub async fn open_async<P: AsPath>(path: P) throws (IoError) -> File {
     let p = path.as_path();

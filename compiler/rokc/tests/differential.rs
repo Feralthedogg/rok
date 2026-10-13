@@ -1,21 +1,10 @@
-//! Differential testing: random (seeded) cases run as one rok program
-//! per suite and checked against Python 3 (or, for ROKON, against the
-//! compiler's own ROKON writer). Each case prints one line; the oracle
-//! prints the line it expects.
+//! Differential testing: seeded random cases, one rok program per suite,
+//! each printing a line checked against Python 3 (ROKON: the compiler's
+//! own writer).
 //!
-//! Suites: fixed-width integers (wrapping / checked / saturating, `/`
-//! `%` `%%`, shifts, bit counts, `as`), `int` vs Python ints, `f64`
-//! (Display shortest round trip vs `repr`, literals, `parse`, `{:.N}`,
-//! arithmetic), `str` (split / trim / find / case mapping / replace /
-//! lines ...), sorting, `Dict` / `OrderedDict` / `Set` op sequences,
-//! Python slicing, ROKON round trips, sub-word arrays and structs by
-//! value through calls.
-//!
-//! Skips without the LLVM toolchain (`common::setup`) or `python3`.
-//! `ROK_DIFF_SEED` picks another case set, `ROK_DIFF_CASES` the cases
-//! per suite (default 120). Programs land in
-//! `target/differential/<suite>/` for reproduction. A mismatch in an
-//! op listed in `KNOWN` (an open bug or a deliberate difference) is
+//! Skips without LLVM or `python3`. `ROK_DIFF_SEED` picks another case
+//! set, `ROK_DIFF_CASES` the cases per suite (default 120). Programs land
+//! in `target/differential/<suite>/`. Mismatches in `KNOWN` ops are
 //! printed, not failed.
 
 // Case builders juggle many short names; the Python templates use
@@ -189,8 +178,6 @@ fn odkeys(d: OrderedDict<i64, i64>) -> List<i64> {
 }
 "#;
 
-// ------------------------------------------------------------ literals
-
 /// A rok string literal.
 fn rq(s: &str) -> String {
     rokc_rokon::quote(s)
@@ -318,8 +305,6 @@ impl IntTy {
         )
     }
 }
-
-// --------------------------------------------------------------- suites
 
 fn int_suite(rng: &mut Rng) -> Suite {
     let mut s = Suite {
@@ -1186,8 +1171,6 @@ fn rokon_suite(rng: &mut Rng) -> Suite {
     }
     s
 }
-
-// -------------------------------------------------------------- running
 
 /// Significant digits of a float's text (`-1.50e3` -> `15`).
 fn digits(t: &str) -> String {

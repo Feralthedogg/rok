@@ -1,56 +1,35 @@
 #!/bin/sh
-# Builds what rokc links for a --target (spec 9.2.14), into
-# <cargo target dir>/lib/rok/targets/<triple>/ (a toolchain's lib/rok/targets/):
-#
-#   librokr.a            the runtime, by cargo for that target
-#                        (Windows: rokr.lib; rokc carries the rest);
-#                        localized (runtime/rokr/localize.sh)
-#   Linux, -musl:        crt1.o crti.o crtn.o libc.a: musl, the copy the
-#                        pinned Rust toolchain ships for the target; empty
-#                        libm.a, libpthread.a, .. as musl installs them
-#   Linux, -gnu(eabihf): Scrt1.o crti.o crtn.o libc_nonshared.a, the empty
-#                        libpthread.a / libdl.a / librt.a / libutil.a /
-#                        libanl.a, and stub
-#                        libc.so / libm.so (sonames .so.6), made by
-#                        glibc_stubs.py from glibc 2.36 (Debian 12 amd64 /
-#                        arm64 / i386 / armhf; riscv64, which Debian 12
-#                        lacks, from debian-ports' 2.36-9; the packages
-#                        are checked against pinned SHA-256s). Executables need
-#                        glibc >= 2.34 (the 32-bit runtimes call its
-#                        time64 symbols, .cargo/config.toml).
-#   wasm32-*:            crt1-command.o (the browser's: crt1-reactor.o;
-#                        wasm32-wasi has both, a reactor component links
-#                        the latter) libc.a: wasi-libc, the copy the
-#                        pinned Rust toolchain ships for the Rust target
-#                        the runtime is built for: wasm32-wasip2 for
-#                        wasm32-wasi (plus wasm-component-ld, which makes
-#                        the component: a pinned release, SHA-256 checked;
-#                        on a musl host that version built by cargo),
-#                        wasm32-wasip1-threads for wasm32-wasi-threads,
-#                        wasm32-wasip1 for wasm32-unknown-unknown (plus
-#                        rok.mjs, the JS host that gives a browser or node
-#                        the WASI imports it uses).
-#   libclang_rt.profile.a  what `-C profile-generate` links: compiler-rt's
-#                        profile runtime from the pinned LLVM's sources,
-#                        compiled with clang against the target's C
-#                        headers (Apple: the macOS SDK, on a macOS host
-#                        only; glibc: Debian 12's, with linux-libc-dev
-#                        6.1; musl: musl 1.2.5's; Windows:
-#                        clang_rt.profile.lib, against mingw-w64's
-#                        headers, with profile_windows.c; wasm32-wasi:
-#                        wasi-libc's headers, with its emulated mmap and
-#                        getpid in the archive). Every target but
-#                        wasm32-unknown-unknown (no file system).
+# Builds what rokc links for a --target (spec 9.2.14) into
+# <cargo target dir>/lib/rok/targets/<triple>/.
 #
 #   targets/build.sh [<triple>...]
 #
-# Default: every shipped target the host can build (the Apple ones only on
-# macOS; an Apple host's runtime is lib/librokr.a: only its profile
-# runtime is built here). Needs rustup (and its
-# llvm-tools component's llvm-ar), curl, make, python3, bash, clang (as
-# the assembler and C compiler; CC names another: wasm32-wasi's profile
-# runtime needs one with the WebAssembly target, which Apple's lacks) and
-# the pinned LLVM's ld.lld (ROK_LLVM_PREFIX, else llvm/build.sh's).
+# Default: every shipped target the host can build (Apple ones only on
+# macOS, where the host runtime is lib/librokr.a and only its profile
+# runtime is built here).
+#
+# Per target:
+#   librokr.a (Windows: rokr.lib)  the runtime, localized by
+#       runtime/rokr/localize.sh.
+#   -musl   musl's crt objects and libc.a from the pinned Rust toolchain,
+#       plus musl's empty libm.a, libpthread.a, ...
+#   -gnu    crt objects, libc_nonshared.a, the empty libpthread.a etc. and
+#       stub libc.so / libm.so made by glibc_stubs.py from glibc 2.36
+#       (Debian 12; riscv64 from debian-ports; packages SHA-256 pinned).
+#       Executables need glibc >= 2.34 (32-bit runtimes use time64).
+#   wasm32  wasi-libc's crt objects and libc.a from the pinned Rust
+#       toolchain (wasip2 for wasm32-wasi, plus a pinned
+#       wasm-component-ld; wasip1-threads; wasip1 for the browser, plus
+#       rok.mjs, its JS host).
+#   libclang_rt.profile.a  compiler-rt's profile runtime from the pinned
+#       LLVM, built against the target's C headers (macOS SDK, Debian 12,
+#       musl 1.2.5, mingw-w64 with profile_windows.c, wasi-libc). Not for
+#       wasm32-unknown-unknown.
+#
+# Needs rustup with llvm-tools, curl, make, python3, bash, clang (CC
+# overrides; wasm32-wasi's profile runtime needs one with the
+# WebAssembly target) and the pinned LLVM's ld.lld (ROK_LLVM_PREFIX,
+# else llvm/build.sh's).
 set -eu
 
 TARGETS="x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu

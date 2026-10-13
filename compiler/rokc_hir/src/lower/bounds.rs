@@ -1,29 +1,21 @@
 //! Generic bodies checked at their definition (spec 2.10.9).
 //!
-//! Each generic body (generic fn, generic impl method, generic method,
-//! trait default method) is lowered once with its type parameters (and
-//! a default's `Self`) bound to opaque `HirTy::Param`s. A `Param` has
-//! only what its bounds give — with their supertraits, defaults
-//! filled, associated types (bound by the bound or opaque projections)
-//! and `where` clauses: methods and static calls resolve through the
-//! bound traits' declarations (`bound_methods`), operators through the
-//! operator trait's bound, trait questions (`has_impl`) through the
-//! bound list. Instances over a `Param` are signatures only
-//! (`mono::var_instance`), as for `let` inference variables, so a check
-//! lowers its own body alone. Then everything the lowering made is
-//! undone (functions, type instances, ids, recorded uses); only its
-//! errors stay. A check thus adds nothing to the build but its errors,
-//! and an incremental build takes them from the store
-//! (`incr::Incr::checked`) while the interface and the body are
-//! unchanged.
+//! Each generic body (fn, impl or trait method, trait default) is lowered
+//! once with its type parameters (and a default's `Self`) as opaque
+//! `HirTy::Param`s that have only what their bounds give: supertraits,
+//! associated types, `where` clauses. Methods resolve through the bound
+//! traits (`bound_methods`), operators and `has_impl` through the bound
+//! list; instances over a `Param` are signatures only
+//! (`mono::var_instance`). Everything the check lowered is then undone and
+//! only its errors stay; an incremental build reuses them
+//! (`incr::Incr::checked`).
 //!
-//! Monomorphization stays the code path. An instance of a template
-//! that failed its check reports nothing more (`failed`). Implicit
-//! type parameters (spec 4.2.2) are exempt: such a template is checked
-//! per instance only. A `const` parameter takes a value no other in
-//! the body has (a distinct prime past the unrolled array lengths), so
-//! `[T; N]` and `[T; M]` differ while `[T; M * N]` and `[T; N * M]`
-//! agree (spec 2.11.5); diagnostics show its name.
+//! Monomorphization stays the code path; an instance of a template that
+//! failed its check reports nothing more (`failed`). Implicit type
+//! parameters (spec 4.2.2) are checked per instance only. A `const`
+//! parameter gets a distinct prime past the unrolled array lengths, so
+//! `[T; N]` and `[T; M]` differ but `[T; M * N]` and `[T; N * M]` agree
+//! (spec 2.11.5); diagnostics show its name.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
