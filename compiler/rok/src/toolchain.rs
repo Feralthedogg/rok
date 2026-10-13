@@ -1,9 +1,8 @@
-//! Toolchains (spec 9.10.6, 9.2.19): `$ROK_HOME/toolchains/<version>-<triple>/`,
-//! each self-contained (`bin/{rok,rokc,rokls}`, `lib/librokr.a`,
-//! `lib/rok/`). `$ROK_HOME/bin/{rok,rokc,rokls}` are proxies: copies of
-//! a toolchain's `rok` that run the active toolchain's executable of the
-//! same name. The active toolchain: `+<version>` > `ROK_TOOLCHAIN` > the
-//! nearest `rok.rokon`'s `toolchain` > `rok toolchain default`.
+//! Toolchains (spec 9.10.6, 9.2.19): self-contained
+//! `$ROK_HOME/toolchains/<version>-<triple>/`. `$ROK_HOME/bin/{rok,rokc,
+//! rokls}` are proxies that run the active toolchain's tool of the same
+//! name, picked by `+<version>`, else `ROK_TOOLCHAIN`, else the nearest
+//! `rok.rokon`'s `toolchain`, else `rok toolchain default`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -32,8 +31,7 @@ fn root(home: &Path) -> PathBuf {
     home.join("toolchains")
 }
 
-/// `(directory name, version)` of the installed toolchains for this
-/// host, oldest first.
+/// Installed toolchains for this host, `(dir name, version)`, oldest first.
 fn installed(home: &Path) -> Vec<(String, String)> {
     let suffix = format!("-{HOST}");
     let mut v: Vec<(String, String)> = std::fs::read_dir(root(home))
@@ -50,8 +48,8 @@ fn installed(home: &Path) -> Vec<(String, String)> {
     v
 }
 
-/// The newest installed toolchain `pin` accepts (a version prefix, or a
-/// whole directory name).
+/// The newest installed toolchain matching `pin` (version prefix or dir
+/// name).
 fn find(home: &Path, pin: &str) -> Option<PathBuf> {
     installed(home)
         .into_iter()
@@ -67,8 +65,8 @@ fn not_installed(pin: &str, why: &str) -> String {
     )
 }
 
-/// The nearest `rok.rokon` at or above the working directory, and its
-/// `toolchain` (a manifest that does not load pins nothing here).
+/// The nearest `rok.rokon` and its `toolchain` (unloadable manifests pin
+/// nothing).
 fn manifest_pin() -> Option<(PathBuf, String)> {
     let cwd = std::env::current_dir().ok()?;
     let path = cwd.ancestors().find_map(manifest::find)?;
@@ -81,8 +79,7 @@ fn default_pin(home: &Path) -> Result<Option<String>, String> {
     crate::config(home, "toolchain")
 }
 
-/// The toolchain to run: `plus` (`+<version>`), else `ROK_TOOLCHAIN`,
-/// else the manifest's, else the default.
+/// `+<version>`, else `ROK_TOOLCHAIN`, else the manifest's, else default.
 fn active(home: &Path, plus: Option<&str>) -> Result<PathBuf, String> {
     let env = std::env::var("ROK_TOOLCHAIN")
         .ok()
@@ -105,12 +102,9 @@ fn active(home: &Path, plus: Option<&str>) -> Result<PathBuf, String> {
     find(home, &pin).ok_or_else(|| not_installed(&pin, &why))
 }
 
-/// Run as a proxy, when this executable is one; the exit code.
-///
-/// A proxy is `$ROK_HOME/bin/<tool>` beside `$ROK_HOME/toolchains/`: it
-/// runs the active toolchain's `<tool>` with the same arguments. `None`:
-/// not a proxy, or `rok toolchain ..` (the proxy manages the toolchains
-/// itself).
+/// If this executable is a proxy (`$ROK_HOME/bin/<tool>` beside
+/// `toolchains/`), run the active toolchain's `<tool>`; the exit code.
+/// `None` for `rok toolchain ..`, which the proxy handles itself.
 pub fn proxy(args: &[OsString]) -> Option<i32> {
     let exe = rokc_core::current_exe()?;
     let h = exe.parent()?.parent()?;
@@ -146,9 +140,8 @@ pub fn proxy(args: &[OsString]) -> Option<i32> {
     Some(crate::exec(c, &target))
 }
 
-/// The `rokc` to run: this `rok`'s own, unless the active pin (`+`,
-/// `ROK_TOOLCHAIN`, then the manifest's `pin`) names another version;
-/// then that installed toolchain's.
+/// This `rok`'s own `rokc`, unless the active pin names another installed
+/// version.
 pub fn rokc_for(plus: Option<&str>, pin: Option<&str>) -> Result<PathBuf, String> {
     let env = std::env::var("ROK_TOOLCHAIN")
         .ok()
@@ -195,8 +188,7 @@ fn run(c: &mut Command, what: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Check `archive` against the SHA-256 in `sum` (a release's
-/// `<archive>.sha256`: the hex digest, then optionally the file name).
+/// Check `archive` against `sum` (hex digest, optionally the file name).
 fn check_sum(archive: &Path, sum: &Path, what: &str) -> Result<(), String> {
     let text = std::fs::read_to_string(sum).map_err(|e| format!("{}: {e}", sum.display()))?;
     let want = text
@@ -217,11 +209,9 @@ fn check_sum(archive: &Path, sum: &Path, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Unpack `from` (a directory, a `.tar[.gz]`, a `.zip` (Windows' `tar`
-/// reads it), or an `http(s)://` URL of one) into `tmp`; the
-/// toolchain's top directory there. A download is checked against the
-/// `.sha256` beside it at the same place, an archive file against its
-/// `.sha256` when one is beside it.
+/// Unpack `from` (a directory, `.tar[.gz]`, `.zip`, or a URL of one) into
+/// `tmp`; returns the toolchain's top directory. Downloads must match the
+/// `.sha256` beside them; local archives are checked when one is there.
 fn unpack(from: &str, tmp: &Path) -> Result<PathBuf, String> {
     let mut archive = PathBuf::from(from);
     let curl = |url: &str, to: &Path| {
@@ -278,8 +268,8 @@ fn unpack(from: &str, tmp: &Path) -> Result<PathBuf, String> {
     Ok(files)
 }
 
-/// Check that the toolchain at `top` is whole and is `version` for this
-/// host (its `bin/rokc --version --verbose`); its full version.
+/// Check `top` is complete and is `version` for this host; its full
+/// version.
 fn verify(top: &Path, version: &str) -> Result<String, String> {
     let rokc = top.join("bin").join(exe_name("rokc"));
     if !rokc.is_file() {
@@ -328,8 +318,7 @@ impl Drop for Scratch {
     }
 }
 
-/// Unpack and check `from` in a scratch directory: it, the toolchain's
-/// top directory in it, and the toolchain's full version.
+/// Unpack and verify `from` in scratch: (scratch, top dir, full version).
 fn stage(home: &Path, version: &str, from: &str) -> Result<(Scratch, PathBuf, String), String> {
     std::fs::create_dir_all(root(home)).map_err(|e| e.to_string())?;
     let tmp = Scratch(root(home).join(format!(".tmp-{}", std::process::id())));
@@ -340,9 +329,8 @@ fn stage(home: &Path, version: &str, from: &str) -> Result<(Scratch, PathBuf, St
     Ok((tmp, top, full))
 }
 
-/// Move the staged toolchain `top` to `toolchains/<full>-<host>`; its
-/// name. One already there is moved aside into `tmp` first, and back if
-/// the move fails.
+/// Move `top` to `toolchains/<full>-<host>`, moving an existing one aside
+/// into `tmp` and back on failure; its name.
 fn place(home: &Path, tmp: &Scratch, top: &Path, full: &str) -> Result<String, String> {
     let name = format!("{full}-{HOST}");
     let dest = root(home).join(&name);
@@ -383,9 +371,8 @@ fn write_proxies(home: &Path, toolchain: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Windows cannot replace a running executable (this proxy, when `rok
-/// toolchain default` runs through it), but can rename it: move `exe`
-/// to `.old-<n>` in `bin`, and delete earlier ones no longer running.
+/// Windows can rename a running executable but not replace it: move `exe`
+/// to `bin/.old-<n>` and delete older ones no longer running.
 fn set_aside(bin: &Path, exe: &Path) {
     for e in std::fs::read_dir(bin).into_iter().flatten().flatten() {
         if e.file_name().to_string_lossy().starts_with(".old-") {
@@ -407,10 +394,9 @@ fn set_default(home: &Path, pin: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// The release server: `<dist>/download/v<version>/rok-<version>-<triple>.<ext>`
-/// with its `.sha256`, and `<dist>/latest/download/rok-version`, the
-/// newest release's version (GitHub releases' layout). `ROK_DIST`
-/// overrides it.
+/// Release server in GitHub releases' layout:
+/// `download/v<version>/rok-<version>-<triple>.<ext>` (+ `.sha256`) and
+/// `latest/download/rok-version`. `ROK_DIST` overrides it.
 fn dist() -> String {
     std::env::var("ROK_DIST")
         .ok()
@@ -444,8 +430,8 @@ fn latest(dist: &str) -> Result<String, String> {
     release_version(out.trim(), &url)
 }
 
-/// `bin/rok` runs and `bin/rokc` is `full`, as the default toolchain
-/// (no `ROK_TOOLCHAIN`, outside any project).
+/// Check the proxies run `full` as the default (no `ROK_TOOLCHAIN`, no
+/// project).
 fn check_proxies(home: &Path, full: &str) -> Result<(), String> {
     let version = |tool: &str| {
         let exe = home.join("bin").join(exe_name(tool));
@@ -468,9 +454,8 @@ fn check_proxies(home: &Path, full: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Make `full` (installed at `dir`) the default and write its proxies,
-/// then check that they run it. On failure the config and the proxies
-/// are put back, and `dir` removed if `fresh` (installed for this).
+/// Make `full` the default, write and check its proxies; on failure
+/// restore config and proxies, and remove `dir` if `fresh`.
 fn switch(home: &Path, full: &str, dir: &Path, fresh: bool) -> Result<(), String> {
     let bin = home.join("bin");
     let config = home.join("config.rokon");
@@ -526,8 +511,8 @@ fn switch(home: &Path, full: &str, dir: &Path, fresh: bool) -> Result<(), String
     }
 }
 
-/// `rok toolchain update`: install release `version` (default: the newest), make
-/// it the default and update the proxies.
+/// `rok toolchain update`: install `version` (default: newest), make it
+/// the default, update the proxies.
 fn update(home: &Path, version: Option<&str>, quiet: bool) -> Result<(), String> {
     let dist = dist();
     let full = match version {
@@ -599,8 +584,7 @@ pub fn cmd(args: &[String], quiet: bool) -> Result<i32, String> {
             if !quiet {
                 eprintln!("   Installed toolchain {name}");
             }
-            // The first toolchain becomes the default; the proxies are
-            // made once.
+            // The first toolchain becomes the default; proxies once.
             let def = default_pin(&h)?;
             if def.is_none() {
                 set_default(&h, &name)?;

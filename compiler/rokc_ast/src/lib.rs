@@ -1,8 +1,5 @@
-//! Abstract syntax tree.
-//!
-//! Operators are not built into the language. The parser only records
-//! their token symbol; trait dispatch (`#[infix]` / `#[prefix]` /
-//! `#[postfix]` on stdlib trait methods) happens later.
+//! Abstract syntax tree. Operators are just token symbols here; trait
+//! dispatch (`#[infix]` / `#[prefix]` / `#[postfix]`) happens later.
 
 mod codec;
 pub mod defs;
@@ -23,9 +20,9 @@ pub struct Program {
     pub stmts: Vec<Stmt>,
     /// Source text of each meta expansion (spec 6.9.9, `--emit=expanded`).
     pub expanded: Vec<String>,
-    /// Where each top-level item / statement of the file starts (its
-    /// first token, attributes included), in order: (byte offset,
-    /// whether it is an item). A REPL session splits a program by it.
+    /// Start of each top-level item / statement (first token, attributes
+    /// included): (byte offset, is an item). The REPL splits programs by
+    /// it.
     pub tops: Vec<(u32, bool)>,
 }
 

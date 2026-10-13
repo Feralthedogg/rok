@@ -1,11 +1,6 @@
-//! `rok.rokon`: the package manifest (also an environment's), and the
-//! `//! ```rokon` block of a single-file script.
-//!
-//! The file is one ROKON value (`rokc_rokon`), a `Package { .. }` struct
-//! (the name `Package` may be left out). It is data only: strings,
-//! `{ "key": value }` dicts and the `Dep::path(..)` / `Dep::git(..)` /
-//! `Dep::version(..)` variants, which also take `optional: true`,
-//! `features: [..]` and `default_features: false`.
+//! `rok.rokon` (a package's or an environment's) and a script's
+//! `//! ```rokon` block: one data-only ROKON value, `Package { .. }` (the
+//! name is optional).
 //!
 //! ```rokon
 //! Package {
@@ -136,8 +131,7 @@ pub struct Dep {
     pub optional: bool,
     /// Its features this package enables.
     pub features: Vec<String>,
-    /// Its `default` feature is on (`default_features: false` turns it
-    /// off).
+    /// `default_features: false` turns it off.
     pub default_features: bool,
 }
 
@@ -152,8 +146,7 @@ impl Dep {
         }
     }
 
-    /// The `Dep::..` value, with the feature arguments that differ from
-    /// the defaults.
+    /// The `Dep::..` value; feature arguments only where not the default.
     pub fn to_value(&self) -> Value {
         let mut v = self.source.to_value();
         if let Kind::Variant { named, .. } = &mut v.kind {
@@ -179,7 +172,6 @@ impl Dep {
     }
 }
 
-/// A list of strings.
 pub fn strings(items: &[String]) -> Value {
     Value::new(Kind::List(items.iter().map(Value::str).collect()))
 }
@@ -253,10 +245,8 @@ pub enum At {
     Dep(usize),
 }
 
-/// Check `features` against the package's (normal) `deps`: names, that
-/// every entry names a feature or dependency of the package, that no
-/// feature reaches itself, and that every optional dependency is enabled
-/// by some feature.
+/// Check names and references, that no feature reaches itself, and that
+/// some feature enables each optional dependency.
 pub fn check_features(features: &Features, deps: &[Dep]) -> Result<(), (At, String)> {
     // 0 new, 1 on the path, 2 done.
     fn visit(
@@ -432,8 +422,8 @@ pub struct NativeDep {
     pub source: NativeSource,
 }
 
-/// A package (and dependency) name: `[a-z][a-z0-9_-]*`. Code names it
-/// with `-` as `_` (`code_name`), so it starts with a letter.
+/// A package name: `[a-z][a-z0-9_-]*`, a letter first since code spells
+/// `-` as `_` (`code_name`).
 pub fn check_name(name: &str) -> Result<(), String> {
     let valid = |n: &str| {
         n.starts_with(|c: char| c.is_ascii_lowercase())
@@ -473,8 +463,7 @@ pub fn code_name(name: &str) -> String {
     name.replace('-', "_")
 }
 
-/// A package's identity: names equal up to case and `-` / `_` are one
-/// package (so they cannot both exist).
+/// Identity: names equal up to case and `-` / `_` are one package.
 pub fn key(name: &str) -> String {
     code_name(&name.to_ascii_lowercase())
 }
@@ -483,8 +472,8 @@ pub fn same(a: &str, b: &str) -> bool {
     key(a) == key(b)
 }
 
-/// `dir/rok.rokon`, if present. A file whose name differs only in case
-/// (`Rok.rokon`) is not the manifest: warn, whatever the file system.
+/// `dir/rok.rokon`, if present. A case variant (`Rok.rokon`) only warns,
+/// whatever the file system.
 pub fn find(dir: &Path) -> Option<PathBuf> {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return None;
@@ -593,8 +582,7 @@ pub fn parse(text: &str, file: &str) -> Result<Manifest, String> {
     })
 }
 
-/// `m.lints` (of the manifest at `path`) after those of its `lints_from`
-/// chain, outermost first: later entries win, as `-A/-W/-D` do.
+/// `m.lints` after its `lints_from` chain, outermost first; later wins.
 pub fn inherit_lints(m: &Manifest, path: &Path) -> Result<Vec<(String, Level)>, String> {
     let real = rokc_core::real_path(path).map_err(|e| format!("{}: {e}", path.display()))?;
     chain_lints(m, path, &mut vec![real])
@@ -718,8 +706,7 @@ pub fn source(d: Decoder<'_>) -> Result<Source, String> {
     dep(d, false).map(|d| d.source)
 }
 
-/// `source`, with the feature arguments when `flags` (the name is
-/// left empty).
+/// `source`, plus feature arguments when `flags` (name left empty).
 fn dep(d: Decoder<'_>, flags: bool) -> Result<Dep, String> {
     if let Ok(s) = d.string() {
         // `"geom": "../geom"`: a path where a requirement goes.
@@ -827,9 +814,8 @@ pub fn set_dep(
     parse(&out, file).map(|_| out)
 }
 
-/// `text` with `dep` in `field` (`deps` / `dev_deps`). An optional one
-/// comes with a feature of its name that enables it, unless the package
-/// has that feature.
+/// `text` with `dep` in `field`; an optional one also gets a feature of
+/// its name enabling it, unless the package has one.
 pub fn add_dep(text: &str, file: &str, field: &str, dep: &Dep) -> Result<String, String> {
     let m = parse(text, file)?;
     let edit = |text: &str, steps: &[Step<'_>], value: &str| {
@@ -868,8 +854,7 @@ pub struct Block {
     pub span: std::ops::Range<usize>,
 }
 
-/// The leading `//!` lines of `src` (after a shebang line): each line's
-/// start, end (newline included) and text after `//!` and one space.
+/// Leading `//!` lines after a shebang: (start, end incl. newline, text).
 fn doc_lines(src: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     let start = if rokc_core::shebang_len(src) > 0 {
         src.find('\n').map_or(src.len(), |i| i + 1)
@@ -906,9 +891,8 @@ pub fn script_block(src: &str) -> Option<Block> {
     None
 }
 
-/// `src` with `text` (a `rok.rokon` value) as its block: in place of the
-/// old one, else after the shebang line and the leading `//!` lines;
-/// `None` removes the block.
+/// `src` with `text` as its block, replacing the old one or placed after
+/// the shebang and leading `//!` lines; `None` removes it.
 pub fn set_script_block(src: &str, text: Option<&str>) -> String {
     let lines = text.map_or_else(String::new, |t| {
         let mut out = "//! ```rokon\n".to_owned();

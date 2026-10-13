@@ -1,9 +1,6 @@
-// rok::bare tier — base layer.
-// Owns: Ptr<T>, ConstPtr<T>, transmute, raw allocation, pin, volatile.
-// Depends only on the runtime (`extern "rok"` symbols).
-//
-// Importing this crate is a danger signal; user code must `use rok::bare::...`
-// explicitly.
+// rok::bare — raw pointers, transmute, raw allocation, pinning and
+// volatile access, over the runtime's `extern "rok"` symbols only. Never
+// in the prelude: code that needs it says `use rok::bare::..`.
 
 pub mod alloc;
 pub mod ffi;

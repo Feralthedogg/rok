@@ -3,7 +3,7 @@
 use rokc_hir::{HirModule, HirTy};
 use rokc_ir_common::PrimTy;
 
-use crate::{DebugTy, MirTy, Target};
+use crate::{DebugTy, MirTy, Target, UnionKind};
 
 /// Struct id marking the MIR type of an `any Tr` value, so the
 /// collector's `ScanTable` gets an `ANY_SLOT` (802 §8.2.7) for it.
@@ -307,7 +307,7 @@ pub fn unify_payload(variants: &[(u32, MirTy)], target: &Target) -> Option<MirTy
     if align > 8 || payloads.iter().any(|p| target.has_gc_ref(p)) {
         let w = target.pointer_width / 8;
         let words = size.next_multiple_of(align).div_ceil(w);
-        return Some(MirTy::Union(variants.to_vec(), words));
+        return Some(MirTy::Union(variants.to_vec(), words, UnionKind::Sum));
     }
     Some(MirTy::Array(Box::new(uint(align)), size.div_ceil(align)))
 }
@@ -325,7 +325,11 @@ fn union_storage(fields: &[(String, HirTy)], module: &HirModule, target: &Target
         .fold((1, 1), |(s, a), (ps, pa)| (s.max(ps), a.max(pa)));
     if tys.iter().any(|(_, t)| target.has_gc_ref(t)) {
         let w = target.pointer_width / 8;
-        return MirTy::Union(tys, size.next_multiple_of(align).div_ceil(w));
+        return MirTy::Union(
+            tys,
+            size.next_multiple_of(align).div_ceil(w),
+            UnionKind::Plain,
+        );
     }
     // Words of the alignment, up to 8; a more aligned member raises
     // the union struct's own alignment (`union_align`).
@@ -554,7 +558,10 @@ mod tests {
         assert!(t.has_gc_ref(&p(PrimTy::Str)));
         let pair = MirTy::Tuple(vec![p(PrimTy::I64), p(PrimTy::I64)]);
         let vs = tagged(&[p(PrimTy::Str), pair]);
-        assert_eq!(unify_payload(&vs, &t), Some(MirTy::Union(vs, 2)));
+        assert_eq!(
+            unify_payload(&vs, &t),
+            Some(MirTy::Union(vs, 2, UnionKind::Sum))
+        );
         assert!(!t.has_gc_ref(&p(PrimTy::I64)));
     }
 
@@ -623,6 +630,9 @@ mod tests {
         // `str | i64` on a 32-bit target: an 8-byte `str`, 4-aligned.
         let t = Target::builtin("i686-unknown-linux-gnu");
         let vs = tagged(&[p(PrimTy::Str), p(PrimTy::I64)]);
-        assert_eq!(unify_payload(&vs, &t), Some(MirTy::Union(vs, 2)));
+        assert_eq!(
+            unify_payload(&vs, &t),
+            Some(MirTy::Union(vs, 2, UnionKind::Sum))
+        );
     }
 }

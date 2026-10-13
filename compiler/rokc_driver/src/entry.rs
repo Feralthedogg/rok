@@ -86,9 +86,8 @@ fn implicit_main(stmts: Vec<Stmt>) -> FnDef {
     }
 }
 
-/// Spec 4.16.3: no parameters or generics; returns `()` or `i32`, and may
-/// `throws (E)` (an escaping error exits 1, see HIR `uncaught_in_main`).
-/// A `Result` return is not an entry form.
+/// Spec 4.16.3: no parameters or generics; `()` or `i32`, optionally
+/// `throws (E)` (an escaping error exits 1). `Result` isn't an entry form.
 fn check_main_signature(f: &FnDef, diags: &mut Vec<RokDiagnostic>) {
     let mut bad = |msg: &str| {
         diags.push(RokDiagnostic::error(

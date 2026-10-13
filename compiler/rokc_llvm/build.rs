@@ -1,13 +1,10 @@
-//! Links the pinned LLVM / MLIR / lld static libraries and the C++ shim
-//! over them.
+//! Links the pinned LLVM / MLIR / lld static libraries and the C++ shim.
 //!
-//! The prefix is `ROK_LLVM_PREFIX`, else the default of `llvm/build.sh`
-//! (`$ROK_LLVM_CACHE/llvm-<version>`, `~/.cache/rok`; `llvm/build.ps1`'s
-//! `%LOCALAPPDATA%\rok` on Windows). Without one, or with one built for
-//! another machine than the cargo target (`cargo check --target ..`), the
-//! crate builds its stub (`cfg(rok_llvm)` unset): every entry point
-//! returns an error. A `ROK_LLVM_PREFIX` that is not a usable prefix is a
-//! build error.
+//! The prefix is `ROK_LLVM_PREFIX`, else `llvm/build.sh`'s default
+//! (`$ROK_LLVM_CACHE/llvm-<version>`, `~/.cache/rok`; `%LOCALAPPDATA%\rok`
+//! on Windows). Without one, or with one for another machine than the
+//! cargo target, the crate builds its stub (`cfg(rok_llvm)` unset) whose
+//! entry points all fail. An unusable `ROK_LLVM_PREFIX` is a build error.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -70,9 +67,8 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=rokc_llvm_shim");
 
-    // Users before what they use: lld, then MLIR, then LLVM. Not bundled
-    // into the rlib (-bundle): the archives go to the final link as they
-    // are.
+    // Users before what they use: lld, MLIR, LLVM. Not bundled into the rlib
+    // (-bundle): the archives go to the final link as they are.
     let lib = prefix.join("lib");
     println!("cargo:rustc-link-search=native={}", lib.display());
     let mut names: Vec<String> = std::fs::read_dir(&lib)
@@ -97,14 +93,10 @@ fn main() {
             n.clone(),
         )
     });
-    // MLIR plugins bind to the MLIR rokc links and the LLVM support
-    // library under it (spec bare 1.10.2): rokc exports those, and the
-    // rest of the toolchain is dead-stripped. Support and Demangle go in
-    // whole, so plugins find all of it. A static rokc (musl, whose Rust
-    // targets link `crt-static`, a feature build scripts are not told
-    // about) loads no plugins and exports nothing: its startup relocates
-    // only itself, and anything bound by symbol would need the dynamic
-    // loader it does not have.
+    // MLIR plugins bind to rokc's MLIR and LLVM support library (spec bare
+    // 1.10.2), so rokc exports those and the rest is dead-stripped; Support
+    // and Demangle go in whole. A static (musl) rokc loads no plugins and
+    // exports nothing: it has no dynamic loader to bind them.
     let shared = env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("musl");
     if shared {
         let exports = out.join(if msvc { "exports.def" } else { "exports" });
@@ -128,9 +120,8 @@ fn main() {
             println!("cargo:rustc-link-lib=static:-bundle={n}");
         }
     } else {
-        // GNU ld reads each archive once, in order, and these reference
-        // each other in cycles: a linker script in place of an archive
-        // groups them.
+        // GNU ld reads each archive once, in order, and these reference each
+        // other cyclically: a linker script groups them.
         let group: Vec<String> = names
             .iter()
             .map(|n| format!("\"{}\"", lib.join(format!("lib{n}.a")).display()))
@@ -227,15 +218,12 @@ fn macho_exportable(archive: &Path) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// The symbols rokc exports, for its link (`cargo:exports`): the
-/// non-weak globals of every MLIR archive member the link loads (found
-/// as the linker does: members defining what the shim and the members
-/// loaded so far leave undefined) and of the whole [`EXPORTED_LIBS`].
-/// Weak definitions (template instances, COMDATs) stay internal: a
-/// plugin has its own, and dyld would bind each use of an exported one
-/// at launch; but MSVC's of the whole libraries and explicit `TypeID`s are
-/// exported. Mach-O takes one name per line (`-exported_symbols_list`),
-/// ELF a dynamic list, PE a module definition file.
+/// Symbols rokc exports (`cargo:exports`): the non-weak globals of every
+/// MLIR member the link loads (found as the linker would) and of all of
+/// [`EXPORTED_LIBS`]. Weak definitions stay internal (a plugin has its own,
+/// and dyld would bind each exported one at launch), except MSVC's in the
+/// whole libraries and explicit `TypeID`s. Mach-O takes a name list, ELF a
+/// dynamic list, PE a module definition file.
 fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: bool) {
     use std::collections::{HashMap, HashSet};
     // (archive, exported, loaded whole)
@@ -290,12 +278,10 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
             if !loaded.contains(&(a, m)) {
                 continue;
             }
-            // MSVC makes an explicit template instantiation a COMDAT like
-            // any inline function, and clang-cl an explicit TypeID's
-            // `id`: a plugin's `extern template` use of one
-            // (`SmallVectorBase<uint32_t>::grow_pod`) and its TypeIDs
-            // (rok/mlir_typeid.h) bind to rokc's. So the COMDATs of the
-            // whole libraries and the TypeIDs are exported too.
+            // MSVC makes explicit template instantiations COMDATs, and
+            // clang-cl explicit TypeIDs' `id`s; plugins' `extern template`
+            // uses (`SmallVectorBase<uint32_t>::grow_pod`) and TypeIDs
+            // (rok/mlir_typeid.h) must bind to rokc's, so those are exported.
             let weak = member
                 .weak
                 .iter()
@@ -322,13 +308,11 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
     std::fs::write(to, text).unwrap();
 }
 
-/// The plugin development tree beside the build's executables
-/// (`target/<profile>/mlir-plugin-dev`; dist.sh ships it as the
-/// `rok-mlir-dev` archive, docs/mlir-plugins.md): `include/` holds the
-/// prefix's LLVM and MLIR headers, `mlir/Support/TypeID.h` including
-/// `rok/mlir_typeid.h` (`plugin/`) before its first explicit `TypeID` and
-/// the plugin entry points declared `LLVM_ALWAYS_EXPORT`, and rokc's link
-/// puts its import library in `lib/` (MSVC).
+/// The plugin development tree (`target/<profile>/mlir-plugin-dev`,
+/// shipped as `rok-mlir-dev`, docs/mlir-plugins.md): the prefix's LLVM and
+/// MLIR headers, `mlir/Support/TypeID.h` including `rok/mlir_typeid.h`
+/// before its first explicit `TypeID`, plugin entry points
+/// `LLVM_ALWAYS_EXPORT`, and on MSVC rokc's import library in `lib/`.
 fn plugin_dev(prefix: &Path, out: &Path) -> PathBuf {
     let dev = out.ancestors().nth(3).unwrap().join("mlir-plugin-dev");
     let inc = dev.join("include");
@@ -429,9 +413,8 @@ fn usable(prefix: &Path, msvc: bool) -> bool {
         && prefix.join("share/rok/dsymutil/Options.inc").is_file()
 }
 
-/// The prefix runs on the cargo target: `LLVM_HOST_TRIPLE` names its
-/// architecture and OS (`arm64-apple-darwin25.1.0` for
-/// `aarch64-apple-darwin`).
+/// Does the prefix run on the cargo target (`LLVM_HOST_TRIPLE`'s arch and
+/// OS)?
 fn for_target(prefix: &Path) -> bool {
     let config = std::fs::read_to_string(prefix.join("include/llvm/Config/llvm-config.h"))
         .unwrap_or_default();
@@ -461,9 +444,9 @@ fn libcxx(lib: &Path) -> bool {
     support.windows(7).any(|w| w == b"St3__1E")
 }
 
-/// The shim and dsymutil's sources (`llvm/build.sh` keeps them in
-/// `share/rok/dsymutil`), compiled in parallel into one archive: with
-/// `$CXX` (`c++`; MSVC targets: `cl`, or `clang-cl`) and `ar` (`lib`).
+/// Compile the shim and dsymutil's sources (`share/rok/dsymutil`) in
+/// parallel into one archive with `$CXX` (`c++`; MSVC: `cl` / `clang-cl`)
+/// and `ar` (`lib`).
 fn compile_shim(prefix: &Path, out: &Path, apple: bool, msvc: bool) {
     let dsym = prefix.join("share/rok/dsymutil");
     let mut sources = vec![PathBuf::from("src/shim.cpp")];

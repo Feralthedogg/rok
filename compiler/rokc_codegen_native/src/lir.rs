@@ -1,9 +1,7 @@
-//! Low-level IR between MIR and machine code. Every value lives in a
-//! frame slot (or behind a pointer held in one); an instruction loads
-//! its operands into scratch registers, computes, and stores. The ISA
-//! modules only pick instructions: layout, the calling conventions,
-//! GC frames, barriers and checks are decided here, once for all
-//! targets.
+//! Low-level IR between MIR and machine code. Every value lives in a frame
+//! slot; instructions load operands into scratch registers, compute and
+//! store. ISA modules only pick instructions; everything else is decided
+//! here once for all targets.
 
 use std::collections::HashMap;
 
@@ -255,9 +253,8 @@ pub enum Inst {
         dst: Mem,
         a: V,
     },
-    /// `ptr` holds the address. `seq_cst` loads / stores and
-    /// read-modify-writes are sequentially consistent (always fine:
-    /// every ordering asked for is at most that).
+    /// `ptr` holds the address. All atomics are `seq_cst`, which satisfies
+    /// any ordering asked for.
     AtomicLoad {
         k: K,
         dst: Mem,
@@ -359,9 +356,8 @@ impl Func {
         self.labels - 1
     }
 
-    /// Append `i`. Integer arithmetic on two immediates, or with an
-    /// identity (`x + 0`, `x * 1`, ...), folds into a move (the store
-    /// keeps `k`'s bits).
+    /// Append `i`, folding arithmetic on two immediates or with an identity
+    /// (`x + 0`, `x * 1`) into a move.
     pub fn push(&mut self, i: Inst) {
         if let Inst::Bin {
             op, k, dst, a, b, ..
@@ -428,11 +424,10 @@ impl Use {
     }
 }
 
-/// The scalar parts of `f`'s slots whose store may wait (`Pend`), as
-/// `(slot, offset)` → `(size, reads)`: written once and read at most
-/// once, always as those bytes, in a slot whose parts do not overlap,
-/// never reached by address, copied whole or described to the
-/// debugger. And the slots reached by address.
+/// Scalar slot parts whose store may wait (`Pend`), `(slot, offset)` →
+/// `(size, reads)`: written once, read at most once as the same bytes, in a
+/// slot with non-overlapping parts, never addressed, copied whole or
+/// described to the debugger. Also: which slots are addressed.
 pub fn waitable(f: &Func) -> (Waits, Vec<bool>) {
     fn rd(u: &mut [Use], m: Mem, size: u32) {
         match m {

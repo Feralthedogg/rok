@@ -1,18 +1,14 @@
-//! Incremental builds by codegen units (spec 9.2.16).
+//! Incremental builds by codegen units (spec 9.2.16): a package's objects
+//! from its units (`rokc_codegen_mlir::units`), each recompiled only when
+//! its key changed. Directory layout:
 //!
-//! A package's objects from its units (`rokc_codegen_mlir::units`), each
-//! compiled only when its key changed since the last build into the same
-//! directory. Its layout:
+//! - `stamp`: compiler and options the rest is for (a change empties it);
+//! - `<key>.o`: a unit's object (native backend, LLVM `-O0`);
+//! - `<key>.bc`: a unit's `ThinLTO` bitcode above `-O0`, with LLVM's
+//!   object cache in `thin/`.
 //!
-//! - `stamp`: the compiler and build options the rest is for (another
-//!   one empties the directory);
-//! - `<key>.o`: a unit's object (native backend, LLVM at `-O0`);
-//! - `<key>.bc`: a unit's `ThinLTO` bitcode (LLVM above `-O0`), and
-//!   `thin/`, LLVM's cache of the objects the thin link made.
-//!
-//! Units compile with a placeholder for the user package's hash in
-//! their symbols (a source edit changes the hash); the objects get the
-//! real one before the link. Entries the build did not use are deleted.
+//! Units use a placeholder for the package hash, patched before the link.
+//! Unused entries are deleted.
 
 use std::path::{Path, PathBuf};
 
@@ -31,11 +27,8 @@ pub struct UnitCounts {
     pub cached: Option<usize>,
 }
 
-/// Whether `module` builds by units into `opts.incremental`.
-///
-/// A program or library (not a REPL cell) without what needs the whole
-/// module at once: MLIR plugins and passes, profile-guided optimization
-/// (it instruments and reads profiles in the whole-module pipeline).
+/// Whether `module` builds by units: a program or library (not a REPL
+/// cell) without whole-module features (MLIR plugins and passes, PGO).
 pub fn applies(_module: &CompiledModule, opts: &BuildOptions) -> bool {
     opts.incremental.is_some()
         && opts.repl.is_none()
@@ -92,10 +85,9 @@ pub fn objects(
     Ok((objects, counts, plan.gc_tables.len() as u32))
 }
 
-/// What the units' entries are for: this compiler, the target, the
-/// options that change code; under `-g` also the directory the source
-/// paths are relative to (debug info names them absolute; a unit's key
-/// has the paths of its own spans).
+/// What units' entries are for: compiler, target, code-changing options;
+/// under `-g` also the base directory of source paths (debug info is
+/// absolute, unit keys hold their own spans' paths).
 fn salt(
     opts: &BuildOptions,
     native: bool,
@@ -299,9 +291,8 @@ fn by_llvm_o0(
     Ok(finish_counts(plan, objects, None, paths))
 }
 
-/// Objects by LLVM above `-O0`: the units' `ThinLTO` bitcode (an entry
-/// each) through the thin link, which LLVM's cache in `thin/` spares
-/// for the units whose inputs are unchanged.
+/// Objects above `-O0`: the units' bitcode through the thin link, whose
+/// `thin/` cache spares unchanged units.
 fn by_thin_link(
     module: &CompiledModule,
     sources: &SourceMap,

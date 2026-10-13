@@ -89,11 +89,10 @@ pub(super) fn lookup_in_use_entries_full(
     }
 }
 
-/// Module-aware path resolution shared by the value (fn) and type
-/// namespaces. Order: `pkg::` / `sup::` / `rok::` roots are absolute;
-/// otherwise the current module (no ancestor walk, spec 5.7); then
-/// function-local `use`s (innermost scope first); then the module-level
-/// `use` table. `Err(hits)` = ambiguous glob import (hits sorted).
+/// Path resolution for the value and type namespaces: `pkg::` / `sup::` /
+/// `rok::` roots are absolute; else the current module (no ancestor walk,
+/// spec 5.7), then local `use`s innermost first, then module `use`s.
+/// `Err(hits)`: an ambiguous glob (sorted).
 pub(super) fn resolve_name(
     segments: &[&str],
     module: &str,
@@ -115,9 +114,8 @@ pub(super) fn resolve_name(
     let resolved_segs: Vec<&str> = resolved.iter().map(String::as_str).collect();
     let segments = resolved_segs.as_slice();
     let suffix = segments.join("::");
-    // Spec 5.7: no implicit ancestor walk — the current module (its items
-    // and child modules), then the `rok::` virtual root; parents need
-    // `sup::` or a `use`.
+    // Spec 5.7: the current module's items and children, then `rok::`;
+    // parents need `sup::` or a `use`.
     let candidate = if module.is_empty() || absolute {
         suffix.clone()
     } else {
@@ -145,9 +143,8 @@ pub(super) fn resolve_name(
             LookupOutcome::None => {}
         }
     }
-    // Every module has an implicit `use rok::core::**;` (stdlib spec 0.1),
-    // consulted last so the module's own names and imports shadow it,
-    // unless its file opts out (0.2.5).
+    // The implicit `use rok::core::**;` (stdlib 0.1) comes last so local
+    // names shadow it, unless the file opts out (0.2.5).
     if NO_IMPLICIT.with(|n| n.borrow().iter().any(|m| m == module)) {
         return Ok(None);
     }
@@ -161,11 +158,9 @@ pub(super) fn resolve_name(
     }
 }
 
-/// The absolute path a rooted path names from `module` (spec 5.7):
-/// `pkg::` starts at the package root (a dependency's own inside it),
-/// each leading `sup::` goes up one module, `rok::` is absolute. `None`
-/// for any other first segment. Shared by expression / type paths and
-/// `use` trees.
+/// The absolute path a rooted path names from `module` (spec 5.7): `pkg::`
+/// from the package root (a dependency's own inside it), each `sup::` up
+/// one, `rok::` absolute; `None` for other roots.
 pub fn root_path(segments: &[&str], module: &str) -> Option<Vec<String>> {
     let owned = |s: &[&str]| s.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
     match *segments.first()? {
@@ -315,9 +310,8 @@ pub(super) fn own_library_privacy(def_module: &str) -> Option<String> {
     })
 }
 
-/// The help for `name`, which the executable does not know, when one of
-/// `paths` (full item paths) is an item of its package's own library
-/// (spec 0.3.1): the `use` that brings it in.
+/// The `use` for `name` when one of `paths` is in the package's own library
+/// (spec 0.3.1), which the executable doesn't see unqualified.
 pub(super) fn own_library_import<'a>(
     name: &str,
     paths: impl Iterator<Item = &'a str>,
@@ -336,9 +330,8 @@ pub(super) fn own_library_import<'a>(
     })
 }
 
-/// The package `module` belongs to: `rok::<tier>` (each library tier is
-/// its own package, spec 5.7), a dependency's name, or `""` — the
-/// package being compiled.
+/// The package of `module`: `rok::<tier>` (each tier its own, spec 5.7), a
+/// dependency's name, or `""` for the one being compiled.
 pub(super) fn package_of(module: &str) -> &str {
     let first = module.split("::").next().unwrap_or_default();
     if first == "rok" {
@@ -354,9 +347,8 @@ pub(super) fn package_of(module: &str) -> &str {
     }
 }
 
-/// How code in `cur` names `k` in a `use`: the library's and a
-/// dependency's items by their path, the package's own from the root
-/// (`a::K`), through `sup::` from below its module, else `pkg::a::K`.
+/// How `cur` names `k` in a `use`: library and dependency items by path,
+/// own items from the root, `sup::` from below, else `pkg::a::K`.
 pub(super) fn use_path(cur: &str, k: &str) -> String {
     let def = module_of(k);
     if !package_of(&def).is_empty() || cur.is_empty() {
@@ -462,9 +454,8 @@ pub(super) fn leaf_name(name: &str) -> &str {
     name.rsplit_once("::").map_or(name, |(_, l)| l)
 }
 
-/// Map a runtime `HirTy` to the `MethodTarget` used in `method_table`
-/// keys. Mirrors `impl_target_key`'s strategy: direct mapping for
-/// Struct/Enum, mangled fallback for everything else.
+/// `ty`'s `method_table` target: structs / enums directly, else mangled
+/// (as `impl_target_key`).
 pub(super) fn method_target_for(ty: &HirTy) -> Option<MethodTarget> {
     match ty {
         HirTy::Struct(id) => Some(MethodTarget::Struct(*id)),
@@ -474,10 +465,9 @@ pub(super) fn method_target_for(ty: &HirTy) -> Option<MethodTarget> {
     }
 }
 
-/// Replace the generic parameters (and `Self`) `params` binds in `ty`:
-/// a parameter bound to a sum with `none` stays one member of a sum
-/// that has its own `none` — `T | none` with `T = i32 | none` is the
-/// nested optional `(i32 | none)?` (spec 2.6.4).
+/// Substitute `params` (and `Self`) in `ty`. A parameter bound to a sum
+/// with `none` stays one member, so `T | none` with `T = i32 | none` is
+/// `(i32 | none)?` (spec 2.6.4).
 pub(super) fn substitute_params(ty: &mut HirTy, params: &HashMap<String, HirTy>) {
     let rec = |t: &mut HirTy| substitute_params(t, params);
     match ty {
@@ -511,10 +501,9 @@ pub(super) fn substitute_params(ty: &mut HirTy, params: &HashMap<String, HirTy>)
     }
 }
 
-/// Instance `full<args>` of a generic struct or enum (made on first use,
-/// its field types resolved under the instance's substitution in the
-/// template's module, their errors at `sc.at`). `None` while an argument
-/// is not concrete (an unbound parameter, an unknown name).
+/// Instance `full<args>`, made on first use with fields resolved in the
+/// template's module (errors at `sc.at`). `None` while an argument isn't
+/// concrete.
 pub(super) fn instance(
     defs: &TypeDefs<'_>,
     full: &str,
@@ -558,11 +547,9 @@ pub(super) fn instance(
     .map(HirTy::Enum)
 }
 
-/// `resolve_ty` plus module-aware struct / enum / alias name lookup, a
-/// generic one instantiated (spec 2.10); `params` binds generic
-/// parameters by name (a generic instance's field types). Unresolvable
-/// names stay `HirTy::Path` (reported by `check_unresolved_types` if they
-/// survive).
+/// `resolve_ty` plus struct / enum / alias lookup, instantiating generics
+/// (spec 2.10); `params` binds parameters by name. Unresolved names stay
+/// `HirTy::Path` for `check_unresolved_types`.
 pub(super) fn resolve_ty_with_structs(
     ty: &rokc_ast::Ty,
     defs: &TypeDefs<'_>,
@@ -658,10 +645,8 @@ pub(super) fn resolve_ty_with_structs(
             HirTy::Path(vec![full])
         }
         AstTyKind::Array(elem, len) => {
-            // `[T; N]` / `[T; M * N]` under bound const parameters. A
-            // length beyond the pre-body evaluator (a `const fn` call)
-            // stays open: `resolve_open_members` evaluates it once bodies
-            // can be lowered.
+            // `[T; N]` under bound const parameters. A length beyond the
+            // pre-body evaluator stays open until `resolve_open_members`.
             let param = |name: &str| params?.get(name).and_then(HirTy::as_const).map(|c| c.0);
             let Some(n) = sc.names.const_int(len, sc.module, &param) else {
                 return HirTy::Path(vec![OPEN_LEN.to_owned()]);

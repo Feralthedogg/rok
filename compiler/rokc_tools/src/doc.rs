@@ -11,16 +11,11 @@
 //! search.js, style.css
 //! ```
 //!
-//! Documented: the user package and its `--extern` dependencies, and with
-//! `--std` the standard library tiers (`rok::core` in `rok-core/`, ..),
-//! their `pub` items in `pub` modules. Doc text is
-//! the item's `#[doc = ".."]` attributes (the parser turns `///` lines
-//! into them, and the `//!` lines / `#![doc]` heading a file or an inline
-//! `mod` body into its module's). Doc
-//! text is a markdown subset: headings, fenced code blocks, inline code,
-//! links, `**bold**`, `-` / `*` / `1.` lists, paragraphs. Type names in
-//! signatures and inline code naming a documented item link to it.
-//!
+//! Documented: the user package, its `--extern` deps and, with `--std`,
+//! the standard library; `pub` items in `pub` modules. Doc text comes from
+//! `#[doc]` (`///`, `//!`) in a markdown subset: headings, fenced code,
+//! inline code, links, `**bold**`, lists, paragraphs. Type names in
+//! signatures and code that name a documented item link to it.
 //! Signatures are printed from the AST as written.
 
 use std::collections::{BTreeMap, HashMap};

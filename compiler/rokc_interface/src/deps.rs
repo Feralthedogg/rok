@@ -1,9 +1,8 @@
 //! Prebuilt dependencies (spec 902.3 / 904): each source `--extern` is
-//! built once into `<deps dir>/lib<name>.a` + `<name>.rokhir` and the build
-//! goes on with the ROKHIR. A dependency is rebuilt when its fingerprint
-//! changes; it sees the dependencies before it (its own, and the GC type
-//! ids to start after), so `externs` come dependencies first. Each has
-//! its own features: the build's `feature` cfg is not its.
+//! built once into `lib<name>.a` + `<name>.rokhir` and the build goes on
+//! with the ROKHIR; rebuilt when its fingerprint changes. Each sees the
+//! ones before it (its deps, and the GC type ids to start after), so
+//! `externs` come dependencies first; each has its own features.
 
 use std::path::{Path, PathBuf};
 

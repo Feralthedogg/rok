@@ -1,14 +1,9 @@
-//! Lang-slot table built from `#[lang(...)]` attributes (spec 6.4).
+//! `#[lang("slot")]` (spec 6.4).
 //!
-//! `#[lang("slot_name")]` connects a stdlib item (trait, type, fn, const,
-//! static) to a compiler-known slot. The compiler uses these slots to
-//! desugar tokens (e.g. `+` → `add_trait::add`), pick the type of
-//! built-in literals (`none` → `none_type`), and so on.
-//!
-//! This module just collects the registrations. Consumers (HIR, codegen)
-//! look up slots through `LangTable`. Slot names are a closed set
-//! (`KNOWN_SLOTS`, stdlib spec 0.4); an unknown name is a compile error
-//! (spec 6.4.8).
+//! Ties a stdlib item to a compiler-known slot used to desugar tokens
+//! (`+` → `add_trait::add`) and type literals (`none` → `none_type`).
+//! Slots are a closed set (`KNOWN_SLOTS`); an unknown one is an error
+//! (6.4.8).
 
 use std::collections::HashMap;
 
@@ -196,9 +191,8 @@ impl LangTable {
     }
 }
 
-/// Walk a program and collect every `#[lang("...")]` attribute attached
-/// to a top-level item. Spec 6.4.6: same slot name on two items is a
-/// compile error.
+/// Collect top-level `#[lang]` attributes; a slot used twice is an error
+/// (6.4.6).
 pub fn collect_lang_table(program: &Program) -> (LangTable, Vec<RokDiagnostic>) {
     collect_lang_table_onto(LangTable::default(), program)
 }

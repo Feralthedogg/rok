@@ -51,12 +51,9 @@ pub(super) fn lower_match(
     // Spec 3.12.5 / 3.12.6: exhaustiveness and unreachable arms.
     if !is_let_else && !bad_pattern {
         // `if let` / `while let` desugar to `match { pat => .., _ => .. }`
-        // with the `_` at the `if` / `while` span; an irrefutable `pat`
-        // makes that arm unreachable by construction, not by mistake.
-        // Recognized by span; mark synthetic arms in the AST if another
-        // desugar needs it.
-        // A `catch` dispatch (`match #err { .. }`) reports unreachable
-        // catch arms itself, as warnings.
+        // with `_` at the `if` span; an irrefutable `pat` makes that arm
+        // unreachable by construction, so don't warn (matched by span).
+        // A `catch` dispatch reports its own unreachable arms.
         let catch_dispatch = matches!(&scrutinee.kind,
             ExprKind::Path(p) if p.segments.len() == 1 && p.segments[0].name.starts_with('#'));
         let synthetic: Vec<bool> = arms
@@ -122,9 +119,9 @@ pub(super) fn lower_match(
     }
 }
 
-/// Spec 2.6.4 / 2.6.5: patterns act on the outer layer of a nested sum.
-/// A catch-all name after arms covering every outer term binds the
-/// inner layer (`none => .., v => ..` on `(i32 | none)?`: `v: i32 | none`).
+/// Spec 2.6.4 / 2.6.5: patterns act on a nested sum's outer layer; a
+/// catch-all after arms covering every outer member binds the inner one
+/// (`none => .., v => ..` on `(i32 | none)?` gives `v: i32 | none`).
 fn inner_layer_binding(
     ctx: &mut LowerCtx<'_>,
     pat: &AstPattern,
@@ -193,10 +190,9 @@ enum Ctor {
     Variant(u32),
     /// The only constructor of a tuple / struct.
     Single,
-    /// An integer / `char` literal or range, as the inclusive interval
-    /// `lo..=hi` (chars by code point). The domain stays open (3.12.5:
-    /// ranges never make a match exhaustive), but intervals subsume each
-    /// other for unreachable arms (3.12.6).
+    /// An integer / `char` literal or range as `lo..=hi`. Ranges never make a
+    /// match exhaustive (3.12.5) but subsume each other for unreachable arms
+    /// (3.12.6).
     Int(i128, i128),
     /// A literal of another open domain (strings, floats): only equal
     /// spellings are the same constructor.
@@ -610,9 +606,9 @@ pub(super) fn check_match_arms(
     }
 }
 
-/// Spec 3.12.5: the arms must cover the scrutinee's type. Bool needs
-/// both literals; enums / sums need every variant (an arm with a guard
-/// covers nothing); other types need a catch-all.
+/// Spec 3.12.5: arms must cover the scrutinee. `bool` needs both literals,
+/// enums / sums every variant (guarded arms cover nothing), others a
+/// catch-all.
 pub(super) fn check_match_exhaustiveness(
     ctx: &LowerCtx<'_>,
     scrut_ty: &HirTy,
@@ -745,9 +741,8 @@ pub(super) fn lower_pattern(
     p
 }
 
-/// Spec 3.11.1: against a sum or `any` value, a bare type name (`f64 =>`,
-/// `i32 | str =>`) is a type pattern binding nothing, not a binding.
-/// Elsewhere a type test is a plain match, so the name stays a binding.
+/// Spec 3.11.1: against a sum or `any`, a bare type name (`f64 =>`) is a
+/// type pattern, not a binding; elsewhere it stays a binding.
 fn bare_type_patterns(
     ctx: &LowerCtx<'_>,
     pat: &AstPattern,
@@ -857,9 +852,9 @@ pub(super) fn lower_pattern_inner(
             };
             lower_pattern(ctx, &variant, scrut_ty)
         }
-        // A bare name that is a variant of the scrutinee's enum, not
-        // imported: a binding would match every value. It is an error,
-        // matched as the variant so no arm after it reads unreachable.
+        // A bare name that is an unimported variant of the scrutinee's enum
+        // would bind everything: an error, matched as the variant so later
+        // arms don't read unreachable.
         AstPatternKind::Binding { name, sub: None }
             if variant_named(ctx, scrut_ty, name).is_some() =>
         {
@@ -987,9 +982,8 @@ pub(super) fn lower_pattern_inner(
                         payload_ty: Some(target_ty),
                     };
                 }
-                // `v: A | B` against `A | B | C` (spec 2.6.4: a generic
-                // `T` bound to a sum inside `T | none`): any of those
-                // tags; the binder is the value re-tagged as `A | B`.
+                // `v: A | B` against `A | B | C` (a generic `T` bound to a
+                // sum): any of those tags, rebound as `A | B`.
                 if let HirTy::Sum(ws) = &target_ty {
                     let idxs: Vec<usize> = ws
                         .iter()
@@ -1084,10 +1078,9 @@ pub(super) fn lower_pattern_inner(
                     ty: scrut_ty.clone(),
                 };
             }
-            // Spec 2.10.9: every type supports `is`. A test that turns on
-            // a type parameter is opaque at the definition check (its own
-            // tag on an open domain) and decided per instance, where a
-            // static mismatch matches nothing.
+            // Spec 2.10.9: every type supports `is`. A test on a type
+            // parameter is opaque at the definition check and decided per
+            // instance.
             if super::bounds::has_param(ctx, scrut_ty) || super::bounds::has_param(ctx, &target_ty)
             {
                 let binder = bind(ctx);
@@ -1453,9 +1446,8 @@ pub(super) fn pattern_bound_names(pat: &AstPattern) -> std::collections::BTreeSe
     n.0
 }
 
-/// Convert an AST literal that appears in a pattern to a `ConstVal` plus
-/// the primitive type the comparison should use. `None` when the
-/// literal's type doesn't fit the scrutinee (the caller reports).
+/// A pattern literal as a `ConstVal` and its comparison type; `None` if it
+/// doesn't fit the scrutinee (the caller reports).
 pub(super) fn literal_to_const(
     ctx: &LowerCtx<'_>,
     lit: &AstLit,

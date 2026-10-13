@@ -49,9 +49,8 @@ pub enum RelKind {
     /// section offset.
     SecRelHi12,
     SecRelLo12,
-    /// DWARF `sec_offset`: 32 bits into the debug section `sym` (an
-    /// index of `Obj::extra`). ELF relocates it (the linker joins the
-    /// sections of all objects); Mach-O keeps the offset in the object.
+    /// DWARF `sec_offset` into debug section `sym` (an `Obj::extra` index):
+    /// relocated on ELF (sections join at link), kept as is on Mach-O.
     SecOff32,
 }
 
@@ -107,9 +106,8 @@ pub struct FnRange {
     pub debug: Option<(crate::lir::FnDebug, Vec<i32>)>,
 }
 
-/// A section's bytes from one symbol definition to the next: what an ELF
-/// or COFF object puts in a section of its own, so the linker drops the
-/// unused ones (function / data sections).
+/// A section's bytes from one definition to the next: its own section in
+/// ELF and COFF, so the linker drops unused ones.
 pub struct Piece {
     pub sect: Sect,
     pub start: u32,
@@ -154,10 +152,8 @@ impl Obj {
         o
     }
 
-    /// The symbol named `name` (undefined until `define`d).
-    /// Drop the undefined symbols no relocation refers to: what was
-    /// declared but never called (a REPL cell declares every function
-    /// earlier cells have).
+    /// Drop undefined symbols no relocation uses (a REPL cell declares
+    /// every earlier function).
     pub fn drop_unreferenced(&mut self) {
         let refs = |r: &Reloc| r.kind != RelKind::SecOff32;
         let mut keep: Vec<bool> = self.syms.iter().map(|s| s.def.is_some()).collect();

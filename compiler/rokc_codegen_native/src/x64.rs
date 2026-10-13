@@ -1,16 +1,12 @@
-//! LIR → `x86_64` machine code (System V; Windows x64 in a COFF object).
+//! LIR → `x86_64` machine code (System V; Windows x64 in COFF objects).
 //!
-//! Frame: `rbp` pushed, `rbp` = it, then the slots, with the outgoing
-//! argument area at `rsp`. Values: `rax rcx rdx r8 r9`, `xmm0`..`xmm3`;
-//! pointer bases `r10 r11`. Only registers caller-saved in both
-//! conventions (Windows keeps `rsi` / `rdi` and `xmm6`.. too), so
-//! nothing is saved and unwinding sees a plain `rbp` frame.
-//! Every LIR value lives in its slot; within straight-line code the
-//! emitter remembers which register still holds a slot's value (`Held`)
-//! and delays the store into a slot written and read once (`Pend`), as
-//! on arm64. Instructions with fixed registers (division, conversions,
-//! atomics ...) load their operands, then `scratch` before the rest.
-//! Only baseline `x86_64` instructions (no `popcnt` / `lzcnt`).
+//! Frame: `rbp` pushed, `rbp` = it, then the slots, outgoing arguments at
+//! `rsp`. Values: `rax rcx rdx r8 r9`, `xmm0`..`xmm3`; pointer bases `r10
+//! r11`. Only registers caller-saved in both conventions, so nothing is
+//! saved and unwinding sees a plain `rbp` frame. `Held` / `Pend` as on
+//! arm64. Fixed-register instructions (division, conversions, atomics)
+//! load operands first, then `scratch`. Baseline `x86_64` only (no
+//! `popcnt` / `lzcnt`).
 
 use crate::lir::{
     Bin, Callee, Cc, Conv, Func, Inst, K, Label, Loc, Mem, Rmw, Un, V, Waits, scalar, waitable,
@@ -33,9 +29,8 @@ const XMM1: u32 = 1;
 /// Value registers, picked by `pick`.
 const POOL: [u32; 5] = [RAX, RCX, RDX, R8, R9];
 
-/// Every function's prologue (then the frame's `sub rsp`, which `rbp`
-/// undoes): `push rbp; mov rbp, rsp`. The unwind encodings
-/// (`coff::X64_UNWIND`, Mach-O's `rbp` frame mode) say this.
+/// Every prologue (before `sub rsp`, undone via `rbp`): `push rbp; mov rbp,
+/// rsp`, as the unwind encodings say.
 pub const PROLOGUE: [u8; 4] = [0x55, 0x48, 0x89, 0xe5];
 const FP_POOL: [u32; 4] = [XMM0, XMM1, 2, 3];
 /// Integer argument registers.
@@ -83,9 +78,8 @@ enum Rm {
     M(u32, i32),
 }
 
-/// A register (`fp`: an `xmm`) that holds the `size` bytes at `off` of
-/// frame slot `slot`. `ext`: its upper bits are those bytes extended
-/// (`Some(signed)`), or unknown.
+/// A register (`fp`: `xmm`) holding `size` bytes at `off` of `slot`;
+/// `ext`: upper bits are those bytes extended (`Some(signed)`) or unknown.
 #[derive(Clone, Copy)]
 struct Held {
     reg: u32,
@@ -223,9 +217,8 @@ impl Em<'_> {
         });
     }
 
-    /// An instruction with a `ModRM` operand: optional legacy prefix,
-    /// REX (`w`: 64-bit; `byte`: a byte register `reg` / `rm` that needs
-    /// REX to be `spl`..`dil`), opcode, `reg` field, `rm`.
+    /// A `ModRM` instruction: optional prefix, REX (`w` 64-bit; `byte` for
+    /// `spl`..`dil`), opcode, `reg`, `rm`.
     fn op(&mut self, pre: Option<u8>, w: bool, byte: bool, opc: &[u8], reg: u32, rm: Rm) {
         if let Some(p) = pre {
             self.b(p);
@@ -528,9 +521,9 @@ impl Em<'_> {
         }
     }
 
-    /// A register holding `v` as `k` extended by `signed`, other than
-    /// `avoid`: one that already does, else a value register, loaded.
-    /// Never a pointer base (`r10`, `r11`).
+    /// A register holding `v` as `k` extended by `signed`, not in `avoid`:
+    /// one already holding it, else a loaded value register; never `r10` /
+    /// `r11`.
     fn reg(&mut self, v: V, k: K, signed: bool, avoid: &[u32]) -> u32 {
         let signed = signed && !k.is_float();
         if let V::M(m) = v {
@@ -823,9 +816,8 @@ impl Em<'_> {
         }
     }
 
-    /// `rd = ra op imm` (`ra` is `rd`, or `rd` holds nothing), when the
-    /// immediate encodes: a 32-bit one (any for 32-bit operations, which
-    /// take its low half), for all but division.
+    /// `rd = ra op imm` (`ra` is `rd` or `rd` is free) when the immediate
+    /// fits 32 bits (any for 32-bit ops); not for division.
     #[allow(clippy::too_many_arguments)]
     fn bin_imm(&mut self, op: Bin, k: K, signed: bool, rd: u32, ra: u32, imm: i64) -> bool {
         let w = k == K::I64;
@@ -1493,9 +1485,8 @@ impl Em<'_> {
         }
     }
 
-    /// Argument register `r` is about to be loaded with `args[0]`: what
-    /// it holds for a later argument moves to a spare register (`rax`,
-    /// `r11`: no argument's) instead of going out to memory and back.
+    /// Before loading `args[0]` into `r`, move what `r` holds for a later
+    /// argument to a spare (`rax`, `r11`) instead of memory.
     fn keep(&mut self, r: u32, args: &[(crate::lir::Part, V)]) {
         let of = |v: &V, h: &Held| {
             !h.fp

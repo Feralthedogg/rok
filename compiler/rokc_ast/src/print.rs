@@ -1,15 +1,9 @@
-//! The AST as rok source (`rokc build --emit=ast`, spec 9.9.10).
+//! The AST as rok source (`--emit=ast`, spec 9.9.10).
 //!
-//! What the parser made of a file after meta expansion (derives, user
-//! attributes and meta blocks) and its desugarings (`if let`, `using`,
-//! compound assignment, `let .. else`, ...). Comments and the original
-//! layout are gone; operands that are not atomic are parenthesized.
-//! The parser's markers are printed as the syntax they stand for
-//! (`...T`, `rethrows`, `throws`, `extern "C" fn`, `x.drop()`) and
-//! `#[derive]` as a comment (its impls follow), so the print parses
-//! back and prints the same again.
-//!
-//! A debug view, not a formatter: no line breaking.
+//! Printed after meta expansion and desugaring, without comments or
+//! layout, non-atomic operands parenthesized. Parser markers print as the
+//! syntax they stand for and `#[derive]` as a comment, so the output
+//! parses back to itself. A debug view, not a formatter.
 
 use std::fmt::Write as _;
 
@@ -232,9 +226,8 @@ impl Printer {
         }
     }
 
-    /// Outer attributes, each on its own line; the parser's marker
-    /// attributes are printed as the syntax they stand for instead.
-    /// The outer attributes; a module's inner ones go in its body.
+    /// Outer attributes, one per line; markers print as their syntax. A
+    /// module's inner ones go in its body.
     fn attrs(&mut self, attrs: &[Attribute]) {
         for a in attrs.iter().filter(|a| !a.inner) {
             if a.path.len() == 1
@@ -1586,10 +1579,8 @@ impl Printer {
         }
     }
 
-    /// The left side of `.f` / `(..)` / `[..]` / `?`: a number literal
-    /// is grouped too (`(1).f`).
-    /// A member / index link's receiver: a `?.` chain is grouped, or
-    /// the link would join it (spec 3.8.8).
+    /// The receiver of `.f` / `(..)` / `[..]` / `?`: number literals and
+    /// `?.` chains (spec 3.8.8) are grouped.
     fn receiver(&mut self, e: &Expr) {
         if matches!(
             &e.kind,

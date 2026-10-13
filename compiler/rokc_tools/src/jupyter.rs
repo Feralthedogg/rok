@@ -1,18 +1,13 @@
-//! `rokc jupyter`: a Jupyter kernel (spec 908) on the REPL session
-//! engine (`repl::Repl::eval`: each cell runs once).
+//! `rokc jupyter`: a Jupyter kernel (spec 908) on the REPL engine.
 //!
-//! Wire: Jupyter messaging 5.3 over a hand-written minimal ZMTP 3.0
-//! (TCP, NULL mechanism; no external crates, targets.md). Shell, control
-//! and stdin act as ROUTER (a reply goes back on the connection the
-//! request came on), iopub as PUB (every message to every subscriber),
-//! heartbeat as REP (echo). Messages are signed with HMAC-SHA256.
+//! Messaging 5.3 over a minimal hand-written ZMTP 3.0 (TCP, NULL
+//! mechanism): shell, control and stdin as ROUTER, iopub as PUB, heartbeat
+//! as REP, HMAC-SHA256 signed.
 //!
-//! Not supported: CURVE / ipc transport, topic filtering on iopub,
-//! rich display (`text/plain` only), `input_request` (cells read
-//! `/dev/null`), the debugger. `complete` and `inspect` are the
-//! language server's completion and hover on the session source;
-//! `history` is this kernel's executed cells. Output is
-//! sent when the cell ends, not as it is printed.
+//! Not supported: CURVE / ipc, iopub topic filtering, rich display, the
+//! debugger, `input_request` (cells read `/dev/null`). `complete` /
+//! `inspect` are the language server's; `history` is this kernel's cells.
+//! Output is sent when a cell ends.
 
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -397,10 +392,9 @@ struct Kernel {
 }
 
 impl Kernel {
-    /// Run `code`: (stdout, stderr, what the last cell shows), `Err` at
-    /// the first failing cell. Like `IPython`, only the last cell's value
-    /// is shown.
-    // The cells before a failing one keep their effects.
+    /// Run `code`: (stdout, stderr, what the last cell shows), `Err` at the
+    /// first failing cell (earlier cells keep their effects). As `IPython`,
+    /// only the last value is shown.
     fn run(&mut self, code: &str) -> (String, String, Result<Option<String>, ()>) {
         self.checked = None;
         let mut result = Ok(None);
@@ -493,9 +487,8 @@ impl Kernel {
     }
 
     /// Help for the name at `code[start..end]` (9.8.6): the language
-    /// server's hover, as plain text. The cell is checked in the
-    /// session; when it does not check, the expression ending at the
-    /// name alone (`a.b`, `m::f`).
+    /// server's hover as text, from the cell checked in the session, else
+    /// from the expression ending at the name alone.
     fn help(&self, code: &str, start: usize, end: usize) -> Option<String> {
         let at = |body: &str, off: usize| {
             let (src, base) = self.repl.source(body);

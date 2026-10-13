@@ -1,8 +1,6 @@
-//! Names of items declared in a block (spec 3.9.1, 4.10).
-//!
-//! The parser lifts each to a module item named `outer/name`, where
-//! `outer` is the enclosing fn's lifted path (`f`, `f/g`, `Type.m`) and a
-//! repeated name gets a counter (`f/S/2`). No source name holds `/`.
+//! Names of block-declared items (spec 3.9.1, 4.10): `outer/name`,
+//! `outer` the enclosing fn's lifted path (`f`, `f/g`, `Type.m`), repeats
+//! numbered (`f/S/2`). No source name contains `/`.
 
 use std::borrow::Cow;
 

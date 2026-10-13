@@ -819,6 +819,7 @@ mod tests {
             name: "f".into(),
             facts: rokc_ir_common::FnFacts::default(),
             strips: Vec::new(),
+            pins: Vec::new(),
             params: vec![LocalId(0), LocalId(1)],
             locals: (0..3)
                 .map(|i| LocalDecl {

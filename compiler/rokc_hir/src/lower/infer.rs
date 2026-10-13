@@ -1,22 +1,15 @@
-//! Inference of an un-annotated `let`'s type from the code after it
-//! (spec 2.10.2 extension): `let xs = List::new(); xs.push(1);` makes
-//! `xs: List<i32>`.
+//! An unannotated `let`'s type from the code after it (spec 2.10.2
+//! extension): `let xs = List::new(); xs.push(1);` makes `xs: List<i32>`.
 //!
-//! Lowering is eager (generic instances are made as calls are lowered),
-//! so inference runs as a probe: the initializer is lowered with every
-//! type parameter nothing fixes as an inference variable (`#var N`), the
-//! rest of the block is lowered against that open type, and every
-//! place a value meets a slot (`coerce`, generic argument binding)
-//! unifies the two. The probe's output is then rolled back and the
-//! initializer lowered for real with the solved type as its expected
-//! type. A `let` inside the probe shares the variables (no nested
-//! probe), so `let a = List::new(); let b = List::new(); b.push(1);
-//! a.push(b);` solves both.
-//!
-//! Instances over open types are signatures only (`mono::var_instance`):
-//! no body is lowered. Struct / enum instances over them stay in the
-//! tables (keyed by arguments) and are emptied at the end
-//! (`drop_var_instances`).
+//! Lowering is eager, so this is a probe: the initializer is lowered with
+//! unfixed type parameters as inference variables (`#var N`), the rest of
+//! the block against that open type, and every place a value meets a slot
+//! unifies them. Then everything is rolled back and the initializer
+//! lowered for real under the solved type. Nested `let`s share the
+//! variables, so `let a = List::new(); let b = List::new(); b.push(1);
+//! a.push(b);` solves both. Instances over open types are signatures only
+//! (`mono::var_instance`); open struct / enum instances are dropped at the
+//! end (`drop_var_instances`).
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -273,10 +266,9 @@ fn zonk_has(ctx: &LowerCtx<'_>, t: &HirTy, v: usize) -> bool {
     has_var(ctx, t) && walk(ctx, t, v)
 }
 
-/// `let name = init;` (no annotation). The initializer is lowered with
-/// open type parameters as variables; if its type has any, the rest of
-/// the block is lowered as a probe to solve them, everything is rolled
-/// back and the initializer is lowered again under the solved type.
+/// `let name = init;` without annotation: lower `init` with open
+/// parameters; if any remain, probe the rest of the block, roll back, and
+/// lower `init` again under the solved type.
 pub(super) fn lower_let(
     ctx: &mut LowerCtx<'_>,
     s: &Stmt,

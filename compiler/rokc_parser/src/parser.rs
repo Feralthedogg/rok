@@ -37,14 +37,11 @@ pub struct Parser<'a> {
     /// `|` mid-type expands to sum-type alternation. Inside closure
     /// parameter lists the closing `|` must end the list instead.
     type_sum_allowed: bool,
-    /// Remainder of a `>`-prefixed token that was split to close a
-    /// generic list (`>>` → `>` + pending `>`, `>=` → `>` + pending `=`,
-    /// `>>=` → `>` + pending `>=`). `peek`/`bump` serve it before the
-    /// next real token.
+    /// What is left of a `>`-prefixed token split to close a generic list
+    /// (`>>`, `>=`, `>>=`); served before the next real token.
     pending: Option<TokenKind>,
-    /// Parsing the target type of `expr as T`: a `<` after the type path
-    /// only opens generic args when a matching `>` follows (otherwise
-    /// `x as i64 < y` is a comparison).
+    /// In `expr as T`: a `<` opens generic args only when a matching `>`
+    /// follows, so `x as i64 < y` stays a comparison.
     in_cast_type: bool,
     /// Current expr/type/pattern/block nesting; capped at `MAX_DEPTH`
     /// so hostile input gets a diagnostic instead of a stack overflow.
@@ -52,9 +49,8 @@ pub struct Parser<'a> {
     depth_reported: bool,
     /// Links on the operator / postfix chains enclosing this point.
     chain: u32,
-    /// Extra statements from a site that emits several (nested tuple
-    /// destructure `let ((a, b), c) = ..;`, spec 3.15.4). `parse_block`
-    /// drains it after each statement, so they land in the same scope.
+    /// Extra statements from one site (nested `let ((a, b), c)`, spec
+    /// 3.15.4), drained by `parse_block` into the same scope.
     pending_stmts: Vec<Stmt>,
     /// Counter for unique temp names of nested tuple destructures.
     next_destructure_temp: u32,
@@ -237,9 +233,8 @@ pub fn parse_expr_file(
     })
 }
 
-/// Recursive descent: `MAX_DEPTH` levels need more than a default 1-2 MiB
-/// (Windows main, spawned threads) stack, so parse on a dedicated thread
-/// whose stack is sized for the cap (address space only until used).
+/// `MAX_DEPTH` recursion needs more than a default 1-2 MiB stack, so
+/// parse on a thread sized for the cap (only address space until used).
 fn on_parser_stack<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| {
         std::thread::Builder::new()
@@ -287,12 +282,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Does `f` fail here? Always rewinds: position, diagnostics and
-    /// queued statements are as before.
     /// Does an `else` sit at this statement's top level, before its `;`
-    /// (`let (a, b) = e else { .. };`, spec 3.16)? An `if .. else` in
-    /// the initializer also answers yes; the general `let` form parses
-    /// that too.
+    /// (`let (a, b) = e else { .. };`, spec 3.16)? An `if .. else` in the
+    /// initializer also says yes; the general `let` form handles that.
     fn stmt_has_else(&self) -> bool {
         let mut depth = 0usize;
         for t in &self.tokens[self.pos..] {
@@ -339,9 +331,8 @@ impl<'a> Parser<'a> {
         self.parse_item()
     }
 
-    /// Run `f` with `struct_expr_allowed` set to `allowed`, restoring the
-    /// previous value afterwards — also when `f` bails out early with
-    /// `None`, so error paths cannot leak the flag.
+    /// Run `f` with `struct_expr_allowed` = `allowed`, restoring it even
+    /// when `f` bails out with `None`.
     fn with_struct_expr<T>(&mut self, allowed: bool, f: impl FnOnce(&mut Self) -> T) -> T {
         let prev = std::mem::replace(&mut self.struct_expr_allowed, allowed);
         let r = f(self);
@@ -357,10 +348,9 @@ impl<'a> Parser<'a> {
         r
     }
 
-    /// Rebuild an assignment target so that every sub-expression with
-    /// possible side effects is evaluated once, into `let` temps pushed
-    /// on `temps`. Variables, `self`, literals and field chains on them
-    /// stay as written (spec 3.4.3).
+    /// Rebuild an assignment target so each side-effecting sub-expression
+    /// runs once, into `let` temps (spec 3.4.3); variables, `self`,
+    /// literals and field chains on them stay.
     fn hoist_place(&mut self, e: Expr, temps: &mut Vec<Stmt>) -> Expr {
         let span = e.span;
         let kind = match e.kind {
@@ -401,13 +391,11 @@ impl<'a> Parser<'a> {
         Expr { kind, span }
     }
 
-    /// Error recovery after a failed item / statement that started at
-    /// token `from`: skip to the next synchronisation point instead of
-    /// one token, so one mistake yields one diagnostic. Braces opened
-    /// since `from` are closed first (parens/brackets are not trusted:
-    /// the error is often an unclosed one); then stop after `;`, before an
-    /// item (or statement) keyword, or at the enclosing `}` — which is
-    /// consumed only at top level, or when it closes the failed item.
+    /// Recover from a failed item / statement that began at `from`: one
+    /// diagnostic per mistake. Close braces opened since `from` (not
+    /// parens / brackets: an unclosed one is often the error), then stop
+    /// after `;`, before an item or statement keyword, or at the enclosing
+    /// `}`, consumed only at top level or when it closes the failed item.
     fn recover(&mut self, from: usize, ctx: Recover) {
         self.pending = None;
         let opened: i32 = self.tokens[from.min(self.pos)..self.pos]
@@ -474,9 +462,8 @@ impl<'a> Parser<'a> {
         r
     }
 
-    /// One more operator / postfix link on a left-nested chain (`1 + 1 +
-    /// ..`, `a.f().g()..`): the tree deepens without `nested`, so the
-    /// links of all enclosing chains share their own cap.
+    /// Count one more link of a left-nested chain (`1 + 1 + ..`,
+    /// `a.f().g()`), which deepens the tree without `nested`.
     fn chain_link(&mut self) -> Option<()> {
         self.chain += 1;
         if self.chain <= MAX_CHAIN {
@@ -700,9 +687,9 @@ impl<'a> Parser<'a> {
         format!("__destruct{n}")
     }
 
-    /// The pattern of `if let` / `while let`, with an optional `: T`
-    /// (spec 3.10.5). `(a, b): T` matches a `__destructN: T` and
-    /// destructures it in the body: the returned statement.
+    /// `if let` / `while let` pattern with an optional `: T` (spec 3.10.5);
+    /// `(a, b): T` matches a `__destructN: T` and returns the statement that
+    /// destructures it.
     fn parse_let_cond_pattern(&mut self) -> Option<(Pattern, Option<Stmt>)> {
         let pat = self.parse_pattern()?;
         if !self.eat(&TokenKind::Colon) {
@@ -739,9 +726,8 @@ impl<'a> Parser<'a> {
         Some((typed(Some(tmp)), Some(stmt)))
     }
 
-    /// Close a generic list: consume a `>`, splitting `>>`, `>=`, `>>=`
-    /// and leaving the remainder pending. Emits an error and returns
-    /// false when no `>` is present.
+    /// Consume a closing `>`, splitting `>>`, `>=`, `>>=` and leaving the
+    /// rest pending; false (with an error) when there is none.
     fn expect_closing_gt(&mut self) -> bool {
         let rest = match self.peek() {
             TokenKind::Gt => None,
@@ -828,9 +814,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// "expected X, found Y" with hints for common slips: a missing `;`
-    /// (pointed at the end of the line), an unclosed delimiter (its
-    /// opening location), `->` / `=>` mixups.
+    /// "expected X, found Y", with hints for a missing `;` (at the line's
+    /// end), an unclosed delimiter (its opener) and `->` / `=>` mixups.
     fn expected(&self, kind: &TokenKind, what: &str) -> RokDiagnostic {
         let found = self.peek();
         let here = self.peek_span();
@@ -1011,9 +996,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Whether the next tokens begin an item rather than a top-level
-    /// statement. `unsafe` / `async` start an item only when `fn` follows
-    /// (`unsafe { .. }` / `async { .. }` are expressions).
+    /// An item rather than a top-level statement? `unsafe` / `async` start
+    /// one only before `fn`.
     fn at_item_start(&self) -> bool {
         match self.peek() {
             TokenKind::Unsafe | TokenKind::Async | TokenKind::Yield => matches!(
@@ -1049,18 +1033,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Spec 1.5.4: `union` is a contextual keyword — an item only as
-    /// `union Name` at item start; elsewhere it is an identifier
-    /// (`Set::union`, `a.union(b)`).
+    /// Spec 1.5.4: `union` is an item keyword only as `union Name` at item
+    /// start (`Set::union`, `a.union(b)` are identifiers).
     fn at_union_item(&self) -> bool {
         matches!(self.peek(), TokenKind::Ident(n) if n == "union")
             && matches!(self.peek_next(), Some(TokenKind::Ident(_)))
     }
 
-    /// Top-level statement of the entry file (spec 4.16.1:
-    /// `top_stmt ::= let_stmt | let_else_stmt | expr ";"`). Block-like
-    /// expressions (`if`, `for`, ...) need no `;`; there is no tail
-    /// expression and no top-level `return` (4.16.4).
+    /// Top-level statement of the entry file (spec 4.16.1). Block-like
+    /// expressions need no `;`; no tail expression, no `return` (4.16.4).
     fn parse_top_stmt(&mut self) -> Option<Stmt> {
         let span = self.peek_span();
         let (stmt, _) = self.parse_stmt()?;
@@ -1107,9 +1088,8 @@ impl<'a> Parser<'a> {
         self.cfg.as_ref().is_some_and(|env| !env.attrs_pass(attrs))
     }
 
-    /// Spec 6.3.7: whether a member or statement with `attrs` stays
-    /// under the build's cfg (always without one). A dropped one's
-    /// malformed predicate is reported here; a kept one's with its item.
+    /// Spec 6.3.7: does `attrs`' cfg keep this member or statement? A
+    /// dropped one's bad predicate is reported here, a kept one's with it.
     fn cfg_keeps(&mut self, attrs: &[Attribute]) -> bool {
         if !self.cfg_off(attrs) {
             return true;
@@ -1155,9 +1135,8 @@ impl<'a> Parser<'a> {
         i
     }
 
-    /// The outer attributes of a statement, match arm, struct literal
-    /// field, parameter or tuple variant field (`what`), which keeps
-    /// none: only `#[cfg]` may be there (spec 6.1.3).
+    /// Outer attributes where only `#[cfg]` may be (spec 6.1.3): a
+    /// statement, arm, literal field, parameter or tuple field (`what`).
     fn cfg_only_attrs(&mut self, what: &'static str) -> Vec<Attribute> {
         let attrs = self.parse_outer_attrs();
         // A nested `fn` is a statement here; like a local item, it may
@@ -1185,9 +1164,8 @@ impl<'a> Parser<'a> {
         attrs
     }
 
-    /// Spec 6.3.7: whether `attrs` drop the statement, arm, literal field
-    /// or parameter just parsed; the statements and nested fns it queued
-    /// since `marks` go with it.
+    /// Spec 6.3.7: do `attrs` drop what was just parsed? Statements and
+    /// nested fns queued since `marks` go with it.
     fn cfg_drops(&mut self, attrs: &[Attribute], (pending, lifted): (usize, usize)) -> bool {
         if !self.cfg_off(attrs) {
             return false;
@@ -1217,11 +1195,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Report the doc comments that document nothing, as Rust does: an
-    /// inner one past the start of its file, module or function body,
-    /// an outer one before a closing bracket or the end, or on a
-    /// parameter (errors), and an outer one on what is not an item (the
-    /// `unused_doc_comments` warning). Not after a syntax error.
+    /// Report doc comments that document nothing, as Rust does: errors for
+    /// a misplaced inner one, an outer one before `}` / EOF or on a
+    /// parameter; the `unused_doc_comments` warning for one on a non-item.
+    /// Skipped after a syntax error.
     fn misplaced_docs(&mut self) {
         if self.diagnostics.iter().any(RokDiagnostic::is_error) {
             return;
@@ -1283,9 +1260,7 @@ impl<'a> Parser<'a> {
             .extend(out.into_iter().map(|d| d.with_file(file.clone())));
     }
 
-    /// The next token's doc comments (`///`, `/** */`; inner: `//!`,
-    /// `/*! */`) as `#[doc = ".."]` attributes (the text escaped, as a
-    /// string literal holds it).
+    /// The next token's doc comments as `#[doc = ".."]` attributes.
     fn doc_attrs(&mut self, inner: bool, out: &mut Vec<Attribute>) {
         self.doc_attrs_at(self.pos, inner, out);
     }
@@ -1541,9 +1516,8 @@ impl<'a> Parser<'a> {
         Some(lit)
     }
 
-    /// A `fn` type behind `unsafe` (calling it needs an unsafe scope,
-    /// 4.15) and / or `extern "C"` / `extern "system"` (a C function
-    /// pointer, 5.9.4).
+    /// A `fn` type behind `unsafe` (4.15) and / or `extern "C"` /
+    /// `extern "system"` (a C function pointer, 5.9.4).
     fn parse_marked_fn_type(&mut self, start: Span) -> Option<TyKind> {
         let unsafe_fn = self.eat(&TokenKind::Unsafe);
         let mut system = false;
@@ -1653,9 +1627,8 @@ impl<'a> Parser<'a> {
                 format!("`{n}` cannot name a {what}: it is reserved as a path root / type keyword"),
             );
         }
-        // Spec 6.3.7: cfg runs before meta expansion. A cfg-false item
-        // expands nothing (the driver drops it); its cfg-false members
-        // were dropped as they were parsed.
+        // Spec 6.3.7: cfg runs before meta expansion; a cfg-false item
+        // expands nothing and its cfg-false members are already gone.
         if self.cfg_off(item.attrs()) {
             return Some(item);
         }
@@ -2070,8 +2043,8 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         self.expect(&TokenKind::Impl, "`impl`")?;
         // `<` opens generics only before a parameter (`<>`, `<T>`, `<T:`,
-        // `<T,`, `<T =`, `<const N`); otherwise it starts a projection
-        // target (`impl <A as P>::Out { .. }`, spec 2.9.1).
+        // `<T,`, `<T =`, `<const N`); else it starts a projection
+        // (`impl <A as P>::Out { .. }`, spec 2.9.1).
         let tok = |i: usize| self.tokens.get(self.pos + i).map(|t| &t.kind);
         let params = match (tok(1), tok(2)) {
             (Some(TokenKind::Gt), _)
@@ -2215,9 +2188,8 @@ impl<'a> Parser<'a> {
         Some(items)
     }
 
-    /// A method (impl or trait) with a user attribute (spec 6.9.5:
-    /// `@accept(fn)` takes methods too) becomes its expansion, which must
-    /// be methods.
+    /// A method with a user attribute (spec 6.9.5) becomes its expansion,
+    /// which must be methods.
     fn expand_method(&mut self, f: FnDef, from: usize) -> Vec<FnDef> {
         if self.meta.is_empty() {
             return vec![f];
@@ -2555,9 +2527,8 @@ impl<'a> Parser<'a> {
         let prefix_start = self.peek_span();
         let mut segments: Vec<PathSegment> = Vec::new();
         loop {
-            // `use` roots: a bare identifier (absolute), `pkg::` (package
-            // root) or `sup::` (parent). No `self::`: same-module children
-            // resolve through the ancestor walk.
+            // `use` roots: an identifier (absolute), `pkg::` or `sup::`. No
+            // `self::`: children resolve through the ancestor walk.
             let seg_name = if let TokenKind::Ident(n) = self.peek().clone() {
                 self.bump();
                 n
@@ -2573,9 +2544,8 @@ impl<'a> Parser<'a> {
             if !matches!(self.peek(), TokenKind::ColonColon) {
                 break;
             }
-            // Lookahead one token — if it's `*`, `{`, or another path
-            // segment we commit; otherwise the `::` belongs to the
-            // calling context.
+            // Commit only if `*`, `{` or a segment follows; else the `::`
+            // is the caller's.
             let after_colons = self.peek_next();
             match after_colons {
                 Some(TokenKind::Star | TokenKind::LBrace | TokenKind::Ident(_)) => {
@@ -2798,13 +2768,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse `(elem, elem, ...)` for `let` destructure. Each `elem` is
-    /// either an identifier (binding name), `..` / `..ident` (rest), or
-    /// a nested `(...)` group (spec 3.15.4). Nested groups are desugared
-    /// into a fresh temp binding plus a follow-up `LetTuple` queued on
-    /// `pending_stmts`. Caller has already verified `peek() == LParen`.
-    /// The last tuple's flag is whether it ended in `,` (so `(a)` is a
-    /// grouping and `(a,)` a 1-tuple).
+    /// `(elem, ...)` of a `let` destructure: names, `..` / `..name`, or
+    /// nested groups (spec 3.15.4), which become a temp plus a queued
+    /// `LetTuple` in `pending_stmts`. The flag: ended in `,` (`(a)` groups,
+    /// `(a,)` is a 1-tuple).
     fn parse_let_tuple_pattern(
         &mut self,
         outer_span: Span,
@@ -2837,10 +2804,8 @@ impl<'a> Parser<'a> {
                 }
                 continue;
             }
-            // Nested destructure `((a, b), c)` — recurse into the
-            // sub-pattern, allocate a temp, and queue a follow-up
-            // `let (sub_names) = __destructN;` so the inner names land
-            // in the surrounding scope (spec 3.15.4).
+            // Nested `((a, b), c)`: bind a temp and queue
+            // `let (a, b) = __destructN;` so the names land in this scope.
             if matches!(self.peek(), TokenKind::LParen) {
                 let inner_span = self.peek_span();
                 let (mut inner_names, inner_rest, inner_comma) =
@@ -3168,9 +3133,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `fn printf(fmt: str, ...)`: a C variadic marker (spec 8.6.10),
-    /// recorded as an attribute; only last, and only in an `extern`
-    /// block (checked by HIR).
+    /// `fn printf(fmt: str, ...)`: C variadic marker (spec 8.6.10), kept as
+    /// an attribute; HIR checks it is last and in an `extern` block.
     fn eat_c_variadic(&mut self, attrs: &mut Vec<Attribute>) -> bool {
         if !(matches!(self.peek(), TokenKind::DotDot)
             && matches!(self.peek_next(), Some(TokenKind::Dot)))
@@ -3193,10 +3157,8 @@ impl<'a> Parser<'a> {
         true
     }
 
-    /// Spec 4.2.5: `xs: ...T` is a read-only view of the call's trailing
-    /// arguments — `xs: Slice<T>` (the call site builds it), so a
-    /// variadic function is not instantiated per argument count. Only
-    /// the last parameter can be variadic.
+    /// Spec 4.2.5: `xs: ...T` is `xs: Slice<T>` over the trailing
+    /// arguments, so there is no instance per argument count. Last only.
     fn desugar_variadic(&mut self, params: &mut [Param]) {
         let last = params.len().saturating_sub(1);
         for (i, p) in params.iter_mut().enumerate() {
@@ -3370,9 +3332,7 @@ impl<'a> Parser<'a> {
         let start = self.peek_span();
         let by_ref = self.eat(&TokenKind::Ref);
 
-        // `self` (or `ref self`) is the implicit-`Self` receiver. The
-        // `Self` type is filled in later when the method is associated
-        // with its containing trait or impl.
+        // `self` / `ref self`; its type is filled in with the trait or impl.
         if matches!(self.peek(), TokenKind::SelfLower) {
             self.bump();
             return Some(Param {
@@ -3425,9 +3385,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Type expression. `|` (sum) binds weakest (spec 2.1.10); it is
-    /// disabled inside closure parameter lists and cast targets, where a
-    /// bare `|` ends the type.
+    /// A type. `|` (sum) binds weakest (spec 2.1.10) and is off in closure
+    /// parameters and cast targets, where it ends the type.
     fn parse_type(&mut self) -> Option<Ty> {
         let start = self.peek_span();
         let first = self.parse_type_atom()?;
@@ -3448,9 +3407,8 @@ impl<'a> Parser<'a> {
     /// arrays, `any`, `none`, `Self`, and their `T?`.
     fn parse_type_atom(&mut self) -> Option<Ty> {
         let mut t = self.nested(Self::parse_type_atom_inner)?;
-        // `T?` (spec 2.6.5): postfix, tighter than `|`. A `?` right after
-        // `x as T` / `x is T` belongs to the type (propagate with
-        // `(x as T)?`), but `??` there stays coalescing.
+        // `T?` (spec 2.6.5) binds tighter than `|`. After `x as T` / `x is
+        // T` a `?` is the type's (write `(x as T)?`), but `??` coalesces.
         loop {
             let layers = match self.peek() {
                 TokenKind::Question => 1,
@@ -3634,9 +3592,8 @@ impl<'a> Parser<'a> {
                     TokenKind::Eof | TokenKind::Shr | TokenKind::GtEq | TokenKind::ShrEq
                 )
             {
-                // Spec 2.11.4: a const argument — a literal, `-lit`, or a
-                // braced expression `{ M * N }`; a string names an MLIR op
-                // (`__mlir_op::<"arith.addi", i32>`, bare 1.9).
+                // Const argument (spec 2.11.4): a literal, `-lit`, or
+                // `{ expr }`; a string names an MLIR op (bare 1.9).
                 if matches!(
                     p.peek(),
                     TokenKind::IntLit(_)
@@ -3798,9 +3755,8 @@ impl<'a> Parser<'a> {
                 return None;
             };
             self.bump();
-            // `Name<T1, T2>` — generic arguments accepted only when the
-            // caller is parsing a type. In expression position the `<`
-            // is ambiguous with comparison.
+            // Generic args only in type position; in expressions `<` could
+            // be a comparison.
             let mut generics: Vec<Ty> = Vec::new();
             if allow_generics
                 && (matches!(self.peek(), TokenKind::Shl) && !self.in_cast_type
@@ -3817,9 +3773,8 @@ impl<'a> Parser<'a> {
             if !self.eat(&TokenKind::ColonColon) {
                 break;
             }
-            // `f::<T, 3>(..)` — explicit generic arguments in an
-            // expression path (spec 2.11.4); a type path takes the same
-            // spelling (`__mlir_type::<"index">`, bare 1.9).
+            // `f::<T, 3>(..)` (spec 2.11.4); type paths too
+            // (`__mlir_type::<"index">`, bare 1.9).
             if matches!(self.peek(), TokenKind::Lt) {
                 self.bump();
                 let args = self.nested_type_list(TokenKind::Gt)?;
@@ -3860,9 +3815,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Match arm body. `return` / `break` / `continue` / `throw` are
-    /// statements, so `none => return 0,` (spec 3.12) wraps one in a block;
-    /// so does any other expression position.
+    /// Arm body. `return` / `break` / `continue` / `throw` are statements,
+    /// so `none => return 0,` (spec 3.12) wraps one in a block.
     fn parse_arm_body(&mut self) -> Option<Expr> {
         let span = self.peek_span();
         let label = |p: &mut Self| {
@@ -3929,11 +3883,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `{ stmts }`. Inside braces a struct literal is always allowed
-    /// again, even when the block itself sits in an `if`/`while` head.
     /// `let PAT [: T] = init else { .. };` (spec 3.16.4) →
     /// `let (b1, .., bn,) = match init { PAT => (b1, .., bn,), _ => else };`
-    /// (one binder: a plain `let`, none: an expression statement).
+    /// (one binder: a plain `let`; none: an expression statement).
     fn let_else_pattern(
         &mut self,
         pat: Pattern,
@@ -4126,9 +4078,8 @@ impl<'a> Parser<'a> {
         Some(block)
     }
 
-    /// `fn name(..) { .. }` as a statement (spec 4.10): lifted to a
-    /// module item `outer/name` (`outer/name/2` .. for a repeated name;
-    /// `/` is in no other item name), leaving a marker statement.
+    /// A `fn` statement (spec 4.10): lifted to item `outer/name`
+    /// (`outer/name/2` on repeats), leaving a marker statement.
     fn parse_nested_fn(&mut self) -> Option<Stmt> {
         let start = self.peek_span();
         if self.parse_visibility() != Visibility::Private {
@@ -4171,9 +4122,7 @@ impl<'a> Parser<'a> {
         lifted
     }
 
-    /// Does a block-local item (spec 3.9.1) start here: attributes and
-    /// `pub` before `struct`, `enum`, `union`, `trait`, `[unsafe] impl`,
-    /// `type`, `static` or `const`?
+    /// Does a block-local item (spec 3.9.1) start here?
     fn at_local_item(&mut self) -> bool {
         let save = self.pos;
         self.pos = self.past_attrs(save);
@@ -4195,12 +4144,10 @@ impl<'a> Parser<'a> {
         at
     }
 
-    /// A block-local item (spec 3.9.1) and the items it expands to
-    /// (derives, meta attributes): each lifted to a private module item
-    /// named by `lift_name`, a copy left in the block as a statement
-    /// (its scope, renamed at the block's end; HIR checks that it
-    /// captures nothing). `None` after an error; no statements when cfg
-    /// drops it.
+    /// A block-local item (spec 3.9.1) and its expansions, each lifted to a
+    /// private item named by `lift_name` with a copy left as a statement
+    /// (renamed at the block's end; HIR checks it captures nothing).
+    /// `None` after an error; empty when cfg drops it.
     fn parse_local_item(&mut self) -> Option<Vec<Stmt>> {
         let start = self.peek_span();
         let (pending, lifted) = (self.pending_items.len(), self.lifted.len());
@@ -4264,9 +4211,8 @@ impl<'a> Parser<'a> {
         Some(stmts)
     }
 
-    /// Spec 3.9.1: the local items of `block` are visible in all of it
-    /// and in the items lifted from it, over outer names of their
-    /// namespace (inner blocks renamed theirs already).
+    /// Spec 3.9.1: a block's local items shadow outer names of their
+    /// namespace in the whole block and in items lifted from it.
     fn rename_local_items(&mut self, block: &mut Block, lifted: usize) {
         let mut r = rokc_ast::rename::Renames::default();
         // Per namespace (types, values): where each name is first.
@@ -4475,9 +4421,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Returns `(stmt, is_trailing_eligible)`. The block-builder decides
-    /// whether a trailing expression is actually a trailing value or a
-    /// statement.
+    /// `(stmt, may be the tail)`; the block builder decides.
     #[allow(clippy::cognitive_complexity)] // one arm per statement form
     fn parse_stmt(&mut self) -> Option<(Stmt, bool)> {
         let start = self.peek_span();
@@ -4514,10 +4458,9 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Let => {
                 self.bump();
-                // The flat forms below (`Point { x, y: b }`, `(a, ..rest)`,
-                // `name`) have their own statements; any other irrefutable
-                // pattern (`Pair(a, b)`, `Line { a: Point { x, .. }, .. }`,
-                // `(n, P { x, .. })`) is a `LetPattern` (spec 3.15).
+                // Flat forms (`Point { x, y: b }`, `(a, ..rest)`, `name`)
+                // have their own statements; any other irrefutable pattern
+                // is a `LetPattern` (spec 3.15).
                 let general = match self.peek() {
                     TokenKind::Ident(_) => {
                         matches!(
@@ -4678,9 +4621,8 @@ impl<'a> Parser<'a> {
                         false,
                     ));
                 }
-                // `let name [: T] = expr else { ... };` — let-else.
-                // Desugar to `let name [: T] = match expr { v: T => v, _ => { else_body } };`
-                // where the wildcard arm runs the divergent else block.
+                // `let name [: T] = expr else { .. };` →
+                // `let name = match expr { v: T => v, _ => { else } };`
                 if matches!(self.peek(), TokenKind::Else) {
                     self.bump();
                     let else_block = self.parse_block()?;
@@ -4830,10 +4772,9 @@ impl<'a> Parser<'a> {
                     false,
                 ))
             }
-            // Spec 3.9 (Rust rule): a block-like expression in statement
-            // position ends the statement — no `;` needed, and a following
-            // operator starts a new statement (`if c {} -1` is two). Only
-            // the postfix chain (`.m()`, `?`) continues it.
+            // Spec 3.9: a block-like expression ends its statement; no `;`,
+            // and a following operator starts a new one (`if c {} -1` is
+            // two). Only postfix links (`.m()`, `?`) continue it.
             TokenKind::If
             | TokenKind::Match
             | TokenKind::Loop
@@ -4869,9 +4810,8 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek(), TokenKind::Eq) {
                     self.bump();
                     let value = self.parse_expr()?;
-                    // Spec 4.6.2 writes `|| { count = count + 1 }`: a
-                    // trailing assignment (`}` follows) may omit its `;`
-                    // (3.9.1 otherwise requires it).
+                    // `|| { count = count + 1 }` (spec 4.6.2): an assignment
+                    // before `}` may omit its `;`.
                     if matches!(self.peek(), TokenKind::RBrace) {
                         let _ = self.eat(&TokenKind::Semi);
                     } else {
@@ -4885,12 +4825,9 @@ impl<'a> Parser<'a> {
                         false,
                     ));
                 }
-                // Compound assignment `target op= value;` (HIR: the
-                // `*Assign` trait's method, else `target = target op
-                // value`). Spec 3.4.3: the target must be evaluated once —
-                // index / receiver sub-expressions that are not plain
-                // variables or literals are hoisted into temps first:
-                // `a[f()] += 1` → `{ let t = f(); a[t] += 1; }`.
+                // `target op= value;`: HIR uses the `*Assign` method, else
+                // `target = target op value`. The target is evaluated once
+                // (spec 3.4.3): `a[f()] += 1` → `{ let t = f(); a[t] += 1; }`.
                 if let Some(op) = compound_assign_op(self.peek()) {
                     self.bump();
                     let value = self.parse_expr()?;
@@ -4989,9 +4926,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Postfix `catch pat? { .. }` arms and `finally { .. }` around `body`
-    /// (spec 4.14). They bind loosest, so `try a() + b() catch _ { 0 }`
-    /// handles both calls.
+    /// `catch pat? { .. }` arms and `finally { .. }` around `body` (spec
+    /// 4.14); loosest binding, so `try a() + b() catch _ { 0 }` covers both.
     fn parse_catch_tail(&mut self, body: Expr) -> Option<Expr> {
         if !(self.at_kw("catch") || self.at_kw("finally")) {
             return Some(body);
@@ -5073,8 +5009,8 @@ impl<'a> Parser<'a> {
             self.parse_primary()?
         };
 
-        // Tracks the precedence of the most recently consumed non-associative
-        // op so we can reject chains like `a < b < c` (spec 3.2.5).
+        // Precedence of the last non-associative op, to reject `a < b < c`
+        // (spec 3.2.5).
         let mut last_none_prec: Option<u32> = None;
 
         loop {
@@ -5171,9 +5107,8 @@ impl<'a> Parser<'a> {
         Some(lhs)
     }
 
-    /// The current token as an operator symbol for `fixity`. Tokens that
-    /// are also syntax (`|` in closure params, `<` in generic args) are
-    /// the caller's to filter.
+    /// The current token as a `fixity` operator; tokens that are also
+    /// syntax (`|`, `<`) are the caller's to filter.
     fn peek_op_symbol(&self, fixity: Fixity) -> Option<(String, Span)> {
         let tok = self.tokens.get(self.pos)?;
         let sym = match (&tok.kind, fixity) {
@@ -5261,9 +5196,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `include_str!("path")` / `include_bytes!("path")`: the file at
-    /// `path` (relative to this file's directory), read now, as a string
-    /// or byte string literal.
+    /// `include_str!` / `include_bytes!`: the file (relative to this one),
+    /// read now, as a literal.
     fn include_macro(&mut self) -> Option<Expr> {
         let start = self.peek_span();
         let at = |k: usize| self.tokens.get(self.pos + k).map(|t| &t.kind);
@@ -5364,8 +5298,7 @@ impl<'a> Parser<'a> {
             }
             // Spec 3.17: `using a = e, b = f { body }` is
             // `{ let a = e; { let b = f; { body } finally { b.drop(); } }
-            // finally { a.drop(); } }` — resources drop in reverse order on
-            // every way out of the block.
+            // finally { a.drop(); } }`: reverse order, every exit.
             TokenKind::Using => {
                 self.bump();
                 // Spec 3.17.1 `using_binding ::= pattern "=" expr`: a name,
@@ -5522,9 +5455,7 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Label(name) => {
-                // `'label: loop`, `'label: while`, `'label: for`,
-                // `'label: { ... }`. Parse the labelled construct and
-                // attach the label.
+                // `'label:` before `loop`, `while`, `for` or a block.
                 let label_name = name;
                 self.bump();
                 self.expect(&TokenKind::Colon, "`:` after label")?;
@@ -5626,9 +5557,8 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Try => {
-                // `try e` / `try? e` / `try! e` covers the whole expression
-                // to its right, up to a `catch` / `finally` (attached
-                // around the result by `parse_catch_tail`).
+                // `try e` / `try? e` / `try! e` covers everything to its right
+                // up to `catch` / `finally` (`parse_catch_tail`).
                 let try_end = self.peek_span().end;
                 self.bump();
                 // `try!` is one word: `try !x` tries the negation.
@@ -5805,9 +5735,8 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(_) => {
                 let mut path = self.parse_path()?;
-                // Spec 2.10: `Pair<i32, i32> { a: 5, b: 7 }`. `<` is a
-                // comparison unless a balanced `>` is followed by `{` or
-                // `(`. The args attach to the last path segment.
+                // `Pair<i32, i32> { .. }` (spec 2.10): `<` compares unless a
+                // balanced `>` is followed by `{` or `(`.
                 if matches!(self.peek(), TokenKind::Lt) && self.peek_struct_or_call_after_generics()
                 {
                     self.bump(); // `<`
@@ -5820,14 +5749,10 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if self.struct_expr_allowed && matches!(self.peek(), TokenKind::LBrace) {
-                    // Spec 2.3 vs 4.8.1: `Path { ... }` is either a struct
-                    // init (`Point { x: 1 }`) or a 0-arg trailing closure
-                    // (`run { body }`). We disambiguate with lookahead at
-                    // the body's first token:
-                    //   `}`                     → empty struct init
-                    //   `..rest`                → struct init (rest)
-                    //   `ident ":"|","|"}"`     → struct init / shorthand
-                    //   anything else           → 0-arg trailing closure
+                    // `Path { .. }`: struct init or 0-arg trailing closure
+                    // (spec 2.3 vs 4.8.1), by the body's first tokens:
+                    //   `}`, `..rest`, `ident :|,|}`  → struct init
+                    //   anything else               → trailing closure
                     if self.peek_struct_init_body() {
                         self.parse_struct_init_body(path)?
                     } else {
@@ -5912,10 +5837,8 @@ impl<'a> Parser<'a> {
                 self.bump();
                 ExprKind::SelfUpper
             }
-            // `[a, b, c]` array literal — OR closure capture-list
-            // `[ref x, ref y] || ...` (spec 4.6.2). We disambiguate by
-            // lookahead: a `ref` keyword inside `[...]` is unambiguous —
-            // arrays of variables don't take `ref`, capture lists do.
+            // `[a, b]` array, or capture list `[ref x] || ..` (spec 4.6.2):
+            // `ref` inside decides.
             TokenKind::LBracket
                 if matches!(
                     self.tokens.get(self.pos + 1).map(|t| &t.kind),
@@ -6043,9 +5966,8 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let args = self.parse_call_args()?;
                     self.expect(&TokenKind::RParen, "`)`")?;
-                    // Spec 4.8: trailing closure after a call. A `{` or
-                    // closure-shape (`||` / `|x|`) immediately after the
-                    // closing `)` attaches as the call's last argument.
+                    // Trailing closure (spec 4.8): a `{` or `|..|` right
+                    // after `)` is the last argument.
                     let trailing_closure = self.try_parse_trailing_closure()?;
                     expr = Expr {
                         span: expr.span,
@@ -6125,10 +6047,8 @@ impl<'a> Parser<'a> {
                         self.bump();
                         let args = self.parse_call_args()?;
                         self.expect(&TokenKind::RParen, "`)`")?;
-                        // Spec 4.8: trailing closure on a method call —
-                        // `v.apply() |x| { x*2 }` / `v.apply() { body }`.
-                        // Same disambig as Call: `{` only consumed when
-                        // `struct_expr_allowed`, `|`/`||` always consumed.
+                        // Trailing closure on a method call (spec 4.8), as
+                        // for calls.
                         let trailing_closure = self.try_parse_trailing_closure()?;
                         expr = Expr {
                             span: expr.span,
@@ -6280,9 +6200,8 @@ impl<'a> Parser<'a> {
         Some(expr)
     }
 
-    /// Tuple field index after `.`: plain decimal digits only — no
-    /// suffix, radix prefix, `_` or leading zero (`t.1u8`, `t.0x1` are
-    /// errors, not `t.0`).
+    /// Tuple index after `.`: plain decimal only (`t.1u8`, `t.0x1` are
+    /// errors).
     fn tuple_index(&mut self, text: &str, span: Span) -> Option<u32> {
         let plain = !text.is_empty()
             && text.bytes().all(|b| b.is_ascii_digit())
@@ -6297,9 +6216,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Spec 6.5.6: `{ k: v, .. }` is a dict, `{ a, b, .. }` a set (two
-    /// or more items, or a trailing comma); anything else (`{}`, `{ e }`,
-    /// statements) is a block. Decided by parsing the first expression
-    /// speculatively and looking at the token after it.
+    /// items or a trailing comma), anything else a block. Decided by a
+    /// speculative parse of the first expression.
     fn try_set_or_dict(&mut self) -> Option<ExprKind> {
         let (pos, pending, n_diags) = (self.pos, self.pending.clone(), self.diagnostics.len());
         let n_lifted = self.lifted.len();
@@ -6310,9 +6228,8 @@ impl<'a> Parser<'a> {
             p.lifted.truncate(n_lifted);
         };
         self.bump(); // `{`
-        // Only a simple-looking first item is tried, so nested blocks
-        // (`{ if .. { .. } }`) aren't re-parsed exponentially; a set /
-        // dict whose first item starts with a keyword parses as a block.
+        // Try only a simple first item, so nested blocks aren't re-parsed
+        // exponentially; one starting with a keyword is a block.
         let first = if matches!(
             self.peek(),
             TokenKind::IntLit(_)
@@ -6457,14 +6374,9 @@ impl<'a> Parser<'a> {
         Some((items, trailing_comma))
     }
 
-    /// Spec 4.8: trailing closure attached to a call. A `|...|` or
-    /// `{ ... }` immediately after the closing `)` of the call becomes
-    /// the last argument (408.6); a 0-arg trailing closure is spelled
-    /// `{ ... }`, so `||` there is the logical-or operator. Returns
-    /// `None` when no trailing closure is present.
-    ///
-    /// `{ ... }` is gated on `struct_expr_allowed`: in a control-flow
-    /// head the brace is the construct's body, not a 0-arg closure.
+    /// Trailing closure (spec 4.8, 408.6): `|..|` or `{ .. }` right after a
+    /// call's `)`. `||` there is logical-or (0-arg is `{ .. }`), and `{`
+    /// is off in a control-flow head (`struct_expr_allowed`).
     #[allow(clippy::option_option)] // outer None = parse error (for `?`), inner None = no closure
     fn try_parse_trailing_closure(&mut self) -> Option<Option<Box<Expr>>> {
         match self.peek() {
@@ -6576,12 +6488,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Spec 4.8.1 `primary trailing_closure` without the call's `( )`:
-    /// `xs.map |x| { .. }` / `f |x| { .. }`. A `|` after a callee is the
-    /// closure only when `|params| (-> R)? {` follows — the trailing body
-    /// is always a block — else it stays the `|` operator. `||` stays
-    /// logical-or (the 0-parameter form is `f { .. }`). Off in a
-    /// control-flow head, like the `{ .. }` form.
+    /// Spec 4.8.1 without the `( )`: `xs.map |x| { .. }`. A `|` after a
+    /// callee is a closure only when `|params| (-> R)? {` follows; `||`
+    /// stays logical-or. Off in a control-flow head.
     fn paren_less_trailing_closure(&mut self) -> Option<Box<Expr>> {
         if !self.struct_expr_allowed || !matches!(self.peek(), TokenKind::Pipe) {
             return None;
@@ -6640,10 +6549,8 @@ impl<'a> Parser<'a> {
         Some((params, ret_ty))
     }
 
-    /// `Path<...>` in expression position: true when a balanced `>` is
-    /// followed by `{` or `(` (a struct literal or turbofish call).
-    /// Stops at tokens a generic-arg list can't hold, which rules out
-    /// comparisons and keeps the lookahead short.
+    /// `Path<...>` in an expression: a balanced `>` followed by `{` or `(`.
+    /// Stops at tokens no generic list holds, so comparisons fail fast.
     fn peek_struct_or_call_after_generics(&self) -> bool {
         // Caller has already confirmed `peek() == Lt`.
         let mut depth: i32 = 0;
@@ -6708,14 +6615,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `Path { .. }`: struct literal or 0-arg trailing closure? Looks two
-    /// tokens past the `{` without consuming.
-    ///   `{ }`              → struct init (empty/unit)
-    ///   `{ .. }`           → struct init (rest)
-    ///   `{ ident : ... }`  → struct init (named field)
-    ///   `{ ident , ... }`  → struct init (shorthand)
-    ///   `{ ident } `       → struct init (single shorthand)
-    ///   anything else      → trailing closure body
+    /// `Path { .. }`: struct literal (`{}`, `{ .. }`, `{ x: `, `{ x, `,
+    /// `{ x }`) or 0-arg trailing closure? Peeks two tokens.
     fn peek_struct_init_body(&self) -> bool {
         // Caller has just confirmed `peek() == LBrace`.
         self.struct_init_body_at(self.pos)
@@ -7149,9 +7050,8 @@ impl<'a> Parser<'a> {
     fn parse_call_args_inner(&mut self) -> Option<Vec<CallArg>> {
         let mut args = Vec::new();
         while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-            // `name: expr` is a named argument; otherwise positional.
-            // `__mlir_op`'s `attributes = {..}` / `regions = [..]` are
-            // too (bare 1.9).
+            // `name: expr` is a named argument (also `__mlir_op`'s
+            // `attributes = {..}` / `regions = [..]`, bare 1.9).
             if let Some(name) = self.peek_name() {
                 if matches!(self.peek_next(), Some(TokenKind::Colon))
                     || (matches!(name.as_str(), "attributes" | "regions")
@@ -7225,10 +7125,9 @@ const fn starts_item(k: &TokenKind) -> bool {
     )
 }
 
-/// A statement that may omit its `;`: a block-like expression (spec
-/// 1.3.4), or a call whose trailing closure has a block body
-/// (`with_lock(m) { .. }`, `xs.each |x| { .. }` — spec 4.8.8 writes them
-/// keyword-like, without `;`). The call's value is discarded like `;`.
+/// May omit its `;`: a block-like expression (spec 1.3.4) or a call with a
+/// block-bodied trailing closure (`with_lock(m) { .. }`, spec 4.8.8); the
+/// value is discarded.
 const fn ends_stmt(e: &Expr) -> bool {
     let (ExprKind::Call {
         trailing_closure: Some(c),
@@ -7262,10 +7161,9 @@ const fn is_block_like(e: &Expr) -> bool {
     )
 }
 
-/// `T?` = `Nest(T) | none`: like `Maybe<T>` (`type Maybe<T> = T |
-/// none`), `T` is a generic member, so `(i32 | none)?` keeps two layers
-/// while `i32?` is `i32 | none` (spec 2.6.4).
-/// `Tuple<A, B>` is `(A, B)` (stdlib 2.9.6); any other path stays one.
+/// `T?` is `Nest(T) | none`, so `(i32 | none)?` keeps two layers while
+/// `i32?` is `i32 | none` (spec 2.6.4). `Tuple<A, B>` is `(A, B)` (stdlib
+/// 2.9.6).
 fn tuple_or_path(mut p: Path) -> TyKind {
     match p.segments.as_mut_slice() {
         [s] if s.name == "Tuple" && !s.generics.is_empty() => {
@@ -7305,9 +7203,8 @@ fn path_ty(name: &str, span: Span) -> Ty {
 }
 
 /// `fn f(g: fn(T) throws -> U) rethrows -> R` → `fn f<#E0>(g: fn(T)
-/// throws (#E0) -> U) throws (#E0) -> R`. Monomorphization binds `#E0`
-/// to the argument's error type, or to "no error" for a non-throwing
-/// argument, whose instance then doesn't throw. Returns the error types.
+/// throws (#E0) -> U) throws (#E0) -> R`; monomorphization binds `#E0` to
+/// the argument's error, or none. Returns the error types.
 fn desugar_rethrows(params: &mut [Param], generics: &mut Generics) -> Vec<Ty> {
     fn walk(ty: &mut Ty, generics: &mut Generics, errs: &mut Vec<Ty>) {
         if rokc_ast::is_untyped_throws(ty) {
@@ -7410,10 +7307,9 @@ fn keyword_alias(word: &str) -> Option<&'static str> {
     })
 }
 
-/// The help for `import name` (or `include` / `require`) in `file`,
-/// whose tokens are `tokens`: `mod` for a `name.rok` beside it; `None`
-/// (the `use` hint) for a name the file knows (a path root, a module it
-/// declares); else `rok add` of library `name`.
+/// Help for `import name` (or `include` / `require`): `mod` for a sibling
+/// `name.rok`; `None` (the `use` hint) for a name the file knows; else
+/// `rok add`.
 fn import_help(file: &str, tokens: &[Token], name: &str) -> Option<String> {
     use std::path::Path;
     let path = Path::new(file);

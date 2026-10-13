@@ -3,8 +3,8 @@
 
 use rokc_ir_common::PrimTy;
 
-use crate::MirTy;
 use crate::gc_abi::{AMBIGUOUS, ANY_SLOT, INTERIOR_REF, STRONG_REF};
+use crate::{MirTy, UnionKind};
 
 /// What the collector must see of a value (802 §8.2.3), offsets in
 /// bytes from the same base.
@@ -132,7 +132,7 @@ impl Target {
             // An MLIR type's values stay SSA; only an aggregate holding
             // one asks, and gets a word.
             MirTy::Any | MirTy::GcRef | MirTy::Fn(_, _) | MirTy::Mlir(_) => word,
-            MirTy::Union(vs, n) => (
+            MirTy::Union(vs, n, _) => (
                 word.0 * n,
                 vs.iter()
                     .map(|(_, t)| self.size_align(t).1)
@@ -162,9 +162,12 @@ impl Target {
             MirTy::Struct(crate::ANY_STRUCT, _) => out.push(GcSlot::Word(at, ANY_SLOT)),
             // A sum (`sum_layout`): `(i32 tag, union)`.
             MirTy::Tuple(ps)
-                if matches!(ps.as_slice(), [MirTy::Prim(PrimTy::I32), MirTy::Union(..)]) =>
+                if matches!(
+                    ps.as_slice(),
+                    [MirTy::Prim(PrimTy::I32), MirTy::Union(_, _, UnionKind::Sum)]
+                ) =>
             {
-                let MirTy::Union(vs, _) = &ps[1] else {
+                let MirTy::Union(vs, _, _) = &ps[1] else {
                     unreachable!()
                 };
                 let payload = at
@@ -186,7 +189,7 @@ impl Target {
             }
             // A union away from its tag (a payload temporary): any word
             // a variant keeps a reference in, kept alive and never moved.
-            MirTy::Union(vs, _) => {
+            MirTy::Union(vs, _, _) => {
                 let mut slots = Vec::new();
                 for (_, t) in vs {
                     self.gc_offsets(t, at, &mut slots);
@@ -324,7 +327,7 @@ mod tests {
         let t = Target::builtin("x86_64-unknown-linux-gnu");
         let pair = MirTy::Tuple(vec![p(PrimTy::I64), MirTy::GcRef]);
         let vs = vec![(0, p(PrimTy::Str)), (1, pair), (2, p(PrimTy::I64))];
-        let union = MirTy::Union(vs, 2);
+        let union = MirTy::Union(vs, 2, UnionKind::Sum);
         let sum = MirTy::Tuple(vec![p(PrimTy::I32), union.clone()]);
         assert_eq!(t.size_align(&sum), (24, 8));
         let mut slots = Vec::new();
@@ -350,5 +353,17 @@ mod tests {
             slots,
             [GcSlot::Word(0, AMBIGUOUS), GcSlot::Word(8, AMBIGUOUS)]
         );
+    }
+
+    /// An `(i32, union)` that is no sum (a coroutine frame with one
+    /// pinned slot): the `i32` is no tag, every word is scanned.
+    #[test]
+    fn only_a_sum_payload_makes_a_sum() {
+        let t = Target::builtin("x86_64-unknown-linux-gnu");
+        let slot = MirTy::Union(vec![(0, MirTy::GcRef)], 1, UnionKind::Plain);
+        let frame = MirTy::Tuple(vec![p(PrimTy::I32), slot]);
+        let mut slots = Vec::new();
+        t.gc_offsets(&frame, 0, &mut slots);
+        assert_eq!(slots, [GcSlot::Word(8, AMBIGUOUS)]);
     }
 }

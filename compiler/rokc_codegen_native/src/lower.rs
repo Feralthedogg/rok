@@ -1,8 +1,6 @@
-//! MIR → LIR, one function at a time. The semantics are the MLIR
-//! emitter's (`rokc_codegen_mlir::emit`) construct by construct, so a
-//! program behaves the same on both backends: the same layouts, GC
-//! frames and roots, barriers, allocation fast path, polls, checks and
-//! their panic messages.
+//! MIR → LIR, one function at a time, with the MLIR emitter's semantics
+//! construct by construct (layouts, GC frames, barriers, allocation, polls,
+//! checks, panic messages), so programs behave the same on both backends.
 
 use std::collections::{HashMap, HashSet};
 
@@ -893,10 +891,9 @@ impl<'c, 'a> FnLower<'c, 'a> {
         self.call_rok(Callee::Sym(sym), &[], ret, &[], dst, true);
     }
 
-    /// A call to a runtime function codegen makes on its own: as
-    /// `call_sym`, but a `str` argument goes as a pointer to a copy on
-    /// Windows x64, whose C ABI passes the 16-byte struct by reference
-    /// (spec 8.6.3; `abi::classify_rok`).
+    /// Call a runtime function codegen uses itself: `call_sym`, with `str`
+    /// passed as a pointer to a copy on Windows x64 (8.6.3,
+    /// `abi::classify_rok`).
     fn call_runtime(
         &mut self,
         sym: SymId,
@@ -946,10 +943,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
         }
     }
 
-    /// The shapes of a rok signature (spec 8.6.6): a by-address
-    /// argument (`abi::rok_by_ref`) is a pointer word; a by-address
-    /// result comes back through a leading pointer (`true`), nothing
-    /// returned.
+    /// Shapes of a rok signature (8.6.6): by-address arguments are pointer
+    /// words; a by-address result comes through a leading pointer (`true`).
     fn rok_shapes(
         &self,
         params: &[MirTy],
@@ -1372,9 +1367,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
         obj
     }
 
-    /// Write barrier (704 §7.4.2) before storing a reference into GC
-    /// object `obj` (a word slot) at address `slot` (a word slot), `len`
-    /// bytes.
+    /// Write barrier (704 §7.4.2) before storing a reference into `obj` at
+    /// address `slot` (both word slots), `len` bytes.
     fn write_barrier(&mut self, obj: Slot, slot: Slot, len: u32) {
         let w = self.word();
         let flags = self.tmp_k(K::I32);
@@ -1509,10 +1503,8 @@ impl<'c, 'a> FnLower<'c, 'a> {
         self.push(Inst::Label(r));
     }
 
-    /// The GC type id of `ty` objects (`array`: buffers of them): a
-    /// constant, or in a codegen unit read from the symbol the glue
-    /// defines (`units::gc_symbol`), so the unit's code stays the same
-    /// when other units' types change the ids.
+    /// GC type id of `ty` objects (`array`: buffers): a constant, or in a
+    /// unit read from the glue's symbol (`units::gc_symbol`).
     fn gc_tid(&mut self, ty: &MirTy, array: bool) -> V {
         let i = self.c.gc_type(ty, array);
         let Some(pkg) = self.c.gc_pkg else {
@@ -1569,9 +1561,7 @@ impl<'c, 'a> FnLower<'c, 'a> {
         rokc_codegen_mlir::emit::body_safepoints(self.f, self.c.quiet, self.c.pkgs, self.c.t)
     }
 
-    /// The shadow-stack frame (704 §7.4.1), as the emitter's
-    /// `emit_gc_frame` decides it: for a function that can stop for a
-    /// collection, rooting the locals live across such a point.
+    /// The shadow-stack frame (704 §7.4.1), as `emit_gc_frame` decides it.
     fn gc_frame(&mut self) {
         if self.back_edges.is_empty() && !self.reaches_safepoint() {
             return;

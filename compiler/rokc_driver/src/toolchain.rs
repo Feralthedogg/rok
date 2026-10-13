@@ -1,8 +1,6 @@
-//! Native back half of the AOT pipeline (spec 902.11-902.14), in
-//! process: the MLIR passes, the translation to LLVM IR, LLVM's
-//! optimization and code generation, and the link (lld) through the
-//! LLVM / MLIR / lld rokc links statically (`rokc_llvm`). `ROK_CC`, when
-//! set, links instead.
+//! The back half of the pipeline (spec 902.11-902.14), in process: MLIR
+//! passes, LLVM IR, LLVM optimization and codegen, and the lld link, all
+//! statically linked (`rokc_llvm`). `ROK_CC` links instead when set.
 
 use std::borrow::Cow;
 use std::ffi::OsString;
@@ -18,9 +16,8 @@ use crate::CompiledModule;
 /// Intermediate artifact selectable with `--emit=<kind>` (spec 901).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmitKind {
-    /// The user package's whole AST after meta expansion and the
-    /// parser's desugaring, as rok source; needs the parsed files
-    /// (`keep_ast`). (`expanded` shows the meta expansions alone.)
+    /// The package's whole AST after meta expansion and desugaring, as
+    /// source (needs `keep_ast`); `expanded` shows meta expansions alone.
     Ast,
     Hir,
     Mir,
@@ -99,9 +96,9 @@ pub struct BuildOptions {
     /// `-l [static=|dylib=]<name>`: native libraries linked as if named by
     /// `#[link]` (`true`: static).
     pub libs: Vec<(String, bool)>,
-    /// `--native-runtime <file>`: shared libraries an executable loads at
-    /// run time, copied beside it; the executable then searches its own
-    /// directory (rpath `@loader_path` / `$ORIGIN`; Windows always does).
+    /// `--native-runtime <file>`: shared libraries copied beside the
+    /// executable, which searches its own directory (`@loader_path` /
+    /// `$ORIGIN`; Windows always does).
     pub runtime_files: Vec<PathBuf>,
     /// `-C subsystem=console|windows`: a Windows executable's subsystem.
     pub subsystem: crate::windows::Subsystem,
@@ -111,9 +108,8 @@ pub struct BuildOptions {
     /// The profile runtime an instrumented executable links
     /// (`<sysroot>/lib/rok/targets/<target>/`).
     pub profile_rt: Option<PathBuf>,
-    /// An executable builds by codegen units, reusing from this
-    /// directory the objects of the units that did not change (spec
-    /// 9.2.16, `units`).
+    /// Build by codegen units, reusing unchanged units' objects from here
+    /// (spec 9.2.16).
     pub incremental: Option<PathBuf>,
 }
 
@@ -128,9 +124,8 @@ pub enum Profile {
     Generate(PathBuf),
     /// Optimized with this indexed profile (`rokc profdata merge`).
     Use(PathBuf),
-    /// `-C cs-profile-generate`: optimized with this profile, then
-    /// instrumented again after inlining (context-sensitive), writing to
-    /// this pattern; merged with the first, it is a profile to use.
+    /// `-C cs-profile-generate`: use this profile, then instrument again
+    /// after inlining; merged with the first, it is the profile to use.
     CsGenerate(PathBuf, PathBuf),
 }
 
@@ -333,9 +328,8 @@ pub fn emit(
     }
 }
 
-/// Full build: an executable at `out`; by codegen units with
-/// `opts.incremental` (`units::applies`), and then how many it
-/// compiled.
+/// Build an executable at `out`; by codegen units with
+/// `opts.incremental`, returning how many it compiled.
 pub fn link_executable(
     module: &CompiledModule,
     sources: &SourceMap,
@@ -371,13 +365,10 @@ pub fn link_executable(
 
 /// Library build (spec 902.13): `libfoo.a`.
 ///
-/// By codegen units with `opts.incremental` (`units::applies`; and then
-/// how many it compiled), else as many members as LLVM compiles in
-/// parallel (a prebuilt dependency, the standard library cache).
-///
-/// For a prebuilt-library build (`CompiledModule::interface`), its ROKHIR
-/// `foo.rokhir` beside them (spec 904). The ROKHIR is a sibling file rather
-/// than an archive member (903): no object-section reader is needed.
+/// By codegen units with `opts.incremental`, else as many members as LLVM
+/// compiles in parallel. A prebuilt-library build writes `foo.rokhir`
+/// beside it (904), a sibling rather than a member so no object-section
+/// reader is needed.
 pub fn build_archive(
     module: &CompiledModule,
     sources: &SourceMap,
@@ -449,11 +440,9 @@ pub fn lower_to_llvm(
 /// more than the cores win back.
 const SPLIT_MIN: usize = 1 << 20;
 
-/// The module through LLVM in process: the MLIR passes (plugins' first),
-/// the translation to LLVM IR, `-O<level>` and code generation. `parts`
-/// 0: as many objects as the module's size makes worth compiling in
-/// parallel (in-process `ThinLTO` above -O0, so inlining still sees
-/// every function).
+/// The module through LLVM in process: MLIR passes (plugins' first), LLVM
+/// IR, `-O<level>` and codegen. `parts` 0: as many objects as the size
+/// warrants (in-process `ThinLTO` above -O0, so inlining sees everything).
 fn llvm(
     module: &CompiledModule,
     sources: &SourceMap,
@@ -519,14 +508,11 @@ fn llvm(
     Ok((out, mlir))
 }
 
-/// Link the objects `objs` of `module` with the runtime and the
-/// dependencies into the executable `out`: lld in process, or the C
-/// compiler driver `ROK_CC`.
+/// Link `objs` with the runtime and dependencies into `out`.
 ///
-/// A Windows executable links its C runtime and system libraries
-/// through import libraries rokc makes (`windows::link_args`), written
-/// into `objs_dir` with the objects: the PDB names them, so the same
-/// paths in every build.
+/// lld in process, or `ROK_CC`. Windows import libraries
+/// (`windows::link_args`) go into `objs_dir` beside the objects, since the
+/// PDB names their paths.
 pub fn link_object(
     module: &CompiledModule,
     objs: &[PathBuf],
@@ -672,11 +658,9 @@ pub fn link_object(
     Ok(())
 }
 
-/// lld's arguments of a `release` profile link (9.2.15): identical code
-/// folded (`safe`: not code whose address an object marks as taken,
-/// all of an object that marks none), and without `-g` no symbols but
-/// what the loader needs. A COFF link folds without `/debug` already;
-/// a wasm module keeps its name section.
+/// lld arguments of a `release` link (9.2.15): safe identical code folding
+/// and, without `-g`, only the symbols the loader needs. COFF folds
+/// without `/debug` already; wasm keeps its name section.
 fn release_link_args(t: &TargetSpec, opts: &BuildOptions) -> Vec<&'static str> {
     let strip = !opts.debug;
     match t.object_format {
@@ -688,9 +672,8 @@ fn release_link_args(t: &TargetSpec, opts: &BuildOptions) -> Vec<&'static str> {
     }
 }
 
-/// The C compiler driver's (`ROK_CC`) arguments of the profile: `-g`,
-/// or a release link's stripped symbols (`release_link_args`; the
-/// system linker folds code its own way).
+/// `ROK_CC` arguments for the profile: `-g`, or a release link's
+/// stripping.
 fn cc_profile_args(t: &TargetSpec, opts: &BuildOptions) -> &'static [&'static str] {
     match t.object_format {
         _ if opts.debug => &["-g"],
@@ -701,10 +684,9 @@ fn cc_profile_args(t: &TargetSpec, opts: &BuildOptions) -> &'static [&'static st
     }
 }
 
-/// `wasm-component-ld`'s arguments for the WIT of `ffi::wit` (stdlib
-/// 1.8): the component's world in a directory under `tmp`, its sources
-/// under `deps/` (as `wit-parser` reads a package directory), and the
-/// core exports the world's functions are.
+/// `wasm-component-ld` arguments for `ffi::wit` (stdlib 1.8): the world in
+/// a directory under `tmp`, its sources under `deps/`, and the core
+/// exports backing the world's functions.
 fn wit_link_args(w: &rokc_mir::WitLink, tmp: &Path) -> Result<Vec<OsString>, RokDiagnostic> {
     let io = |p: &Path, e: std::io::Error| err(format!("cannot write {}: {e}", p.display()));
     let dir = tmp.join("wit");
@@ -736,9 +718,8 @@ fn wit_link_args(w: &rokc_mir::WitLink, tmp: &Path) -> Result<Vec<OsString>, Rok
     Ok(a)
 }
 
-/// The target `t` links a program for: a component without `main` is a
-/// reactor (wasi-libc's `crt1-reactor.o`, no entry; the host calls
-/// `_initialize`, then the exports).
+/// The target to link for: a component without `main` is a reactor
+/// (`crt1-reactor.o`, no entry; the host calls `_initialize`).
 fn entry_model<'t>(t: &'t TargetSpec, wit: Option<&rokc_mir::WitLink>) -> Cow<'t, TargetSpec> {
     if wit.is_some_and(|w| w.reactor) {
         Cow::Owned(TargetSpec {
@@ -785,9 +766,8 @@ fn cc_wit_args(w: Option<&rokc_mir::WitLink>, tmp: &Path) -> Result<Vec<OsString
     Ok(out)
 }
 
-/// An instrumented executable's profile runtime (compiler-rt's) and the
-/// symbol that pulls in its registration, which writes the profile at
-/// exit.
+/// compiler-rt's profile runtime and the symbol that pulls in its
+/// registration (which writes the profile at exit).
 fn profile_runtime(t: &TargetSpec, opts: &BuildOptions) -> Option<(PathBuf, String)> {
     if !opts.profile.generates() {
         return None;
@@ -819,10 +799,9 @@ fn native_lib_args(
     Ok(a)
 }
 
-/// The runtime's TLS block `rok_tls` (803 §8.3.1) for
-/// `wasm32-wasi-threads`, in wasm TLS (`__tls_base` + offset), with the
-/// accessor the runtime reaches its own thread's copy through
-/// (`rokr_common::tls`, which stable Rust cannot define there), in `dir`.
+/// `rok_tls` (803 §8.3.1) for `wasm32-wasi-threads` in wasm TLS, with the
+/// accessor the runtime uses (`rokr_common::tls`; stable Rust can't define
+/// it there), written to `dir`.
 fn wasm_tls_object(t: &TargetSpec, dir: &Path) -> Result<PathBuf, RokDiagnostic> {
     let size = rokc_mir::tls_abi::SIZE.offset(t.pointer_width / 8);
     let align = rokc_mir::tls_abi::ALIGN;
@@ -852,9 +831,9 @@ fn wasm_tls_object(t: &TargetSpec, dir: &Path) -> Result<PathBuf, RokDiagnostic>
     Ok(path)
 }
 
-/// `#[link(name, kind = "static")]` for ld64, which has no `-Bstatic`
-/// (it takes a `.dylib` before a `.a` in each directory): the first
-/// `lib<name>.a` in the `-L` directories, then `LIBRARY_PATH`.
+/// `#[link(name, kind = "static")]` for ld64, which has no `-Bstatic` and
+/// prefers `.dylib`: the first `lib<name>.a` in `-L` dirs, then
+/// `LIBRARY_PATH`.
 fn static_archive(name: &str, opts: &BuildOptions) -> Result<PathBuf, RokDiagnostic> {
     let env = std::env::var_os("LIBRARY_PATH").unwrap_or_default();
     let dirs: Vec<PathBuf> = opts
@@ -888,8 +867,8 @@ fn rokr_arg(opts: &BuildOptions, t: &TargetSpec) -> String {
 }
 
 /// `--load-mlir-plugin <path | name>` (stdlib bare 1.10.3): a path must
-/// exist; a bare name is the host's library file of that name
-/// ([`mlir_plugin_files`]) in a directory of `ROK_MLIR_PLUGIN_PATH`.
+/// exist; a bare name is looked up ([`mlir_plugin_files`]) in
+/// `ROK_MLIR_PLUGIN_PATH`.
 ///
 /// # Errors
 /// The plugin is not there.
@@ -915,9 +894,8 @@ pub fn find_mlir_plugin(spec: &str) -> Result<PathBuf, String> {
         })
 }
 
-/// The file names plugin `name` has on `os` (`std::env::consts::OS`):
-/// `<name>.dll` on Windows, `lib<name>.so` (and on macOS
-/// `lib<name>.dylib` first: modules cmake builds are `.so` there too).
+/// File names of plugin `name` on `os`: `<name>.dll`, `lib<name>.so`, and
+/// on macOS `lib<name>.dylib` first (cmake modules are `.so` there too).
 fn mlir_plugin_files(name: &str, os: &str) -> Vec<String> {
     match os {
         "windows" => vec![format!("{name}.dll")],
@@ -926,9 +904,8 @@ fn mlir_plugin_files(name: &str, os: &str) -> Vec<String> {
     }
 }
 
-/// The REPL's session host: `host_object` (`repl_host.c`, compiled with
-/// rokc) with the whole runtime linked in and exported, for the cells it
-/// maps and links itself.
+/// The REPL host: `repl_host.c` with the whole runtime linked in and
+/// exported, for the cells it links itself.
 pub fn link_host(host_object: &Path, opts: &BuildOptions, out: &Path) -> Result<(), RokDiagnostic> {
     let t = TargetSpec::host();
     if t.object_format == ObjectFormat::Coff {
@@ -970,9 +947,8 @@ pub fn link_host(host_object: &Path, opts: &BuildOptions, out: &Path) -> Result<
         .map_err(|e| err(format!("cannot link the REPL host:\n{e}")))
 }
 
-/// The Windows session host: every runtime member, every symbol
-/// exported (the host finds them with `GetProcAddress`), linked like a
-/// program (`windows::link_args`).
+/// Windows host: every runtime member, every symbol exported (found with
+/// `GetProcAddress`), linked like a program.
 fn link_windows_host(
     t: &TargetSpec,
     host_object: &Path,
@@ -1005,9 +981,8 @@ fn c_compiler() -> Option<OsString> {
         .or_else(|| (!rokc_llvm::AVAILABLE).then(|| "cc".into()))
 }
 
-/// rokc's build cache: `<sysroot>/lib/rok-cache` of an installed
-/// toolchain, else `rok-cache/` beside `rokc` (a build in the
-/// repository).
+/// rokc's build cache: `<sysroot>/lib/rok-cache` when installed, else
+/// `rok-cache/` beside `rokc`.
 #[must_use]
 pub fn cache_dir() -> Option<PathBuf> {
     let exe = rokc_core::current_exe()?;

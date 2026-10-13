@@ -38,8 +38,7 @@ pub enum RootMain {
     /// Made from the entry file's top-level statements (spec 4.16.2).
     Implicit,
     /// The `rokc test` / `rokc bench` harness: it reaches every test, so
-    /// item and module visibility do not apply to the paths in its body
-    /// (spec 9.1, 6.2.5).
+    /// visibility doesn't apply to its paths (spec 9.1, 6.2.5).
     Harness,
 }
 
@@ -58,14 +57,12 @@ pub struct Script {
 #[derive(Clone, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)] // independent switches
 pub struct HirInput {
-    /// The dependency packages' top-level names (`--extern`).
-    /// Visibility stops at a package (`pub(pkg)`, `pub(sub)`), `pkg::`
-    /// in a dependency is the dependency, and a path starting with a
-    /// dependency's name reaches it from any module.
+    /// Dependencies' top-level names (`--extern`). Visibility stops at a
+    /// package, `pkg::` in a dependency is that dependency, and a path
+    /// starting with its name reaches it from anywhere.
     pub packages: Vec<String>,
-    /// The dependency of `packages` that is this package's own library
-    /// (`src/lib.rok` beside the `src/main.rok` being built, spec
-    /// 0.3.1): errors about its items say how the executable sees it.
+    /// The dependency that is this package's own library (spec 0.3.1), so
+    /// errors say how the executable sees its items.
     pub own_library: Option<String>,
     /// The dependency package this build compiles as a prebuilt library
     /// (`lib<name>.a` + `<name>.rokhir`): every body of it is lowered.
@@ -78,18 +75,16 @@ pub struct HirInput {
     pub check_library: bool,
     /// Where the root `main` comes from.
     pub root_main: RootMain,
-    /// Also lower the reached small functions of the prebuilt standard
-    /// library, for the optimizer to inline: they stay the archive's
-    /// symbols (`available_externally`).
+    /// Also lower reached small functions of the prebuilt std for inlining;
+    /// they stay the archive's symbols (`available_externally`).
     pub inline_prebuilt: bool,
     /// Bits of `usize` / `isize` (the target's pointer width) for
     /// literal ranges and constant evaluation; 0 means 64.
     pub pointer_width: u32,
     /// `extern "system"` is `stdcall`, not `"C"` (32-bit x86 Windows).
     pub stdcall_system: bool,
-    /// The module path (`a::b`, `""` at the root) of each item of the
-    /// program, by index; missing ones are at the root. HIR qualifies
-    /// the item names with it.
+    /// Module path of each item by index (missing: root); HIR qualifies
+    /// item names with it.
     pub item_modules: Vec<String>,
     /// The modules without the implicit `use rok::core::**;`
     /// (`#![no_implicit_rok]`, stdlib 0.2.5).
@@ -105,18 +100,16 @@ pub struct HirInput {
     /// The program is a lone script (an anonymous package), not a
     /// package: a `use` of a package it lacks says how a script gets one.
     pub script: Option<Script>,
-    /// The library's items are the same as in an earlier compile of
-    /// this process that gave this key (a REPL session's cells): what
-    /// collecting them made is taken from it.
+    /// The library items equal those of an earlier compile in this process
+    /// with this key (REPL cells); reuse what collecting them made.
     pub library: Option<u64>,
     /// The stage of `library`, when the driver took it: what collecting
     /// the library's items made is taken from it.
     pub stage: Option<KeptLibrary>,
 }
 
-/// Marker attribute on a trait / impl method, path `[ASSOC_TYPES_ATTR,
-/// X, ..]`: the associated types whose bare name `X` means `Self::X` in
-/// the body (spec 2.8.3).
+/// Marker on a trait / impl method, `[ASSOC_TYPES_ATTR, X, ..]`: bare `X`
+/// in the body means `Self::X` (spec 2.8.3).
 pub const ASSOC_TYPES_ATTR: &str = "#assoc";
 
 pub use ty::resolve_ty;
@@ -135,14 +128,11 @@ pub struct HirModule {
     /// Module-level `static` items with stable storage (one global per
     /// entry). Differs from `const` (which inlines at each use site).
     pub statics: Vec<HirStaticDef>,
-    /// Diagnostics produced during lowering: visibility violations,
-    /// glob conflicts, unresolved paths, etc. Driver appends these to
-    /// its overall diagnostic list.
+    /// Lowering diagnostics, appended by the driver.
     pub diagnostics: Vec<RokDiagnostic>,
-    /// What code generation starts from: `main`, the exports and the
-    /// lazy static initializers (a prebuilt library: also every function
-    /// of its package and the `any` dispatchers). `None`: keep every
-    /// function (a library without `main`).
+    /// Codegen roots: `main`, exports and lazy static inits (a prebuilt
+    /// library: also all its functions and the `any` dispatchers). `None`:
+    /// keep everything (a library without `main`).
     pub roots: Option<Vec<FunctionId>>,
     /// Library functions no lowered body reaches: body-less stubs in
     /// `functions` (signatures for tools), not code to emit.
@@ -237,8 +227,7 @@ pub struct HirStructDef {
     pub niche: Vec<NicheArg>,
 }
 
-/// `#[repr(..)]` of a struct, enum or union (spec 6.2.2). The default
-/// layout is already C's (declaration order, natural alignment), so `C`
+/// `#[repr(..)]` (spec 6.2.2). The default layout is already C's, so `C`
 /// changes nothing there.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Repr {
@@ -281,9 +270,9 @@ pub enum UnionStorage {
     /// One primitive wide enough for every field, accessed by cast;
     /// stays in registers.
     WidestPrim(PrimTy),
-    /// Bytes as large and aligned as the largest field, laid out by MIR
-    /// (`rokc_mir::ty::union_storage`); words that may hold a reference
-    /// are scanned as ambiguous.
+    /// Bytes as large and aligned as the largest field
+    /// (`rokc_mir::ty::union_storage`); possible reference words are
+    /// scanned as ambiguous.
     ByteArray,
 }
 
@@ -299,9 +288,8 @@ pub struct HirUnionKind {
 pub struct HirField {
     pub name: String,
     pub ty: HirTy,
-    /// Default for a field a struct literal omits. Kept as AST and
-    /// lowered at each literal; it is const, so re-evaluating it has no
-    /// side effects.
+    /// Default for an omitted field: kept as AST and lowered at each
+    /// literal, which is fine since it is const.
     pub default: Option<rokc_ast::Expr>,
 }
 
@@ -382,11 +370,10 @@ pub enum HirStmt {
     Continue {
         label: Option<String>,
     },
-    /// A call to a never-returning runtime hook (`rok_panic_at` for a failed
-    /// `try!`, `rok_uncaught_error_at` for an error escaping a throwing
-    /// `main`). MIR emits the call followed by an `unreachable`
-    /// terminator so the block is seen as not falling through. `throw`
-    /// itself lowers to plain returns / jumps (see `lower::throws`).
+    /// Call of a never-returning runtime hook (`rok_panic_at` for `try!`,
+    /// `rok_uncaught_error_at` for an error escaping `main`), followed by
+    /// `unreachable` in MIR. `throw` itself is returns / jumps
+    /// (`lower::throws`).
     Panic(HirExpr),
 }
 
@@ -437,9 +424,8 @@ pub enum HirExprKind {
         from_ty: HirTy,
         to_ty: HirTy,
     },
-    /// Build a closure value: a struct of (`fn_addr`, env). The lifted
-    /// function takes `env` as its first parameter; the user-visible
-    /// signature is `(arg_tys) -> ret_ty`.
+    /// Closure value `(fn_addr, env)`; the lifted function takes `env`
+    /// first, the visible signature is `(arg_tys) -> ret_ty`.
     ClosureValue {
         fn_id: FunctionId,
         env: Box<HirExpr>,
@@ -456,9 +442,8 @@ pub enum HirExprKind {
         ret_ty: HirTy,
         env_ty: HirTy,
     },
-    /// `if cond { then_block } else { else_branch }`. The `else_branch`
-    /// is itself an expression so `else if` chains and block-as-else are
-    /// represented uniformly.
+    /// `if cond { then } else { else_branch }`; the else is an expression
+    /// so `else if` chains need nothing special.
     If {
         cond: Box<HirExpr>,
         then_block: Box<HirBlock>,
@@ -555,9 +540,8 @@ pub enum HirExprKind {
         ty: HirTy,
         volatile: bool,
     },
-    /// `addr_of(place)` (`rok::bare`): the address (`usize`) of a local,
-    /// or of a field / array element inside one; the local lives in
-    /// memory from then on.
+    /// `addr_of(place)` (`rok::bare`): the address of a local or a part of
+    /// one, which then lives in memory.
     AddrOf {
         place: Box<HirExpr>,
     },
@@ -579,10 +563,9 @@ pub enum HirExprKind {
         value: Box<HirExpr>,
         elem: HirTy,
     },
-    /// `#[intrinsic("rok.atomic.OP")]` (stdlib 2.16.2): atomic `op`
-    /// (`load`, `xchg`, `add`, `sub`, `and`, `or`, `xor`, `cas`) on
-    /// element `i` of an integer / `bool` buffer. Yields the element's
-    /// previous value; `args` are the operand (`cas`: expected, new).
+    /// `rok.atomic.OP` (stdlib 2.16.2) on element `i` of an integer /
+    /// `bool` buffer; yields the previous value. `args`: the operand
+    /// (`cas`: expected, new).
     BufAtomic {
         op: &'static str,
         buf: Box<HirExpr>,
@@ -593,11 +576,10 @@ pub enum HirExprKind {
         /// (success, failure), the others the first.
         order: [&'static str; 2],
     },
-    /// `__mlir_op::<"dialect.op", R>(args.., attributes = {..},
-    /// regions = [..])` (stdlib bare 1.9): one MLIR op in generic form,
-    /// `attrs` (`name`, MLIR attribute text) verbatim; the expression's
-    /// type is the result. Each region is its block arguments (locals of
-    /// this function) and a straight-line body ending in the terminator.
+    /// `__mlir_op::<"dialect.op", R>(..)` (bare 1.9): one MLIR op in
+    /// generic form, `attrs` verbatim, typed by its result. Each region is
+    /// its block arguments (locals here) and a straight-line body ending in
+    /// the terminator.
     MlirOp {
         op: String,
         attrs: Vec<(String, String)>,
@@ -626,18 +608,15 @@ pub enum HirExprKind {
         storage_ty: HirTy,
         field_ty: HirTy,
     },
-    /// Coroutine suspend point (`yield`, a pending `await`): hand `value`
-    /// (the step value, the body function's return type) to the resumer;
-    /// the next resume continues after it. `is_final` marks the point a
-    /// finished coroutine parks at (it hands back the same value on every
-    /// later resume). Unit-typed.
+    /// Coroutine suspend (`yield`, pending `await`): hand `value` to the
+    /// resumer and continue here on the next resume. `is_final` is where a
+    /// finished coroutine parks, returning the same value forever.
     Suspend {
         value: Box<HirExpr>,
         is_final: bool,
     },
-    /// A fresh coroutine of body `body_fn` (an `is_async` /
-    /// `is_generator` function) with its initial `args`: a function value
-    /// `fn(resume args..) -> step` whose env is the coroutine frame.
+    /// A fresh coroutine of `body_fn` with initial `args`: a function value
+    /// `fn(resume args..) -> step` whose env is the frame.
     CoroNew {
         body_fn: FunctionId,
         args: Vec<HirExpr>,
@@ -677,8 +656,7 @@ pub enum HirPattern {
         struct_id: StructId,
         fields: Vec<(u32, HirPattern)>,
     },
-    /// `lo..hi` (exclusive) or `lo..=hi` (inclusive). Either bound may be
-    /// absent — `0..` matches anything `>= 0`. The compare type is the
+    /// `lo..hi` or `lo..=hi`, either bound optional, compared as the
     /// scrutinee's primitive.
     Range {
         start: Option<ConstVal>,
@@ -700,9 +678,8 @@ pub enum HirPattern {
         binder: Option<LocalId>,
         payload_ty: Option<HirTy>,
     },
-    /// A pattern on one member of a sum or `any` (`'a'` on `char | none`,
-    /// `E { msg }` on `any Error`): the tag test, then `sub` on the
-    /// member's payload.
+    /// A pattern on one member of a sum or `any` (`'a'` on `char | none`):
+    /// the tag test, then `sub` on the payload.
     SumMember {
         sum_ty: HirTy,
         variant_index: u32,
@@ -782,9 +759,8 @@ pub(crate) fn truncate_type_names(structs: usize, enums: usize) {
     });
 }
 
-/// Name struct (or `enum_`) `id`: its full path, and a generic
-/// instance's arguments by their own stable keys. Called when the id is
-/// handed out, before any type names it.
+/// Name struct (or enum) `id` by full path, instances by their arguments'
+/// stable keys; called when the id is handed out.
 pub(crate) fn name_type(enum_: bool, id: u32, base: &str, args: &[HirTy]) {
     let name = if args.is_empty() {
         base.to_owned()
@@ -819,9 +795,8 @@ pub fn type_name(enum_: bool, id: u32) -> Option<String> {
     })
 }
 
-/// A trait as a bound names it or an impl provides it, `Get<i32, Item =
-/// u8>` (spec 2.8, 2.10): the trait's full path, its positional
-/// arguments and its associated-type bindings (sorted by name).
+/// A trait as bounded or provided (`Get<i32, Item = u8>`, spec 2.8, 2.10):
+/// full path, positional arguments, associated bindings sorted by name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TraitRef {
     pub path: String,
@@ -848,9 +823,8 @@ impl TraitRef {
         self.args.is_empty() && self.binds.is_empty()
     }
 
-    /// Does an impl providing `self` (its arguments and associated types
-    /// all given) meet bound `want`? `want` may leave the arguments and
-    /// any binding out.
+    /// Does an impl providing `self` (fully given) meet `want`, which may
+    /// omit arguments and bindings?
     #[must_use]
     pub fn satisfies(&self, want: &Self) -> bool {
         self.path == want.path
@@ -897,11 +871,9 @@ pub enum HirTy {
     /// Untyped wildcard (error recovery, untyped parameters); compatible
     /// with everything. The user's `any` is `AnyTrait(vec![])`.
     Any,
-    /// `any` / `any Tr` / `any (A + B)`: the bounds in canonical order
-    /// (`HirTy::any`); plain `any` has none.
-    /// Tag + heap payload; the tag numbers concrete types program-wide.
-    /// Construction reuses `SumWrap` (variant index = tag) and narrowing
-    /// reuses `SumVariant` with this as `sum_ty`.
+    /// `any` / `any Tr` / `any (A + B)`, bounds in canonical order. A tag
+    /// (program-wide type number) and a heap payload; built with `SumWrap`,
+    /// narrowed with `SumVariant`.
     AnyTrait(Vec<TraitRef>),
     /// A type name not resolved (yet): a type parameter, `Self`, or an
     /// unknown name reported later.
@@ -918,9 +890,8 @@ pub enum HirTy {
     NoThrow,
     /// An inference variable of an un-annotated `let` (`lower::infer`).
     Var(u32),
-    /// A type parameter while its generic body is checked against its
-    /// bounds (spec 2.10.9, `lower::bounds`): opaque, it has only what
-    /// its bounds give.
+    /// A type parameter while its generic body is checked (spec 2.10.9):
+    /// opaque, with only what its bounds give.
     Param(u32),
     Sum(Vec<HirTy>),
     Tuple(Vec<HirTy>),
@@ -932,10 +903,7 @@ pub enum HirTy {
     Array(Box<HirTy>, u32),
     // `fn(A, B) -> R` — first-class function pointer, with its bounds.
     Fn(Vec<HirTy>, Box<HirTy>, FnBounds),
-    // Closure value: function pointer paired with captured-by-value
-    // environment. Stored in MIR as a 2-tuple `{fn_ptr, env}`. The env
-    // type is part of the closure's type identity — closures with
-    // different capture sets are different closure types.
+    // `{fn_ptr, env}`; the env type is part of the closure's identity.
     Closure {
         args: Vec<HirTy>,
         ret: Box<HirTy>,
@@ -944,17 +912,15 @@ pub enum HirTy {
         /// never `Send` / `Sync` (spec 4.6.9).
         shares: bool,
     },
-    // What a function declared `throws (err) -> ok` returns: the
-    // `{ is_err: bool, ok, err }` carrier (value-based errors, no
-    // unwinding). Appears only as a function's (or `fn` type's) return
-    // type; `try` unpacks it at the call site.
+    // `throws (err) -> ok` carrier `{ is_err, ok, err }` (no unwinding);
+    // only as a return type, unpacked by `try`.
     Throws {
         ok: Box<HirTy>,
         err: Box<HirTy>,
     },
-    /// `rok::bare::mem::GcBuf<T>` (re-exported as `rok::core::collections::raw::GcBuf`): a GC object holding a
-    /// run of `T`s (the storage of `List` / `Dict` / `Set`). One `GcRef`
-    /// word; its length lives with whoever owns it.
+    /// `rok::bare::mem::GcBuf<T>`: a GC object holding a run of `T`s (the
+    /// storage of `List` / `Dict` / `Set`), one word; the owner keeps the
+    /// length.
     GcBuf(Box<HirTy>),
     /// `!`: the type of a diverging expression (`panic(..)`, `exit(..)`,
     /// `loop {}` without `break`). Flows into any slot.
@@ -981,27 +947,18 @@ impl HirTy {
         Self::AnyTrait(bounds)
     }
 
-    /// Spec 2.6.4: a sum is a set — nested sums flatten, duplicates
-    /// drop, and the members take one canonical order, so `A | B` and
-    /// `B | A` are the same `HirTy` (same layout, same tags, same
-    /// `PartialOrd` across variants). One member left is that type.
-    /// Build every `HirTy::Sum` through this (or `canonicalize` after
-    /// rewriting members in place).
+    /// Spec 2.6.4: a sum is a set. Nested sums flatten, duplicates drop and
+    /// members take one canonical order, so `A | B` and `B | A` are one
+    /// `HirTy`; a single member is that type. Build every `HirTy::Sum` here
+    /// (or `canonicalize` after editing members).
     ///
-    /// Except a nested layer: a member sum sharing a member with the
-    /// outer set's own (non-sum) members stays one member. Generic
-    /// substitution builds that shape: `T | none` with `T = i32 | none`
-    /// is `(i32 | none)?`, whose outer `none` is not the inner one, and
-    /// `T | E` with `T = i32 | E` keeps the generic's `E` apart from
-    /// `T`'s. Disjoint members flatten (`T | none` with `T = i32 | str`
-    /// is `i32 | str | none`). A written sum is `spread` first, so
-    /// `(i32 | none) | none` is `i32 | none`. Each layer is canonical
-    /// on its own.
+    /// A member sum that overlaps the outer members stays one nested layer:
+    /// generic substitution makes `T | none` with `T = i32 | none` into
+    /// `(i32 | none)?`. Disjoint members flatten; written sums are
+    /// `spread` first.
     ///
-    /// The order: `none` last, the rest by `stable_key` — their
-    /// structure with structs and enums by full name (and generic
-    /// arguments), so the tags agree across separately compiled
-    /// packages (a prebuilt library and its users).
+    /// Order: `none` last, the rest by `stable_key` (structs and enums by
+    /// full name), so tags agree across separately compiled packages.
     #[must_use]
     pub fn sum(parts: impl IntoIterator<Item = Self>) -> Self {
         let parts: Vec<Self> = parts.into_iter().collect();

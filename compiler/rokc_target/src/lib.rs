@@ -1,11 +1,9 @@
-//! Target specifications: everything the compiler, the linker and the
-//! runtime build know about a compilation target, in one value.
+//! Target specifications: everything compiler, linker and runtime build
+//! know about a target, in one value.
 //!
-//! A target is named by `--target`: a built-in name (`rokc --print
-//! target-list`), or the path of a `<name>.rokon` file holding a
-//! `TargetSpec { .. }` with every field below (`rokc --print target-spec
-//! --target <t>` prints a built-in one in that form). Nothing else in the
-//! compiler looks at a target's name.
+//! `--target` takes a built-in name (`rokc --print target-list`) or a
+//! `<name>.rokon` holding a full `TargetSpec { .. }` (`rokc --print
+//! target-spec` prints one). Nothing else looks at a target's name.
 
 mod builtin;
 
@@ -367,9 +365,8 @@ impl TargetSpec {
         HOST_SPEC.get_or_init(|| Self::resolve(None).unwrap_or_else(|e| panic!("{e}")))
     }
 
-    /// The host's platform, whatever CPU it builds for (`-C target-cpu`,
-    /// `-C target-feature`): its runtime, C toolchain and cached
-    /// standard library builds serve it.
+    /// The host's platform whatever CPU it targets: its runtime, C
+    /// toolchain and cached std builds serve it.
     #[must_use]
     pub fn is_host(&self) -> bool {
         let h = Self::host();
@@ -380,9 +377,9 @@ impl TargetSpec {
         }
     }
 
-    /// `-C target-cpu` (`native`: the build machine's, with its
-    /// features, when this is its platform; `host` gives them) and
-    /// `-C target-feature` (`+f` / `-f`, appended to the baseline's).
+    /// `-C target-cpu` (`native`: the build machine's, with features, on
+    /// its platform; `host` gives them) and `-C target-feature` (`+f` /
+    /// `-f` over the baseline).
     pub fn set_cpu(
         &mut self,
         cpu: Option<&str>,

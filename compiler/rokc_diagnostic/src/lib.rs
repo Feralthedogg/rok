@@ -63,18 +63,16 @@ pub fn time<T>(what: &str, f: impl FnOnce() -> T) -> T {
     r
 }
 
-/// The source files of one compile, by id (`Span::file` - 1): path and
-/// text, for locations and the caret line under a diagnostic. The
-/// driver fills it; whoever renders the compile's diagnostics reads it.
+/// One compile's source files by id (`Span::file` - 1), for locations and
+/// carets.
 #[derive(Clone, Debug, Default)]
 pub struct SourceMap {
     files: Vec<(String, String)>,
     views: Vec<View>,
 }
 
-/// A stretch of a file `location` shows as another file: a REPL cell
-/// inside its generated session source reads as `<repl>:1:1`, a program
-/// loaded into a session (`repl <path>`) as the program's own lines.
+/// A stretch of a file shown as another: a REPL cell as `<repl>:1:1`, a
+/// loaded program as its own lines.
 #[derive(Clone, Debug)]
 struct View {
     id: u32,
@@ -153,10 +151,8 @@ impl SourceMap {
             .map(|(_, s)| s.as_str())
     }
 
-    /// Make `location` show lines `from.0..=last` of file `id` as `path`.
-    ///
-    /// `from` (line, column) shows as `at`. A span of `id` outside every
-    /// such stretch shows as the first one's `path`, without a position.
+    /// Show lines `from.0..=last` of file `id` as `path`, `from` at `at`.
+    /// Spans outside every stretch show the first `path`, unpositioned.
     pub fn view(&mut self, id: u32, path: String, from: (u32, u32), last: u32, at: (u32, u32)) {
         self.views.push(View {
             id,
@@ -372,11 +368,8 @@ impl RokDiagnostic {
     }
 }
 
-/// `message` about the name `leaf` defined at both `a` and `b`.
-///
-/// One name, one item: no overloading. Points at both, the later as
-/// the error; `callable`: the help names default parameters, the way
-/// to take different argument counts (spec 4.2.3).
+/// `leaf` defined at both `a` and `b`; no overloading, so the later one
+/// is the error. `callable`: suggest default parameters (spec 4.2.3).
 #[must_use]
 pub fn duplicate(
     kind: ErrorKind,
@@ -427,11 +420,9 @@ impl SourceMap {
     }
 }
 
-/// Closest candidate to `name` by edit distance, for a "did you mean".
-///
-/// Within about a third of the name's length (names under three chars
-/// only match by case), ties to the first. Exact matches and internal
-/// names (`__x`, `#x`, a nested fn's `f/x`) give nothing.
+/// "Did you mean": the closest candidate within about a third of the
+/// name's length (short names match by case only), first on ties. Exact
+/// matches and internal names (`__x`, `#x`, `f/x`) give nothing.
 #[must_use]
 pub fn suggest<'a, I>(name: &str, candidates: I) -> Option<&'a str>
 where
@@ -634,12 +625,9 @@ pub fn capture_warnings<T>(f: impl FnOnce() -> T) -> (T, String) {
     (r, text)
 }
 
-/// From a panic hook: end the process quietly if `output_closed`.
-///
-/// As a C program does: killed by SIGPIPE, saying nothing (Windows:
-/// exit 1, though std drops writes to a pipe whose reader left, so it
-/// hardly gets here). Other pipes and sockets keep reporting `EPIPE`, so SIGPIPE
-/// stays ignored until now.
+/// From a panic hook: if `output_closed`, die of SIGPIPE quietly like a C
+/// program (Windows: exit 1). SIGPIPE stays ignored until here so other
+/// pipes and sockets still see `EPIPE`.
 pub fn end_if_output_closed(info: &std::panic::PanicHookInfo<'_>) {
     if !output_closed(info) {
         return;

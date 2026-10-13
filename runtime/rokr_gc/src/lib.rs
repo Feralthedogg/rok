@@ -1,105 +1,59 @@
 //! Garbage collector: mark-region (Immix-style blocks and lines, 703
 //! §7.3.1), generational, with opportunistic evacuation and concurrent
-//! marking of big full collections ([`concurrent`]): precise in the
-//! heap, roots and a few ambiguous words pin what they reach.
+//! marking ([`concurrent`]). Precise in the heap and roots; ambiguous
+//! words pin what they reach.
 //!
-//! Small and medium objects (< [`LOS_THRESHOLD`], align <= 8) live in
-//! 32 KiB blocks of 128-byte lines carved from one reserved address
-//! range. Each thread bump-allocates from its TLAB (702 §7.2.1): a run
-//! of free lines in `rok_tls_tlab_cursor..rok_tls_tlab_limit`. Compiled
-//! code inlines the bump (809 §8.9.9) and calls [`alloc`] only when the
-//! TLAB is exhausted; the refill takes the world lock. A medium object
-//! (> one line) that does not fit the TLAB gets its own run of lines.
-//! Large objects (LOS, 702 §7.2.9) are one allocation each (pages of
-//! their own from [`LOS_MAP_MIN`] on, unmapped when they die), linked
-//! through a hidden [`Prefix`] in front of the header.
+//! Objects below [`LOS_THRESHOLD`] live in 32 KiB blocks of 128-byte
+//! lines. Each thread bump-allocates from its TLAB (702 §7.2.1); compiled
+//! code inlines the bump (809 §8.9.9) and calls [`alloc`] only on refill,
+//! which takes the world lock and zeroes the lines it hands out. Large
+//! objects (702 §7.2.9) are one allocation each, linked through a hidden
+//! [`Prefix`].
 //!
-//! Every object's `gc_word` (801 §8.1.4) holds its size (8-rounded; its
-//! new address while an evacuation runs) and block objects have a nonzero
-//! `type_id`, so a block is parsable: memory that is not an object is
-//! all zero. The refill zeroes the lines it hands out (outside the
-//! world lock; dead objects are not zeroed by the sweep), so the TLAB
-//! fast path hands out zeroed memory without a memset.
+//! Every `gc_word` (801 §8.1.4) holds the object's size (its new address
+//! while evacuating) and block objects have a nonzero `type_id`, so a
+//! block is parsable: non-object memory is zero. Per-block object-start
+//! bitmaps are filled lazily, so an unreachable young block is freed
+//! without being read.
 //!
-//! A collection (heap over `max(4 MiB, 2 x live)`, or `rok_gc_collect`)
-//! stops every mutator ([`world`]), empties all TLABs, marks from all
-//! shadow stacks, then sweeps: live objects mark their lines, dead ones
-//! lose their start bit, unmarked lines are free for the next cycle's
-//! TLABs. Object lookup uses per-block object-start bitmaps, kept
-//! across collections; the lines handed out since the last collection
-//! are parsed into them only in blocks a lookup lands in, so a block of
-//! young objects that nothing reaches is freed without being read.
+//! Generations use sticky mark bits (703 §7.3.2). A minor collection
+//! marks from the roots and the remembered set and sweeps only lines
+//! handed out since the last collection. The write barrier tests
+//! `UNLOGGED` on an old object; the slow path ([`write_barrier_slow`])
+//! records it. An old LOS object is `CARDED` instead: the barrier dirties
+//! a 512-byte card and a minor collection scans only dirty cards. A full
+//! collection runs when old bytes exceed `max(4 MiB, 2 x live)`; past
+//! [`CONCURRENT_MIN`] it marks concurrently (no evacuation then).
 //!
-//! Generations (sticky mark bits, 703 §7.3.2): a survivor of any collection is old (`STICKY`). A
-//! minor collection marks from the roots and the remembered set only,
-//! never enters an old object, and sweeps only the lines handed out
-//! since the last collection (all young objects live there). An old
-//! object also carries `UNLOGGED`; compiled code's write barrier tests
-//! that bit before storing a reference into a GC object, and the slow
-//! path ([`write_barrier_slow`]) clears it and records the object. A
-//! full collection (old bytes over `max(4 MiB, 2 x live after the last
-//! full one)`, or `rok_gc_collect`) marks everything and resets the
-//! remembered set. An automatic one marks concurrently once the old heap
-//! reaches [`CONCURRENT_MIN`]: a minor collection in a pause, then the
-//! marker thread while mutators run, then a short pause to finish and
-//! sweep (no evacuation; a fragmented heap makes the next full
-//! collection stop the world).
-//!
-//! An old LOS object is `CARDED` instead: the barrier dirties the
-//! 512-byte card of the slot (card table behind the object, pointer in
-//! the word before its header) and a minor collection scans only the
-//! dirty cards, so a store into a big old buffer costs one card.
-//!
-//! Evacuation (defragmentation, full collections only): after the
-//! sweep, if a quarter of the used blocks' lines are free, every block
-//! at most half occupied is a candidate ([`select_candidates`]); its
-//! survivors are copied into the holes of the other blocks (then free,
-//! then fresh blocks) and leave their new address behind (`FORWARDED`,
-//! `gc_word`); one pass over the live heap rewrites every precise
-//! reference ([`fix_references`]). An object stays where it is if a
-//! root or an ambiguous word reaches it (the mark records those), if it
-//! is pinned, or if its address was taken (`NOMOVE`, parking keys).
-//! Roots pin because a root word may be an inline `any` payload and
-//! because compiled code and runtime calls derive pointers from rooted
-//! values (`str` bytes passed to C or a blocking call, element
-//! addresses): an object a frame reaches directly never moves. After a
-//! full collection the pages of free blocks beyond the next cycle's
-//! allocation budget go back to the OS.
-//!
-//! Limits: block objects (< 8 KiB) are remembered whole; the sweep and
-//! evacuation run in pauses.
-//!
-//! Debug knobs (env, read once): `ROK_GC_STRESS=N` (a collection every
-//! `N` object allocations through the runtime, every 8th one full),
-//! `ROK_GC_EVAC=always` (every full collection evacuates every block it
-//! may), `ROK_GC_CONCURRENT=always|off` (every automatic full collection
-//! marks concurrently / none does), `ROK_GC_STATS=1` (counts, pause
-//! times, blocks and bytes moved, full-collection pauses and marker CPU
-//! to stderr at exit), `ROK_GC_LOG=1` (a line per collection, [`Pause`])
-//! and `ROK_HEAP_DUMP=on_oom` ([`heap_dump`]). Any other value warns
-//! and reads as the default ([`rokr_common::env_knob`]).
+//! Evacuation (full stop-the-world collections only): when a quarter of
+//! used lines are free, blocks at most half occupied are candidates
+//! ([`select_candidates`]); survivors move into holes elsewhere and one
+//! pass rewrites every precise reference ([`fix_references`]). An object
+//! reached by a root or an ambiguous word, pinned, or `NOMOVE` stays put:
+//! compiled code and runtime calls derive raw pointers from rooted values.
+//! Free pages beyond the next cycle's budget go back to the OS. Block
+//! objects are remembered whole; sweep and evacuation run in pauses.
 //!
 //! Roots (704 §7.4.1): compiled code links a frame
 //! `{ prev, count, slots[count] }` into `rok_tls_shadow_stack_top` before
 //! the first safepoint of each path and unlinks it on every return of a
-//! path that linked it; each slot is the *address* of a word that holds a
-//! GC reference (0 = none).
+//! path that linked it; each slot is the address of a word holding a GC
+//! reference (0 = none).
 //!
-//! Children (802): `type_id → ScanTable` registered by
-//! [`register_type`] ([`for_each_ref`]): `STRONG_REF` / `INTERIOR_REF`
-//! words (a reference, a `str` pointer into an object, or a non-heap
-//! address), `ANY_SLOT` (the payload is a reference iff the tag has
-//! [`ANY_BOXED`]; else it is the value), `SUM_PAYLOAD` (an enum / sum:
-//! its tag selects the variant whose entries apply, [`visit_sum`]),
-//! `AMBIGUOUS` (a word that may hold anything) and `WEAK_REF` (a
-//! reference the mark does not follow, [`clear_dead_weak`]). A table
-//! with the `TABLE_ARRAY` version bit describes one element of a buffer,
-//! repeated over its payload. Type id 2 (runtime word buffers) is all
-//! ambiguous words; type id 3 is a weak cell ([`weak_new`]). An object
-//! whose type was never registered has no traced children. Any reference word (root, interior, or an
-//! integer that happens to equal an address) is looked up among the
-//! objects; a word outside every object is ignored and an ambiguous one
-//! only retains (and pins) the object it hits.
+//! Children (802): [`register_type`] maps `type_id` to a `ScanTable`
+//! ([`for_each_ref`]): `STRONG_REF` / `INTERIOR_REF` words, `ANY_SLOT`
+//! (a reference iff the tag has [`ANY_BOXED`]), `SUM_PAYLOAD` (the tag
+//! selects the variant, [`visit_sum`]), `AMBIGUOUS` and `WEAK_REF`
+//! ([`clear_dead_weak`]). `TABLE_ARRAY` describes one element repeated
+//! over a buffer. Type id 2 is all ambiguous words, 3 a weak cell
+//! ([`weak_new`]). A word outside every object is ignored; an ambiguous
+//! one only retains and pins the object it hits.
+//!
+//! Debug knobs (read once): `ROK_GC_STRESS=N` (a collection every `N`
+//! runtime allocations, every 8th full), `ROK_GC_EVAC=always`,
+//! `ROK_GC_CONCURRENT=always|off`, `ROK_GC_STATS=1`, `ROK_GC_LOG=1`
+//! ([`Pause`]), `ROK_HEAP_DUMP=on_oom` ([`heap_dump`]). Other values warn
+//! ([`rokr_common::env_knob`]).
 
 #![cfg_attr(not(test), no_std)]
 
@@ -1199,11 +1153,9 @@ fn for_each_start(
     }
 }
 
-/// Before marking: the sorted LOS index. (Block start bits of the lines
-/// handed out since the last collection are parsed lazily, by
-/// [`object_in`].)
-/// Also the block heap view lookups use ([`Mark`]). With the world
-/// stopped and the mark lock held.
+/// Before marking: the sorted LOS index and the block heap view lookups
+/// use ([`Mark`]); new block lines are parsed lazily by [`object_in`].
+/// With the world stopped and the mark lock held.
 fn build_index() {
     let (h, m) = (heap(), mark());
     (m.base, m.nblocks, m.meta, m.reserved) = (h.base, h.nblocks, h.meta, h.reserved);
@@ -1364,9 +1316,9 @@ pub unsafe fn no_move(obj: *mut u8) {
 /// decided from the line table without touching the object. Free and
 /// `BLACK` lines hold none (a live object covers only its own lines;
 /// a concurrent mark never looks at what was allocated meanwhile).
-/// `MOVED`: objects may be evacuated already. `!exact` (a precise reference: inside its object, or one past its
-/// end): the nearest block object start at or before `word`, its header
-/// left unread.
+/// `MOVED`: objects may be evacuated already. `!exact` (a precise
+/// reference: inside its object, or one past its end): the nearest block
+/// object start at or before `word`, its header left unread.
 fn object_in<const MOVED: bool>(word: usize, young: bool, exact: bool) -> Option<*mut u8> {
     let size_of = |o: *mut u8| if MOVED { moved_size(o) } else { obj_size(o) };
     let m = mark();

@@ -1,14 +1,11 @@
-//! `write_to_copy` (spec 6.2.9): a field written on a copy that nothing
-//! can read afterwards. A struct is a value (spec 2.3.8), so a by-value
-//! parameter or receiver, a `for` binding and a `let` of an element
-//! (`xs[i]`) hold copies, and `p.x = v` changes only the copy.
+//! `write_to_copy` (spec 6.2.9): a field write on a copy nothing reads
+//! afterwards. Structs are values (spec 2.3.8), so by-value parameters,
+//! `for` bindings and `let x = xs[i]` hold copies.
 //!
-//! A write is reported when no read of its variable can follow it: none
-//! later in the text, and none in a loop around the write that the
-//! variable outlives. A read that only feeds a write to the same
-//! variable (`p.x = p.x + 1`, a right side of paths, fields, literals
-//! and operators) counts only if that write is read in turn. A variable
-//! a closure or coroutine block mentions is skipped: it may run later.
+//! Reported when no read of the variable can follow: none later, and none
+//! in a loop around the write that the variable outlives. A read feeding
+//! only a write to the same variable (`p.x = p.x + 1`) counts only if that
+//! write is read. Variables a closure or coroutine mentions are skipped.
 
 use std::collections::{HashMap, HashSet};
 

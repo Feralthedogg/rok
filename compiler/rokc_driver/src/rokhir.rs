@@ -11,18 +11,12 @@
 //!          varint n | n × (str function | str summary)
 //! ```
 //!
-//! `str` is a `PrefixVarInt` length + UTF-8 (904.7). The body is the
-//! package's source, every file, with each concrete function body cut
-//! to `;` (line breaks kept, so diagnostics keep their lines): what
-//! downstream code needs (signatures, types, traits, impls, generic and
-//! `async` / `#[inline]` bodies, trait defaults) and nothing it can link;
-//! then the `.wit` files its `ffi::wit` items read, whole (paths may
-//! leave the source dir through `..`). Then the use-after-hand-off
-//! summaries of its bodies (stdlib 2.13.9): what each function does
-//! with its parameters, which a dependent cannot see in a cut body.
-// The body is rok source rather than 904.9-11's type / item / body
-// sections: monomorphization consumes AST and the parser reads it; a
-// binary tree would only save the (cheap) parse.
+//! `str` is a `PrefixVarInt` length + UTF-8 (904.7). The body is every
+//! source file with concrete function bodies cut to `;` (line breaks kept
+//! for diagnostics), then the `.wit` files `ffi::wit` reads, then the
+//! use-after-hand-off summaries (stdlib 2.13.9) a cut body can't show.
+// Source rather than 904.9-11's binary sections: monomorphization works on
+// AST anyway, and a binary tree would only save the cheap parse.
 
 use std::path::{Path, PathBuf};
 
@@ -346,9 +340,8 @@ fn strip(text: &str, file_id: u32, items: &[Item]) -> String {
     out
 }
 
-/// `text` (of `file`) with each `include_str!` / `include_bytes!` replaced
-/// by the literal it reads (line breaks kept), so a relocated interface
-/// reads no file.
+/// `text` with `include_str!` / `include_bytes!` replaced by their literals
+/// (line breaks kept), so a relocated interface reads no file.
 fn inline_includes(text: &str, file: &Path) -> String {
     use rokc_lexer::TokenKind as K;
     let (tokens, _) = rokc_lexer::Lexer::new(text, String::new()).lex_all();
@@ -381,11 +374,8 @@ fn inline_includes(text: &str, file: &Path) -> String {
     out
 }
 
-/// The interface files of package `pkg` (its `SourceFile`s, mounted at
-/// `pkg`) whose root file is in `dir`, with its `any` seeds (`(module,
-/// text)`, HIR `any_seeds`) appended to their modules' files.
-///
-/// `cut`: concrete bodies cut to `;`.
+/// Interface files of package `pkg` rooted in `dir`, with its `any` seeds
+/// appended to their modules. `cut`: concrete bodies cut to `;`.
 #[must_use]
 pub fn interface(
     sources: &[SourceFile],
@@ -520,11 +510,9 @@ pub fn companions(path: &Path) -> (PathBuf, PathBuf) {
     )
 }
 
-/// The `pub` items of an interface file, one line each (as written, up
-/// to the body; methods as `Type::fn ..`); generic ones (with `<` before
-/// `(`, or in an `impl<..>`) apart.
-// Line-level (a `pub` line; an `impl` line at column 0 opens a block
-// until a `}` line), which suffices for formatted source.
+/// `pub` items of an interface file, one line each (methods as
+/// `Type::fn ..`), generic ones apart.
+// Line-level; enough for formatted source.
 fn signatures(text: &str, exports: &mut Vec<String>, generic: &mut Vec<String>) {
     let mut impl_of: Option<(String, bool)> = None;
     for line in text.lines() {

@@ -231,6 +231,11 @@ pub struct MirFunction {
     /// Loop headers whose loop `strip` bounded to `SHORT_TRIPS`
     /// iterations a time (`short_loops`).
     pub strips: Vec<u32>,
+    /// In a function where a `rok::bare::ptr` value can appear: its locals
+    /// holding GC references. Each stays rooted (so in place) until its
+    /// scope ends, not only until its last use, and a coroutine keeps it
+    /// in its frame as a pinning word (stdlib 2.15 `str::as_ptr`).
+    pub pins: Vec<LocalId>,
 }
 
 impl MirFunction {
@@ -535,6 +540,16 @@ pub enum Terminator {
     },
 }
 
+/// What a [`MirTy::Union`] is: only `Sum` marks a sum's `(i32 tag,
+/// payload)` layout; the shape alone never does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnionKind {
+    /// The payload slot right after a sum's `i32` tag (`sum_layout`).
+    Sum,
+    /// Anything else: a `union`'s storage, a pinning frame slot.
+    Plain,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum MirTy {
     Unit,
@@ -553,14 +568,13 @@ pub enum MirTy {
     /// and traces exactly these words; the collector ignores a word that
     /// is not an object address.
     GcRef,
-    /// The shared payload slot of a sum whose variants hold GC
-    /// references: `words` pointer-width words, laid out like
-    /// `[GcRef; words]`. Keeps each data variant's `(stored tag,
-    /// payload)` so the collector scans only the active one (802
-    /// `SUM_PAYLOAD`); the tag is the `i32` before it in the sum. As
-    /// aligned as its most aligned variant (an explicit layout past a
-    /// word).
-    Union(Vec<(u32, MirTy)>, u32),
+    /// Overlaid values holding GC references: `words` pointer-width
+    /// words, laid out like `[GcRef; words]`, keeping each variant's
+    /// `(stored tag, type)`. As aligned as its most aligned variant (an
+    /// explicit layout past a word). A sum's payload slot
+    /// ([`UnionKind::Sum`]) is scanned per the `i32` tag before it (802
+    /// `SUM_PAYLOAD`); any other one as ambiguous words.
+    Union(Vec<(u32, MirTy)>, u32, UnionKind),
     /// `__mlir_type<"text">` (stdlib bare 1.9): an opaque MLIR type;
     /// its values are SSA only (no slot, never in memory).
     Mlir(String),

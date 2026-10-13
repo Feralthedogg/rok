@@ -36,9 +36,8 @@ struct Server<W> {
     shutdown: bool,
 }
 
-/// Serve requests from `input` until `exit` (or end of input), linting
-/// at `levels`. Returns the process exit code: 0 after a `shutdown`,
-/// else 1 (LSP spec).
+/// Serve `input` until `exit` or EOF, linting at `levels`; exit code 0
+/// after `shutdown`, else 1 (LSP spec).
 pub fn serve(
     input: impl BufRead + Send + 'static,
     out: impl Write,
@@ -274,13 +273,12 @@ impl<W: Write> Server<W> {
         s
     }
 
-    /// Check `text` standing for the buffer `path`: the package root
-    /// (902.2) with this buffer's text when it is the root, else the
-    /// root as open or on disk; a file outside any package is anonymous.
-    /// Every open buffer stands for its file.
-    /// A package with both root files (0.3.1): a file its library reaches
-    /// is the library's, any other the executable's, which mounts the
-    /// library's sources (as edited) as dependency `<name>`.
+    /// Check `text` as buffer `path`: the package root (902.2) with this
+    /// buffer as root or the root as open / on disk; files outside any
+    /// package are anonymous. Open buffers stand for their files. With both
+    /// root files (0.3.1), a file the library reaches is the library's, any
+    /// other the executable's, which mounts the library (as edited) as
+    /// dependency `<name>`.
     fn compile(&self, path: &Path, text: &str) -> Analysis {
         let Some(pkg) = rokc_interface::discover(path).ok().filter(|p| !p.anonymous) else {
             return analyze(self.session(true), text, path, &self.levels);
@@ -297,9 +295,8 @@ impl<W: Write> Server<W> {
         self.compile_root(&abs(&pkg.root), path, text, library)
     }
 
-    /// Check package root `root` for the buffer `path` (its text `text`
-    /// when it is the root, else the root as open or on disk), with
-    /// `library` (the package's name and `src/lib.rok`) as a dependency.
+    /// Check root `root` for buffer `path`, with `library` (name and
+    /// `src/lib.rok`) as a dependency.
     fn compile_root(
         &self,
         root: &Path,
@@ -501,11 +498,9 @@ impl<W: Write> Server<W> {
 /// A completion candidate: label, LSP `CompletionItemKind`, detail.
 pub(crate) type Candidate = (String, u32, String);
 
-/// Completion at byte `off` of `text` (the file `key`): after `recv.`
-/// the receiver's fields and methods, after `a::b::` the items under
-/// the path. `compile` checks an edited `text`; `good` is the last
-/// compile that type-checked. Returns where the word being completed
-/// starts and the candidates extending it.
+/// Completion at `off`: after `recv.` its fields and methods, after
+/// `a::b::` the items under it. `compile` checks the edited `text`; `good`
+/// is the last type-checked compile. Returns the word start and candidates.
 pub(crate) fn complete(
     text: &str,
     key: &str,
@@ -954,11 +949,10 @@ impl AstVisitor for FieldInits<'_> {
     }
 }
 
-/// Every reference in the buffer to what the identifier at `off`
-/// names, its declaration included, as byte ranges. A local resolves
-/// through the buffer's scopes; a `.member` matches every `.member` of
-/// that name; anything else every same-named identifier that is not a
-/// local.
+/// Every reference to what the identifier at `off` names, its declaration
+/// included, as byte ranges: a local through the buffer's scopes, a
+/// `.member` every same-named member, anything else every same-named
+/// non-local identifier.
 fn references(doc: &Doc, key: &str, off: usize) -> Option<Vec<(usize, usize)>> {
     let text = doc.text.as_str();
     let (name, start) = ident_at(text, off)?;
@@ -1254,9 +1248,8 @@ fn path_uri(path: &Path) -> String {
     path_to_uri(&path.display().to_string(), cfg!(windows))
 }
 
-/// A `file://` URI's path. On Windows `file:///c%3A/a/b` is `C:\a\b`
-/// (the drive as rokc spells it: editors lowercase it) and
-/// `file://host/share/x` is `\\host\share\x`.
+/// A `file://` URI's path; on Windows `file:///c%3A/a/b` is `C:\a\b` (the
+/// drive as rokc spells it) and `file://host/share/x` is `\\host\share\x`.
 fn uri_to_path(uri: &str, windows: bool) -> String {
     let Some(rest) = uri.strip_prefix("file://") else {
         return uri.to_owned();

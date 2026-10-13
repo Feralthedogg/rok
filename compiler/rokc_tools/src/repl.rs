@@ -1,28 +1,17 @@
-//! `repl`: an interactive session on a JIT (906).
+//! `repl` (906): cells JIT-linked into one session, the implicit
+//! `main.rok` (907.1).
 //!
-//! The session is one anonymous `main.rok` (907.1: a run of cells is
-//! the implicit `main.rok` with top-level statements and items appended).
+//! Each cell is compiled to an object (native backend at `-O0`, LLVM
+//! above) and sent to a long-lived host (`repl_host.c`) that links and
+//! runs it. Items are in every cell's program; statements are not.
+//! Functions the host already has with the same text are only declared
+//! (`ReplCell::known`). A top-level binding is an exported global slot (a
+//! GC root) owned by its cell; later cells declare it `extern "C" static
+//! mut` and copy it in on entry and out on exit. A cell that panics leaves
+//! the session untouched: the host forks a snapshot per cell (Windows:
+//! saves and restores memory).
 //!
-//! rokc compiles each cell and sends it to a long-lived host process
-//! (`repl_host.c`, the runtime linked in and initialized once), which
-//! links it into the session and runs it once. A cell is an object (the
-//! native backend's at `-O0`, LLVM's above), which the host maps and
-//! links itself. Items (`fn`, `struct`, `impl`, ..) are in every cell's
-//! program; statements are not. A function the host already compiled
-//! with the same text (library code, unchanged items) is only declared
-//! (`ReplCell::known`), so library code is compiled once per session.
-//! A top-level binding lives in an exported global slot (a GC root) the
-//! defining cell owns; later cells declare it `extern "C" { static mut
-//! .. }` with its type as written and copy it into a local of the same
-//! name on entry (and back out on exit, so assignments persist). A cell
-//! that dies (panic) leaves the session as it was before it: the host
-//! forks a snapshot per cell (Windows: it saves its memory and puts it
-//! back).
-//!
-//! `repl <path>` loads a program first (`load_program`): its items join the
-//! session, then its top-level statements run as cells, each ending
-//! after a top-level `let`, so a failure keeps the bindings made before
-//! it.
+//! `repl <path>` loads a program first (`load_program`).
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -139,9 +128,8 @@ struct Binding {
     holds_any: bool,
 }
 
-/// The session host (`repl_host.c`) and its command channel. Fields
-/// drop in order: the channel closes (the host's end of input), then
-/// the host is waited for.
+/// The host and its channel. Field order matters: the channel closes
+/// (host sees EOF) before the host is waited for.
 struct Host {
     ctl: Ctl,
     _child: Reaped,
@@ -155,9 +143,8 @@ impl Drop for Reaped {
     }
 }
 
-/// The command channel: one stream both ways, the host's end its stdin.
-/// Unix: a socket pair. Windows: a named pipe this process creates and
-/// opens both ends of (the host reads and writes its stdin handle).
+/// One stream both ways, the host's stdin. Unix: a socket pair. Windows:
+/// a named pipe whose both ends this process opens.
 #[cfg(unix)]
 type Ctl = std::os::unix::net::UnixStream;
 #[cfg(windows)]
@@ -220,10 +207,8 @@ fn channel() -> std::io::Result<(Ctl, Stdio)> {
     Ok((ours, Stdio::from(theirs)))
 }
 
-/// End the cell running in host process `pid` (the host's `pid` reply).
-///
-/// `SIGINT`; Windows: Ctrl-Break to its process group (the host runs in
-/// its own, `CREATE_NEW_PROCESS_GROUP`, and replies with its own pid).
+/// End the cell running in host process `pid`: `SIGINT`, or on Windows
+/// Ctrl-Break to the host's own process group (`CREATE_NEW_PROCESS_GROUP`).
 pub fn interrupt(pid: u32) {
     #[cfg(unix)]
     let _ = Command::new("kill")
@@ -240,9 +225,8 @@ pub fn interrupt(pid: u32) {
     }
 }
 
-/// Windows terminal: the console sends Ctrl-C to rokc (the host's own
-/// group ignores it), which passes it on to a running cell as
-/// `interrupt`, and otherwise ignores it.
+/// Windows: the console sends Ctrl-C to rokc only (the host's group
+/// ignores it); forward it to a running cell.
 #[cfg(windows)]
 fn forward_ctrl_c(running: Arc<AtomicU32>) {
     static RUNNING: std::sync::OnceLock<Arc<AtomicU32>> = std::sync::OnceLock::new();
@@ -269,10 +253,9 @@ fn forward_ctrl_c(running: Arc<AtomicU32>) {
     }
 }
 
-/// Unix terminal: Ctrl-C during a cell sends SIGINT to the foreground
-/// process group, rokc and the host alike. The host ends the cell;
-/// rokc ignores it. A handler, unlike `SIG_IGN`, is reset by `exec`,
-/// so the host does not inherit it.
+/// Unix: Ctrl-C reaches rokc and the host alike; the host ends the cell.
+/// A handler, unlike `SIG_IGN`, is reset by `exec`, so the host doesn't
+/// inherit it.
 #[cfg(unix)]
 fn survive_ctrl_c() {
     const extern "C" fn ignore(_: i32) {}
@@ -306,17 +289,15 @@ pub struct Repl {
     /// Statics (MIR names) a loaded cell defined: later cells use its
     /// storage (`ReplCell::statics`), so their state carries over.
     statics: HashSet<String>,
-    /// Types loaded cells stored into `any` slots: every cell stores
-    /// them too (`any_seeds`), so its `any` methods know them all (the
-    /// tags are the same in every cell: a hash of the type's name).
+    /// Types stored into `any` slots so far; every cell re-seeds them
+    /// (`any_seeds`) so its `any` methods know all of them.
     any_types: std::collections::BTreeSet<String>,
     /// Cells built (slot names).
     built: u32,
     /// The `ScanTable`s loaded cells registered (`ReplCell::gc_tables`).
     gc_tables: Vec<Vec<u32>>,
-    /// Functions the host has compiled: symbol → (text hash, symbols it
-    /// uses). A cell whose function has the same text declares it
-    /// instead of compiling it again (`ReplCell::known`).
+    /// Symbol → (text hash, symbols used) of what the host has compiled;
+    /// unchanged functions are declared, not recompiled.
     known: HashMap<String, (u64, Vec<String>)>,
     tmp: TempDir,
     /// The text the user typed for the cell being built: diagnostics
@@ -356,9 +337,7 @@ impl Repl {
         })
     }
 
-    /// Read cells from `input` until `:quit` or its end. `interactive`
-    /// shows the `>` / `...` prompts. `false` when the input ends inside
-    /// a cell, which is reported and not run.
+    /// Read cells until `:quit` or EOF. `false` when input ends mid-cell.
     pub fn run(&mut self, input: impl BufRead, interactive: bool) -> bool {
         let prompt = |cont: bool| {
             if interactive {
@@ -460,10 +439,8 @@ impl Repl {
         true
     }
 
-    /// One cell: what it shows (`type: value`, or the type alone), or
-    /// `Err` when it failed (the errors went to stderr). Output of the
-    /// cell goes to stdout / stderr.
-    // The errors are reported as they happen: nothing more to carry.
+    /// One cell: what it shows (`type: value`, or the type), or `Err`
+    /// after its errors went to stderr.
     #[allow(clippy::result_unit_err)]
     pub fn eval(&mut self, cell: &str) -> Result<Option<String>, ()> {
         cell.clone_into(&mut self.input);
@@ -504,10 +481,8 @@ impl Repl {
             .collect()
     }
 
-    /// `:add <args>`: `$ROK install --env $ROK_ENV <args>` in an
-    /// environment's session, else `$ROK add <args>` (to the package; the
-    /// `rok` that started this session), then prebuild the dependency list
-    /// of `$ROK deps`.
+    /// `:add <args>`: `rok install --env` in an environment's session, else
+    /// `rok add`; then prebuild `rok deps`.
     fn add_dep(&mut self, args: &str) {
         let Some(rok) = std::env::var_os("ROK") else {
             eprintln!("`:add` needs a session started by `rok repl`");
@@ -533,10 +508,8 @@ impl Repl {
             return;
         }
         let Some(out) = run("deps", &[]) else { return };
-        // `name=<lib.rok>` lines, each followed by its
-        // `--extern-feature=name=<f>` lines, then native packages' rokc arguments
-        // (`-L<dir>`, `-l<kind>=<name>`, `--native-runtime=<file>`), each
-        // under a `# native ..` line. New ones join the session's.
+        // `name=<lib.rok>` lines, each followed by `--extern-feature` lines,
+        // then native rokc arguments under `# native ..` lines.
         let text = String::from_utf8_lossy(&out.stdout);
         let o = &mut self.opts;
         let mut deps: Vec<(String, PathBuf)> = Vec::new();
@@ -606,9 +579,8 @@ impl Repl {
                 if !keep {
                     eprintln!("note: `{}` is gone: its type `{ty}` was redefined", b.name);
                 } else if b.holds_any {
-                    // It may hold an old `{ty}`, which the new
-                    // one's tag would claim; keeping the ones that cannot
-                    // needs the value's tag.
+                    // It may hold an old `{ty}` the new tag would claim;
+                    // telling them apart needs the value's tag.
                     eprintln!(
                         "note: `{}` is gone: it holds an `any` value and `{ty}` was redefined",
                         b.name
@@ -634,9 +606,8 @@ impl Repl {
         true
     }
 
-    /// The source of a cell: the items, the bindings' slots, `body`, and
-    /// the store of the `str` expression `show` to the host. `keep` adds the
-    /// stores of the bindings back to their slots to the compiled HIR.
+    /// Cell source: items, binding slots, `body`, and the store of `show`
+    /// to the host. `keep` adds the slot stores to the HIR.
     fn session(&self, state: &State, body: &str, show: Option<&str>) -> String {
         let mut src = String::new();
         for (_, item) in &state.items {
@@ -680,9 +651,8 @@ impl Repl {
         })
     }
 
-    /// `run_once`; a binding later cells could not use fails the cell
-    /// before it runs, unless it is one of `may_drop` (then it is left
-    /// out, noted).
+    /// `run_once`; a binding later cells can't use fails the cell before it
+    /// runs, unless it is in `may_drop` (dropped with a note).
     fn run_cell(
         &mut self,
         cell: &str,
@@ -789,13 +759,10 @@ impl Repl {
             .map(|ty| if shown { value } else { ty }))
     }
 
-    /// The cell's new bindings: the `let`s at the top of its block in
-    /// `r` (`session`), the last one of each name. Adds their slots to
-    /// the HIR and, at the end of the block, the stores of every
-    /// binding back to its slot (a `let` can be assigned).
-    /// A binding later cells could not use is an error (its name and
-    /// why), unless it is one of `may_drop`. `None`: the HIR is as it
-    /// was; else its MIR must be lowered again.
+    /// Adds slots for the cell's new top-level `let`s (last of each name)
+    /// and, at the block's end, stores of every binding back to its slot.
+    /// An unusable binding is an error unless in `may_drop`. `None`: HIR
+    /// unchanged; else MIR must be lowered again.
     fn keep(
         &self,
         r: &mut CompileResult,
@@ -850,9 +817,8 @@ impl Repl {
             };
             // Full paths, so later cells name the type without a `use`.
             let ty = ty_path(hir, &l.ty);
-            // What the HIR printer cannot write as source (closures,
-            // unresolved types) cannot be kept; nor can a type the next
-            // cell, at the top level of the session, cannot see (spec 5.6).
+            // Closures, unresolved types, and types the session's top level
+            // can't see (spec 5.6) can't be kept.
             let why = if ty.contains('{') || ty.starts_with("closure") {
                 Some("its type has no name".to_owned())
             } else {
@@ -945,9 +911,8 @@ impl Repl {
         }
     }
 
-    /// The host now has `fns`; `fresh` (symbols the cell defined anew)
-    /// replaced earlier definitions, so what was compiled against those
-    /// (and what uses that, ..) is no longer the same code.
+    /// Record `fns`. `fresh` replaced earlier definitions, so everything
+    /// compiled against those (transitively) is stale.
     fn learn(&mut self, fresh: Vec<String>, fns: Vec<ReplFn>) {
         let mut gone: HashSet<String> = fresh.into_iter().collect();
         loop {
@@ -1059,9 +1024,8 @@ impl Repl {
         }
     }
 
-    /// Front end; reports errors unless `quiet`. Locations in the user's
-    /// text read as `<repl>:line:col`, or as the loaded program's own
-    /// (diagnostics and the panic locations codegen embeds).
+    /// Front end; errors unless `quiet`. Locations map to `<repl>:line:col`
+    /// or the loaded program's own.
     fn compile(&self, src: &str, quiet: bool) -> Option<CompileResult> {
         let (s, path) = self.compiler();
         // Added first so the views are in place while HIR lowering
@@ -1162,9 +1126,7 @@ impl Repl {
             at,
         };
         let mut regions = Vec::new();
-        // An expression cell is built as `{stmts}let VALUE = ({last});`,
-        // so its two parts are found apart: `last` at the end, `stmts`
-        // before it.
+        // An expression cell is `{stmts}let VALUE = ({last});`.
         let (stmts, last) = split_last(&self.input);
         let last_off = src.rfind(last).filter(|_| !last.is_empty());
         let stmts_off = last_off
@@ -1195,17 +1157,13 @@ impl Repl {
         regions
     }
 
-    /// `repl <path>`: load the program whose root file is `path` (`anonymous`:
-    /// a lone file) into the session; `false` when it failed (reported).
-    /// It is front-end checked as a whole first, as `run` would. Its
-    /// items join the session; its top-level statements run as cells,
-    /// each ending after a top-level `let`, so a failure keeps the
-    /// bindings made before it (with the values they had at that `let`).
-    /// A binding later cells cannot use (its type is private, ..) is
-    /// dropped when no later statement names it; else the statements up
-    /// to the last one naming it run as one cell. A `fn main` program
-    /// runs as one cell with `main` its entry; `main` then leaves the
-    /// session (the session is its own `main`), its locals with it.
+    /// `repl <path>`: load `path` (`anonymous`: a lone file); `false` on
+    /// failure. Checked whole first. Items join the session; top-level
+    /// statements run as cells split after each top-level `let`, so a
+    /// failure keeps earlier bindings. An unusable binding is dropped if
+    /// nothing later names it, else the statements up to its last use run
+    /// as one cell. A `fn main` program runs as one cell and `main` then
+    /// leaves the session.
     pub fn load_program(&mut self, path: &std::path::Path, anonymous: bool) -> bool {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -1378,14 +1336,12 @@ fn line_col(src: &str, off: usize) -> (u32, u32) {
     )
 }
 
-/// `d` as the user sees it: a location in the user's text moves to the
-/// file it shows in (`regions`); one in the generated wrapper (file
-/// `session` at `path`) is dropped.
+/// `d` as the user sees it: spans in the user's text move to their file
+/// (`regions`); spans in the generated wrapper are dropped.
 fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> RokDiagnostic {
     let mut d = d.clone();
-    // `None`: the span is in the wrapper. One that opens just before a
-    // region (the `(` around an expression cell) or ends at one starts
-    // at it, unless a region holds it.
+    // `None`: in the wrapper. A span touching a region's edge (the `(`
+    // around an expression cell) snaps into it.
     let map = |s: Span| -> Option<Span> {
         if s.file != session {
             return Some(s);
@@ -1431,10 +1387,9 @@ fn localize(d: &RokDiagnostic, session: u32, path: &str, regions: &[Region]) -> 
     d
 }
 
-/// The native libraries the host loads (`-l`, `--native-runtime`), in
-/// order: shared ones first (the runtime files; off Windows, also the
-/// `dylib` links found in the `-L` directories), then the static ones,
-/// each after those it uses (`-l` lists dependents first).
+/// Native libraries for the host, in load order: shared ones (runtime
+/// files; off Windows also `dylib`s in `-L` dirs), then static ones after
+/// those they use.
 fn native_files(opts: &BuildOptions) -> Vec<PathBuf> {
     let find = |f: String| {
         opts.lib_dirs

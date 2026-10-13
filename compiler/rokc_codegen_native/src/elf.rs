@@ -1,11 +1,9 @@
 //! ELF64 relocatable object (`ET_REL`) writer, `x86_64` and arm64.
 //!
-//! A section per function and data object (`.text.<sym>`, `.rodata.`,
-//! `.data.rel.ro.`, `.data.`, `.bss.`), so `--gc-sections` drops what
-//! nothing uses; their `.rela.*`, an `.eh_frame` with one FDE per
-//! function (a frame-pointer frame) so unwinders and debuggers walk
-//! through it, the debug sections when present, a non-executable stack
-//! note; symbols local first.
+//! A section per function and data object so `--gc-sections` drops the
+//! unused; their `.rela.*`; `.eh_frame` with an FDE per function for
+//! unwinders and debuggers; debug sections; a non-executable stack note.
+//! Symbols local first.
 
 use crate::obj::{FnRange, Obj, RelKind, Sect};
 
@@ -136,9 +134,8 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         info: 0,
         entsize: 0,
     }];
-    // Symbols: null, the section symbols (the pieces, then the extra
-    // sections), locals, then globals. Unwind and debug info refer to
-    // code by its section symbol, so they go with a dropped section.
+    // Symbols: null, section symbols, locals, globals. Unwind and debug
+    // info refer to code by section symbol, so they drop with the section.
     let nsect_syms = pieces.len() + obj.extra.len();
     let mut order: Vec<usize> = (0..obj.syms.len()).collect();
     let local = |i: usize| obj.syms[i].def.is_some() && !obj.syms[i].global;

@@ -1,19 +1,15 @@
-//! `rokc bindgen` (stdlib 1.7.6): rok declarations from a C header,
-//! through libclang loaded at run time.
+//! `rokc bindgen` (stdlib 1.7.6): rok declarations from a C header via
+//! libclang loaded at run time.
 //!
-//! What the header and the non-system headers it includes declare (a
-//! system header: with what it includes from its own directory tree) is
-//! written out, with the other headers' types they use. Layouts are
-//! clang's for the target: typedefs become `type` aliases, structs and
-//! unions `#[repr(C)]` (bitfield runs as byte storage; a layout rok
-//! cannot express as an opaque blob of the same size and alignment),
-//! enums an integer alias with one `const` per value, functions and
-//! globals `extern "C"` items (`extern "system"` for stdcall), object
-//! pointers `CPtr<T>`, function pointers `unsafe extern "C" fn(..) | none`,
-//! and object-like macros that clang evaluates to a number or string
-//! `const` items. Anything else is skipped with a comment, and so is a
-//! function or function pointer passing a byte-blob record by value (C
-//! classifies it by its real fields).
+//! Binds what the header and its non-system includes declare (a system
+//! header: with its own tree), plus the types they use, in clang's target
+//! layout: typedefs as `type`, structs / unions `#[repr(C)]` (bitfields as
+//! bytes; inexpressible layouts as opaque blobs), enums as an integer alias
+//! with `const`s, functions and globals `extern "C"` (`"system"` for
+//! stdcall), object pointers `CPtr<T>`, function pointers
+//! `unsafe extern "C" fn(..) | none`, and number / string macros as
+//! `const`s. Anything else is skipped with a comment, including by-value
+//! passing of blob records (C classifies them by their real fields).
 
 mod clang;
 
@@ -160,10 +156,8 @@ fn top_level(clang: &Clang, c: Cursor) -> Vec<Cursor> {
     out
 }
 
-/// Which declarations are written out (with what they use): those of
-/// non-system headers, and of the header and the headers beside or below
-/// it (so a system header is bound with what it includes from its own
-/// tree).
+/// What gets bound: non-system headers' declarations, and those of the
+/// header and headers beside or below it.
 struct Roots<'a> {
     c: &'a Clang,
     dir: PathBuf,
@@ -186,9 +180,8 @@ impl Roots<'_> {
     }
 }
 
-/// The object-like macros of `roots` that clang evaluates to a number or
-/// a string, as `name -> (rok type, value)`: a second unit includes the
-/// header and initializes one constant from each.
+/// Object-like macros of `roots` clang evaluates to a number or string,
+/// `name -> (rok type, value)`, via a second unit that includes the header.
 fn eval_macros(
     roots: &Roots<'_>,
     unit: &Unit<'_>,
@@ -247,9 +240,8 @@ fn eval_macros(
     out
 }
 
-/// A macro body that can be an expression: balanced parentheses, no
-/// braces, `;` or `#`, and no keyword but `sizeof`, `true` / `false` and
-/// type names.
+/// Could a macro body be an expression: balanced parentheses, no braces,
+/// `;` or `#`, no keyword but `sizeof`, `true` / `false` and type names?
 fn expression_like(tokens: &[(c_int, String)]) -> bool {
     const KEYWORDS: &[&str] = &[
         "sizeof", "true", "false", "char", "short", "int", "long", "signed", "unsigned", "float",
@@ -623,9 +615,8 @@ impl Gen<'_> {
         }
     }
 
-    /// A use of a typedef. A typedef of a builtin type outside the roots is
-    /// that type (`size_t` and its kin: `usize` / `isize`); others keep
-    /// their name.
+    /// A typedef use: builtin typedefs outside the roots resolve
+    /// (`size_t` → `usize`), others keep their name.
     fn typedef_ref(&mut self, t: Type) -> Result<String, Skip> {
         let api = self.c.api();
         // SAFETY: a typedef type of a live unit.
@@ -916,9 +907,8 @@ impl Gen<'_> {
         Ok((repr, fields))
     }
 
-    /// `Err` when a value of type `t` would not cross the C ABI as C
-    /// passes it: a record written as bytes, alone or inside one passed
-    /// by value, is classified unlike its C fields.
+    /// `Err` when a `t` value wouldn't cross the C ABI as C passes it: a
+    /// byte-blob record, alone or inside one, classifies unlike its fields.
     fn by_value(&mut self, t: Type) -> Result<(), Skip> {
         let api = self.c.api();
         // SAFETY: a type of a live unit.
@@ -930,8 +920,8 @@ impl Gen<'_> {
                 // SAFETY: a record type of a live unit.
                 let def =
                     unsafe { (api.clang_getCursorDefinition)((api.clang_getTypeDeclaration)(t)) };
-                // An incomplete type is not passed by value; an unnamed one
-                // has no rok form already.
+                // Incomplete types aren't passed by value; unnamed ones have
+                // no rok form anyway.
                 // SAFETY: a cursor of a live unit.
                 if unsafe { (api.clang_Cursor_isNull)(def) } != 0 {
                     return Ok(());

@@ -1,17 +1,17 @@
-//! `int` / `float` (stdlib spec 2.1.2, 2.1.3): library structs the
-//! compiler knows by path. An unsuffixed literal in an `int` / `float`
-//! slot becomes a constructor call:
+//! `int` / `float` (stdlib 2.1.2, 2.1.3) are library structs the compiler
+//! knows by path; an unsuffixed literal in such a slot becomes a
+//! constructor call:
 //!
 //! ```text
-//! let a: int = 5;           ==>  Int::from_i64(5i64)
+//! let a: int = 5;          ==>  Int::from_i64(5i64)
 //! let b: int = 10 ** 30;    ==>  Int::from_literal("1000..0")   (past i64)
 //! let c: float = 1.5;       ==>  Float::from_f64(1.5f64)
 //! let d: float = 1e400;     ==>  Float::from_literal("1e400")   (past f64)
 //! ```
 //!
-//! `x as T` with an `int` / `float` on either side is a conversion
-//! trait call (stdlib 2.11.1: `as` is the bit / wrap policy):
-//! `Int as i32` → `i32::wrapping_from(x)`, `i32 as int` → `Int::from(x)`.
+//! `x as T` with `int` / `float` on either side is a conversion trait call
+//! (stdlib 2.11.1): `Int as i32` → `i32::wrapping_from(x)`, `i32 as int` →
+//! `Int::from(x)`.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -75,9 +75,8 @@ const fn lit(l: AstLit, span: Span) -> Expr {
     }
 }
 
-/// The literal `lit` (negated when `negate`) in an `int` / `float`
-/// slot, as the constructor call; `None` when the slot is neither or
-/// the literal is suffixed (a type mismatch, reported as usual).
+/// `lit` (negated if `negate`) as the constructor call; `None` when the
+/// slot is neither or the literal is suffixed (a plain mismatch).
 pub(super) fn literal(
     ctx: &mut LowerCtx<'_>,
     l: &AstLit,
@@ -207,9 +206,8 @@ pub(super) fn cast(
             ),
         );
     };
-    // Into `int` / `float`: the lossless `From` (a cast from `f64` to
-    // `int` has no impl and is reported as such); out of one: the
-    // wrapping conversion of stdlib 2.11.1.
+    // Into `int` / `float`: the lossless `From` (none from `f64` to `int`,
+    // reported as such); out of one: stdlib 2.11.1's wrapping conversion.
     let method = if into.is_some() {
         "from"
     } else {

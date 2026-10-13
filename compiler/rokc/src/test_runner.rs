@@ -1,6 +1,5 @@
-//! `rokc test` (spec 901): run each selected `#[test]` function in its
-//! own process (the harness binary takes the test name as `argv[1]`), so
-//! a panic or an escaping error fails only that test.
+//! `rokc test` (spec 901): each `#[test]` in its own process (`argv[1]`
+//! names it), so a panic fails only that test.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -14,8 +13,8 @@ pub struct Options<'a> {
     pub show_output: bool,
 }
 
-/// Run `tests` from the harness `exe`; prints a cargo-style report to
-/// stdout and returns whether every test passed.
+/// Run `tests` from `exe`, cargo-style report to stdout; whether all
+/// passed.
 pub fn run(exe: &Path, tests: &[String], opts: &Options<'_>) -> bool {
     let started = Instant::now();
     let selected: Vec<&String> = tests
@@ -107,11 +106,8 @@ fn describe(o: &Output) -> String {
     }
 }
 
-/// The test filter (spec 901: "regex or plain substring").
-///
-/// An unanchored match supporting `^ $ . * + ?` and `\` escapes; a
-/// filter without those is a substring search. No classes, groups or
-/// alternation.
+/// Test filter (spec 901: "regex or plain substring"): unanchored, with
+/// `^ $ . * + ?` and `\`; no classes, groups or alternation.
 pub fn re_match(re: &str, text: &str) -> bool {
     let re: Vec<char> = re.chars().collect();
     let text: Vec<char> = text.chars().collect();

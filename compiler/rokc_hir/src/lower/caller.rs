@@ -1,10 +1,9 @@
-//! `#[track_caller]`: such a function takes its caller's location as a
-//! hidden last parameter (`str`, `path:line:col`). A call passes its own
-//! position, or, inside another `#[track_caller]` function, the location
-//! that one received, so a panic reports the first caller outside the
-//! chain. On an `extern` declaration the runtime receives it (the
-//! panic hooks). A function value of one is a shim that passes the
-//! position the value was taken at.
+//! `#[track_caller]`: the function takes its caller's location
+//! (`path:line:col`) as a hidden last `str`. A call passes its own position,
+//! or inside another `#[track_caller]` function the one that received, so
+//! panics report the first caller outside the chain. On an `extern`
+//! declaration the runtime receives it; a function value of one is a shim
+//! passing where the value was taken.
 
 use std::collections::{HashMap, HashSet};
 

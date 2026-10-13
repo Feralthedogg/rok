@@ -1,15 +1,13 @@
-//! Renaming of block-local items (spec 3.9.1).
+//! Renaming block-local items (spec 3.9.1).
 //!
-//! An item declared in a block is lifted to a module item under a name
-//! no source can write; every use in its scope is renamed to it. Values
-//! (a `static`, a unit / tuple struct) are renamed at every binding of
-//! the name too, so a `let` that shadows one keeps shadowing it; a
-//! `use` in an inner block that names it shadows it there. Field,
-//! method and label names are never renamed.
+//! A block's item is lifted under a name no source can write and every use
+//! in scope is renamed. Values (`static`, unit / tuple structs) are renamed
+//! at bindings too, so shadowing still works. Fields, methods and labels
+//! are never renamed.
 //!
-//! The same walk gives a block's items its `use`s (`paths`): outside fn
-//! and closure bodies (`headers_only`; the parser copies the `use`s into
-//! those), a name a `use` binds is replaced by its path.
+//! The same walk resolves a block item's `use`s (`paths`) outside fn and
+//! closure bodies (`headers_only`; the parser copies the `use`s into
+//! those).
 
 use std::collections::HashMap;
 

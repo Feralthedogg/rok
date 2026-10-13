@@ -1,17 +1,13 @@
-//! Value-based errors (spec 4.14): `throws`
-//! signatures, `throw`, prefix `try` / `try?` / `try!`, postfix `catch`
-//! / `finally`.
+//! Value-based errors (spec 4.14): `throws`, `throw`, `try` / `try?` /
+//! `try!`, `catch` / `finally`.
 //!
-//! A function declared `throws (E) -> T` returns the carrier
-//! `HirTy::Throws { ok: T, err: E }` (MIR: `is_err` and one payload for
-//! `T` / `E`, spec 8.6.5; HIR names its fields `(is_err, T, E)`). Nothing
-//! unwinds: a call under `try` tests `is_err` and on error `raise`s the
-//! payload, which walks the enclosing `err_frames` innermost-first — a
-//! `finally` frame runs its block inline, the first `catch` frame that
-//! may take the error type parks the value and `break`s out of the catch
-//! body to its dispatch — and with no frame left returns the error from
-//! the function (converted to its `throws` type). `return` / `break` /
-//! `continue` run the `finally` blocks they leave the same way.
+//! `throws (E) -> T` returns the carrier `HirTy::Throws { ok, err }` (MIR:
+//! `is_err` plus one payload, spec 8.6.5). Nothing unwinds: `try` tests
+//! `is_err` and `raise`s the payload through `err_frames` innermost first,
+//! running `finally` blocks inline until a `catch` that may take the type
+//! parks the value and breaks to its dispatch; with no frame left the
+//! function returns the error. `return` / `break` / `continue` run the
+//! `finally` blocks they leave the same way.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -35,9 +31,9 @@ pub(super) struct CatchFrame {
     /// The catch body runs in a block with this label; a raise breaks
     /// out of it.
     label: String,
-    /// Error type each `catch` arm can take (`None` = any type), plus
-    /// the local recording which parked error was raised. `None` for
-    /// `try?` / `try!` / throwing `main`, which take every error.
+    /// Error type each `catch` arm takes (`None`: any) and the local saying
+    /// which parked error was raised; `None` for `try?` / `try!` / throwing
+    /// `main`, which take all.
     arms: Option<(Vec<Option<HirTy>>, LocalId)>,
     /// Distinct error types raised into this frame, each parked in its
     /// own local.
@@ -57,9 +53,8 @@ impl CatchFrame {
     }
 }
 
-/// Can an arm whose pattern names type `filter` (`None`: any) match an
-/// error of type `ety`? An unresolved filter is kept so lowering the
-/// arm reports it.
+/// Can an arm filtering `filter` (`None`: any) take `ety`? Unresolved
+/// filters are kept so lowering the arm reports them.
 fn may_take(filter: Option<&HirTy>, ety: &HirTy) -> bool {
     let parts = |t: &HirTy| match t {
         HirTy::Sum(vs) => vs.clone(),
@@ -111,10 +106,8 @@ pub(super) fn sig_ret_ast(f: &FnDef) -> Ty {
     }
 }
 
-/// An error type parameter not bound yet (a `rethrows` one, `#E0`, or a
-/// plain `E`) → `Unknown`, so a call-argument hint `fn(i32) throws (E)
-/// -> i32` still types a closure argument (whose error type is then
-/// inferred).
+/// Unbound error parameters (`#E0` or plain `E`) → `Unknown`, so a
+/// `fn(i32) throws (E) -> i32` hint still types a closure argument.
 pub(super) fn erase_unbound_errors(ty: &mut HirTy) {
     match ty {
         HirTy::Throws { ok, err } => {
@@ -455,9 +448,8 @@ pub(super) fn raise(
     out
 }
 
-/// Error `value` as a `to`-typed error: itself, injected into the sum
-/// `to`, or (a sum whose variants all occur in `to`) re-wrapped variant
-/// by variant. `None` when `to` can't hold it.
+/// Error `value` as a `to` error: itself, injected into sum `to`, or
+/// re-wrapped member by member; `None` if `to` can't hold it.
 fn convert_err(ctx: &mut LowerCtx<'_>, value: HirExpr, to: &HirTy) -> Option<HirExpr> {
     let from = value.ty.clone();
     if !err_fits(ctx, &from, to) {
@@ -521,11 +513,9 @@ fn value_meets(ctx: &LowerCtx<'_>, ty: &HirTy, want: &crate::FnBounds) -> bool {
     }
 }
 
-/// Spec 4.4.9: a function value that throws less than its `fn` slot
-/// (not at all, or a narrower error) goes in through an adapter
-/// `fn #thunk(args) throws (E) -> T { try f(args) }`. A named fn is
-/// called directly; any other function value (a variable, a capturing
-/// closure) is captured by the thunk, itself a closure.
+/// Spec 4.4.9: a function value throwing less than its slot goes through
+/// `fn #thunk(args) throws (E) -> T { try f(args) }`; a named fn is called
+/// directly, other values captured.
 pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
     let (
         HirTy::Fn(args, sret, want),
@@ -691,11 +681,9 @@ pub(super) fn adapt_fn_value(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     }
 }
 
-/// Spec 4.4: a `fn(..) -> !` fits any `fn(..) -> R` slot through a
-/// thunk `fn #thunk(args) -> R { f(args) }` (the call never returns, so
-/// the thunk's body diverges; a throwing one returns only its error,
-/// passed on in the slot's carrier). A named fn is called directly; any
-/// other function value is captured by the thunk, itself a closure.
+/// Spec 4.4: `fn(..) -> !` fits a `fn(..) -> R` slot through a thunk
+/// `fn #thunk(args) -> R { f(args) }` (a throwing one passes its error
+/// on); a named fn is called directly, other values captured.
 pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
     let (
         HirTy::Fn(args, sret, want),
@@ -868,10 +856,9 @@ pub(super) fn adapt_never_fn(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -
     }
 }
 
-/// A `rethrows` function used as a value: the instance the expected
-/// `fn` type asks for (its function-typed parameters bind the error
-/// parameters), else the throwing one — unbound error parameters become
-/// `any Error`. `None` for a function with real type parameters.
+/// A `rethrows` function as a value: the instance the expected `fn` type
+/// asks for, else the throwing one with unbound errors as `any Error`.
+/// `None` for real type parameters.
 pub(super) fn rethrows_value(
     ctx: &LowerCtx<'_>,
     def: &FnDef,
@@ -925,9 +912,9 @@ fn run_finally(ctx: &mut LowerCtx<'_>, i: usize, block: &Block, try_depth: u32) 
     })
 }
 
-/// `jump` (a `return` / `break` / `continue` carrying `value`) after the
-/// `finally` blocks it leaves: every one for a `return` (`depth` =
-/// `None`), else those inside breakable number `depth`.
+/// `jump` (`return` / `break` / `continue` with `value`) after the
+/// `finally` blocks it leaves: all for `return` (`depth` `None`), else
+/// those inside breakable `depth`.
 pub(super) fn exit_through(
     ctx: &mut LowerCtx<'_>,
     depth: Option<usize>,
@@ -1012,8 +999,6 @@ pub(super) fn jump_index(ctx: &LowerCtx<'_>, label: Option<&str>, needs_loop: bo
         .unwrap_or(usize::MAX)
 }
 
-/// `throw value;` — the value's type must be one the enclosing catch /
-/// function `throws` accepts (checked when it is routed).
 /// An untyped `throws`: `any Error`.
 fn any_error(t: &HirTy) -> bool {
     matches!(t, HirTy::AnyTrait(b) if b.iter().any(|t| t.path == "rok::core::error::Error"))
@@ -1066,9 +1051,8 @@ fn pop_catch(ctx: &mut LowerCtx<'_>) -> CatchFrame {
     }
 }
 
-/// `'done: { '<frame>: { break 'done body }; handler }` — a raise into
-/// the frame breaks out of the inner block into the handler; normal
-/// completion skips it.
+/// `'done: { '<frame>: { break 'done body }; handler }`: a raise breaks
+/// into the handler, normal completion skips it.
 fn shell(
     ctx: &mut LowerCtx<'_>,
     frame: &CatchFrame,
@@ -1539,10 +1523,9 @@ fn lower_catch_arms(
     if frame.errs.is_empty() {
         return body_h;
     }
-    // Dispatch on the parked error: `if #which == k { match #err_k {
-    // <arms that can take E_k>, _ => throw #err_k } } else ...`, built as
-    // AST so arm patterns / bodies lower like any `match`. The `#` names
-    // can't clash with user identifiers.
+    // Dispatch on the parked error, built as AST so arms lower like any
+    // `match`: `if #which == k { match #err_k { <arms for E_k>, _ => throw
+    // #err_k } } else ..`.
     ctx.next_synth += 1;
     let n = ctx.next_synth;
     ctx.push_scope();
@@ -1612,9 +1595,8 @@ fn lower_catch_arms(
     )
 }
 
-/// Lower a `catch` arm no error reaches for its diagnostics only, as
-/// `match <filter-typed placeholder> { arm }`, with every error it
-/// raises swallowed. The result and its locals are dropped.
+/// Lower a `catch` arm no error reaches only for its diagnostics; result,
+/// locals and raised errors are discarded.
 fn check_dead_arm(
     ctx: &mut LowerCtx<'_>,
     arm: &rokc_ast::CatchArm,
@@ -1760,9 +1742,8 @@ fn dispatch_one(
     }
 }
 
-/// Do `arms` match every value of `ety`? A catch-all / binding, a type
-/// pattern of exactly `ety`, type patterns over every variant of a sum,
-/// or plain variant patterns over every variant of an enum.
+/// Do `arms` cover every `ety`: a catch-all, its exact type, type patterns
+/// over a sum's members, or every variant of an enum?
 fn covers(ctx: &LowerCtx<'_>, arms: &[AstMatchArm], ety: &HirTy) -> bool {
     let irrefutable = |p: &AstPattern| {
         matches!(

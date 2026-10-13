@@ -1,13 +1,11 @@
-// Explicit TypeIDs of an MLIR plugin loaded by rokc.exe. Included by the
-// plugin development headers' mlir/Support/TypeID.h before its first
-// explicit TypeID (docs/mlir-plugins.md).
+// Explicit TypeIDs of an MLIR plugin loaded by rokc.exe, included by the
+// plugin headers' mlir/Support/TypeID.h before its first explicit TypeID.
 //
 // An explicit TypeID is the address of `TypeIDResolver<T>::id`, data in
-// rokc.exe. A DLL reaches another module's data only through dllimport,
-// which MLIR's headers do not declare, so each resolver looks its `id` up
-// in rokc.exe's exports by decorated name at first use instead. A type
-// rokc.exe does not define (one of the plugin's own) gets a TypeID owned
-// by the plugin. Elsewhere plugins bind to rokc's symbols directly.
+// rokc.exe. A DLL reaches another module's data only via dllimport, which
+// MLIR's headers don't declare, so each resolver looks `id` up in
+// rokc.exe's exports by decorated name on first use; types rokc.exe lacks
+// get a plugin-owned TypeID. Elsewhere plugins bind directly.
 
 #ifndef ROK_MLIR_TYPEID_H
 #define ROK_MLIR_TYPEID_H

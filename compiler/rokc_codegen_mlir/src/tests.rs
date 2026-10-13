@@ -47,6 +47,7 @@ fn function(
         name: name.into(),
         facts: FnFacts::default(),
         strips: Vec::new(),
+        pins: Vec::new(),
         params: vec![LocalId(0), LocalId(1)],
         locals,
         blocks,

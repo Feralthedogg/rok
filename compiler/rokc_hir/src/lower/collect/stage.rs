@@ -1,8 +1,6 @@
-//! The library's collected stage in a byte form (spec 9.2.16): a build
-//! of the same library takes it instead of collecting the library's
-//! items again. The library's items go with it; what the tables borrow
-//! from them is written as where it sits in them (item, member) and
-//! borrowed again from the items read back.
+//! The library's collected stage serialized (spec 9.2.16), so a build of
+//! the same library skips collecting it. Borrows into the items are
+//! written as (item, member) positions and re-borrowed on read.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -38,9 +36,8 @@ impl LibraryStage {
         self.lib
     }
 
-    /// Write the stage; `false` when something it borrows is not in the
-    /// library's items (nothing to read back then). Function bodies are
-    /// read back when first used (`Dec::keep`).
+    /// Write the stage; `false` if it borrows something outside the
+    /// library's items. Bodies are read back lazily (`Dec::keep`).
     #[must_use]
     pub fn enc(&self, e: &mut Enc) -> bool {
         e.lazy = true;
@@ -64,9 +61,8 @@ impl LibraryStage {
         enc_collected(&self.c, &at, e).is_some()
     }
 
-    /// The stage written by `enc`; its items live as long as the process.
-    /// The items, the impls and the generic methods (each in groups) and
-    /// the tables that hold no borrows decode in parallel.
+    /// Read a stage back; its items live for the process. Items, impls,
+    /// generic methods and borrow-free tables decode in parallel.
     pub fn dec(d: &mut Dec<'_>) -> Option<Self> {
         let keep = d.keep.clone()?;
         let keep = &keep;
@@ -469,10 +465,9 @@ fn dec_list<I: Codec, T: Located>(
     (0..n).map(|_| Some((I::dec(d)?, T::read(p, d)?))).collect()
 }
 
-// What holds no borrows of the items goes first, as bytes of its own
-// (`dec_plain`, decoded beside the items); the borrows after.
-// The leaf indexes, `auto_memo`, `bound_methods` / `bound_traits` and
-// the root flags are left out: the next stage starts them afresh.
+// Borrow-free data first as its own bytes (`dec_plain`, decoded in
+// parallel), then the borrows. Leaf indexes, `auto_memo`,
+// `bound_methods` / `bound_traits` and root flags restart per stage.
 fn enc_collected(c: &Collected<'_>, at: &Locs, e: &mut Enc) -> Option<()> {
     let t = &c.t;
     enc_blob(e, |e| t.fn_table.enc(e));

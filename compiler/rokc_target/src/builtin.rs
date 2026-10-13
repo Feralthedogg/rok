@@ -298,9 +298,9 @@ pub fn spec(name: &str) -> Option<TargetSpec> {
         },
         "i686-pc-windows-msvc" => {
             let mut t = i686(windows(name, "x86", "x86"));
-            // A 4 GiB address space under 64-bit Windows (the heap of spec
-            // 0.6.3), and no SafeSEH table: rok code raises no SEH
-            // exceptions and the runtime's handler is vectored.
+            // 4 GiB address space on 64-bit Windows (the heap, spec 0.6.3),
+            // no SafeSEH: rok raises no SEH and the runtime's handler is
+            // vectored.
             t.pre_link_args
                 .extend(v(&["/largeaddressaware", "/safeseh:no"]));
             TargetSpec {
@@ -318,9 +318,8 @@ pub fn spec(name: &str) -> Option<TargetSpec> {
             linker: Linker::WasmComponentLd,
             ..wasm32(name, "wasm32-wasip2")
         },
-        // A preview 1 module with wasi-threads: shared memory (atomics,
-        // bulk memory) the host provides, and `wasi_thread_start`, where
-        // each new thread begins.
+        // Preview 1 with wasi-threads: host-provided shared memory and
+        // `wasi_thread_start` as each thread's entry.
         "wasm32-wasi-threads" => TargetSpec {
             features: s("+simd128,+atomics,+bulk-memory,+mutable-globals"),
             pre_link_args: v(&[
@@ -332,10 +331,9 @@ pub fn spec(name: &str) -> Option<TargetSpec> {
             threads: true,
             ..wasm32(name, "wasm32-wasip1-threads")
         },
-        // The browser's: a reactor. The host calls `_initialize`, then the
-        // exports (`main` and the `#[export_name]` functions), and flushes
-        // stdout (rok's buffer, and C's when the program uses it) after
-        // each: no `exit` does.
+        // The browser's: a reactor. The host calls `_initialize`, then
+        // exports, flushing stdout (rok's and C's buffers) after each, since
+        // no `exit` does.
         "wasm32-unknown-unknown" => TargetSpec {
             os: s("none"),
             pre_link_args: v(&[

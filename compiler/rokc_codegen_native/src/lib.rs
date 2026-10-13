@@ -1,12 +1,9 @@
-//! rok's own native backend: MIR straight to machine code and an object
-//! file, no LLVM. It builds `-O0` code and REPL cells fast; LLVM builds
-//! the optimized code. Both follow one runtime ABI, so objects from
-//! either link together.
+//! rok's own backend: MIR straight to machine code and an object file, no
+//! LLVM, for fast `-O0` builds and REPL cells. Both backends follow one
+//! runtime ABI, so their objects link together.
 //!
-//! MIR → LIR (`lower`, target-independent: layouts, calling
-//! conventions, GC frames, barriers, checks) → machine code (`a64`, one
-//! module per ISA) → object (`macho`, `elf`, `coff`: one module per
-//! format).
+//! MIR → LIR (`lower`: layouts, conventions, GC frames, barriers, checks)
+//! → machine code (one module per ISA) → object (one module per format).
 
 // Instruction selection names registers and encodings tersely; its
 // dispatch matches are long by nature.
@@ -53,9 +50,8 @@ pub struct Output {
     pub gc_tables: Vec<Vec<u32>>,
 }
 
-/// Why this backend cannot compile `module` (the caller then uses
-/// LLVM): a target without an instruction selector / object writer, or
-/// MLIR written in the source (`__mlir_op`, bare 1.9).
+/// Why this backend can't compile `module` (LLVM then does): no
+/// instruction selector or object writer for the target, or `__mlir_op`.
 #[must_use]
 pub fn unsupported(module: &MirModule) -> Option<String> {
     let t = &module.target;

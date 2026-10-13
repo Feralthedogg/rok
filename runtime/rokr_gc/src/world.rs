@@ -5,19 +5,15 @@
 //! mutator's `rok_tls_yield_flag` and waits on the world condvar until
 //! each one is out of `RUNNING`:
 //!
-//! - `GC_COOPERATING`: parked in [`safepoint`] (compiled code polls the
-//!   flag at function entry and loop back-edges), or blocked on the world
-//!   lock itself (taking it means cooperating first, see [`lock`]);
-//! - `PARKED`: inside a blocking runtime call bracketed by
-//!   [`enter_native`] / [`leave_native`] (804 §8.4.10). Leaving waits
-//!   out a running stop, so a parked thread never touches the heap
-//!   mid-collection;
-//! - not attached yet (spawned, not started): its state slot is unknown.
+//! - `GC_COOPERATING`: parked in [`safepoint`] (compiled code polls at
+//!   entries and back edges, 804 §8.4.2) or blocked on the world lock
+//!   ([`lock`] cooperates first);
+//! - `PARKED`: in a blocking call bracketed by [`enter_native`] /
+//!   [`leave_native`] (804 §8.4.10); leaving waits out a running stop;
+//! - not attached yet.
 //!
 //! Then every registered thread's shadow-stack chain is a root set.
-//!
-//! TLABs (702) keep allocation off the lock: it guards block refills,
-//! the registry and the stop protocol.
+//! TLABs (702) keep ordinary allocation off the lock.
 
 use core::cell::UnsafeCell;
 use core::mem::size_of;
@@ -301,9 +297,8 @@ pub fn safepoint() {
 /// objects in between except reading words its own frames keep alive.
 ///
 /// Lock-free unless a stop is pending: [`stop`] raises the yield flag
-/// before reading the state, we write the state before reading the
-/// flag (both `SeqCst`), so either it sees `PARKED` or we see the flag
-/// and wake it.
+/// before reading the state and this writes the state before reading
+/// the flag (both `SeqCst`), so one side always sees the other.
 pub fn enter_native() {
     tls::mutator_state().store(MUTATOR_PARKED, Ordering::SeqCst);
     if tls::yield_flag().load(Ordering::SeqCst) != 0 {

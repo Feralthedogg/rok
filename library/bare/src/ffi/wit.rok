@@ -1,12 +1,9 @@
-// rok::bare::ffi::wit — what the bindings `ffi::wit::import` /
-// `ffi::wit::export` generate (stdlib spec 1.8) run on: linear memory
-// reads and writes at canonical ABI addresses (`i32`), the blocks the
-// canonical ABI lowers strings and lists into, resource handles and
-// `error-context`. The async ABI, which runs on the executor, is
-// `rok::std::wit` (bare does not depend on core, stdlib 0.1.2).
-//
-// Blocks come from the C allocator, as do the ones the host fills
-// through `cabi_realloc` (wasi-libc's): a lifted string or list frees
+// rok::bare::ffi::wit — what the generated WIT bindings run on (stdlib
+// 1.8): linear-memory access at canonical ABI addresses (`i32`), the
+// blocks strings and lists lower into, resource handles and
+// `error-context`. The async ABI is `rok::std::wit` (bare does not depend
+// on core, 0.1.2). Blocks come from the C allocator, including the ones
+// the host fills through `cabi_realloc`; a lifted string or list frees
 // its block once copied into GC memory.
 
 use rok::bare::ptr::{ConstPtr, Ptr, from_exposed_provenance};

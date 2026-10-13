@@ -50,10 +50,9 @@ pub enum TokenKind {
     RawStrLit(String),
     /// `b"bytes"` (a `[u8; N]`).
     ByteStrLit(String),
-    // `f"x = {x:>{w}}"` (spec 1.7.3) is `FStrStart`, `FStrText` runs and
-    // holes, `FStrEnd`. A hole is `HoleStart`, its code as ordinary
-    // tokens, an optional `HoleSpec` with `SpecText` runs and nested
-    // holes, then `HoleEnd`.
+    // `f"x = {x:>{w}}"` (spec 1.7.3): `FStrStart`, `FStrText` runs and
+    // holes, `FStrEnd`. A hole: `HoleStart`, code tokens, optional
+    // `HoleSpec` with `SpecText` and nested holes, `HoleEnd`.
     /// `f"` or (`true`) `f"""`.
     FStrStart(bool),
     /// Literal text: escapes kept raw, `{{` / `}}` folded.
@@ -71,9 +70,7 @@ pub enum TokenKind {
 
     // Identifiers and contextual promotions.
     Ident(String),
-    /// `'name` — loop / block label. Distinguished from char literals
-    /// at lex time: `'X'` is a char, `'name` (without closing quote) is
-    /// a label.
+    /// `'name`: a label; `'X'` with its closing quote is a char.
     Label(String),
 
     // Declaration / variable keywords.
@@ -359,19 +356,17 @@ impl TokenKind {
 
 /// Reserved keywords (spec 1.5).
 ///
-/// `type`, `any`, `in`, `where`,
-/// `throws`, `rethrows`, `catch`, `finally`, `const`, `static`,
-/// `extern`, `mut`, `union`, `pkg`, `sub`, `sup` and `rok` are contextual:
-/// they lex as identifiers and the parser recognizes them in place.
+/// `type`, `any`, `in`, `where`, `throws`, `rethrows`, `catch`, `finally`,
+/// `const`, `static`, `extern`, `mut`, `union`, `pkg`, `sub`, `sup` and
+/// `rok` are contextual: identifiers to the lexer, keywords in place.
 pub const RESERVED: &[&str] = &[
     "let", "fn", "if", "else", "match", "while", "loop", "for", "return", "break", "continue",
     "try", "throw", "async", "await", "yield", "unsafe", "using", "struct", "enum", "trait",
     "impl", "pub", "mod", "use", "as", "is", "ref", "true", "false", "none", "self", "Self",
 ];
 
-/// The spelling of a reserved-keyword token (`TokenKind::Match` →
-/// `"match"`), for positions where any keyword is a name (after `.`,
-/// field declarations, argument labels).
+/// A keyword's spelling, for places where any keyword is a name (after
+/// `.`, field declarations, argument labels).
 #[must_use]
 pub fn keyword_str(kind: &TokenKind) -> Option<&'static str> {
     RESERVED

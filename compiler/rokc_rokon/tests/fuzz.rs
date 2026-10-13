@@ -25,7 +25,7 @@ impl Rng {
     }
 }
 
-/// Open bugs (TODOS.md §7): a failure containing one of these is
+/// Open bugs (TODOS.md, Tests / CI): a failure containing one of these is
 /// counted, not failed. Delete an entry once its bug is fixed.
 const KNOWN: &[&str] = &[
     // `quote` escapes `is_control` only; the lexer rejects a raw bidi

@@ -22,9 +22,8 @@ pub enum Step<'a> {
     Index(usize),
 }
 
-/// `text` with the entry at `path` set to `value` (ROKON text): replaced
-/// in place, or added at the end of its container. Missing containers on
-/// the way are added as `{}` (a field or string key only).
+/// `text` with `path` set to ROKON `value`, in place or appended to its
+/// container; missing containers are added as `{}` (fields or string keys).
 pub fn set(text: &str, path: &[Step<'_>], value: &str) -> Result<String, Error> {
     let Some((last, outer)) = path.split_last() else {
         return Ok(value.to_owned());
@@ -54,9 +53,8 @@ pub fn set(text: &str, path: &[Step<'_>], value: &str) -> Result<String, Error> 
     }
 }
 
-/// `text` without the entry at `path`, or `None` when there is none.
-/// The entry's whole lines go (with a trailing `//` comment) when it has
-/// them to itself.
+/// `text` without the entry at `path` (`None`: absent). Whole lines go
+/// (with a trailing `//` comment) when the entry has them to itself.
 pub fn remove(text: &str, path: &[Step<'_>]) -> Result<Option<String>, Error> {
     let Some((last, outer)) = path.split_last() else {
         return Ok(None);
@@ -227,9 +225,8 @@ fn line_start(text: &str, at: usize) -> usize {
     text[..at].rfind('\n').map_or(0, |i| i + 1)
 }
 
-/// `text` with `entry` added at the end of `list`, in its layout: one
-/// more line in a multi-line list, `, entry` in a one-line list, and an
-/// empty list opened onto lines.
+/// Append `entry` to `list` in its layout: a new line in a multi-line list,
+/// `, entry` in a one-line list, an empty list opened onto lines.
 fn append(text: &str, list: &List, entry: &str) -> String {
     let ls = line_start(text, list.open);
     let base = &text[ls..ls + text[ls..].len() - text[ls..].trim_start_matches([' ', '\t']).len()];

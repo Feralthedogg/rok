@@ -1,16 +1,13 @@
-//! The standard library prebuilt once per toolchain, options and
-//! target: its bootstrap tiers as one prebuilt library `rok`
-//! (`librok.a` + `rok.rokhir`), which builds link instead of compiling
-//! the library's concrete code each time.
+//! The standard library prebuilt once per toolchain, options and target as
+//! one library `rok` (`librok.a` + `rok.rokhir`), linked instead of
+//! compiled every build.
 //!
-//! Kept in `rokc_driver::cache_dir()` (the sysroot's `lib/rok-cache/`,
-//! or `rok-cache/` beside a repository build of `rokc`), one folder
-//! per `<toolchain>-<options>-<sources>` hash: written to a scratch
-//! folder and renamed into place, so a folder that exists is complete.
-//! A new folder replaces those of other toolchains and of older sources,
-//! and of this toolchain only the `KEEP` option sets used last stay;
-//! nothing used within `IN_USE` goes (each use stamps the folder's
-//! `used` file). A failed build leaves `<folder>.failed` instead.
+//! Kept in `rokc_driver::cache_dir()`, one folder per
+//! `<toolchain>-<options>-<sources>` hash, built in scratch and renamed
+//! into place so an existing folder is complete. A new folder evicts other
+//! toolchains', older sources' and all but the `KEEP` most recent option
+//! sets, sparing anything used within `IN_USE` (each use stamps `used`).
+//! A failed build leaves `<folder>.failed`.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::RecvTimeoutError;
@@ -55,14 +52,11 @@ fn last_use(dir: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-/// `rok.rokhir` of the prebuilt standard library for `key`, built now if
-/// missing.
+/// `rok.rokhir` of the prebuilt std for `key`, built now if missing; a
+/// build in another process is waited for, so fingerprints stay put.
 ///
-/// A build in another process is waited for: every build of one key
-/// links the same library, so dependency fingerprints stay put.
-///
-/// `None` (compile it from source) when the options rule it out, the
-/// cache is not writable, or the build fails.
+/// `None` (compile from source) when ruled out by options, the cache is
+/// read-only, or the build fails.
 #[must_use]
 pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
     let o = key.opts;
@@ -74,9 +68,8 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         // the program.
         && o.profile == crate::Profile::Off
         && o.opt_level != "3";
-    // The library has no features. Another `--cfg` or a cross build is
-    // rare enough that a library build of its own costs more than it
-    // saves.
+    // No features in the library; other `--cfg`s and cross builds are rare
+    // enough that a separate library build costs more than it saves.
     let cfg: Vec<&String> = key
         .cfg
         .iter()
@@ -140,9 +133,8 @@ pub fn prebuilt_std(key: &StdKey<'_>) -> Option<PathBuf> {
         {
             Ok(_) => break,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            // Windows: a lock just removed while another process still
-            // has it open (the heartbeat) is pending deletion until
-            // closed; creating it meanwhile is denied.
+            // Windows: a just-removed lock still open elsewhere is pending
+            // deletion, and recreating it is denied meanwhile.
             Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
             Err(_) => return None,
         }

@@ -1,20 +1,18 @@
-//! `rokc bench` (spec 901 / 9.9.11): time each selected `#[bench]`
-//! function. The harness binary takes `name iters samples` and prints
-//! one `#rokbench <ns>` line per sample (see the driver's `harness`), so
-//! timing happens inside the process, not around a spawn.
+//! `rokc bench` (spec 901 / 9.9.11). The harness takes `name iters
+//! samples` and prints `#rokbench <ns>` per sample, so timing happens
+//! in-process.
 //!
-//! Per bench: unless `--iters` fixes it, calibrate the calls per sample
-//! by growing it until one sample takes ~10ms; then one process runs a
-//! warm-up sample (dropped) and `samples` timed ones. The report is the
-//! mean ns per call and the standard deviation across samples:
+//! Unless `--iters` is given, iterations per sample grow until a sample
+//! takes ~10ms; then one process runs a dropped warm-up and `samples`
+//! timed ones. Reported: mean ns per call and the deviation across
+//! samples:
 //!
 //! ```text
 //! bench fib_20 ... bench:       41,503 ns/iter (+/- 312)
 //! ```
 //!
-//! Benches run one at a time (parallel runs would disturb the timings).
-//! There is no `black_box`, so an optimizer may delete a bench body
-//! whose result is unused.
+//! Benches run serially so they don't disturb each other. There is no
+//! `black_box`: an unused result may be optimized away.
 
 use std::path::Path;
 use std::process::Command;
@@ -32,8 +30,7 @@ pub struct Options<'a> {
 /// Calibration target for one sample.
 const SAMPLE_NS: u64 = 10_000_000;
 
-/// Run `benches` from the harness `exe`, printing a report to stdout;
-/// whether every bench ran.
+/// Run `benches` from `exe`, reporting to stdout; whether all ran.
 pub fn run(exe: &Path, benches: &[String], opts: &Options<'_>) -> bool {
     let started = Instant::now();
     let selected: Vec<&String> = benches

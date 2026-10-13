@@ -19,16 +19,14 @@ pub struct Pkgs {
     pub link: Link,
     /// `extern` statics: they keep their C name.
     pub extern_statics: std::collections::HashSet<String>,
-    /// Windows: the `extern` statics of DLLs (`MirStaticDef::dll_import`),
-    /// reached through their import address `__imp_<name>`, as an
-    /// import library defines only that for data.
+    /// Windows: DLL `extern` statics, reached via `__imp_<name>` (import
+    /// libraries define only that for data).
     pub dll_statics: std::collections::HashSet<String>,
     /// Lazily initialized statics: name → symbol of their initializer.
     pub lazy_statics: std::collections::HashMap<String, String>,
-    /// A codegen unit build (`units`): a library's statics of other
-    /// packages it defines (compiled from source) are its copies,
-    /// `<symbol>.copy_Y<hash>_`, which the units share and another
-    /// package's copies do not collide with.
+    /// Unit builds: a library's own copies of other packages' statics are
+    /// `<symbol>.copy_Y<hash>_`, shared by its units and distinct from other
+    /// packages' copies.
     pub unit_copies: bool,
 }
 
@@ -109,9 +107,8 @@ pub fn item(pkg: &str, qualified: &str, typehash: &str) -> String {
     format!("_Y{pkg}_{}_{}_{typehash}", path.join("_"), escape(name))
 }
 
-/// A string literal's global, named by its content: the same literal
-/// has the same name in every module, so a REPL cell's function text
-/// compares equal to an earlier cell's (`crate::repl`).
+/// A string literal's global, named by content so a REPL cell's text
+/// compares equal to an earlier cell's.
 pub fn str_global(bytes: &[u8]) -> String {
     format!("rok.str.{}", &hex(&sha256(bytes))[..16])
 }
@@ -133,9 +130,8 @@ pub struct Demangled {
 }
 
 impl Demangled {
-    /// `rok::std::vec::push` style. The mangled form drops the root
-    /// segment, so a path starting with a library tier (`core` / `std` /
-    /// `bare`) gets `rok::` back (a user module named `std` too).
+    /// `rok::std::vec::push` style; a path starting with a library tier gets
+    /// `rok::` back (the mangled form drops the root).
     #[must_use]
     pub fn qualified_path(&self) -> String {
         let mut segs: Vec<&str> = Vec::new();

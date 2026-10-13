@@ -106,9 +106,8 @@ pub enum PrimOp {
     Mul,
     Div,
     Rem,
-    /// Floored remainder `%%` (`rok.mod.TYPE`): the result takes the
-    /// divisor's sign. MIR lowering expands it into `Rem` and an
-    /// adjustment, so backends never see it.
+    /// Floored `%%` (`rok.mod.TYPE`): the result takes the divisor's sign.
+    /// MIR expands it, so backends never see it.
     Mod,
     Neg,
     Not,
@@ -168,15 +167,13 @@ pub enum ConstVal {
 /// Calling convention of a function.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Abi {
-    /// rok's own: `str` is `(ptr, len)` by value, a `fn` value is
-    /// `{code, env}`. Every rok function, and `extern "rok"` runtime
-    /// declarations.
+    /// rok's own: `str` is `(ptr, len)` by value, a `fn` value
+    /// `{code, env}`. Every rok function and `extern "rok"` declaration.
     #[default]
     Rok,
-    /// The platform C ABI (spec 8.6): `str` is a NUL-terminated `char*`,
-    /// a `fn` parameter a bare C function pointer, aggregates classified.
-    /// `system`: `extern "system"`, `stdcall` on 32-bit x86 Windows and
-    /// the C ABI elsewhere (spec 5.9.2).
+    /// Platform C ABI (spec 8.6): `str` is a NUL-terminated `char*`, `fn`
+    /// a bare function pointer, aggregates classified. `system`:
+    /// `stdcall` on 32-bit Windows, C elsewhere (spec 5.9.2).
     C { variadic: bool, system: bool },
 }
 
@@ -224,17 +221,15 @@ pub struct FnFacts {
     pub linkage: Linkage,
     /// `#[export_name("sym")]` (spec 905.8).
     pub export_name: Option<String>,
-    /// The core import `(module, name)` of an extern function on wasm32:
-    /// `#[link(wasm_import_module = "module")]` on its block, the name
-    /// its `#[link_name]` or its own (spec 6.2.3).
+    /// wasm32 core import `(module, name)`: `#[link(wasm_import_module)]`
+    /// and `#[link_name]` or the own name (spec 6.2.3).
     pub wasm_import: Option<(String, String)>,
     /// `#[link_name = "sym"]` of an extern function outside a
     /// `wasm_import_module` block: the symbol it links to.
     pub link_name: Option<String>,
     pub role: FnRole,
-    /// A generic instance: its type arguments, mangled into the symbol's
-    /// typehash (905.2). The function's name then ends in
-    /// `MONO_MARK` + these.
+    /// A generic instance's mangled type arguments (905.2); the name ends
+    /// in `MONO_MARK` + these.
     pub mono_args: Option<String>,
     /// `#[track_caller]`: the last parameter is the caller's location
     /// (`str`, `path:line:col`), which its panics report.
@@ -260,10 +255,9 @@ impl FnFacts {
             .unwrap_or(name)
     }
 
-    /// Whether the function's rok-ABI body takes its caller's `rok_tls`
-    /// block address as a hidden last argument (803 §8.3.8): every body
-    /// but the `any` dispatcher and an `#[export_name]` rok function,
-    /// which are reached by symbol from outside and read TLS themselves.
+    /// Whether the body takes the caller's `rok_tls` address as a hidden
+    /// last argument (8.3.8). All but the `any` dispatcher and
+    /// `#[export_name]` functions, which are entered from outside.
     #[must_use]
     pub fn takes_tls(&self) -> bool {
         self.linkage != Linkage::Extern

@@ -21,9 +21,8 @@ extern "rok" {
 pub fn collect() { unsafe { rok_gc_collect() } }
 
 /// What `pin` keeps in place for a value: the GC object holding its
-/// data, `none` when nothing can move (an empty list, a `str`: a
-/// literal is static and a run-time string never moves while a live
-/// variable — the `Pinned` itself — refers to it).
+/// data, `none` when nothing can move (an empty list; a `str`, which
+/// stays in place while the `Pinned` holding it is in scope, 2.15.2).
 pub trait Pinnable {
     fn gc_object(self) -> GcBuf<u8> | none;
 }

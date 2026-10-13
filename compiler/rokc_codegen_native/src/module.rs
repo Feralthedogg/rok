@@ -1,6 +1,4 @@
-//! A whole MIR module → one object: signatures and symbols, function
-//! bodies, the generated functions, statics, GC tables (the MLIR
-//! emitter's `emit_module`).
+//! A MIR module → one object, as the MLIR emitter's `emit_module`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -339,9 +337,9 @@ fn thunk(name: &str, id: FunctionId, sig: &Sig) -> rokc_mir::MirFunction {
     f
 }
 
-/// What the program has once: the C `main`, the statics,
-/// `rok.register_types` with the GC types from `pre_tables` on and the
-/// static roots. A unit build's glue exports its statics (`units`).
+/// Once per program: the C `main`, statics, `rok.register_types` (GC types
+/// from `pre_tables` on, static roots). A unit build's glue exports its
+/// statics.
 #[allow(clippy::too_many_arguments)]
 fn glue_code(
     module: &MirModule,
@@ -396,9 +394,9 @@ fn glue_code(
     }
     // Statics.
     for s in &module.statics {
-        // A prebuilt package's statics are its `.a`'s.
-        // Defined outside: no symbol unless used (a DLL's is used at
-        // its import address only).
+        // A prebuilt package's statics are in its `.a`; others defined
+        // outside get a symbol only if used (DLL ones via the import
+        // address).
         if pkgs.link.in_prebuilt(&s.name) || (s.is_extern && !defines(&s.name)) {
             continue;
         }
@@ -412,9 +410,8 @@ fn glue_code(
         }
         let lazy = pkgs.lazy_statics.get(&s.name).cloned();
         if prebuilt_static(&s.name) {
-            // An earlier REPL cell's `.init` stays to itself (a private
-            // copy here), made only when this object's code reads the
-            // static.
+            // An earlier REPL cell's `.init` stays private, made only if
+            // this object reads the static.
             if let Some(init) = lazy.filter(|_| ctx.obj.named(&format!("{name}.init"))) {
                 let state = ctx.sym(&format!("{name}.state"));
                 let init = ctx.sym(&init);

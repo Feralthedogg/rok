@@ -1,0 +1,27 @@
+// spec: std 215-string §2.15.2
+// gc-stress: 5
+// expect-exit: 0
+// expect-stdout:
+//  1 104
+
+// A generator frame holding exactly one pinned local is `(i32 state,
+// slot)`: the state is no sum tag, so the slot stays traced (and the
+// list in place) while suspended.
+use rok::bare::ptr::ConstPtr;
+
+fn churn() { for i in 0..3000i64 { let xs: List<str> = [f"{i}-xxxxxxxxxxxxxxxxxxxxxxxx"]; } }
+fn mk() -> List<u8> { let l: List<u8> = [104u8, 101u8]; l }
+
+yield fn gen() -> u32 {
+    let s = mk();
+    let p = ConstPtr::<u8>::dangling();
+    yield p.addr() as u32;
+    churn();
+    yield s[0] as u32;
+}
+
+fn main() {
+    let o = "";
+    for x in gen() { o = f"{o} {x}"; }
+    println(o);
+}

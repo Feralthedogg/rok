@@ -1,9 +1,8 @@
-//! `#[derive(...)]` (refs-lang 6.2.1, stdlib 2.5.9 / 2.10.10 / 2.13).
+//! `#[derive(...)]` (refs-lang 6.2.1).
 //!
-//! Each derived trait becomes an ordinary `impl` written as rok source,
-//! lexed and parsed here; every generated token carries the derive
-//! attribute's span, so diagnostics point at `#[derive(..)]`. That every
-//! field implements the trait is checked in HIR (`check_derives`).
+//! Each trait becomes an `impl` written as source and parsed, every token
+//! carrying the attribute's span so diagnostics point there. Field bounds
+//! are checked in HIR (`check_derives`).
 
 // Impl source is built by `format!`; generators take generator closures.
 #![allow(clippy::format_collect, clippy::type_complexity)]

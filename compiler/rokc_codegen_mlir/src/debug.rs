@@ -39,13 +39,11 @@ pub struct DebugInfo {
     cu: Option<u32>,
     /// DWARF type alias by `MirTy` / `DebugTy` (its `Debug` text).
     types: BTreeMap<String, String>,
-    /// Names of the structs whose type is being built, by `Debug` text:
-    /// a reference back to one (a `GcBuf` field) is a declaration,
-    /// which the debugger completes by name.
+    /// Structs being built, by `Debug` text: a reference back to one (a
+    /// `GcBuf` field) is a declaration the debugger completes by name.
     building: BTreeMap<String, String>,
-    /// The `any` being described: its self reference (`isRecSelf`), and
-    /// the types defined since that hold it, by key. They leave `types`
-    /// once it is done: outside it the reference is undefined.
+    /// The `any` being described: its self reference (`isRecSelf`) and the
+    /// types defined since that hold it, dropped from `types` once done.
     any_self: Option<(String, Vec<String>)>,
     next: u32,
     target: Target,
@@ -167,9 +165,9 @@ impl DebugInfo {
         Some(d)
     }
 
-    /// The subprogram `name` at `span` of a function without MIR (the C
-    /// `main`, a lazy static's guard, ..): a function without a position
-    /// is at line 0 of the unit's file; `None` before any unit.
+    /// Subprogram for a function without MIR (C `main`, a lazy static's
+    /// guard); without a position it is line 0 of the unit's file. `None`
+    /// before any unit.
     pub fn synthesized(&mut self, name: &str, span: rokc_diagnostic::Span) -> Option<FnDebug> {
         self.function(name, span, None)
     }
@@ -225,10 +223,9 @@ impl DebugInfo {
         })
     }
 
-    /// A `#llvm.di_local_variable` for local `name` (a `ty`) of the
-    /// function `sp`, declared at `line`; `arg` is its 1-based parameter
-    /// position. `None` for types without a DWARF description here. A
-    /// cell's comes with the expression that reaches its value.
+    /// A `#llvm.di_local_variable` for `name` of type `ty` in `sp` at `line`
+    /// (`arg`: 1-based parameter position); `None` for undescribed types. A
+    /// cell's comes with the expression reaching its value.
     pub fn local(
         &mut self,
         sp: &str,
@@ -359,13 +356,11 @@ impl DebugInfo {
         ])
     }
 
-    /// A value laid out `(i32 tag, payload)` (a tuple, or `any`'s
-    /// struct) whose payload `variants` (`(stored tag, name, payload)`)
-    /// tells apart: a variant part, each variant a struct over the whole
-    /// value (as Rust describes enums), its payload's parts at their
-    /// offsets. The discriminant comes first and each variant's stored
-    /// tag rides a `di_subrange` (`rokc_llvm`'s `variant_parts` makes them
-    /// DWARF variants). Else the plain type.
+    /// A `(i32 tag, payload)` value as a variant part, each variant a struct
+    /// over the whole value (as Rust describes enums). The discriminant
+    /// comes first; each variant's tag rides a `di_subrange`, which
+    /// `rokc_llvm`'s `variant_parts` turns into a DWARF variant. Else the
+    /// plain type.
     fn variant_part(
         &mut self,
         name: &str,
@@ -510,7 +505,7 @@ impl DebugInfo {
             MirTy::Array(..) | MirTy::Union(..) => {
                 let (elem, n) = match ty {
                     MirTy::Array(elem, n) => ((**elem).clone(), *n),
-                    MirTy::Union(_, n) => (MirTy::Prim(PrimTy::Usize), *n),
+                    MirTy::Union(_, n, _) => (MirTy::Prim(PrimTy::Usize), *n),
                     _ => unreachable!(),
                 };
                 let base = self.di_type(&elem)?;
@@ -525,9 +520,8 @@ impl DebugInfo {
         Some(self.define(key, &def))
     }
 
-    /// `(name, type, byte offset)` of each part of aggregate `agg`
-    /// (`names[i]`, else `i`; typed `debug[i]` when given); `()` parts
-    /// are left out.
+    /// `(name, type, byte offset)` of each part of `agg`, `()` parts left
+    /// out.
     fn members(
         &mut self,
         agg: &MirTy,

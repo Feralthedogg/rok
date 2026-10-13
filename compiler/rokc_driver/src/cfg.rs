@@ -1,10 +1,6 @@
-//! `#[cfg(...)]` predicate evaluation and item filtering.
-//!
-//! The cfg environment is the `--cfg` flags plus the target's keys
-//! (`target_os`, `target_arch`, `target_pointer_width`, `target_family`,
-//! `target_endian`, `target_env`); an item whose `#[cfg(p)]` is false
-//! is dropped, an excluded inline `mod` with its whole subtree. Members
-//! and statements are dropped by the parser as they are read.
+//! `#[cfg(...)]` item filtering. The environment is the `--cfg` flags plus
+//! the target's `target_*` keys; an excluded inline `mod` goes with its
+//! subtree. Members and statements are dropped by the parser.
 
 use rokc_ast::{Attribute, Item};
 
@@ -34,9 +30,7 @@ pub fn add_target(env: &mut CfgEnv, target: &rokc_mir::Target) {
     }
 }
 
-/// Filter a list of items, dropping those whose `#[cfg(...)]` predicate
-/// evaluates to false. Inline modules recurse so excluded subtrees are
-/// fully pruned; their non-`Mod` children also get the same filter.
+/// Drop items whose `#[cfg]` is false, recursing into inline modules.
 #[must_use]
 pub fn filter_items(items: Vec<Item>, env: &CfgEnv) -> Vec<Item> {
     let mut out = Vec::with_capacity(items.len());

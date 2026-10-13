@@ -1,21 +1,15 @@
-//! One exhaustive pre-order AST walker.
-//!
-//! For the lowering pre-passes (generic-instantiation discovery, closure
-//! capture analysis) and the driver. Every match is exhaustive so a new
-//! AST node kind is a compile error here instead of a silently skipped
-//! subtree.
+//! One exhaustive pre-order AST walker for the lowering pre-passes and the
+//! driver: exhaustive matches make a new node kind a compile error here,
+//! not a skipped subtree.
 
 use rokc_ast::{
     AccessTail, Block, CallArg, EnumVariantKind, Expr, ExprKind, FnDef, ImplItem, Item, Pattern,
     PatternKind, Stmt, StmtKind, StructKind, TraitItem, Ty, TyKind,
 };
 
-/// Callbacks for `walk_*`.
-///
-/// Scope events (`push_scope` / `bind` /
-/// `pop_scope`) follow the language's lexical rules: a `let` binds after
-/// its initializer, match / for / closure binders are scoped to their
-/// body.
+/// Callbacks for `walk_*`. Scope events follow lexical rules: a `let` binds
+/// after its initializer; match / for / closure binders are scoped to
+/// their body.
 pub trait AstVisitor {
     fn expr(&mut self, _e: &Expr) {}
     /// Every path written: in expressions, types, patterns and an impl's

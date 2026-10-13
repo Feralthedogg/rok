@@ -97,6 +97,17 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
         .iter()
         .map(|f| lower_fn(f, module, target, &ret_tys, &fnv))
         .collect();
+    let ptrs = PtrTypes::new(module);
+    for (f, hf) in functions.iter_mut().zip(&lowered) {
+        if ptrs.in_fn(hf, f) {
+            f.pins = f
+                .locals
+                .iter()
+                .filter(|l| target.has_gc_ref(&l.ty))
+                .map(|l| l.id)
+                .collect();
+        }
+    }
     // Coroutine bodies → resume functions + constructors (spec 708).
     for (i, hf) in lowered.iter().enumerate() {
         if !(hf.is_async || hf.is_generator) || hf.body.is_none() {
@@ -108,7 +119,16 @@ pub fn lower(module: &HirModule, target: &Target) -> MirModule {
             .entry(hf.id)
             .or_insert_with(|| fnv.fresh_id());
         // An `async` body takes the poll's `Context` on every resume.
-        let ctor_fn = crate::coro::transform(&mut functions[i], usize::from(hf.is_async), ctor);
+        let ctor_fn =
+            crate::coro::transform(&mut functions[i], usize::from(hf.is_async), ctor, |t| {
+                // A union away from its tag scans as ambiguous words.
+                let (size, word) = (target.size_align(t).0, target.pointer_width / 8);
+                if size % word == 0 {
+                    MirTy::Union(vec![(0, t.clone())], size / word, crate::UnionKind::Plain)
+                } else {
+                    t.clone()
+                }
+            });
         functions.push(ctor_fn);
     }
     finish_fn_values(&mut functions, &fnv);
@@ -229,6 +249,76 @@ impl FnValues {
     }
 }
 
+/// The structs and enums whose values hold a `rok::bare::ptr` pointer,
+/// or whose type arguments name one (`List<ConstPtr<u8>>`).
+struct PtrTypes {
+    structs: HashSet<rokc_hir::StructId>,
+    enums: HashSet<rokc_hir::EnumId>,
+}
+
+impl PtrTypes {
+    fn new(module: &HirModule) -> Self {
+        let mut p = Self {
+            structs: module
+                .structs
+                .iter()
+                .filter(|s| s.name.starts_with("rok::bare::ptr::"))
+                .map(|s| s.id)
+                .collect(),
+            enums: HashSet::new(),
+        };
+        loop {
+            let n = p.structs.len() + p.enums.len();
+            for s in &module.structs {
+                if s.generic_args
+                    .iter()
+                    .chain(s.fields.iter().map(|f| &f.ty))
+                    .any(|t| p.hir(t))
+                {
+                    p.structs.insert(s.id);
+                }
+            }
+            for e in &module.enums {
+                let payloads = e.variants.iter().filter_map(|v| v.payload_ty.as_ref());
+                if e.generic_args.iter().chain(payloads).any(|t| p.hir(t)) {
+                    p.enums.insert(e.id);
+                }
+            }
+            if p.structs.len() + p.enums.len() == n {
+                return p;
+            }
+        }
+    }
+
+    fn hir(&self, t: &HirTy) -> bool {
+        match t {
+            HirTy::Struct(id) => self.structs.contains(id),
+            HirTy::Enum(id) => self.enums.contains(id),
+            HirTy::Sum(ts) | HirTy::Tuple(ts) => ts.iter().any(|t| self.hir(t)),
+            HirTy::Array(t, _) => self.hir(t),
+            HirTy::Fn(ps, r, _) => ps.iter().any(|t| self.hir(t)) || self.hir(r),
+            _ => false,
+        }
+    }
+
+    fn mir(&self, t: &MirTy) -> bool {
+        match t {
+            MirTy::Struct(id, ts) => self.structs.contains(id) || ts.iter().any(|t| self.mir(t)),
+            MirTy::Tuple(ts) => ts.iter().any(|t| self.mir(t)),
+            MirTy::Union(vs, _, _) => vs.iter().any(|(_, t)| self.mir(t)),
+            MirTy::Array(t, _) => self.mir(t),
+            MirTy::Fn(ps, r) => ps.iter().any(|t| self.mir(t)) || self.mir(r),
+            _ => false,
+        }
+    }
+
+    /// Whether a pointer can appear in `f` (a local or temporary's type
+    /// names one).
+    fn in_fn(&self, hf: &HirFunction, f: &MirFunction) -> bool {
+        hf.locals.iter().any(|l| self.hir(&l.ty)) || f.locals.iter().any(|l| self.mir(&l.ty))
+    }
+}
+
 fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
     let at: HashMap<FunctionId, usize> = functions
         .iter()
@@ -316,6 +406,7 @@ fn finish_fn_values(functions: &mut Vec<MirFunction>, fnv: &FnValues) {
             span: f.span,
             facts: FnFacts::default(),
             strips: Vec::new(),
+            pins: Vec::new(),
         };
         functions.push(w);
     }
@@ -437,6 +528,7 @@ fn lower_fn(
         span: f.span,
         facts: f.facts.clone(),
         strips: Vec::new(),
+        pins: Vec::new(),
     }
 }
 
@@ -2023,11 +2115,8 @@ impl<'a> FnBuilder<'a> {
                     } else {
                         arm_body_bb
                     };
-                    // For start: `lo <= x`  ↔  `x >= lo` is the same; we
-                    // mirror by computing `value <op> x` for the bound.
-                    // Concretely: bound `(Le, lo)`  ↔  `lo <= x`,
-                    //            bound `(Gt, hi)`  ↔  `hi >  x`,
-                    //            bound `(Ge, hi)`  ↔  `hi >= x`.
+                    // A bound `(op, v)` tests `v <op> x`: `(Le, lo)` is
+                    // `lo <= x`, `(Gt, hi)` is `hi > x`.
                     let cond = self.build_cmp_const_op(*op, value, scrut_local, *prim);
                     self.terminate(Terminator::If {
                         cond,
@@ -2346,8 +2435,6 @@ impl<'a> FnBuilder<'a> {
         }
     }
 
-    /// The MIR type of one enum variant's own payload (before it is
-    /// moved into the enum's shared slot).
     /// Each payload argument of enum variant `scrut` in its own local
     /// (`None` when the variant carries no matching payload).
     fn variant_arg_locals(

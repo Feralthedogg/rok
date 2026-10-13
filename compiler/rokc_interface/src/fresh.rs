@@ -1,15 +1,12 @@
-//! Incremental builds (902.16) at package granularity: a build is skipped
-//! when its output is there and nothing it was made from changed. The
-//! record (`.<out>.fp` next to the output) holds the key, the output's
-//! stamp (`file_stamp`: a replaced output rebuilds) and the build's
-//! rendered warnings, which a skipped build prints again.
+//! Package-level incremental builds (902.16): skip a build whose output
+//! exists and whose inputs didn't change. The record (`.<out>.fp`) holds
+//! the key, the output's `file_stamp` and the rendered warnings, which a
+//! skipped build reprints.
 //!
-//! The key covers the compiler, the report style, the build words
-//! (options, paths), every source file the build can read and the
-//! prebuilt archives it links. Files the build read beyond those (a
-//! `#[path]` module outside the package, an `include_str!` /
-//! `include_bytes!` file) are listed in the record with their content
-//! hashes. One key per package: any change rebuilds the package whole.
+//! The key covers the compiler, report style, options and paths, every
+//! source the build can read and the prebuilt archives it links. Files read
+//! beyond those (`#[path]` outside the package, `include_str!`) are listed
+//! with content hashes. Any change rebuilds the whole package.
 
 use std::path::{Path, PathBuf};
 
@@ -37,9 +34,8 @@ fn content_hash(p: &Path) -> String {
 }
 
 impl Fingerprint {
-    /// `words`: what the build is (options, paths); `inputs`: files it
-    /// reads (a directory: its source files); `stamped`: big files known
-    /// by `file_stamp` (the runtime, prebuilt archives).
+    /// `words`: options and paths; `inputs`: files read (a directory: its
+    /// sources); `stamped`: big files tracked by `file_stamp`.
     #[must_use]
     pub fn new(
         out: &Path,

@@ -1,30 +1,21 @@
-//! `#[literal(pattern)]` (refs-lang 6.5): a function registers a
-//! syntax pattern; source matching it is a call of that handler.
+//! `#[literal(pattern)]` (refs-lang 6.5): source matching a registered
+//! pattern is a call of its handler.
 //!
-//! The pattern mini-language (6.5.3), written as tokens in the
-//! attribute: `"tok"` matches that token, `expr` / `number` / `string`
-//! / `ident` capture, `{ .. }` and `( .. )` group, `% "sep"` separates
-//! repetitions, `*` / `+` / `?` repeat. `, priority = N` (6.5.5) may
-//! follow.
+//! Patterns (6.5.3): `"tok"` matches a token; `expr` / `number` /
+//! `string` / `ident` capture; `{ .. }` / `( .. )` group; `% "sep"`
+//! separates repetitions; `*` / `+` / `?` repeat; `, priority = N` (6.5.5).
 //!
-//! Three kinds of registration:
-//! - the built-in shapes (`[..]`, `{k: v}`, `{a, b}`, ranges): the
-//!   parser keeps parsing them with the language's own rules (block vs
-//!   set 6.5.6, range precedence 3.7); HIR dispatches each to the
-//!   handlers registered with that exact pattern (`shape`);
-//! - `number "suffix"` (spec 1.6.2): a numeric literal with a suffix
-//!   the language doesn't define (`2i`);
-//! - any other pattern starting with a quoted token: tried at every
-//!   expression start (`Parser::try_magic_literal`) before the built-in
-//!   grammar; the longest match wins, equal matches go to HIR as
-//!   candidates (6.5.5).
+//! - Built-in shapes (`[..]`, `{k: v}`, `{a, b}`, ranges) keep the
+//!   language's own parse (6.5.6, 3.7); HIR dispatches them by exact
+//!   pattern (`shape`).
+//! - `number "suffix"` (1.6.2): a numeric literal with an unknown suffix.
+//! - Any other pattern starting with a quoted token is tried at every
+//!   expression start before the grammar (`Parser::try_magic_literal`);
+//!   longest match wins, ties go to HIR as candidates (6.5.5).
 //!
-//! Captures become handler arguments in order: a capture is one
-//! argument, a `?` group's captures are each a value or `none`, a `*` /
-//! `+` repetition is one argument holding its items (each item a value,
-//! a tuple of several, or an array for a nested repetition). A
-//! repetition in a variadic `...T` slot passes its items as the
-//! variadic arguments.
+//! Captures are handler arguments in order; a `?` group's are each a value
+//! or `none`; a `*` / `+` repetition is one argument of items (a value, a
+//! tuple, or an array when nested), or the variadic arguments of a `...T`.
 
 use std::sync::Arc;
 
@@ -529,9 +520,8 @@ impl Parser<'_> {
         }
     }
 
-    /// Spec 6.5.4: at an expression start, the registered patterns
-    /// before the built-in grammar. `None`: nothing matched (nothing
-    /// consumed).
+    /// Spec 6.5.4: registered patterns, tried before the grammar. `None`
+    /// consumes nothing.
     pub(super) fn try_magic_literal(&mut self) -> Option<Expr> {
         let span = self.peek_span();
         if let TokenKind::IntLit(t) | TokenKind::FloatLit(t) = self.peek().clone() {

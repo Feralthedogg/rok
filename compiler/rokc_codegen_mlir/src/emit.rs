@@ -22,17 +22,13 @@ use crate::abi::{ArgAbi, FnAbi, RetAbi, rok_by_ref};
 /// The standard library's `List` (`buf_ref_facts`).
 const LIST: &str = "rok::core::collections::list::List";
 
-/// TBAA (type-based alias analysis) tags. A local's stack slot is never
-/// GC object memory; GC object memory read and written as different
-/// scalar types (a `GcBuf<f64>`'s elements, a `GcBuf<usize>` length)
-/// never overlaps: a buffer is only ever accessed as its element type.
-/// Memory the collector reads or rewrites counts as a reference (`ref`,
-/// the tag of `REF_ONLY_CALLS`): a root (`gcroot`, what the shadow-stack
-/// frame points to), a heap reference (`gc`), a heap `str` (its pointer)
-/// and a card of the write barrier (`card`); each a type of its own, so
-/// one does not clobber the other. Other accesses
-/// (raw addresses, scratch, the runtime's words) carry no tag and may
-/// alias anything.
+/// TBAA tags. A local's stack slot is never GC object memory, and a GC
+/// buffer is only ever accessed as its element type, so differently typed
+/// heap accesses never overlap. Memory the collector reads or rewrites is
+/// tagged as references (`ref`, also on `REF_ONLY_CALLS`): roots
+/// (`gcroot`), heap references (`gc`), heap `str` pointers and write
+/// barrier cards (`card`), each its own type. Raw addresses, scratch and
+/// runtime words carry no tag and may alias anything.
 const TBAA_DEFS: &str = r#"#rok_tbaa_root = #llvm.tbaa_root<id = "rok">
 #rok_tbaa_slot_t = #llvm.tbaa_type_desc<id = "rok.slot", members = {<#rok_tbaa_root, 0>}>
 #rok_tbaa_heap_t = #llvm.tbaa_type_desc<id = "rok.heap", members = {<#rok_tbaa_root, 0>}>
@@ -115,9 +111,8 @@ pub struct Emitter {
     /// Interned string-literal globals: content → symbol, shared by every
     /// function of the module.
     str_globals: std::collections::BTreeMap<Vec<u8>, String>,
-    /// Unsupported constructs found while emitting, at the function
-    /// they are in (dummy outside one): the module is rejected instead
-    /// of shipping placeholder IR.
+    /// Unsupported constructs found while emitting, by function: the module
+    /// is rejected rather than shipping placeholder IR.
     pub errors: Vec<(rokc_diagnostic::Span, String)>,
     /// Runtime symbols codegen uses on its own (`runtime_decl`).
     needs: BTreeSet<&'static str>,
@@ -162,9 +157,8 @@ pub(crate) struct FnSig {
     ret: MirTy,
     /// A C declaration: its C lowering (spec 8.6).
     c: Option<FnAbi>,
-    /// An `extern "C" fn` definition with aggregates (spec 5.9.10,
-    /// 8.6.3): the symbol and `(params) -> ret` type of the C ABI entry C
-    /// calls (`emit_c_entry`); `name` is the rok-ABI body.
+    /// An `extern "C" fn` with aggregates (spec 5.9.10, 8.6.3): symbol and
+    /// type of the C entry (`emit_c_entry`); `name` is the rok-ABI body.
     c_entry: Option<(String, String)>,
     /// Its C declaration or C entry is `stdcall` (`FnAbi::stdcall`).
     stdcall: bool,
@@ -201,9 +195,9 @@ enum Callee<'s> {
     Ptr(&'s str),
 }
 
-/// The declaration of runtime symbol `name` (805) codegen calls on its
-/// own; `None` for a name not in the table. A `str` parameter is a
-/// pointer to it on Windows x64 and wasm32 (`FnEmit::runtime_str`).
+/// Declaration of runtime symbol `name` (805) that codegen calls itself;
+/// `None` if not in the table. `str` is passed by pointer on Windows x64
+/// and wasm32 (`FnEmit::runtime_str`).
 fn runtime_decl(name: &str, target: &Target) -> Option<String> {
     let pw = target.pointer_width;
     if name == "rok.alloc" {
@@ -251,11 +245,9 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
     ))
 }
 
-/// The parameters, as codegen passes them, of the runtime symbols only
-/// codegen calls whose spec 8.5 types (`Ptr<u8>`, `ConstPtr<u8>`) are not
-/// these. A program's own declaration of one (its types checked against
-/// `rok::core::rt`) is declared and called with them: its arguments
-/// cross as these types, as codegen's own calls of it do.
+/// Parameter types codegen uses for runtime symbols whose spec 8.5 types
+/// (`Ptr<u8>`, `ConstPtr<u8>`) differ. A program's own declaration of one
+/// is declared and called with these too.
 fn codegen_params(name: &str, pw: u32) -> Option<Vec<String>> {
     let p = || "!llvm.ptr".to_owned();
     Some(match name {
@@ -266,20 +258,16 @@ fn codegen_params(name: &str, pw: u32) -> Option<Vec<String>> {
     })
 }
 
-/// Runtime functions that write no GC object memory but references (a
-/// collection moves objects and rewrites the references to them) and
-/// object headers (untagged). Called with the `ref` TBAA tag, so other
-/// heap loads (a length, a buffer's numbers) stay valid across them;
-/// declared as `llvm.func`, as only an `llvm.call` carries the tag.
+/// Runtime functions that write only references (a collection moves
+/// objects and rewrites them) and headers. Called with the `ref` TBAA tag
+/// so other heap loads stay valid across them; declared `llvm.func`,
+/// since only `llvm.call` carries the tag.
 const REF_ONLY_CALLS: [&str; 3] = ["rok_runtime_yield", "rok_gc_alloc_slow", "rok_gc_wb_slow"];
 
 /// `rok.alloc(cursor, limit, size8, size, align, type_id, ok)`: bump-
-/// allocate `size8` bytes (a multiple of 8, below `LOS_THRESHOLD`) from
-/// this thread's TLAB (`cursor` / `limit`: its TLS slots) when they fit
-/// and `ok` holds, writing the header (`type_id`; `gc_word` = size; the
-/// flags are already 0); else `rok_gc_alloc_slow(size, align, type_id)`.
-/// The optimizer sees an allocation function and inlines it last (the
-/// LLVM shim's `InlineAlloc`).
+/// allocate `size8` bytes from this thread's TLAB when they fit and `ok`,
+/// writing the header; else `rok_gc_alloc_slow`. The optimizer sees an
+/// allocation function and inlines it last (the shim's `InlineAlloc`).
 fn alloc_fn(pw: u32) -> String {
     format!(
         "llvm.func internal @rok.alloc(%cp: !llvm.ptr, %lp: !llvm.ptr, %size8: i{pw}, %size: i{pw}, %align: i{pw}, %tid: i32, %ok: i1) -> !llvm.ptr attributes {{passthrough = [\"noinline\", \"nounwind\"]}} {{
@@ -313,9 +301,8 @@ pub fn alloc_module(target: &Target) -> String {
     )
 }
 
-/// LLVM attributes of runtime function `name`'s declaration: none
-/// unwinds (a Rust panic there aborts); the ones that end the process
-/// never return.
+/// LLVM attributes of a runtime declaration: nothing unwinds (a Rust panic
+/// there aborts); process-ending ones never return.
 fn runtime_fn_attrs(name: &str) -> &'static str {
     match name {
         "rok_panic"
@@ -378,13 +365,11 @@ impl Emitter {
             .is_some_and(|r| r.define.iter().any(|d| d == name))
     }
 
-    /// A definition kept to this object (spec 904 separate compilation):
-    /// in a prebuilt library everything but the package's own items; with
-    /// prebuilt dependencies, the copies of their code compiled here. In
-    /// a program, everything not exported by name (a REPL cell's
-    /// functions stay visible to later cells; the program's dispatcher
-    /// replaces a prebuilt library's weak one). A unit's function another
-    /// unit uses is not.
+    /// A definition private to this object (spec 904): in a prebuilt library
+    /// everything but the package's own items; with prebuilt deps, the
+    /// copies of their code compiled here; in a program, everything not
+    /// exported by name (REPL cells stay visible; the program's dispatcher
+    /// overrides a library's weak one). Not a function another unit uses.
     fn private_copy(&self, f: &MirFunction) -> bool {
         if self
             .unit
@@ -404,9 +389,8 @@ impl Emitter {
         }
     }
 
-    /// A static whose storage a prebuilt dependency's `.a` defines, or
-    /// (a REPL cell) an earlier cell (`ReplCell::statics`), or (a unit)
-    /// the glue unit.
+    /// A static whose storage is defined elsewhere: a prebuilt dependency's
+    /// `.a`, an earlier REPL cell, or the glue unit.
     fn prebuilt_static(&self, name: &str) -> bool {
         !self.glue
             || self.link().in_prebuilt(name)
@@ -416,10 +400,8 @@ impl Emitter {
                 .is_some_and(|r| r.statics.iter().any(|s| s == name))
     }
 
-    /// Linkage of a static this object defines: a prebuilt library
-    /// exports its package's statics (its users declare them), a REPL
-    /// cell all of them (later cells use them), the glue unit all of
-    /// them (the other units use them).
+    /// Linkage of a defined static: exported from a prebuilt library (its
+    /// package's), a REPL cell or the glue unit, since others use them.
     fn static_linkage(&self, name: &str) -> &'static str {
         if self.repl.is_some()
             || self.unit.is_some()
@@ -667,9 +649,9 @@ impl Emitter {
         self.emit_rest(module, &view, &fns);
     }
 
-    /// `<f>.v` for each rok body a function value takes (`thunks`): its
-    /// own parameters and result, the `rok_tls` address read here and
-    /// passed on; internal to each module that takes such a value.
+    /// `<f>.v` for each rok body used as a function value: same parameters
+    /// and result, reading `rok_tls` and passing it on; internal to each
+    /// module.
     fn emit_thunks(&mut self, module: &MirModule, fns: &HashMap<FunctionId, FnSig>) {
         if !self.thunks.is_empty() {
             self.needs.insert("rok_tls");
@@ -725,9 +707,8 @@ impl Emitter {
         c_entries: &[(FunctionId, FnAbi)],
     ) {
         let unit = self.unit.clone();
-        // An `extern "C"` declaration of a symbol this module defines
-        // (`#[export_name]`, spec 9.5.8) is the same function: no second
-        // `func.func`.
+        // An `extern "C"` declaration of a symbol defined here
+        // (`#[export_name]`, spec 9.5.8) is the same function.
         let defined: HashSet<&str> = view
             .iter()
             .filter(|f| f.facts.linkage == Linkage::Defined)
@@ -740,9 +721,8 @@ impl Emitter {
             })
             .flatten()
             .collect();
-        // One declaration per symbol: extern functions may share one
-        // (`#[link_name]`), and an `extern "C"` declaration may name a
-        // prebuilt dependency's `#[export_name]` function.
+        // One declaration per symbol: externs may share one (`#[link_name]`)
+        // or name a prebuilt dependency's `#[export_name]` function.
         let mut declared: HashSet<&str> = HashSet::new();
         for &f in view {
             let sym = fns[&f.id].name.as_str();
@@ -850,9 +830,8 @@ impl Emitter {
         self.out.push_str("}\n");
     }
 
-    /// The `ScanTable`s (802) and `rok.register_types`, which registers
-    /// them and the static roots right after `rok_runtime_init` (802
-    /// §8.2.12).
+    /// The `ScanTable`s (802) and `rok.register_types`, which registers them
+    /// and the static roots right after `rok_runtime_init` (§8.2.12).
     fn emit_gc_support(&mut self, module: &MirModule) {
         let mut calls = String::new();
         // Earlier REPL cells registered the first tables.
@@ -973,11 +952,10 @@ impl Emitter {
                 continue;
             }
             if self.prebuilt_static(&s.name) {
-                // In the dependency's `.a`; a lazy one's state byte and
-                // `.init` too (a REPL cell's earlier cell keeps `.init`
-                // to itself: a private copy here). A lazy one is written
-                // at run time: not `constant`, or a load could move above
-                // its `.init`.
+                // In the dependency's `.a`, a lazy one's state byte and
+                // `.init` too (an earlier REPL cell keeps `.init` private).
+                // A lazy one is written at run time: not `constant`, or a
+                // load could move above its `.init`.
                 let lazy = self.pkgs.lazy_statics.contains_key(&s.name);
                 let constness = if lazy { "" } else { constness };
                 let _ = writeln!(
@@ -1048,11 +1026,10 @@ impl Emitter {
         }
     }
 
-    /// A static with a non-literal initializer: zeroed storage, a state
-    /// byte (0 new, 1 running, 2 ready) and `@sym.init`, which runs the
-    /// initializer `init` exactly once across threads
-    /// (`rok_static_init_begin` / `_end`). Every access first checks the
-    /// state (`FnEmit::ensure_static_init`).
+    /// A static with a non-literal initializer: zeroed storage, a state byte
+    /// (0 new, 1 running, 2 ready) and `@sym.init`, which runs `init` once
+    /// across threads (`rok_static_init_begin` / `_end`). Every access checks
+    /// the state first (`FnEmit::ensure_static_init`).
     fn emit_lazy_static(
         &mut self,
         name: &str,
@@ -1074,11 +1051,10 @@ impl Emitter {
         self.emit_lazy_init(name, sym, ty, init, export, by_addr);
     }
 
-    /// `@sym.init(at)`: runs initializer `init` of static `name` once
-    /// (see `emit_lazy_static`); `at` is the reading code's location, for
-    /// the panic of a recursive initialization. `export`ed by a prebuilt
-    /// library that owns the static. `by_addr`: `init` returns its value
-    /// through a leading pointer (spec 8.6.6), the static itself.
+    /// `@sym.init(at)`: run `init` once; `at` locates the panic of a
+    /// recursive initialization. Exported by the prebuilt library owning
+    /// the static. `by_addr`: `init` returns through a leading pointer
+    /// (8.6.6), the static itself.
     fn emit_lazy_init(
         &mut self,
         name: &str,
@@ -1141,10 +1117,9 @@ impl Emitter {
             .clone()
     }
 
-    /// One `internal unnamed_addr constant` byte array per interned string
-    /// literal, NUL-terminated so the pointer alone is a C string. Its
-    /// address is not significant: a split compile copies it into each
-    /// part that uses it.
+    /// One `internal unnamed_addr constant` NUL-terminated byte array per
+    /// interned literal (so the pointer is a C string). Addresses aren't
+    /// significant: split compiles copy it into each part.
     fn emit_string_globals(&mut self) {
         let entries: Vec<(Vec<u8>, String)> = self
             .str_globals
@@ -1182,9 +1157,9 @@ impl Emitter {
                 );
                 return;
             }
-            // The runtime's (`extern "rok"`) are C functions; a prebuilt
-            // library's rok functions are defined without extension
-            // attributes, so they are declared without them.
+            // Runtime (`extern "rok"`) functions are C functions; prebuilt
+            // rok functions are defined, so declared, without extension
+            // attributes.
             let (params, ret) = if f.facts.linkage == Linkage::Prebuilt {
                 let (params, ret) = sig.rok_types(&self.target);
                 (params, ret.map_or_else(String::new, |r| format!(" -> {r}")))
@@ -1239,12 +1214,11 @@ impl Emitter {
             // The program's own (complete) dispatcher replaces it.
             attrs.push("llvm.linkage = #llvm.linkage<weak>".to_owned());
         }
-        // Stack probes: a frame bigger than a page touches each page on
-        // the way down, so an overflow faults in the guard page (where
-        // the runtime reports it) instead of somewhere below it.
-        // rok code never unwinds: a panic ends the process.
-        // A loop-free function that never returns is a panic path: kept
-        // out of line, so the checks that call it stay small to inline.
+        // Stack probes: a frame over a page touches each page on the way
+        // down, so overflow faults in the guard page where the runtime
+        // reports it. rok code never unwinds. A loop-free never-returning
+        // function is a panic path: kept out of line so its callers'
+        // checks stay small enough to inline.
         let cold = if f.facts.inline != Inline::Always
             && f.blocks
                 .iter()
@@ -1299,9 +1273,8 @@ impl Emitter {
                     else {
                         continue;
                     };
-                    // A zero-sized value has nothing to show, and its
-                    // promoted `{}` location crashes LLVM's instruction
-                    // selection.
+                    // Zero-sized values show nothing, and their promoted `{}`
+                    // location crashes LLVM's instruction selection.
                     if emit.is_block_param(l.id) || self.target.size_align(&l.ty).0 == 0 {
                         continue;
                     }
@@ -1375,12 +1348,10 @@ impl Emitter {
         }
     }
 
-    /// The C ABI entry of an `extern "C" fn` definition `sig` (spec
-    /// 8.6.3): takes the arguments as C passes them (coerced, by
-    /// pointer, `sret`), calls the rok body with the values, returns
-    /// the result the C way. Exported under `#[export_name]`, else
-    /// internal (C gets it as a function pointer) unless `shared` with
-    /// another unit.
+    /// C entry of an `extern "C" fn` (spec 8.6.3): takes arguments the C way
+    /// (coerced, by pointer, `sret`), calls the rok body and returns the C
+    /// way. Exported under `#[export_name]`, else internal unless `shared`
+    /// with another unit.
     fn emit_c_entry(&mut self, sig: &FnSig, abi: &FnAbi, exported: bool, shared: bool, span: Span) {
         let Some((entry, _)) = &sig.c_entry else {
             return;
@@ -1552,9 +1523,8 @@ impl Emitter {
 
     /// An `extern "C"` declaration under the platform C ABI (spec 8.6):
     /// aggregates per `abi::classify`, `str` as `char*`, small integers
-    /// caller-extended, variadic ones as an `llvm.func` with `...`.
-    ///
-    /// `wasm_import`: the core import `(module, name)` it is on wasm32.
+    /// caller-extended, variadics as an `llvm.func` with `...`.
+    /// `wasm_import`: its wasm32 core import `(module, name)`.
     fn emit_c_decl(
         &mut self,
         symbol: &str,
@@ -1612,10 +1582,9 @@ impl Emitter {
     }
 
     /// The C `main` (spec 905.9): runtime init, type registration, the
-    /// user's `main`, runtime shutdown; its result as the exit code.
-    /// wasm32: `__main_void`, what wasi-libc's `_start` calls (clang's
-    /// name for a `main` without parameters there). In a browser module
-    /// (a reactor, no `_start`) it is the export `main`.
+    /// user's `main`, shutdown; its result is the exit code. On wasm32 it is
+    /// `__main_void` (what wasi-libc's `_start` calls), or the export `main`
+    /// in a browser reactor.
     fn emit_main_wrapper(
         &mut self,
         user_main: &str,
@@ -1778,10 +1747,9 @@ struct FnEmit<'a> {
     /// Blocks whose terminator takes a loop back-edge: a safepoint poll
     /// goes right before it (804 §8.4.8). Each maps to its loop headers.
     back_edges: HashMap<u32, HashSet<u32>>,
-    /// Loop headers entered through a `^rok_re<H>` block: every edge
-    /// but the poll's fast back edge goes there, so the yield call sits
-    /// in an outer loop and the inner loop has no call to clobber its
-    /// loop-invariant loads (LLVM hoists them into the re-entry block).
+    /// Loop headers entered through `^rok_re<H>`: every edge but the fast
+    /// back edge goes there, so the yield call sits in an outer loop and
+    /// LLVM can hoist the inner loop's invariant loads into it.
     reentry: HashSet<u32>,
     /// The block whose terminator is being emitted, and whether on its
     /// poll's yield path.
@@ -1789,11 +1757,10 @@ struct FnEmit<'a> {
     /// The GC-holding locals live across a safepoint (`emit_prelude`);
     /// `None`: every one.
     rooted: Option<HashSet<LocalId>>,
-    /// The root cell the frame holds for a rooted local besides its own
-    /// slot (all but arrays, without `__mlir_op` regions). Every write
-    /// goes to both; reads use the slot, which nothing else can reach,
-    /// so its loads survive calls: a collection never rewrites a root
-    /// (an object a root reaches is not moved, 704 §7.4.1).
+    /// The frame's root cell for a rooted local, besides its own slot (not
+    /// arrays or `__mlir_op` bodies). Writes go to both; reads use the
+    /// slot, which nothing else reaches, so loads survive calls (a root's
+    /// object never moves, 704 §7.4.1).
     root_cells: HashMap<u32, String>,
     /// Rooted locals whose own slot is the root (no root cell).
     root_slots: HashSet<u32>,
@@ -1808,10 +1775,9 @@ struct FnEmit<'a> {
     /// (local id, `#di_var` alias, the declare's location).
     dbg: Option<crate::debug::FnDebug>,
     dbg_vars: Vec<(u32, String, String)>,
-    /// `__mlir_op` regions (bare 1.9): the enclosing bodies of the open
-    /// regions, the text of the closed ones (the next op takes them),
-    /// and root clears put off until the op is out of every region (a
-    /// cleared root slot could be the local a loop region reads again).
+    /// `__mlir_op` regions (bare 1.9): enclosing bodies of open regions,
+    /// text of closed ones for the next op, and root clears deferred until
+    /// out of every region (a loop region may reread the local).
     region_outer: Vec<String>,
     regions_closed: Vec<String>,
     region_deaths: Vec<LocalId>,
@@ -1835,9 +1801,8 @@ struct FnEmit<'a> {
     /// Where the next rok call returning by address writes its result
     /// (`rok_call_args`): the target's slot instead of a temporary.
     sret_into: Option<String>,
-    /// This thread's address of each runtime TLS slot used, by offset,
-    /// and of the block at `u32::MAX` (`tls_addr`), computed once in the
-    /// entry block.
+    /// This thread's address of each runtime TLS slot used, by offset, and
+    /// of the block at `u32::MAX`, computed once in the entry block.
     tls: HashMap<u32, String>,
     /// The hidden parameter holding the block's address (`FnSig::tls`).
     tls_arg: Option<String>,
@@ -1851,9 +1816,8 @@ pub fn back_edge_blocks(f: &MirFunction) -> HashSet<u32> {
     rokc_mir::back_edges(f).into_keys().collect()
 }
 
-/// The back edges that poll, by block, with their loop headers: all but
-/// those of a short loop (`rokc_mir::short_loops`) whose blocks reach no
-/// safepoint, which ends in bounded time anyway.
+/// Polling back edges by block, with their headers: all but those of short
+/// loops (`rokc_mir::short_loops`) reaching no safepoint.
 #[allow(clippy::implicit_hasher)]
 pub fn polled_back_edges(
     f: &MirFunction,
@@ -1883,9 +1847,8 @@ pub fn polled_back_edges(
     edges
 }
 
-/// Whether statement `s` can reach a safepoint (a collection can run
-/// before it completes): a call to a function outside `quiet`, an
-/// allocation, a lazy static's initializer, a user MLIR op.
+/// Can `s` reach a safepoint (a collection may run before it completes):
+/// a call outside `quiet`, an allocation, a lazy static init, an MLIR op.
 #[allow(clippy::implicit_hasher)]
 pub fn stmt_safepoint(
     s: &Statement,
@@ -1911,18 +1874,17 @@ pub fn stmt_safepoint(
     }
 }
 
-/// A shadow-stack frame: the address of `rok_tls_shadow_stack_top`, of
-/// the frame's `prev` field, and what links it but the load of `prev`
-/// (constant stores of the entry block's values).
+/// A shadow-stack frame: addresses of `rok_tls_shadow_stack_top` and of
+/// `prev`, and the link stores other than `prev`'s load.
 pub(crate) struct GcFrame {
     tls: String,
     prev: String,
     link: String,
 }
 
-/// Where a function links its shadow-stack frame (804 §8.4.7) and, if
-/// reentrant, polls (§8.4.2): before the first safepoint on each path,
-/// so a path that reaches none pays for neither.
+/// Where a function links its frame (804 §8.4.7) and, if reentrant, polls
+/// (§8.4.2): before the first safepoint of each path, so paths reaching
+/// none pay for neither.
 #[derive(Default)]
 pub(crate) struct Links {
     /// Block id → the statement the link goes before (`usize::MAX`:
@@ -1932,12 +1894,11 @@ pub(crate) struct Links {
     pub linked: HashSet<u32>,
 }
 
-/// `Links` for `f`, given which statements are safepoints (`sp`, by
-/// block position and index) and which blocks end in one (`end`, a
-/// back-edge poll). Every block is entered either always linked or
-/// never: a block linked on some incoming paths links the others at
-/// their end. `None` when the entry block itself is linked on entry (a
-/// back edge to it): then the frame links at entry.
+/// `Links` for `f` from its safepoint statements (`sp`) and blocks ending
+/// in a back-edge poll (`end`). A block is entered always linked or never:
+/// one linked on some incoming paths links the others at their end. `None`
+/// when the entry block is linked on entry (a back edge to it): link at
+/// entry.
 pub(crate) fn plan_links(
     f: &MirFunction,
     sp: impl Fn(usize, usize) -> bool,
@@ -2023,14 +1984,12 @@ pub fn body_safepoints(
     })
 }
 
-/// Functions some cycle of calls may pass through (804 §8.4.2: every
-/// such cycle polls).
+/// Functions some call cycle may pass through.
 ///
-/// Members of a cycle of direct calls, and the functions that call what
-/// this module cannot see (an indirect call, a C function, an
-/// `__mlir_op`), are called from C or through a pointer (the runtime's
-/// loops run those), or dispatch `any`. The others are entered only
-/// from a caller that polls in turn.
+/// Every such cycle polls (804 §8.4.2). Members of a direct-call cycle,
+/// callers of what this module can't see (indirect calls, C,
+/// `__mlir_op`), functions called from C or through a pointer, and `any`
+/// dispatchers; the rest are only entered from callers that poll.
 pub fn reentrant_functions(module: &MirModule) -> HashSet<FunctionId> {
     let index: HashMap<FunctionId, usize> = module
         .functions
@@ -2116,12 +2075,9 @@ pub fn reentrant_functions(module: &MirModule) -> HashSet<FunctionId> {
     out
 }
 
-/// Functions entered other than by a direct rok call.
-///
-/// Called from C or
-/// through a pointer (the runtime's loops run those), exported, or the
-/// `any` dispatcher. Their entry poll stays at entry; another
-/// reentrant function polls before its first safepoint instead.
+/// Functions entered other than by a direct rok call: from C, through a
+/// pointer, exported, or the `any` dispatcher. They poll at entry; other
+/// reentrant functions poll before their first safepoint.
 pub fn entered_functions(module: &MirModule) -> HashSet<FunctionId> {
     let mut out: HashSet<FunctionId> = module
         .functions
@@ -2152,11 +2108,10 @@ pub fn entered_functions(module: &MirModule) -> HashSet<FunctionId> {
 
 /// Functions that never reach a safepoint.
 ///
-/// No loop but short ones (`rokc_mir::short_loops`), no allocation or
-/// indirect call, and only calls to such functions (never-returning
-/// calls aside). The least fixpoint, so recursion is never in it. They
-/// need neither a shadow-stack frame nor an entry poll: they run for a
-/// bounded time and no collection can see their references.
+/// Only short loops, no allocation or indirect call, and calls only to
+/// such functions (never-returning ones aside). Least fixpoint, so never
+/// recursive. They need no frame or entry poll: they run for bounded time
+/// and no collection sees their references.
 pub fn quiet_functions(
     module: &MirModule,
     pkgs: &crate::mangle::Pkgs,
@@ -2306,12 +2261,9 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// Address of TLS slot `slot` of the block `rok_tls` (803) on this
-    /// thread: one `threadlocal.address` per function (a thread never
-    /// changes under a running function), so LLVM keeps it in a register
-    /// instead of recomputing it at each use (a call on some targets).
-    /// Inside an `__mlir_op` region, which may not see the entry block's
-    /// values, a fresh one.
+    /// Address of TLS slot `slot` (803), off `tls_base`, computed once per
+    /// function so LLVM keeps it in a register; a fresh one inside an
+    /// `__mlir_op` region, which may not see the entry block's values.
     fn tls_addr(&mut self, slot: Slot) -> String {
         self.needs.insert("rok_tls");
         let off = slot.offset(self.target.pointer_width / 8);
@@ -2367,19 +2319,17 @@ impl<'a> FnEmit<'a> {
         body_safepoints(self.f, &self.quiet, self.pkgs, self.target)
     }
 
-    /// Scratch for reinterpreting an aggregate `ty` as its C coerced
-    /// type: big enough for either (a coerced type is at most 16 bytes,
-    /// or the HFA's own size).
+    /// Scratch to reinterpret aggregate `ty` as its coerced C type, big
+    /// enough for either (coerced types are at most 16 bytes or an HFA).
     fn coerce_slot(&mut self, ty: &MirTy) -> String {
         // Room for a coerced type rounded up to whole words.
         let size = self.target.size_align(ty).0.next_multiple_of(8).max(16);
         self.entry_alloca(&format!("!llvm.array<{size} x i8>"), 16)
     }
 
-    /// The arguments of a call by the rok convention (`rok_fn_types`),
-    /// and the address the result comes back at when it is by-ref. A
-    /// by-ref argument is the address of the value: the operand's own
-    /// slot (the callee copies it before anything runs), else a temporary.
+    /// Arguments of a rok-convention call and the address of a by-ref
+    /// result. A by-ref argument is the operand's own slot (the callee
+    /// copies it first), else a temporary.
     fn rok_call_args(
         &mut self,
         args: &[Operand],
@@ -2421,11 +2371,9 @@ impl<'a> FnEmit<'a> {
         (vals, sret)
     }
 
-    /// A stack slot of type `ty` allocated once in the entry block.
-    /// A `str` argument `v` of a runtime function codegen calls on its
-    /// own (`runtime_decl`), and its type: Windows x64 and WebAssembly
-    /// pass the two-word C struct by reference (spec 8.6.3), so a pointer
-    /// to a copy there.
+    /// A `str` argument for a runtime function codegen calls itself, and its
+    /// type: Windows x64 and wasm pass the two-word struct by reference
+    /// (8.6.3), so a pointer to a copy there.
     fn runtime_str(&mut self, v: &str) -> (String, String) {
         let ty = mlir_prim(PrimTy::Str, self.target.pointer_width);
         if !self.target.c_abi.pair_by_ref() {
@@ -2478,14 +2426,13 @@ impl<'a> FnEmit<'a> {
         );
     }
 
-    /// Write barrier (704 §7.4.2, 809 §8.9.10) before storing a GC
-    /// reference into the GC object `obj` at `slot` (`len` bytes): the
-    /// inline fast path tests the header's `UNLOGGED | CARDED` bits (set
-    /// only on old objects). `UNLOGGED`: `rok_gc_wb_slow(obj)`; then
-    /// `CARDED` (a large old object): mark the cards of the slot's first
-    /// and last byte inline. (A concurrent mark sets both on old large
-    /// objects: the slow path snapshots, the card remembers.) Not a
-    /// safepoint. Emission continues in a fresh fall-through block.
+    /// Write barrier (704 §7.4.2, 809 §8.9.10) before storing a reference
+    /// into `obj` at `slot` (`len` bytes): the fast path tests the header's
+    /// `UNLOGGED | CARDED` bits (old objects only). `UNLOGGED` calls
+    /// `rok_gc_wb_slow(obj)`; `CARDED` (large old objects) marks the cards
+    /// of the slot's first and last byte inline. Concurrent marking sets
+    /// both: the slow path snapshots, the card remembers. Not a safepoint;
+    /// emission continues in a fresh block.
     fn emit_write_barrier(&mut self, obj: &Operand, slot: &str, len: u32) {
         let pw = self.pw;
         let obj_v = self.materialize_operand(obj, &MirTy::GcRef);
@@ -2569,17 +2516,16 @@ impl<'a> FnEmit<'a> {
         );
     }
 
-    /// Safepoint poll (804 §8.4.1, 809 §8.9.11): a relaxed load of this
-    /// thread's `rok_tls_yield_flag`, `rok_runtime_yield` when set.
-    /// Emission continues in a fresh fall-through block.
+    /// Safepoint poll (804 §8.4.1, 809 §8.9.11): relaxed load of
+    /// `rok_tls_yield_flag`, `rok_runtime_yield` when set; continues in a
+    /// fresh block.
     fn emit_poll(&mut self) {
         let n = self.emit_poll_split();
         let _ = writeln!(self.body, "    cf.br ^rok_run{n}\n  ^rok_run{n}:");
     }
 
-    /// `emit_poll` whose yield block is left open for the caller's
-    /// terminator; returns `n` of the `^rok_run{n}` block the caller
-    /// opens after it.
+    /// `emit_poll` with the yield block left open for the caller's
+    /// terminator; returns `n` of the `^rok_run{n}` block to open after.
     fn emit_poll_split(&mut self) -> u32 {
         self.needs.insert("rok_runtime_yield");
         let a = self.tls_addr(tls_abi::YIELD_FLAG);
@@ -2599,11 +2545,10 @@ impl<'a> FnEmit<'a> {
         n
     }
 
-    /// Into (`enter`) or out of a C call (804 §8.4.10): the inline fast
-    /// path of `rok_enter_native` / `rok_leave_native`. Store the state,
-    /// then read the yield flag (both `seq_cst`: a stopper raises the
-    /// flag, then reads the state); a raised flag takes the runtime's
-    /// slow path, which wakes the stopper or waits it out.
+    /// Into (`enter`) or out of a C call (804 §8.4.10): the inline fast path
+    /// of `rok_enter_native` / `rok_leave_native`. Store the state, then
+    /// read the yield flag (both `seq_cst`, since a stopper raises the flag
+    /// and then reads the state); a raised flag takes the slow path.
     fn emit_native_edge(&mut self, enter: bool) {
         let (state, slow) = if enter {
             (2, "rok_enter_native")
@@ -2649,13 +2594,11 @@ impl<'a> FnEmit<'a> {
         self.block_param_set.contains(&id.0)
     }
 
-    /// The locals built straight in the caller's result (`%arg0` of a
-    /// by-address result, 8.6.6) instead of copied there on return: the
+    /// Locals built directly in a by-address result (`%arg0`, 8.6.6): the
     /// one every return returns, or a temporary only its block's return
-    /// reads (`once`: `rokc_mir::block_local`). Not parameters (copied
-    /// in on entry), nor locals a collection can see (rooted), whose
-    /// address is taken or whose scope ends first (`StorageDead` clears
-    /// a slot): the caller's result is no root, and only it sees it.
+    /// reads (`once`). Not parameters, rooted locals, address-taken ones or
+    /// ones whose scope ends first: the caller's result is no root and only
+    /// this function sees it.
     fn result_locals(&self, once: &[bool]) -> HashSet<LocalId> {
         let f = self.f;
         if !rok_by_ref(&f.ret_ty, self.target) {
@@ -2710,16 +2653,13 @@ impl<'a> FnEmit<'a> {
         self.rooted.as_ref().is_none_or(|r| r.contains(&id))
     }
 
-    /// An `llvm.alloca` slot for every slotted local (`-g` describes
-    /// them), scratch slots for union bitcasts, the shadow-stack frame,
-    /// then the arguments stored into their slots. Called once at the
-    /// start of the entry block.
+    /// Entry-block prelude: `llvm.alloca` slots for slotted locals, union
+    /// scratch, the frame, then arguments stored into their slots.
     fn emit_prelude(&mut self) {
         let one = self.fresh_value();
         let _ = writeln!(self.body, "    {one} = llvm.mlir.constant(1 : i32) : i32");
-        // A value read only later in its own block needs no slot, unless
-        // it holds GC references (a root lives in memory), is an array
-        // (indexed in place), or `-g` describes it.
+        // A value read only later in its own block needs no slot, unless it
+        // holds GC references, is an array, or `-g` describes it.
         let regions = self
             .f
             .blocks
@@ -2731,9 +2671,8 @@ impl<'a> FnEmit<'a> {
         } else {
             rokc_mir::block_local(self.f)
         };
-        // Link and poll lazily (`plan_links`), but with `__mlir_op`
-        // regions, or for a function entered from C or a pointer, which
-        // polls at entry.
+        // Link and poll lazily (`plan_links`), except with `__mlir_op`
+        // regions or for functions entered from C or a pointer.
         if !(regions || self.entry_poll && self.eager_poll) {
             let (quiet, pkgs, target) = (&*self.quiet, self.pkgs, self.target);
             let f = self.f;
@@ -2763,10 +2702,9 @@ impl<'a> FnEmit<'a> {
                 }
             }
         }
-        // GC-holding locals no collection can see while they hold a
-        // value (`live_across`) need no root: they may stay SSA values,
-        // and their slots do not escape into the frame. With `__mlir_op`
-        // regions, every one is rooted.
+        // GC-holding locals no collection sees while live (`live_across`)
+        // need no root and may stay SSA values; with `__mlir_op` regions
+        // everything is rooted.
         let rooted: Option<HashSet<LocalId>> = (!regions).then(|| {
             let (quiet, pkgs, target) = (&*self.quiet, self.pkgs, self.target);
             rokc_mir::live_across(
@@ -2908,19 +2846,16 @@ impl<'a> FnEmit<'a> {
                 );
             }
         }
-        // Entry poll, once the frame roots the arguments: only where a
-        // call cycle can come back in (`reentrant_functions`) without a
-        // loop's poll. A function that reaches no safepoint runs for a
-        // bounded time and needs none; a recursive one always reaches
-        // one (`quiet_functions`).
+        // Entry poll, once the frame roots the arguments: only where a call
+        // cycle can re-enter (`reentrant_functions`) without a loop poll, and
+        // only if a safepoint is reachable (recursion always reaches one).
         if self.entry_poll && self.links.is_none() && self.reaches_safepoint() {
             self.emit_poll();
         }
     }
 
-    /// Link the frame where `links` says, before statement `i` of block
-    /// `b` (`usize::MAX`: its terminator); a reentrant function polls
-    /// there too.
+    /// Link the frame where `links` says, before statement `i` of block `b`
+    /// (`usize::MAX`: the terminator); reentrant functions poll there too.
     fn link_before(&mut self, b: u32, i: usize) {
         if self.links.as_ref().and_then(|l| l.at.get(&b)) == Some(&i) {
             self.emit_link();
@@ -2930,16 +2865,13 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// Shadow-stack frame (704 §7.4.1) for a function that holds GC
-    /// references and can reach a safepoint (`reaches_safepoint`, or a
-    /// loop's poll). Layout
-    /// `{prev, count, slots[count]}`; each slot is the address of a word
-    /// that may hold a GC reference (`Target::root_offsets`) in a local's
-    /// stack slot, or in a block param's spill slot. The slots are zeroed here so the
-    /// collector never reads garbage, then the frame becomes this
-    /// thread's `rok_tls_shadow_stack_top`; every return restores it.
-    /// A rooted local's slot is cleared right after its last use (MIR
-    /// liveness, `rokc_mir::deaths`), so it stops retaining garbage.
+    /// Shadow-stack frame (704 §7.4.1) for a function holding GC references
+    /// that can reach a safepoint: `{prev, count, slots[count]}`, each slot
+    /// the address of a word that may hold a reference
+    /// (`Target::root_offsets`) in a local's or block param's slot. Slots
+    /// are zeroed so the collector never reads garbage. A rooted local's
+    /// slot is cleared after its last use (`rokc_mir::deaths`) so it stops
+    /// retaining garbage.
     fn emit_gc_frame(&mut self) {
         // A loop's back-edge poll can stop this thread for a collection
         // mid-function, like a call.
@@ -3163,14 +3095,11 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// `v`, a `ty` value fresh from outside this function (an argument,
-    /// a call's result), with the object of the `List`s in it known to
-    /// LLVM: a `List`'s object is always allocated (`buf_new`), and holds
-    /// its length, capacity and element buffer (three words), so these
-    /// may be loaded ahead of their use (out of a loop). Each goes
-    /// through a `ptrmask` keeping every bit of an 8-aligned address,
-    /// whose result carries the facts. (Other `GcBuf`s may be null or a
-    /// `str`'s bytes, `rok_str_bytes_buf`.)
+    /// `v` of type `ty`, fresh from outside (argument, call result), with its
+    /// `List` objects' facts given to LLVM: a `List` object always exists
+    /// and holds length, capacity and buffer, so they may be loaded early
+    /// (out of loops). Each goes through a no-op `ptrmask` that carries the
+    /// facts. Other `GcBuf`s may be null or a `str`'s bytes.
     fn buf_ref_facts(&mut self, v: String, ty: &MirTy) -> String {
         let mut paths = Vec::new();
         buf_ref_paths(ty, self.target, &self.lists, &mut Vec::new(), &mut paths);
@@ -3320,18 +3249,16 @@ impl<'a> FnEmit<'a> {
         self.heap_store(&q, &v, &field_ty);
     }
 
-    /// A `ty` lives in memory and moves by `llvm.intr.memcpy`: an
-    /// aggregate over 64 bytes (the size passed by address, 8.6.6). As an
-    /// LLVM value its loads and stores cost the optimizer time growing
-    /// with its size squared.
+    /// Does `ty` live in memory and move by `memcpy`: an aggregate over 64
+    /// bytes (passed by address, 8.6.6)? As LLVM values those cost
+    /// optimizer time quadratic in their size.
     fn in_memory(&self, ty: &MirTy) -> bool {
         rok_by_ref(ty, self.target)
     }
 
-    /// Copy the `ty` at `src` (aligned to `src_align`) to `dst`. Both
-    /// addresses are otherwise aligned as the type, as its loads and
-    /// stores assume: an unknown alignment makes the copy bytewise where
-    /// unaligned accesses are slow (RISC-V).
+    /// Copy a `ty` from `src` (aligned `src_align`) to `dst`. Addresses are
+    /// otherwise aligned as the type; unknown alignment would make the copy
+    /// bytewise where unaligned access is slow (RISC-V).
     fn emit_memcpy(&mut self, dst: &str, src: &str, ty: &MirTy, src_align: u32) {
         let pw = self.pw;
         let (size, align) = self.target.size_align(ty);
@@ -3407,8 +3334,6 @@ impl<'a> FnEmit<'a> {
         Some(p)
     }
 
-    /// The address `r`, a read of a `ty` from memory, reads at (its
-    /// checks emitted); `None` for any other rvalue.
     /// The address of static `name`: its symbol's, or (`dll_statics`) the
     /// one at its import address.
     fn static_ptr(&mut self, name: &str) -> String {
@@ -3484,12 +3409,10 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// Assign `r` to the `ty` (an array or `in_memory`) at `slot` in
-    /// memory: copied from where it is read, or built in place; false
-    /// (nothing emitted) for an rvalue computed as a value. A callee
-    /// writes its result into the slot as it goes (`result_locals`), so
-    /// a slot a pointer may read (`seen`: its address is taken) gets the
-    /// result copied in once the call is done.
+    /// Assign `r` to the in-memory `ty` at `slot`: copied from where it's
+    /// read or built in place; false (nothing emitted) for a value rvalue. A
+    /// slot whose address is taken (`seen`) gets a call's result copied in
+    /// afterwards, since the callee writes as it goes (`result_locals`).
     fn assign_in_memory(&mut self, slot: &str, ty: &MirTy, r: &RValue, seen: bool) -> bool {
         if let Some(src) = self.rvalue_addr(r, ty) {
             if src != slot {
@@ -3602,15 +3525,13 @@ impl<'a> FnEmit<'a> {
                     return;
                 }
                 let ty = self.local_ty(*target);
-                // `let x = ();` / a unit-valued `try .. catch`: a `()`
-                // copy has no value to materialize (`()` is not an MLIR
-                // type).
+                // `()` has no MLIR type and nothing to copy.
                 if ty == MirTy::Unit && matches!(rvalue, RValue::Use(_)) {
                     return;
                 }
-                // An array or a value in memory (`in_memory`) is built
-                // in its slot and copied slot to slot: as an LLVM value a
-                // big one takes the optimizer minutes (or crashes it).
+                // Arrays and in-memory values are built in their slot and
+                // copied slot to slot: as LLVM values big ones take the
+                // optimizer minutes, or crash it.
                 if let Some(slot) = self.slot_of(*target) {
                     let seen = self.addressed.contains(target);
                     if (matches!(ty, MirTy::Array(..)) || self.in_memory(&ty))
@@ -3832,9 +3753,8 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// Materialize an array index at its own integer type and panic
-    /// unless `0 <= index < len` (one unsigned compare). Statically
-    /// in-range constants skip the check.
+    /// An array index at its own type, panicking unless `0 <= index < len`
+    /// (one unsigned compare); in-range constants skip the check.
     fn checked_index(&mut self, index: &Operand, len: u32) -> (String, String) {
         let ty = match index {
             Operand::Copy(id) => self.local_ty(*id),
@@ -4055,10 +3975,10 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// `__mlir_op` (stdlib bare 1.9): the op in MLIR's generic form,
-    /// `%r = "d.op"(%a, %b) ({ ^bb0(..): .. }, ..) {name = attr} : (A, B) -> R`
-    /// with the last `regions` closed. A unit result is no result (the
-    /// target is never read: nothing may follow a region's terminator).
+    /// `__mlir_op` (bare 1.9) in generic form,
+    /// `%r = "d.op"(%a, %b) ({ ^bb0(..): .. }, ..) {name = attr} : (A, B) -> R`,
+    /// closing the last `regions`. A unit result is none (nothing may
+    /// follow a region's terminator).
     fn emit_mlir_op(
         &mut self,
         op: &str,
@@ -4105,10 +4025,10 @@ impl<'a> FnEmit<'a> {
         v
     }
 
-    /// `rok_gc_alloc_slow(total_size, align, type_id)` + store of the
-    /// payload; the object's `GcRef`. The size is computed here, not by
-    /// the `gep null[1]` idiom: MLIR folds that under LLVM's default data
-    /// layout (`i64` 4-aligned), which undersizes objects for the target.
+    /// `rok_gc_alloc_slow(total_size, align, type_id)` and store the
+    /// payload; returns the `GcRef`. Size computed here: MLIR folds the
+    /// `gep null[1]` idiom under LLVM's default layout (`i64` 4-aligned),
+    /// undersizing objects.
     fn emit_heap_box(&mut self, value: &Operand, ty: &MirTy) -> String {
         if self.target.any_inline(ty) {
             let v = self.materialize_operand(value, ty);
@@ -4127,11 +4047,10 @@ impl<'a> FnEmit<'a> {
         obj
     }
 
-    /// A zeroed GC object with a `ty` payload, its type id registered
-    /// with `ty`'s `ScanTable`; the object's `GcRef`. Small objects bump
-    /// this thread's TLAB inline (702 §7.2.2, 809 §8.9.9) and write the
-    /// header (`type_id`; `gc_word` = size, which the block heap parses
-    /// by; the flags are already 0); `rok_gc_alloc_slow` otherwise.
+    /// A zeroed GC object of `ty`; returns the `GcRef`. Small objects bump
+    /// the TLAB inline (702 §7.2.2, 809 §8.9.9) and write the header
+    /// (`gc_word` = size, which the block heap parses by); else
+    /// `rok_gc_alloc_slow`.
     fn emit_gc_object(&mut self, ty: &MirTy) -> String {
         let pw = self.pw;
         let tid = self.gc_tid(ty, false);
@@ -4202,13 +4121,10 @@ impl<'a> FnEmit<'a> {
         addr
     }
 
-    /// The GC type id of `ty` objects (`array`: of buffers of `ty`
-    /// elements), registered with its `ScanTable` at startup, as an
-    /// `i32` value. Types with the same table share an id (it only tells
-    /// the collector where the references are), so the ids stay the same
-    /// across REPL cells. A codegen unit reads it from the symbol the
-    /// glue defines (`units::gc_symbol`): its code stays the same when
-    /// other units' types change the ids.
+    /// GC type id of `ty` objects (`array`: buffers of `ty`) as an `i32`.
+    /// Types with the same `ScanTable` share an id, so ids stay stable
+    /// across REPL cells. Units read it from a glue-defined symbol
+    /// (`units::gc_symbol`), so other units' types don't change their code.
     fn gc_tid(&mut self, ty: &MirTy, array: bool) -> String {
         let key = scan_table(ty, array, self.target);
         let index = self
@@ -4237,10 +4153,9 @@ impl<'a> FnEmit<'a> {
         tid
     }
 
-    /// `rok_gc_alloc_slow(header + len * size, align, type_id)` for a
-    /// buffer of `len` `elem_ty`s (zeroed by the runtime): a plain buffer
-    /// (untraced) unless the elements hold GC references, then
-    /// traced element by element through an array `ScanTable`.
+    /// `rok_gc_alloc_slow(header + len * size, align, type_id)` for a zeroed
+    /// buffer of `len` `elem_ty`s: untraced unless elements hold references,
+    /// then traced through an array `ScanTable`.
     fn emit_buf_alloc(&mut self, elem_ty: &MirTy, len: &Operand) -> String {
         let pw = self.pw;
         let usize_ty = MirTy::Prim(PrimTy::Usize);
@@ -4284,9 +4199,9 @@ impl<'a> FnEmit<'a> {
             );
             return obj;
         }
-        // A small buffer bumps the TLAB inline: its size rounded up to 8
-        // (no overflow below the `max_n` limit), at least
-        // `MIN_OBJECT_SIZE`, short of the large object space.
+        // Small buffers bump the TLAB inline: size rounded up to 8 (no
+        // overflow under `max_n`), at least `MIN_OBJECT_SIZE`, below the
+        // large object space.
         let [seven, mask, padded, rounded, min, size8, los, small, inline] =
             std::array::from_fn(|_| self.fresh_value());
         let _ = write!(
@@ -4335,9 +4250,8 @@ impl<'a> FnEmit<'a> {
         p
     }
 
-    /// LLVM atomics on a buffer element (stdlib 2.16.2). `bool` (`i1`)
-    /// goes through its `i8` storage byte.
-    /// `order`: the LLVM ordering (a `cas`: success, failure).
+    /// LLVM atomics on a buffer element (stdlib 2.16.2); `bool` through its
+    /// `i8` byte. `order`: the LLVM ordering (`cas`: success, failure).
     fn emit_buf_atomic(
         &mut self,
         op: &str,
@@ -4420,9 +4334,8 @@ impl<'a> FnEmit<'a> {
         p
     }
 
-    /// Load a `ty` from GC object memory at `p`: an aggregate one scalar
-    /// at a time, each with its type's TBAA tag, so a field load is not
-    /// clobbered by a store of another type.
+    /// Load a `ty` from GC memory at `p`, aggregates scalar by scalar with
+    /// their TBAA tags so a store of another type can't clobber them.
     fn heap_load(&mut self, p: &str, ty: &MirTy) -> String {
         let ty_s = mlir_type(ty, self.target);
         let Some(leaves) = heap_leaves(ty, self.target) else {
@@ -4496,9 +4409,8 @@ impl<'a> FnEmit<'a> {
         let MirTy::Fn(args, ret) = fn_ty else {
             return self.unsupported("address of a function with a non-function type");
         };
-        // `func.constant` accepts a `func.func` symbol; bridge to
-        // `!llvm.ptr` so it can flow through closure structs and
-        // llvm-dialect call sites.
+        // `func.constant` takes a `func.func` symbol; cast to `!llvm.ptr`
+        // for closure structs and llvm-dialect calls.
         let typed = self.fresh_value();
         let mut name = name;
         let sig = if let Some((entry, ty)) = &self.fns[&callee].c_entry {
@@ -4656,17 +4568,14 @@ impl<'a> FnEmit<'a> {
             return self.unsupported(&format!("cast from `{from}` to `{to}`"));
         }
         let dst = self.fresh_value();
-        // Bool participates in cast logic as a 1-bit unsigned int. The
-        // is_int helpers don't include it (operator dispatch wants Bool
-        // separate), so widen the int classification locally.
+        // `bool` casts as a 1-bit unsigned int (`is_int` excludes it for
+        // operator dispatch).
         let from_int_like = fp.is_int() || matches!(fp, PrimTy::Bool);
         let to_int_like = tp.is_int() || matches!(tp, PrimTy::Bool);
         // Pick the right arith op for each four-way (int/float) combination.
         match (from_int_like, to_int_like, fp.is_float(), tp.is_float()) {
             (true, true, _, _) => {
-                // `bit_width` for bool reports 8 because it represents
-                // storage size, but the codegen type is i1. Use 1
-                // explicitly here so the ext/trunc decision is right.
+                // `bool`'s `bit_width` is its storage (8); the value is `i1`.
                 let bool_aware = |p: PrimTy| -> u32 {
                     if matches!(p, PrimTy::Bool) {
                         1
@@ -4688,9 +4597,7 @@ impl<'a> FnEmit<'a> {
                     }
                     std::cmp::Ordering::Less => {
                         if matches!(tp, PrimTy::Bool) {
-                            // Truncating to i1 — use a comparison with 0
-                            // since `arith.trunci ... to i1` is supported
-                            // but `cmpi ne` is more explicit about intent.
+                            // To `i1`: compare with 0.
                             let zero = self.fresh_value();
                             let _ = writeln!(self.body, "    {zero} = arith.constant 0 : {from}");
                             let _ = writeln!(
@@ -4753,9 +4660,8 @@ impl<'a> FnEmit<'a> {
         dst
     }
 
-    /// Bit-preserving scalar move (payload slot ↔ variant type): floats
-    /// are reinterpreted as same-width ints, ints zero-extend into a
-    /// wider slot and truncate back out.
+    /// Bit-preserving scalar move between a payload slot and a variant type:
+    /// floats as same-width ints, ints zero-extended or truncated.
     fn bitcast_value(&mut self, v: String, from_ty: &MirTy, to_ty: &MirTy) -> String {
         let pw = self.pw;
         // `()` carries no bits: going in, the slot just reads zero; coming
@@ -4986,9 +4892,8 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// The alias scopes of a call that touches only its first
-    /// argument's list, held by a scoped local (`crate::alias`): that
-    /// local's scope, and `noalias` for the others.
+    /// Alias scopes of a call touching only its first argument's list, held
+    /// by a scoped local (`crate::alias`): its scope, `noalias` for others.
     fn call_scopes(&self, callee: FunctionId, args: &[Operand]) -> String {
         let Some(Operand::Copy(l)) = args.first() else {
             return String::new();
@@ -5038,9 +4943,8 @@ impl<'a> FnEmit<'a> {
 "
                 );
             }
-            // Up to 16 bytes: the first and the last `w` bytes of each
-            // side (`w` = 8, 4, 2 or 1 covers lengths `w..=2w`) instead
-            // of a call.
+            // Up to 16 bytes: compare the first and last `w` bytes of each
+            // side (`w` = 8, 4, 2, 1 covers `w..=2w`) instead of a call.
             ("rok_str_eq", [lhs, rhs]) if self.region_outer.is_empty() => {
                 let sa = self.materialize_operand(lhs, &str_ty);
                 let sb = self.materialize_operand(rhs, &str_ty);
@@ -5119,13 +5023,11 @@ impl<'a> FnEmit<'a> {
         c
     }
 
-    /// A call under the C ABI (`abi`, from `abi::classify`): to a C
-    /// declaration or through an `extern "C" fn` pointer. `str` goes as
-    /// `rok_str_cstr`'s NUL-terminated `char*` (the bytes themselves, or a
-    /// pinned copy for a slice, released by `rok_str_cstr_done` after the
-    /// call) and comes back measured (`rok_cstr_len`); aggregates
-    /// go through memory as their coerced type, by pointer or `sret`;
-    /// arguments past `params` are a C variadic call's `...`.
+    /// A C-ABI call (`abi::classify`), to a declaration or an `extern "C"
+    /// fn` pointer. `str` goes as `rok_str_cstr`'s `char*` (the bytes, or a
+    /// pinned copy of a slice released after) and comes back measured
+    /// (`rok_cstr_len`); aggregates go through memory as their coerced type;
+    /// arguments past `params` are C variadics.
     fn emit_c_call(
         &mut self,
         dst: &str,
@@ -5210,19 +5112,17 @@ impl<'a> FnEmit<'a> {
         let lhs = res.as_ref().map(|r| format!("{r} = ")).unwrap_or_default();
         let rty = call_ret.clone().unwrap_or_else(|| "()".to_owned());
         let (list, tlist) = (ops.join(", "), op_tys.join(", "));
-        // A C call may block: the thread counts as `PARKED` meanwhile
-        // (804 §8.4.10), its GC references rooted in its frame (the
-        // arguments' locals die after the call). Runtime calls do not,
-        // nor a `rok_*` runtime symbol declared `extern "C"` (it may
-        // allocate: it must not overlap another thread's collection).
+        // A C call may block: the thread is `PARKED` meanwhile (804
+        // §8.4.10), its references rooted in the frame. Not for runtime
+        // calls, nor `rok_*` symbols declared `extern "C"` (they may
+        // allocate, which must not overlap another thread's collection).
         let parked = !abi.rok && !matches!(callee, Callee::Symbol(n) if n.starts_with("rok_"));
         if parked {
             self.emit_native_edge(true);
         }
-        // The declaration's parameter attributes (`sret` in `x8` on arm64,
-        // `byval`, `signext` / `zeroext`) go on the call too: LLVM reads
-        // some from the call alone (a `tail` call reaches no caller
-        // `alloca` unless the call marks it `byval`).
+        // Parameter attributes (`sret` in `x8` on arm64, `byval`, `signext`
+        // / `zeroext`) go on the call too: LLVM reads some from the call
+        // alone (a `tail` call reaches a caller `alloca` only via `byval`).
         let mut attrs: Vec<String> = c_signature(params, ret, abi, self.target)
             .0
             .into_iter()
@@ -5351,10 +5251,9 @@ impl<'a> FnEmit<'a> {
         self.errors.push(format!("unsupported in codegen: {what}"));
     }
 
-    /// Branch to a `rok_panic_at(msg, location)` block when `fail` (an
-    /// `i1`) is set; emission continues in a fresh fall-through block.
-    /// The location is the current statement's, or in a
-    /// `#[track_caller]` function the one it was passed.
+    /// Branch to `rok_panic_at(msg, location)` when `fail` (`i1`); continues
+    /// in a fresh block. The location is this statement's, or the one a
+    /// `#[track_caller]` function received.
     fn emit_check(&mut self, fail: &str, msg: &str) {
         let n = self.next_check;
         self.next_check += 1;
@@ -5393,10 +5292,9 @@ impl<'a> FnEmit<'a> {
         r
     }
 
-    /// Runtime checks that must panic rather than hit LLVM poison / UB:
-    /// integer division by zero, signed `MIN / -1`, and shift amounts
-    /// at or beyond the bit width. Constant divisors / shift amounts
-    /// that are statically fine skip the check.
+    /// Checks that panic instead of hitting LLVM poison / UB: division by
+    /// zero, signed `MIN / -1`, shifts at or past the width; skipped for
+    /// constants that are fine.
     fn emit_arith_checks(
         &mut self,
         op: PrimOp,
@@ -5456,9 +5354,8 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// Overflow check on an integer `+ - *` result `dst`, without
-    /// widening: sign-bit tricks for add/sub, the high half of the
-    /// extended product for mul.
+    /// Overflow check on integer `+ - *` without widening: sign tricks for
+    /// add / sub, the extended product's high half for mul.
     fn emit_overflow_check(
         &mut self,
         op: PrimOp,
@@ -5657,9 +5554,8 @@ impl<'a> FnEmit<'a> {
     fn emit_const_assign(&mut self, dst: &str, dst_ty: &MirTy, c: &ConstVal) {
         let ty = mlir_type(dst_ty, self.target);
         match c {
-            // Numeric literals take the destination's type when it is
-            // numeric (`g(3)` with an `i64` param, `let x: i64 = 3`);
-            // otherwise they keep their own literal type.
+            // Numeric literals take a numeric destination's type, else keep
+            // their own.
             ConstVal::Int { ty: prim, .. } | ConstVal::UInt { ty: prim, .. } => {
                 let (value, as_f64) = match c {
                     ConstVal::Int { value, .. } => (value.to_string(), *value as f64),
@@ -5723,11 +5619,10 @@ impl<'a> FnEmit<'a> {
                 let _ = writeln!(self.body, "    {dst} = llvm.mlir.zero : {UNIT_TY}");
             }
             ConstVal::Unit | ConstVal::None => {
-                // For aggregate destinations, materialize a zero value
-                // (null GC references); for primitives, a zero constant (also the unused
-                // payload of a `throws` carrier). Unit really shouldn't
-                // reach codegen but a placeholder keeps the pipeline
-                // well-typed.
+                // Zero value of the destination: a zeroed aggregate (null
+                // references) or a zero constant (also a `throws` carrier's
+                // unused payload). Unit shouldn't get here; a placeholder
+                // keeps the IR well-typed.
                 if matches!(
                     dst_ty,
                     MirTy::Struct(_, _)
@@ -5753,9 +5648,8 @@ impl<'a> FnEmit<'a> {
         }
     }
 
-    /// `^rok_re<H>`: forwards its arguments to loop header `H`. Its
-    /// `llvm.sideeffect` (no code, no visible memory) keeps the block
-    /// from being folded away.
+    /// `^rok_re<H>` forwards its arguments to header `H`; its
+    /// `llvm.sideeffect` (no code, no memory) keeps it from being folded.
     fn emit_reentry(&mut self, b: &BasicBlock) {
         let params: Vec<(String, String)> = b
             .params
@@ -5932,9 +5826,8 @@ impl<'a> FnEmit<'a> {
         match op {
             Operand::Copy(id) => {
                 let v = self.read_local(*id);
-                // A primitive local requested at another primitive type
-                // (e.g. an `i32` local passed to an `i64` parameter) gets
-                // an explicit conversion rather than ill-typed IR.
+                // A primitive local used at another primitive type gets an
+                // explicit conversion.
                 let from = self.local_ty(*id);
                 if mlir_type(&from, self.target) == mlir_type(ty, self.target) {
                     return v;
@@ -6005,7 +5898,7 @@ fn mlir_type(ty: &MirTy, target: &Target) -> String {
         MirTy::Array(elem, n) => {
             format!("!llvm.array<{n} x {}>", mlir_type(elem, target))
         }
-        MirTy::Union(_, n) => format!("!llvm.array<{n} x i{pointer_width}>"),
+        MirTy::Union(_, n, _) => format!("!llvm.array<{n} x i{pointer_width}>"),
         // Function values are opaque pointers inside aggregates; each
         // call site supplies the `(args) -> ret` shape.
         MirTy::GcRef | MirTy::Fn(_, _) => "!llvm.ptr".to_owned(),
@@ -6056,10 +5949,9 @@ fn llvm_field(ty: &MirTy, i: usize, target: &Target) -> usize {
     k
 }
 
-/// The scalars of aggregate `ty` as `(LLVM field path, byte offset,
-/// type)`, nested aggregates flattened; `None` for a scalar, or an
-/// aggregate with an explicit layout (its fields may be misaligned) or
-/// a part that is not a scalar.
+/// Scalars of aggregate `ty` as (field path, byte offset, type), nested
+/// ones flattened; `None` for a scalar, an explicit layout (fields may be
+/// misaligned) or a non-scalar part.
 fn heap_leaves(ty: &MirTy, target: &Target) -> Option<Vec<(Vec<usize>, u32, MirTy)>> {
     fn go(
         ty: &MirTy,
@@ -6102,9 +5994,8 @@ fn join_path(path: &[usize]) -> String {
         .join(", ")
 }
 
-/// LLVM field paths of the `List` buffers in `ty` (`buf_ref_facts`),
-/// in nested structs too. Not through tuples: a throwing call's carrier
-/// holds an unset payload.
+/// Field paths of `List` buffers in `ty` (`buf_ref_facts`), through nested
+/// structs but not tuples (a carrier holds an unset payload).
 fn buf_ref_paths(
     ty: &MirTy,
     target: &Target,
@@ -6169,12 +6060,11 @@ fn c_signature(
     (out, ret)
 }
 
-/// Extension of a narrow integer C parameter (by the caller) or result
-/// (by the callee) where the platform ABI has it, as clang marks it:
-/// `x86_64` System V, Apple arm64 and the other targets extend `i8` /
-/// `i16` / `bool` (`c_char` signed), Windows x64 only `bool`, AAPCS64
-/// elsewhere nothing (the upper bits are unspecified); RISC-V LP64D
-/// also sign-extends 32-bit integers, `u32` too.
+/// Extension of a narrow C integer parameter (caller) or result (callee),
+/// as clang does: System V `x86_64`, Apple arm64 and others extend `i8` /
+/// `i16` / `bool` (`c_char` signed); Windows x64 only `bool`; AAPCS64
+/// elsewhere nothing; RISC-V LP64D also sign-extends 32-bit ints, `u32`
+/// too.
 fn c_ext_attr(ty: &MirTy, target: &Target) -> &'static str {
     let narrow = match target.c_abi {
         CAbi::Aarch64 => matches!(target.os.as_str(), "macos" | "ios"),
@@ -6223,11 +6113,9 @@ fn c_type(ty: &MirTy, target: &Target) -> String {
     mlir_type(ty, target)
 }
 
-/// The MLIR parameter and result types of a rok function (spec
-/// 8.6.6): a by-address argument (`abi::rok_by_ref`) is a pointer to the
-/// caller's value, which the callee copies on entry, and a by-address
-/// result is stored through a leading pointer argument; the function
-/// returns nothing.
+/// MLIR parameter and result types of a rok function (8.6.6): a by-address
+/// argument is a pointer the callee copies from; a by-address result goes
+/// through a leading pointer and the function returns nothing.
 fn rok_fn_types(params: &[MirTy], ret: &MirTy, target: &Target) -> (Vec<String>, Option<String>) {
     let sret = rok_by_ref(ret, target);
     let mut out = Vec::new();
@@ -6355,13 +6243,12 @@ pub fn gc_object_size(ty: &MirTy, target: &Target) -> (u32, u32) {
     (HEADER_SIZE + size.next_multiple_of(align), align)
 }
 
-/// The `ScanTable` (802) of `ty` objects (`array`: of buffers of `ty`
-/// elements) as `u32` words.
+/// The `ScanTable` (802) of `ty` objects (`array`: buffers of `ty`).
 ///
-/// Header `{total_size u32, version u16 = 1,
-/// num_entries u16}`, then `{field_offset u32, field_kind u32}` each,
-/// then the sum descriptors (`gc_abi::SUM_PAYLOAD`). An array table's
-/// size is the element stride, its offsets element-relative.
+/// `u32` words: header `{total_size u32, version u16 = 1, num_entries
+/// u16}`, `{field_offset u32, field_kind u32}` entries, then sum
+/// descriptors. An array table's size is the stride, offsets
+/// element-relative.
 pub fn scan_table(ty: &MirTy, array: bool, target: &Target) -> Vec<u32> {
     let mut slots = Vec::new();
     let (total, version) = if array {
@@ -6377,11 +6264,10 @@ pub fn scan_table(ty: &MirTy, array: bool, target: &Target) -> Vec<u32> {
     words
 }
 
-/// `slots` as entries at word `at` of `words` (already reserved), their
-/// offsets relative to `base`. A sum's entry is its tag offset and
-/// `SUM_PAYLOAD | descriptor << SUM_DESC_SHIFT`; the descriptor, appended,
-/// is `n`, then `{tag, num_entries, entries}` per data variant, each
-/// variant's entries (offsets from the tag) appended in turn.
+/// Write `slots` at word `at` (reserved), offsets relative to `base`. A
+/// sum's entry is its tag offset and `SUM_PAYLOAD | desc << SUM_DESC_SHIFT`;
+/// the appended descriptor is `n`, then `{tag, num_entries, entries}` per
+/// data variant, offsets from the tag.
 fn encode_slots(slots: &[GcSlot], base: u32, at: usize, words: &mut Vec<u32>) {
     for (i, slot) in slots.iter().enumerate() {
         let (off, kind) = match slot {
@@ -6412,10 +6298,8 @@ fn struct_field_tys(ty: &MirTy) -> Vec<MirTy> {
     }
 }
 
-/// `+ - *` whose constant operands rule out overflow.
-///
-/// Both constant and the result fits, or an identity / absorbing
-/// constant (`x + 0`, `x - 0`, `x * 1`, `x * 0`).
+/// `+ - *` whose constant operands rule out overflow: both constant and
+/// fitting, or an identity / absorbing constant (`x + 0`, `x * 1`, `x * 0`).
 pub fn cannot_overflow(
     op: PrimOp,
     prim: PrimTy,
@@ -6460,8 +6344,7 @@ pub fn const_int(op: &Operand) -> Option<i128> {
     }
 }
 
-/// Best-effort type for a `ConstVal`. Used at call sites where we have a
-/// raw const operand and need to pick an MLIR type for it.
+/// Best-effort MLIR type for a raw const operand.
 const fn const_ty(c: &ConstVal) -> MirTy {
     match c {
         ConstVal::Int { ty, .. } | ConstVal::UInt { ty, .. } | ConstVal::Float { ty, .. } => {
@@ -6504,9 +6387,6 @@ fn format_float_decimal(v: f64) -> String {
     }
 }
 
-/// Render a scalar `ConstVal` as the attribute body of an
-/// `llvm.mlir.global`, typed at the static's declared type. `None` for
-/// shapes with no attribute form.
 /// `bytes` as the body of an MLIR string attribute.
 fn mlir_bytes(bytes: &[u8]) -> String {
     let mut escaped = String::with_capacity(bytes.len());
@@ -6523,9 +6403,8 @@ fn mlir_bytes(bytes: &[u8]) -> String {
     escaped
 }
 
-/// The bytes of an array of `elements`, constants of scalar type
-/// `elem_ty`, as stored on `target` (little-endian); `None` unless all
-/// are such constants.
+/// Bytes of an array of scalar `elem_ty` constants as stored on `target`
+/// (little-endian); `None` unless all are such constants.
 #[must_use]
 pub fn const_bytes(elements: &[Operand], elem_ty: &MirTy, target: &Target) -> Option<Vec<u8>> {
     let MirTy::Prim(p) = elem_ty else { return None };

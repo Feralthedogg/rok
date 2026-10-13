@@ -1,20 +1,14 @@
-//! `#[keyword("name")]` (refs-lang 6.6): a function registers `name` as
-//! a keyword of its package.
+//! `#[keyword("name")]` (refs-lang 6.6).
 //!
-//! The driver's pre-pass gathers the registrations (`collect_keywords`)
-//! before the real lex of the package; `apply_keywords` then turns every
-//! `name` token of that package into the handler's absolute path, so
-//! `with(m) { .. }` is the call `pkg::with_handler(m) { .. }` (trailing
-//! closure) and `name` in a declaration / member position is an error.
+//! A driver pre-pass collects them (`collect_keywords`) before the package
+//! is lexed for real; `apply_keywords` then rewrites each `name` token to
+//! the handler's path, so `with(m) { .. }` calls `pkg::with_handler(m)
+//! { .. }`, and `name` in a declaration position is an error. The
+//! handler's signature decides the call shape (6.6.8).
 //!
-//! The handler is a free `fn` named by path; its signature is the
-//! library's (6.6.8), so the call shape is the use site's.
-//!
-//! On a `struct` (stdlib spec 2.1.2 / 2.1.3: `#[keyword("int")] struct
-//! Int`) the keyword is a type name: every `name` token becomes the
-//! struct's path, `name::item` included (`int::from_i64`). A standard
-//! library type keyword applies to every package (the driver's
-//! `keyword_tables`), like the built-in type names.
+//! On a `struct` (`#[keyword("int")] struct Int`) the keyword is a type
+//! name, `name::item` included. Standard library type keywords apply to
+//! every package (`keyword_tables`).
 
 use rokc_ast::{AttrArg, AttrBody, Attribute, FnDef, ImplItem, Item, Literal, TraitItem};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
@@ -44,9 +38,9 @@ const CONTEXTUAL: &[&str] = &[
     "extern", "mut", "union", "pkg", "sub", "sup", "rok",
 ];
 
-/// Every `#[keyword("..")]` among the parsed `items` of a file (inline
-/// `mod`s included). One on anything but a free `fn` or a `struct` gets
-/// an empty handler (reported by `check_keyword`).
+/// Every `#[keyword("..")]` in `items` (inline `mod`s included). One on
+/// anything but a free `fn` or `struct` gets an empty handler, reported
+/// by `check_keyword`.
 #[must_use]
 pub fn collect_keywords(items: &[Item], file: &str) -> Vec<KeywordDef> {
     let mut out = Vec::new();
@@ -139,9 +133,8 @@ fn push_keywords(
     }
 }
 
-/// The function an attribute at `attr` sits on (the first `fn` from
-/// `after`), as a path in its file: `f`, or `a::b::f` inside inline
-/// `mod a { mod b { .. } }`. Empty when no `fn` follows.
+/// Path (`f`, `a::b::f`) of the first `fn` after an attribute; empty if
+/// none.
 pub(crate) fn handler_at(tokens: &[Token], attr: usize, after: usize) -> String {
     let Some(name) = tokens[after.min(tokens.len())..]
         .windows(2)

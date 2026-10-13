@@ -1,6 +1,5 @@
-//! `ffi::wit::import` / `ffi::wit::export` (stdlib 1.8): each module of
-//! the program's package holding them gets the WIT bindings
-//! `rokc_wit` generates, and the link gets the component's world.
+//! `ffi::wit::import` / `export` (stdlib 1.8): modules holding them get
+//! `rokc_wit`'s bindings, the link the component's world.
 
 use std::path::Path;
 
@@ -107,9 +106,8 @@ pub fn expand(
                 continue;
             }
         };
-        // The WIT is checked for any target; only a component (a WASI
-        // preview 2 target) has the core imports and exports the
-        // bindings stand for.
+        // WIT is checked for any target, but only a WASI preview 2
+        // component has the imports and exports the bindings stand for.
         if target.linker != rokc_target::Linker::WasmComponentLd {
             fail(
                 diags,

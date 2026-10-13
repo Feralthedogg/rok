@@ -60,13 +60,10 @@ fn within(pkg: &str, p: &str) -> bool {
         .is_some_and(|r| r.is_empty() || r.starts_with("::"))
 }
 
-/// One `fn __rok_static_init_X() -> T { init }` per lazy static, added
-/// to `program`.
-/// Spec 4.2.2 / 2.10.7: a parameter without a type is an implicit type
-/// parameter (`fn id(x)` is `fn id<T#x>(x: T#x)`), monomorphized per
-/// call; the body is checked per instance, and no bound is synthesized.
-/// Free fns and inherent methods with a body (a trait impl's method
-/// takes its types from the trait).
+/// Spec 4.2.2 / 2.10.7: an untyped parameter is an implicit type parameter
+/// (`fn id(x)` is `fn id<T#x>(x: T#x)`), checked per instance, no bound
+/// synthesized. Free fns and inherent methods only (trait impl methods
+/// take the trait's types).
 fn implicit_generics(program: &mut Program) {
     let fix = |f: &mut FnDef| {
         if f.body.is_none() {
@@ -151,11 +148,9 @@ fn add_lazy_static_inits(program: &mut Program) {
     program.items.extend(inits);
 }
 
-/// What collecting the items of a stage leaves for the next stage and
-/// for lowering: `Env`'s tables, and what the passes after them read.
-/// The library is collected first, then the package on top of it, so
-/// what the library's items take (type and function ids among them)
-/// is the same whatever the package holds.
+/// What collecting a stage leaves for the next one and for lowering.
+/// The library is collected before the package, so its ids don't depend on
+/// the package.
 #[derive(Clone)]
 pub(super) struct Collected<'a> {
     t: Tables<'a>,
@@ -222,9 +217,8 @@ impl Collected<'_> {
     }
 }
 
-/// `program` (its items in `input.item_modules`' modules) lowered: the
-/// library's items are collected first, then the package's on top of
-/// them (`collect`), then the bodies are lowered (`finish`).
+/// Lower `program`: collect the library's items, then the package's on top
+/// (`collect`), then the bodies (`finish`).
 #[must_use]
 pub fn lower_full(
     program: Program,
@@ -352,9 +346,8 @@ pub fn lower_full(
 mod stage;
 pub use stage::LibraryStage;
 
-/// The last library stage collected or read back, by key. A compile
-/// holds the one it takes (`HirInput::stage`): another compile's may
-/// replace it here meanwhile.
+/// The last library stage, by key. A compile holds its own copy
+/// (`HirInput::stage`); another compile may replace this one meanwhile.
 static LIBRARY: Mutex<Option<(u64, KeptLibrary)>> = Mutex::new(None);
 
 /// A kept library stage, shared by the compiles that take it.
@@ -391,9 +384,8 @@ struct Stage<'s> {
     sources: &'s rokc_diagnostic::SourceMap,
 }
 
-/// Collect the items of `owned` (in `item_modules`) on top of `base`:
-/// the library's with an empty `base`, then the package's on the
-/// library's (`lib`: its items). Its `use`s and re-exports are the
+/// Collect `owned` on top of `base`: the library's on an empty base, then
+/// the package's on the library's (`lib`). `use`s and re-exports are the
 /// stage's own.
 #[allow(clippy::cognitive_complexity, clippy::too_many_lines)] // linear sequence of collecting passes
 fn collect<'a>(
@@ -552,9 +544,8 @@ fn collect<'a>(
         ));
     };
     let program: &Program = &*owned;
-    // Spec 6.2: the parser expands `#[derive(..)]` on structs / enums
-    // into impls (`rokc_parser::derive`); a union has no field-wise
-    // meaning.
+    // Spec 6.2: `#[derive]` expanded into impls by the parser; a union has
+    // no field-wise meaning.
     for item in &program.items {
         if let Item::Union(u) = item {
             if let Some((_, at)) = rokc_parser::derive::derive_names(&u.attrs).first() {
@@ -607,10 +598,9 @@ fn collect<'a>(
         }
     }
 
-    // Pass 0: the type namespace. Every type-like item name (already
-    // module-qualified by `qualify`) goes into one index; a second
-    // definition of the same name is an error (and is skipped below so
-    // ids stay consistent).
+    // Pass 0: the type namespace. Every type-like (already qualified) name
+    // goes into one index; a duplicate is an error and skipped so ids stay
+    // consistent.
     let mut names = base_names;
     // An answer for a package module may change with its items.
     names
@@ -754,10 +744,9 @@ fn collect<'a>(
     check_niche_attrs(program, &mut pre_diags);
     check_repr_attrs(program, &mut pre_diags);
 
-    // Pass 1a: every struct / union / enum takes its id before any type
-    // is resolved; a generic one is a template, instantiated in the same
-    // id space when a type first names it (`TypeDefs`). Unions share the
-    // struct namespace, ids after the structs.
+    // Pass 1a: every struct / union / enum gets its id before any type
+    // resolves; generic ones are templates instantiated in the same id space
+    // (`TypeDefs`). Unions follow the structs.
     let mut defs = defs;
     let (first_enum, first_struct) = (defs.enums.borrow().len(), defs.structs.borrow().len());
     let enum_id = |n: usize| EnumId(u32::try_from(first_enum + n).expect("EnumId overflow"));
@@ -930,9 +919,8 @@ fn collect<'a>(
         }
     }
     for (idx, item) in program.items.iter().enumerate() {
-        // Spec 2.9.1: an impl's `const` is `Type::NAME` (`Self::NAME`
-        // inside the impl); a trait impl also gets the trait's defaults
-        // (spec 2.8.3a).
+        // Spec 2.9.1: an impl's `const` is `Type::NAME`; a trait impl also gets
+        // the trait's defaults (2.8.3a).
         let item_consts: Vec<(String, Ty, Expr)> = match item {
             Item::Const(c) => vec![(c.name.clone(), c.ty.clone(), c.value.clone())],
             Item::Impl(i) => {
@@ -943,9 +931,8 @@ fn collect<'a>(
             }
             _ => Vec::new(),
         };
-        // Two trait impls may both give `S::N` (an ambiguity reported
-        // where it is read, `lower_assoc_const`); an inherent `S::N`
-        // shadows the trait ones, as for methods.
+        // Two trait impls may both give `S::N` (ambiguous where read); an
+        // inherent `S::N` shadows them, as for methods.
         let trait_impl = matches!(item, Item::Impl(i) if i.trait_path.is_some());
         // An inherent impl's own consts come first, in order.
         let spans: Vec<Span> = match item {
@@ -1160,10 +1147,8 @@ fn collect<'a>(
         }
     }
 
-    // Pass 2: function-like declarations. Free functions first, then
-    // `impl` methods (a free function `Type::method` taking `self`
-    // first). Generic functions stay AST templates, monomorphized per
-    // call, outside `decls` / `fn_table`.
+    // Pass 2: functions, then `impl` methods. Generic functions stay AST
+    // templates, monomorphized per call, outside `decls` / `fn_table`.
     let mut fn_table = fn_table;
     let mut extern_fns = extern_fns;
     // Later extern declarations of a name already declared: whether
@@ -1175,9 +1160,8 @@ fn collect<'a>(
     let std_prebuilt = input.prebuilt.iter().any(|p| p == "rok");
     let std_linked = std_prebuilt || input.lib.as_deref() == Some("rok");
     let mut generic_fns = generic_fns;
-    // Generic impls with method templates (names `__impl{tag}_m`): the
-    // tag hashes the impl's module, trait and target, so it stays when
-    // another impl comes or goes; a repeat gets a count.
+    // Generic impl method templates are `__impl{tag}_m`, the tag hashing the
+    // impl's module, trait and target so it is stable; repeats get a count.
     let mut intrinsics = intrinsics;
     let mut generic_intrinsics = generic_intrinsics;
     let mut unsafe_fns = unsafe_fns;
@@ -1278,9 +1262,8 @@ fn collect<'a>(
                     let rokc_ast::ExternItem::Fn(fn_def) = ei else {
                         continue;
                     };
-                    // `rok_*` is the runtime's prefix (8.5), whose `str`
-                    // is `(ptr, len)`; `extern "C"` makes it a `char*`
-                    // (5.9.4), which no runtime function takes.
+                    // `rok_*` is the runtime's prefix (8.5), whose `str` is
+                    // `(ptr, len)`; `extern "C"` would make it a `char*`.
                     let is_str = |t: &rokc_ast::Ty| matches!(&t.kind, AstTyKind::Path(p) if p.segments.len() == 1 && p.segments[0].name == "str");
                     if !rok_abi
                         && fn_def.name.starts_with("rok_")
@@ -1477,9 +1460,8 @@ fn collect<'a>(
             names.trait_key(&segs, &module, here)
         });
         // A generic trait impl, or a generic inherent impl on a structural
-        // type (`impl<T, const N: usize> [T; N] { .. }`, no trait: empty
-        // key) or on some instances of a base (`impl<V> P<str, V>`):
-        // matched against the receiver, its methods templates.
+        // type or on some instances of a base (`impl<V> P<str, V>`): matched
+        // against the receiver, its methods templates.
         if impl_generic && (trait_name.is_some() || !covers_base(impl_def)) {
             let trait_key = trait_name.unwrap_or_default();
             let td = trait_defs.get(&trait_key).copied();
@@ -1506,9 +1488,8 @@ fn collect<'a>(
             impls.push(gi);
             continue;
         }
-        // Inherent methods of a generic impl (and generic methods of a
-        // plain inherent or trait impl) are templates keyed by the
-        // target's generic base.
+        // Generic inherent methods (and generic methods anywhere) are
+        // templates keyed by the target's generic base.
         let generic_base = match &impl_def.self_ty.kind {
             AstTyKind::Path(p) => {
                 let segs: Vec<&str> = p.segments.iter().map(|s| s.name.as_str()).collect();
@@ -1850,9 +1831,8 @@ fn collect<'a>(
                             ),
                         );
                     }
-                    // A method unlike the trait's: reported here, and left
-                    // out so callers of the trait method report nothing
-                    // more.
+                    // Mismatched with the trait: reported here and left out,
+                    // so trait-method callers report nothing more.
                     Some(tm) if sig_mismatch(m, tm, &td.name, &mut pre_diags) => continue,
                     Some(_) => {}
                 }
@@ -1898,9 +1878,8 @@ fn collect<'a>(
                 },
             );
             // A dependency's method symbol must not depend on this
-            // build's struct numbering (`Struct70__m`): a prebuilt
-            // dependency and its users name it alike (the standard
-            // library's too, when it is prebuilt).
+            // build's struct numbering, so prebuilt code and its users
+            // agree.
             if resolve::is_dependency(package_of(&module))
                 || (std_linked && !package_of(&module).is_empty())
             {
@@ -1964,10 +1943,9 @@ fn collect<'a>(
                     );
                     continue;
                 };
-                // A default with its own type parameters or a signature
-                // naming the trait's associated types (`fn map<U>(self, f:
-                // fn(Item) -> U)`) becomes a template, instantiated per
-                // call with `Item` replaced by this impl's type.
+                // A default with its own type parameters or naming the
+                // trait's associated types becomes a template, instantiated
+                // per call with this impl's types.
                 if !tm.generics.params.is_empty()
                     || sig_mentions(tm, &trait_assoc_names(trait_def))
                     || returns_self_generic(tm)
@@ -2119,11 +2097,10 @@ fn collect<'a>(
             MethodOrFn::Fn(f) => fn_module(&env, f),
             MethodOrFn::Method { module, .. } => module.clone(),
         };
-        // The prebuilt standard library's interface keeps its bodies
-        // (compile-time evaluation runs them); its `.a` has the code of
-        // those named alike in every build (not trait defaults, named
-        // after the build's type numbering). A prebuilt package's lazy
-        // statics are initialized by its `.a`.
+        // The prebuilt std interface keeps its bodies (const evaluation runs
+        // them); its `.a` has the code of those named alike in every build
+        // (not trait defaults). A prebuilt package's `.a` initializes its
+        // lazy statics.
         let stable = matches!(d, MethodOrFn::Fn(_)) || link_names.contains_key(&i);
         let std_fn = std_prebuilt && within(package_of(&module), "rok");
         let linked =
@@ -2212,14 +2189,11 @@ fn collect<'a>(
     env.sink
         .next_id
         .set(u32::try_from(env.decls.len()).expect("FunctionId overflow"));
-    // Struct fields and enum payloads that name projections (`peeked:
-    // I::Item | none`, `v: <S as Tr>::Out`) waited for the impls: resolve
-    // them now, an instance's under its arguments.
+    // Fields and payloads naming projections waited for the impls; resolve
+    // them now.
     resolve_projection_aliases(&env, program);
-    // Every declaration's signature types, now that every item and impl
-    // is registered (a projection in a signature resolves too). Array
-    // lengths that call `const fn`s need their signatures: those wait
-    // for a second round.
+    // Every signature, now that all items and impls exist. Array lengths
+    // calling `const fn`s wait for a second round.
     let mut waiting: Vec<FunctionId> = Vec::new();
     let mut sigs: HashMap<FunctionId, FnSig> = (first_decl..env.decls.len())
         .map(|i| {
@@ -2242,10 +2216,9 @@ fn collect<'a>(
     }
     install_sigs(&mut env.fn_table, &sigs);
     resolve_open_members(&env, &struct_decls, &enum_decls);
-    // Spec 5.9.4: extern functions share one namespace; declaring one
-    // twice with different signatures is an error. The toolchain's
-    // runtime declarations (`rok::core::rt`, `extern "rok"`, 8.5) are the
-    // reference: the error is at the other one.
+    // Spec 5.9.4: one extern namespace; a second declaration with another
+    // signature is an error, reported against the runtime's declaration
+    // (`rok::core::rt`) when one is involved.
     let no_subst = HashMap::new();
     for (f, rok_abi, first) in &extern_redecls {
         let (params, ret) = mono::sig_tys(&env, f, None, fn_module(&env, f), &no_subst);
@@ -2678,16 +2651,13 @@ fn finish<'a>(
     );
     check_value_types(&mut module);
     check_packed(&mut module);
-    // The same root cause can be reached from several passes (e.g. a
-    // type resolved once per instantiation sweep): report each message
+    // One cause can be reached from several passes; report each message
     // once per place.
     let mut seen = std::collections::HashSet::new();
     module
         .diagnostics
         .retain(|d| seen.insert((d.primary.as_ref().map(|l| l.span), d.message.clone())));
-    // An error inside the library, next to one in the package, follows
-    // from it (a library body calling into the package's wrong impl):
-    // drop it.
+    // A library error alongside a package error follows from it: drop it.
     if !check_library && lib_pkg.is_none() {
         let (own, lib) = &decl_files;
         let file_of = |d: &rokc_diagnostic::RokDiagnostic| d.primary.as_ref().map(|l| l.span.file);
@@ -2727,10 +2697,9 @@ fn finish<'a>(
     module
 }
 
-/// Diagnostics name an item declared in a block (spec 3.9.1, 4.10) as
-/// written: its lifted name `f/S` (`f/S/2` for a repeated name) reads
-/// `S`, or `f::S` when another item of the file has that name. A name
-/// not found where such an item has it gets a note on its scope.
+/// Show block-declared items (spec 3.9.1, 4.10) as written: `f/S` reads
+/// `S`, or `f::S` when the file has another `S`. A name not found where
+/// such an item has it gets a note on its scope.
 fn show_local_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiagnostic]) {
     use rokc_core::local::{leaf, qualified};
     if diags.is_empty() {
@@ -2793,8 +2762,7 @@ fn show_local_names(program: &Program, diags: &mut [rokc_diagnostic::RokDiagnost
 }
 
 /// Stdlib 0.1.2: `rok::bare` names neither `rok::core` nor `rok::std`, and
-/// `rok::core` does not name `rok::std` (in its `use`s and every path it
-/// writes).
+/// `rok::core` doesn't name `rok::std`.
 fn check_tiers(
     raw_uses: &[(String, Visibility, rokc_ast::UseTree)],
     items: &[Item],
@@ -2871,10 +2839,9 @@ fn install_sigs(
     }
 }
 
-/// Re-resolve, with the impls known, the struct fields and enum payloads
-/// left open (a projection) when their type was first defined: a declared
-/// one (`structs[i]` / `enums[i]`) or a generic instance under its
-/// arguments. A union's storage is fixed at registration.
+/// Re-resolve fields and payloads left open (a projection) now that impls
+/// are known, an instance's under its arguments. Union storage is fixed at
+/// registration.
 fn resolve_open_members(
     env: &Env<'_>,
     structs: &[(StructId, &AstStructDef)],
@@ -2950,13 +2917,8 @@ pub(super) fn reexport_key(re: &crate::uses::ReExport) -> String {
     }
 }
 
-/// Prepend `module::` to the name of an item that has one (an impl's
-/// methods and consts: HIR resolves the impl target and the bodies in
-/// that module, then strips it back to the leaf). Item keys are
-/// module-qualified from here on.
-/// The headers of items lifted from blocks with `use p::*`s
-/// (`#block_glob`) name what the globs bring in by path, as a block's
-/// named `use`s already do (spec 3.9.1).
+/// Headers of block-lifted items with `use p::*`s (`#block_glob`) name
+/// what the globs bring in by path, as named `use`s do (spec 3.9.1).
 fn block_glob_renames(
     items: &[Item],
     item_modules: &[String],
@@ -3030,9 +2992,8 @@ fn qualify(item: &mut Item, module: &str) {
     }
 }
 
-/// Each plain alias naming a projection (`type B = <A as P>::Out;`),
-/// resolved once impls are registered and reported at its body; a broken
-/// one is `{unknown}` where used.
+/// Resolve plain aliases of projections once impls exist, reporting at the
+/// body; a broken one is `{unknown}` where used.
 fn resolve_projection_aliases(env: &Env<'_>, program: &Program) {
     let names = &env.names;
     let stage: std::collections::HashSet<&str> = program
@@ -3066,9 +3027,8 @@ fn resolve_projection_aliases(env: &Env<'_>, program: &Program) {
     }
 }
 
-/// Each `pub use` alias key → the path its chain of re-exports ends at
-/// (one that is no alias itself; a cycle stops where it closes). The
-/// first re-export of a key wins.
+/// `pub use` alias key → the end of its re-export chain (a cycle stops
+/// where it closes); the first re-export of a key wins.
 fn reexport_aliases(reexports: &[crate::uses::ReExport]) -> HashMap<String, String> {
     let mut direct: HashMap<String, &str> = HashMap::new();
     for re in reexports {
@@ -3201,11 +3161,10 @@ fn habit_type_help(
     })
 }
 
-/// Safety net: no expression or binding may leave lowering with an
-/// unresolved type unless an error was already reported. A leftover
-/// `HirTy::Path` is an unknown type name; a leftover `Unknown` /
-/// `UnresolvedPath` means some lowering path fell through silently —
-/// refuse to hand that to MIR (it would be lowered as unit / `any`).
+/// Safety net: nothing leaves lowering with an unresolved type unless an
+/// error was reported. A leftover `HirTy::Path` is an unknown name; a
+/// leftover `Unknown` / `UnresolvedPath` is a silent fall-through that MIR
+/// would lower as unit / `any`.
 pub(super) fn check_unresolved_types(
     module: &mut HirModule,
     spans: &HashMap<String, rokc_diagnostic::Span>,
@@ -3213,10 +3172,9 @@ pub(super) fn check_unresolved_types(
     sources: &rokc_diagnostic::SourceMap,
     names: &TypeNames,
 ) {
-    // Each unknown name is reported at the first item that mentions it.
-    // The thread-local "current span" is whatever pass ran last (usually
-    // a library item), so it must not be the default here.
-    // (name, where, the module of the item that mentions it)
+    // Report each unknown name at the first item naming it, not at the
+    // thread-local current span (whatever pass ran last).
+    // (name, where, mentioning item's module)
     let mut unknown_types: Vec<(String, rokc_diagnostic::Span, String)> = Vec::new();
     let mut note = |ty: &HirTy, span: rokc_diagnostic::Span, item: &str| {
         let mut names = Vec::new();
@@ -3374,9 +3332,8 @@ const MAX_VALUE_LEAVES: u64 = 1 << 16;
 /// Largest value type, in (estimated) bytes.
 const MAX_VALUE_BYTES: u64 = 1 << 32;
 
-/// A struct / enum that holds itself by value (through fields, tuples,
-/// sums, arrays or payloads) has no finite size; one whose flattened
-/// layout passes the caps above is refused before MIR expands it.
+/// A struct / enum containing itself by value has no finite size; one past
+/// the layout caps is refused before MIR expands it.
 fn check_value_types(module: &mut HirModule) {
     use std::collections::{HashMap, HashSet};
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -3769,10 +3726,8 @@ pub(super) fn lower_enum_def(
                     named_fields: Vec::new(),
                     arity: tys.len(),
                 },
-                // Named-form variant `Move { x: i32; y: i32; }` — pack
-                // into a tuple payload by declaration order, recording
-                // the field names so initialiser/pattern lowering can
-                // map name → tuple index. Spec 2.4.
+                // `Move { x: i32; y: i32; }` (spec 2.4): a tuple payload in
+                // declaration order, with field names for init / patterns.
                 AstEnumVariantKind::Named(fields) => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
@@ -3799,10 +3754,9 @@ pub(super) fn lower_enum_def(
     }
 }
 
-/// `#[niche(..)]` arguments (spec 2.7.4): integer literals, `MIN` /
-/// `MAX` (`i32::MIN`, `I32_MIN`), `NAN` / `INFINITY` / `NEG_INFINITY`
-/// (`f64::NAN`, `F::NAN`) and ranges of them. Empty without the
-/// attribute; `Err` describes the first argument it cannot read.
+/// `#[niche(..)]` arguments (spec 2.7.4): integers, `MIN` / `MAX`, `NAN` /
+/// `INFINITY` / `NEG_INFINITY`, and ranges. Empty without the attribute;
+/// `Err` names the first unreadable argument.
 pub(super) fn niche_args(attrs: &[rokc_ast::Attribute]) -> Result<Vec<NicheArg>, String> {
     use rokc_ast::{AttrArg, AttrBody, Literal};
     let Some(attr) = attrs.iter().find(|a| a.name() == "niche") else {
@@ -4004,9 +3958,8 @@ fn check_repr_attrs(program: &rokc_ast::Program, diags: &mut Vec<rokc_diagnostic
     }
 }
 
-/// Value variants (spec 2.4.2): an enum with any is all value variants;
-/// each value is a const integer (the const evaluator: `const fn`
-/// calls, `use`d consts) that fits the tag type and is unique.
+/// Value variants (spec 2.4.2): all or none; each value a const integer
+/// that fits the tag type and is unique.
 fn assign_discriminants(env: &Env<'_>, decls: &[(EnumId, &AstEnumDef)]) {
     let no_subst = HashMap::new();
     for &(id, decl) in decls {
@@ -4134,9 +4087,8 @@ pub(super) fn lower_struct_def(
                 default: f.default.clone().map(|d| in_module(&module_of(&s.name), d)),
             })
             .collect(),
-        // Tuple struct `Foo(A, B)` — synthesize positional field names
-        // ("0", "1", ...) so `n.0` tuple-style field access lands in
-        // the same field-read path as named structs (spec 2.7.4).
+        // Tuple struct: fields named "0", "1", ... so `n.0` reads like a
+        // named field (spec 2.7.4).
         AstStructKind::Tuple(fs) => fs
             .iter()
             .enumerate()
@@ -4161,11 +4113,9 @@ pub(super) fn lower_struct_def(
     }
 }
 
-/// Lower a `union { f1: T1; f2: T2; ... }` declaration into a single
-/// synthetic `HirStructDef` with one field `__data` whose type is the
-/// chosen storage. The field name → declared type table goes into
-/// `union_kind.aliases`. See `union_storage_strategy` for the
-/// fast-path (A) vs general-path (B) decision.
+/// A `union` as one synthetic `HirStructDef` field `__data` of the chosen
+/// storage (`union_storage_strategy`); field → declared type in
+/// `union_kind.aliases`.
 pub(super) fn lower_union_def(
     u: &rokc_ast::UnionDef,
     id: StructId,
@@ -4224,10 +4174,8 @@ pub(super) fn union_def(
     }
 }
 
-/// Pick the union backing storage. All-prim unions without `#[repr(C)]`
-/// take the fast path (single widest primitive — model A). Anything
-/// else (struct/enum field, `#[repr(C)]`) falls through to the general
-/// `[u8; size]` byte-array path (model B).
+/// Union storage: all-primitive unions without `#[repr(C)]` use the widest
+/// primitive (model A); otherwise `[u8; size]` (model B).
 pub(super) fn union_storage_strategy(
     aliases: &[(String, HirTy)],
     is_repr_c: bool,
@@ -4278,9 +4226,8 @@ pub(super) fn union_storage_strategy(
     UnionStorage::ByteArray
 }
 
-/// What a trait method's signature type depends on besides concrete
-/// types: `Self`, an associated type `X` (bare, spec 2.8, or `Self::X`;
-/// pushed as `Self::X`) or a trait type parameter (by name).
+/// What a trait method's signature type depends on besides concrete types:
+/// `Self`, an associated type (pushed as `Self::X`) or a trait parameter.
 fn ast_ty_needs(ty: &rokc_ast::Ty, params: &[&str], assoc: &[&str], out: &mut Vec<String>) {
     let kids: Vec<&rokc_ast::Ty> = match &ty.kind {
         AstTyKind::SelfUpper => {
@@ -4320,9 +4267,8 @@ fn ast_ty_needs(ty: &rokc_ast::Ty, params: &[&str], assoc: &[&str], out: &mut Ve
     }
 }
 
-/// Report trait impl method `m` when its parameter count, `ref` modes or
-/// return differ from the trait's declaration `tm`; the declaration is
-/// the fix.
+/// Report impl method `m` when its parameter count, `ref` modes or return
+/// differ from the trait's `tm`; the declaration is the fix.
 fn sig_mismatch(
     m: &FnDef,
     tm: &FnDef,
@@ -4393,9 +4339,8 @@ fn is_throwing(t: &rokc_ast::ThrowsKind) -> bool {
     }
 }
 
-/// `impl<..> Tr for Target` as a set of method templates (the trait's
-/// default bodies included), each monomorphized per receiver like a
-/// generic-impl inherent method.
+/// `impl<..> Tr for Target` as method templates (trait defaults included),
+/// monomorphized per receiver.
 fn generic_trait_impl(
     impl_def: &rokc_ast::ImplDef,
     trait_key: String,
@@ -4544,12 +4489,10 @@ struct PendingImpl<'p> {
     at: usize,
 }
 
-/// Each pending impl's target and the trait ref it provides, resolved
-/// once every item is registered (a generic inherent impl's target is
-/// its base). A projection (`impl Tr for <A as P>::Out`) resolves
-/// through the impls resolved before it, so rounds repeat while one
-/// resolves; the last round reports what is left. `None`: an impl of a
-/// trait (with the same arguments) its target already has.
+/// Each pending impl's target and trait ref, once all items exist (a
+/// generic inherent impl's target is its base). Projection targets resolve
+/// through earlier impls, so rounds repeat while progress is made; the last
+/// reports what's left. `None`: a duplicate trait impl for the target.
 fn impl_heads(
     env: &mut EnvIn<'_, '_>,
     pending: &[PendingImpl<'_>],
@@ -4642,9 +4585,8 @@ fn impl_heads(
     heads
 }
 
-/// A concrete impl's target and, for a trait impl, the trait ref it
-/// provides: `impl Get<i32> for T { type Item = u8; }` also answers
-/// `Get<i32>`, `Get<Item = u8>` and `Get<i32, Item = u8>`.
+/// A concrete impl's target and trait ref: `impl Get<i32> for T { type
+/// Item = u8; }` also answers `Get<Item = u8>` and `Get<i32, Item = u8>`.
 fn impl_head(
     rcx: &mut LowerCtx<'_>,
     p: &PendingImpl<'_>,
@@ -4699,12 +4641,10 @@ fn impl_assoc_list(impl_def: &rokc_ast::ImplDef) -> Vec<(String, Ty)> {
         .collect()
 }
 
-/// An impl's consts plus, in a trait impl, the trait's defaults it
-/// leaves out: keyed `(Type::NAME, type, value)` where `Type::NAME`
-/// names one (see below), and all of them. The key uses the generic
-/// base (`Box::N` for `impl<T> Box<T>`) or a primitive's name.
-// One key per base type: two impls of a generic base (`Box<i32>`,
-// `Box<f64>`) can't give the same const different values.
+/// An impl's consts, plus a trait impl's omitted defaults: `(Type::NAME,
+/// type, value)` keyed by generic base or primitive name where one names
+/// it, and all of them.
+// One key per base: two instances' impls can't give a const two values.
 fn impl_consts(
     i: &rokc_ast::ImplDef,
     program: &Program,
@@ -4779,10 +4719,9 @@ fn impl_consts(
             rokc_ast::GenericParam::Const { .. } => None,
         })
         .collect();
-    // `Type::N` names the const when the impl covers that one type, or
-    // every instance of a generic base (`impl<T> Boxed<T>`, inherent);
-    // the rest (`impl Tr for Box<i32>`, blanket `impl<T: X> Tr for T`)
-    // are found from a concrete type (`T::N`, `Self::N`, `<T as Tr>::N`).
+    // `Type::N` names the const when the impl covers that type or every
+    // instance of a base; others are found from a concrete type (`T::N`,
+    // `Self::N`, `<T as Tr>::N`).
     let keyed_target = match &i.self_ty.kind {
         AstTyKind::Path(p) => {
             let args = p.segments.last().map_or(&[][..], |s| s.generics.as_slice());
@@ -4858,16 +4797,11 @@ pub(super) fn lower_decl(env: &Env<'_>, i: usize, stub: bool) -> HirFunction {
     }
 }
 
-/// Pass 3: function bodies. The `roots` (user code, exports, lazy static
-/// initializers) are lowered, then every decl a lowered body names —
-/// calls, `fn` values, closures, coroutines; f-string helpers, operator
-/// traits, iterator protocols and `any` dispatchers all resolve to these
-/// — lowest id first, so user code keeps its order. A library body never
-/// reached stays a body-less stub (its signature, for tools) and is
-/// listed as unlowered (MIR drops it). `--check-library` lowers (and so
-/// checks) every library body.
-// No cache of library HIR across runs.
-/// Prebuilt functions (`linked`) keep only their signatures.
+/// Pass 3: bodies. The `roots` (user code, exports, lazy static inits) are
+/// lowered, then every decl a lowered body names, lowest id first. An
+/// unreached library body stays a signature-only stub that MIR drops;
+/// `--check-library` lowers all. Prebuilt (`linked`) functions keep only
+/// their signatures.
 fn lower_bodies(
     env: &Env<'_>,
     roots: &[bool],
@@ -4995,10 +4929,9 @@ fn sig_stub(env: &Env<'_>, i: usize) -> HirFunction {
     }
 }
 
-/// Spec 6.2.1 / stdlib 2.5.9, 2.13.3: `#[derive(Tr)]` needs every field
-/// to implement `Tr` (checked here on non-generic types; a generic one's
-/// impl bounds its parameters by `Tr`), and `Copy` excludes `Drop`.
-/// The spans of the derive attributes that failed.
+/// Spec 6.2.1: `#[derive(Tr)]` needs every field to implement `Tr` (here
+/// for non-generic types; generic impls bound their parameters), and
+/// `Copy` excludes `Drop`. Returns the failed attributes' spans.
 fn check_derives(env: &Env<'_>, program: &Program) -> Vec<rokc_diagnostic::Span> {
     let mut failed = Vec::new();
     let no_subst = HashMap::new();
@@ -5082,9 +5015,8 @@ fn check_derives(env: &Env<'_>, program: &Program) -> Vec<rokc_diagnostic::Span>
     failed
 }
 
-/// A `Pod` type (stdlib 1.3.3, `#[derive(Pod)]` or a hand-written impl):
-/// a `#[repr(C)]` / `#[repr(transparent)]` struct of `Pod` fields
-/// without `Drop`.
+/// `Pod` (stdlib 1.3.3): a `#[repr(C)]` / `#[repr(transparent)]` struct of
+/// `Pod` fields without `Drop`.
 fn check_pod(
     ctx: &LowerCtx<'_>,
     attrs: &[rokc_ast::Attribute],
@@ -5125,11 +5057,8 @@ fn check_pod(
     }
 }
 
-/// Every trait named in a bound position — generic parameters, `where`
-/// clauses, supertraits, `impl Tr for` — must exist (`any Tr` and
-/// `fn() + Tr` check their own), with no more type arguments than it
-/// has parameters (`T: Into<U>` of the parameterless `Into`, stdlib
-/// 2.11.3).
+/// Every trait in a bound position must exist, with no more type arguments
+/// than parameters (stdlib 2.11.3).
 fn check_bound_names(
     program: &Program,
     names: &TypeNames,
@@ -5363,9 +5292,9 @@ fn check_type_bounds(env: &Env<'_>) {
         );
         env.sink.diagnostics.borrow_mut().extend(errors);
     }
-    // A generic alias use naming a type parameter is checked where the
-    // parameter's bounds are known: a generic body's by its definition
-    // check (`bounds::check_one`), a generic impl's target here.
+    // Generic alias uses naming a type parameter are checked where its
+    // bounds are known: by the body's definition check, or here for impl
+    // targets.
     let mut seen = std::collections::HashSet::new();
     let uses = env.names.alias_uses.borrow().clone();
     for u in uses {
@@ -5397,11 +5326,9 @@ fn check_type_bounds(env: &Env<'_>) {
     }
 }
 
-/// The bounds generic alias use `u` fails, its arguments resolved by
-/// `rcx` (with the type parameters around the use). None when an
-/// argument names a type `rcx` doesn't know (a parameter of a generic
-/// item around the use, checked by that item's check, or reported as
-/// unknown), or with `params_only`, when none names a parameter.
+/// Bounds that generic alias use `u` fails, arguments resolved by `rcx`.
+/// None when an argument names a type `rcx` doesn't know, or with
+/// `params_only` when none names a parameter.
 pub(super) fn alias_use_unmet(
     rcx: &mut LowerCtx<'_>,
     (full, args, module, span): &AliasUse,
@@ -5446,9 +5373,8 @@ pub(super) fn alias_use_unmet(
     )
 }
 
-/// The bounds of `generics` / `where_clause` that `args` fail, as
-/// errors at `span`. `owner` names what declares a type parameter of
-/// the use's scope, for the help.
+/// Bounds of `generics` / `where_clause` that `args` fail, as errors at
+/// `span`; `owner` names the declaring item for the help.
 #[allow(clippy::too_many_arguments)]
 fn unmet_bounds(
     env: &Env<'_>,
@@ -5507,9 +5433,8 @@ fn unmet_bounds(
     out
 }
 
-/// Spec 5.3: every thread reads a `static`, so its type is `Sync`.
-/// The error says what to write instead: the value in a `Mutex`, or a
-/// `Cell` of a number in an `Atomic`.
+/// Spec 5.3: a `static` is read by every thread, so it must be `Sync`; the
+/// error suggests a `Mutex`, or an `Atomic` for a `Cell` of a number.
 fn check_statics_sync(env: &Env<'_>, programs: &[&Program]) {
     let no_subst = HashMap::new();
     let ctx = LowerCtx::new(env, &no_subst, None, Span::DUMMY);
@@ -5596,12 +5521,9 @@ fn check_statics_sync(env: &Env<'_>, programs: &[&Program]) {
     }
 }
 
-/// A type has at most one impl of a trait (spec 2.9.3): a concrete impl
-/// that a generic impl also covers is a duplicate (no specialization).
-/// Trait impls: the orphan rule (spec 2.9.5: the trait or the target
-/// type is the impl's package's own), and supertraits (spec 2.8.4: a
-/// type implementing a trait implements its supertraits too; a generic
-/// impl's target must meet them for every instance its bounds allow).
+/// Spec 2.9.3: one impl per trait and type (a concrete impl a generic one
+/// covers is a duplicate); the orphan rule (2.9.5); supertraits (2.8.4,
+/// for every instance a generic impl's bounds allow).
 fn check_impl_rules(
     env: &Env<'_>,
     checked: &[&Program],
@@ -5739,10 +5661,8 @@ fn check_assoc_bounds(ctx: &LowerCtx<'_>, td: &rokc_ast::TraitDef, i: &rokc_ast:
     }
 }
 
-/// Spec 2.8.4 for a generic impl: its target, with the impl parameters
-/// as opaque types bounded by their bounds, must implement each
-/// supertrait (`impl<T: Show> Pretty for List<T>` needs `List<T>: Show`
-/// from some impl whose bounds `T: Show` meets).
+/// Spec 2.8.4 for a generic impl: its target, parameters opaque under their
+/// bounds, must implement each supertrait.
 fn check_generic_supers(
     ctx: &LowerCtx<'_>,
     i: &rokc_ast::ImplDef,
@@ -5853,11 +5773,10 @@ fn has_rigid(t: &CanonTy) -> bool {
     }
 }
 
-/// Does `subject` implement trait `key` whatever the opaque `#r.T`s in
-/// it are, given their bounds `assume`? An opaque type has its bounds
-/// and their supertraits; anything else needs an impl whose target
-/// unifies and whose bounds hold in turn. Structural rules (auto
-/// traits, sums) and types this can't read are taken as met.
+/// Does `subject` implement `key` for any opaque `#r.T`s given their bounds
+/// `assume`? Opaque types have their bounds and supertraits; others need a
+/// unifying impl whose bounds hold. Structural rules and unreadable types
+/// are taken as met.
 fn entails(
     ctx: &LowerCtx<'_>,
     subject: &CanonTy,
@@ -5993,11 +5912,10 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
             }
         }
     }
-    // Two generic impls conflict when their targets (and trait
-    // arguments) unify — bounds on what stays generic don't separate
-    // them (`impl<T: A> X for T` / `impl<T: B> X for T` clash even if
-    // no type is `A + B` yet). Targets beyond `symbolic_overlap` fall
-    // back to a witness among the types the program names.
+    // Two generic impls conflict when their targets (and trait arguments)
+    // unify; bounds don't separate them (`impl<T: A> X for T` and
+    // `impl<T: B> X for T` clash). Beyond `symbolic_overlap`, look for a
+    // witness among the program's types.
     let gis: Vec<(&Impl, bool)> = impls
         .iter()
         .zip(&mine)
@@ -6066,10 +5984,8 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
     }
 }
 
-/// Whether generic impl `gi`, matched on concrete target `ty` with
-/// `subst`, also matches a concrete impl's trait arguments:
-/// `impl<T> DotMul<List<T>> for T` and `impl DotMul<M> for M` are
-/// disjoint. A parameter only the trait arguments name is open: assume
+/// Does generic `gi`, matched on `ty`, also match a concrete impl's trait
+/// arguments? A parameter only the trait arguments name is open: assume
 /// overlap.
 fn trait_args_overlap(
     ctx: &LowerCtx<'_>,
@@ -6125,13 +6041,10 @@ fn named_types(env: &Env<'_>) -> Vec<HirTy> {
     out
 }
 
-/// Whether two generic impls of one trait overlap, structurally: unify
-/// their targets (and trait arguments) with the impl parameters as
-/// variables. Bounds on a type left generic are assumed satisfiable
-/// (coherence is open-world); a bound on a parameter the unification
-/// made concrete (`i32: A`) is checked, as for a concrete impl.
-/// `Some(Some(shown))` overlaps on `shown`, `Some(None)` is disjoint,
-/// `None` is a target this check can't read (fn types, aliases ..).
+/// Do two generic impls overlap? Unify targets and trait arguments over
+/// impl parameters. Bounds left generic are assumed satisfiable
+/// (open-world); bounds made concrete are checked. `Some(Some(shown))`
+/// overlaps, `Some(None)` disjoint, `None` unreadable (fn types, aliases).
 #[allow(clippy::option_option)] // overlap / disjoint / can't tell
 fn symbolic_overlap(ctx: &LowerCtx<'_>, a: &Impl, b: &Impl) -> Option<Option<String>> {
     let names = |gi: &Impl, tag: &str| -> HashMap<String, String> {
@@ -6162,10 +6075,8 @@ fn symbolic_overlap(ctx: &LowerCtx<'_>, a: &Impl, b: &Impl) -> Option<Option<Str
     if u.unify(&a_self, &b_self).is_none() || args.iter().any(|(x, y)| u.unify(x, y).is_none()) {
         return Some(None);
     }
-    // Bounds whose subject the unification gave a type constructor:
-    // negative reasoning on known types (`List<T>: Iterator` fails when
-    // no impl of `Iterator` targets `List`). A subject still a bare
-    // variable is open — some type may meet any bounds.
+    // Negative reasoning only on known constructors (`List<T>: Iterator`
+    // fails if no impl targets `List`); a bare variable is open.
     for (gi, vars) in [(a, &va), (b, &vb)] {
         let mut goals: Vec<(CanonTy, &Vec<Ty>)> = Vec::new();
         for gp in &gi.generics.params {
@@ -6200,10 +6111,9 @@ fn symbolic_overlap(ctx: &LowerCtx<'_>, a: &Impl, b: &Impl) -> Option<Option<Str
     Some(Some(u.walk(&a_self).to_string()))
 }
 
-/// Whether `subject` (not a bare variable) may implement trait `key`: a
-/// concrete type is asked directly; one with variables does when some
-/// impl of `key` targets its constructor (`List<..>`, a 2-tuple ..) or
-/// a bare parameter.
+/// May non-variable `subject` implement `key`? Concrete types are asked
+/// directly; others need an impl targeting their constructor or a bare
+/// parameter.
 fn may_implement(ctx: &LowerCtx<'_>, subject: &CanonTy, key: &str) -> bool {
     if let Some(t) = canon_hir(ctx, subject) {
         return ctx.has_trait(&t, key);
@@ -6342,10 +6252,8 @@ fn canon_ast_ty(
             keys.sort();
             CanonTy::Named(format!("any {}", keys.join(" + ")), Vec::new())
         }
-        // `fn(A) -> R`: the kind (`unsafe`, ABI) names the constructor;
-        // the return type, then the parameters, are its arguments. Auto
-        // bounds (`+ Send`) don't separate: such a value also fits the
-        // plain `fn` impl.
+        // `fn(A) -> R`: kind and ABI name the constructor, return then
+        // parameters are its arguments; `+ Send` doesn't separate.
         AstTyKind::Fn(params, ret, b) => {
             let stdcall = b.system && super::const_eval::stdcall_system();
             let kind = format!("fn/{}/{}/{stdcall}", b.unsafe_fn, b.c_abi);
@@ -6531,11 +6439,9 @@ fn occurs(v: &str, t: &CanonTy) -> bool {
     }
 }
 
-/// Rules for impls of auto traits (`Send` / `Sync`): opting in is
-/// `unsafe impl`; opting out is `impl !Tr for S` on a struct / enum,
-/// recorded in `neg` as `(generic base, trait key)`. `unsafe impl` and
-/// `!` are for auto traits only. Returns whether to go on registering
-/// the impl like any other (false for opt-outs and errors).
+/// Auto trait impls: opt in with `unsafe impl`, out with `impl !Tr for S`
+/// (recorded in `neg`); both only for auto traits. Whether to register the
+/// impl normally (false for opt-outs and errors).
 fn check_auto_impl(
     impl_def: &rokc_ast::ImplDef,
     names: &TypeNames,
@@ -6619,10 +6525,9 @@ fn check_auto_impl(
     true
 }
 
-/// Spec 5.9.10: an `extern "C" fn` definition is called from C — no
-/// captures (it is an item), no generics, no `throws` (an error can't
-/// cross into C; a panic aborts the process), and FFI types only (a
-/// rok `str` is `(ptr, len)`, not a `char*`).
+/// Spec 5.9.10: an `extern "C" fn` definition is called from C: no
+/// captures, generics or `throws` (errors can't cross into C), FFI types
+/// only.
 fn check_extern_fn(f: &FnDef, abi: &str, diags: &mut Vec<rokc_diagnostic::RokDiagnostic>) {
     let mut bad = |msg: String| {
         diags.push(rokc_diagnostic::RokDiagnostic::error(
@@ -6704,9 +6609,7 @@ fn export_name(f: &FnDef) -> Option<String> {
 pub(super) enum Intrinsic {
     /// `rok.OP.TYPE` on a primitive's method.
     Prim(PrimOp),
-    /// `rok.cast.FROM.TO` / `rok.clone.copy` on a primitive's method: the
-    /// call is its one operand as the return type (`as`; unchanged for
-    /// a copy).
+    /// `rok.cast.FROM.TO` / `rok.clone.copy`: the operand as the return type.
     Convert,
     BufNew,
     BufGet,
@@ -6806,9 +6709,7 @@ impl Intrinsic {
     }
 }
 
-/// The `#[intrinsic(..)]` of `m`, declared in `module`: standard library
-/// only (stdlib spec 0.3.5); a primitive op's operands are the
-/// parameters.
+/// `m`'s `#[intrinsic(..)]`, standard library only (stdlib 0.3.5).
 pub(super) fn intrinsic_of(
     m: &FnDef,
     module: &str,
@@ -6915,9 +6816,8 @@ fn impl_assoc_types(impl_def: &rokc_ast::ImplDef) -> HashMap<String, Ty> {
         .collect()
 }
 
-/// The value of a trait's const argument: a literal, a `const` item
-/// (`W`, looked up from `module` then the root) or a braced const
-/// expression over those (`{ W + 1 }`).
+/// A trait const argument: a literal, a `const` (from `module`, then the
+/// root) or a braced const expression over those.
 fn const_arg_value(t: &Ty, names: &TypeNames, module: &str) -> Option<i128> {
     let c = match &t.kind {
         AstTyKind::Const(c) => c.clone(),
@@ -6979,9 +6879,8 @@ fn trait_param_args(t: &rokc_ast::TraitDef, impl_def: &rokc_ast::ImplDef) -> Has
     out
 }
 
-/// `Self::X` in a default method's signature where `X` is not the
-/// trait's own (a supertrait's: `Self::Item` in `DoubleEndedIterator`)
-/// becomes the projection on the impl's target (`ListIter<T>::Item`).
+/// `Self::X` from a supertrait in a default's signature becomes the
+/// projection on the impl's target (`ListIter<T>::Item`).
 fn supertrait_projections(
     m: &FnDef,
     t: &rokc_ast::TraitDef,
@@ -7038,9 +6937,9 @@ fn sig_mentions(m: &FnDef, assoc: &[String]) -> bool {
     out.iter().any(|n| n.starts_with("Self::"))
 }
 
-/// Does `m` return a generic type over `Self` (`Flatten<Self>`)? Such a
-/// default is instantiated only when called: the adapter type may not
-/// exist for every implementor (`Flatten` needs `IntoIterator` items).
+/// Does `m` return a generic over `Self` (`Flatten<Self>`)? Such a default
+/// is instantiated only when called, since the adapter may not fit every
+/// implementor.
 fn returns_self_generic(m: &FnDef) -> bool {
     matches!(&sig_ret_ast(m).kind, AstTyKind::Path(p)
         if p.segments.iter().any(|s| s.generics.iter().any(|g| matches!(g.kind, AstTyKind::SelfUpper))))
@@ -7061,12 +6960,10 @@ fn path_ty_named(name: &str, span: rokc_diagnostic::Span) -> Ty {
     }
 }
 
-/// Spec 2.6.4 / 2.8.3 / 2.13.4: in a trait or impl, both `X` and
-/// `Self::X` name its associated type `X`, shadowing an outer `X`. An
-/// impl's method signatures get the impl's type (a generic member:
-/// `Self::Item | none` with `type Item = i32 | none` nests); trait and
-/// impl methods are marked `ASSOC_TYPES_ATTR` so their bodies read bare
-/// `X` as `Self::X`.
+/// Spec 2.6.4 / 2.8.3 / 2.13.4: in a trait or impl, `X` and `Self::X` name
+/// the associated type, shadowing outer `X`. Impl signatures get the
+/// impl's type; methods are marked `ASSOC_TYPES_ATTR` so bodies read `X`
+/// as `Self::X`.
 fn add_self_assoc_sigs(program: &mut Program) {
     let mark = |d: &mut FnDef, names: Vec<String>| {
         d.attrs.push(rokc_ast::Attribute {
@@ -7120,11 +7017,9 @@ fn add_self_assoc_sigs(program: &mut Program) {
     }
 }
 
-/// Associated type defaults (`trait TryFrom<U> { type Error =
-/// ConversionError; }`): an impl that omits `type X` gets the trait's
-/// default, its names resolved in the trait's module and the trait's
-/// parameters replaced by the impl's arguments. Everything after sees
-/// an ordinary `type X = ..;` in the impl. The additions, by item index.
+/// Associated type defaults: an impl omitting `type X` gets the trait's,
+/// resolved in the trait's module with its parameters replaced. Returns
+/// the additions by item index.
 fn assoc_defaults(
     program: &Program,
     names: &TypeNames,
@@ -7192,16 +7087,11 @@ fn assoc_defaults(
     out
 }
 
-/// The bodies without `-> T` that may diverge on every path (spec
-/// 4.3.7), so their return type is inferred (`!` when lowering confirms
-/// it): each ends in `throw`, a `loop`, a call of a function named like
-/// one declared `-> !` or itself in this set, or a control structure
-/// whose every branch does. Names are matched by leaf (an
-/// over-approximation the lowering settles); a fixed point over the
-/// program keeps inference from nesting through every unit call chain.
-/// The bodies of `program` that may diverge on every path, by span;
-/// `names` are the leaf names of the diverging functions so far, and
-/// get this stage's.
+/// Bodies without `-> T` that may diverge on every path (spec 4.3.7), by
+/// span, so their return type is inferred (`!` if lowering confirms): each
+/// ends in `throw`, a `loop`, a call of a known diverging name, or
+/// branches that all do. Names match by leaf (lowering settles it);
+/// `names` accumulates across stages.
 fn may_diverge(
     program: &Program,
     names: &mut std::collections::HashSet<String>,
@@ -7309,13 +7199,8 @@ fn may_diverge(
     }
 }
 
-/// A trait impl method's untyped parameter takes the type the trait
-/// declares at its position (trait parameters replaced by the impl's
-/// arguments), not an implicit type parameter: the method implements
-/// that signature.
-/// Does generic impl `i` cover every instance of its target's base: a
-/// path whose arguments are distinct parameters of the impl (`Box<T>`,
-/// not `P<str, V>` or `P<T, T>`)?
+/// Does generic impl `i` cover every instance of its base: arguments are
+/// distinct impl parameters (`Box<T>`, not `P<str, V>` or `P<T, T>`)?
 fn covers_base(i: &rokc_ast::ImplDef) -> bool {
     let AstTyKind::Path(p) = &i.self_ty.kind else {
         return false;
@@ -7333,9 +7218,8 @@ fn covers_base(i: &rokc_ast::ImplDef) -> bool {
     })
 }
 
-/// `impl<T> Al<T>` with `type Al<T> = S<T>;` is `impl<T> S<T>`: a
-/// generic alias target is expanded (through nested aliases) before
-/// impls are keyed by their written target.
+/// Expand generic alias targets (`impl<T> Al<T>` with `type Al<T> = S<T>`)
+/// before impls are keyed.
 fn expand_impl_aliases(program: &mut Program, names: &TypeNames) {
     for it in &mut program.items {
         let Item::Impl(i) = it else { continue };
@@ -7594,10 +7478,6 @@ pub(super) fn subst_assoc_ty(ty: &mut Ty, assoc: &HashMap<String, Ty>) {
     }
 }
 
-/// The `fn_table` key (and symbol) of method `leaf` of `target`: `Ty__m`,
-/// or `Ty__m__by_Tr` when another trait (or an inherent impl) already
-/// took that name (spec 4.9.6 picks one at the call site). `None`: the
-/// same trait / inherent impl defines it twice.
 /// Where a declaration is.
 fn decl_span(d: &MethodOrFn<'_>) -> Span {
     match d {
@@ -7667,9 +7547,8 @@ fn literal_handlers(
 ) -> Vec<super::ShapeHandler> {
     use rokc_parser::{ArgKind, PatKind, Pattern};
     let mut out = Vec::new();
-    // (pattern, priority, return type leaf) → first handler: a second
-    // one is ambiguous wherever the pattern matches (6.5.5: neither the
-    // slot type nor `priority` can tell them apart).
+    // (pattern, priority, return type leaf) → first handler; a second is
+    // ambiguous wherever the pattern matches (6.5.5).
     let mut seen: HashMap<(String, i64, String), (String, rokc_diagnostic::Span)> = HashMap::new();
     for item in &program.items {
         let Item::Fn(f) = item else { continue };

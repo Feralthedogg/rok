@@ -1,9 +1,7 @@
-//! Mach-O 64 relocatable object (`MH_OBJECT`) writer, arm64 and `x86_64`.
-//!
-//! One unnamed segment holds the sections; symbols are local, then
-//! external defined, then undefined (`LC_DYSYMTAB`); each function gets
-//! a compact unwind entry (a frame-pointer frame, no saved registers),
-//! so backtraces and debuggers walk through it.
+//! Mach-O 64 relocatable object (`MH_OBJECT`) writer, arm64 and `x86_64`:
+//! one unnamed segment, symbols local / external / undefined
+//! (`LC_DYSYMTAB`), and a compact unwind entry per function (plain frame
+//! pointer frames).
 
 use crate::obj::{Obj, RelKind, SECTS, Sect};
 

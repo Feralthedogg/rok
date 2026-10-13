@@ -1,13 +1,10 @@
-//! WIT for rok (stdlib spec 1.8): the `.wit` files an
-//! `ffi::wit::import` / `ffi::wit::export` names are parsed and
-//! resolved ([`load`]), and rok source binding them through the
-//! canonical ABI is generated ([`bind`]), with the world the linker
-//! (`wasm-component-ld`) gives the component.
+//! WIT for rok (stdlib 1.8): `.wit` files named by `ffi::wit::import` /
+//! `export` are parsed and resolved ([`load`]) and bound through the
+//! canonical ABI ([`bind`]), plus the world for `wasm-component-ld`.
 //!
-//! A path names a `.wit` file or a directory: a directory's `*.wit`
-//! files are one package, and its `deps/` holds the packages it uses
-//! (files or directories), as `wit-parser` reads them. A file is read
-//! with the rest of its directory but names only what it defines.
+//! A path is a `.wit` file or a directory (one package, `deps/` holding
+//! its dependencies), as `wit-parser` reads them; a file is read with its
+//! directory but names only what it defines.
 
 // Code generation reads best with the canonical ABI's own short names
 // (`t` type, `v` value, `a` address, `p` / `n` pointer and length).
@@ -45,9 +42,8 @@ pub struct Unit {
     pub files: Vec<usize>,
 }
 
-/// The files read: the ones a request names (`roots`, one entry per
-/// path: the indices of its files in `Resolve::files`) and their
-/// dependencies.
+/// Files read: those requests name (`roots`, per path its indices in
+/// `Resolve::files`) and their dependencies.
 #[derive(Debug)]
 pub struct Loaded {
     pub resolve: Resolve,

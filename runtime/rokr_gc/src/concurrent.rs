@@ -1,36 +1,25 @@
 //! Concurrent marking of full collections (705): snapshot at the
 //! beginning (SATB, Yuasa), one marker thread.
 //!
-//! - Start (a pause, [`start`]): a minor collection first, so every
-//!   survivor is old: block objects `UNLOGGED`, LOS objects `CARDED`
-//!   (they get `UNLOGGED` too here) and no line is `TAKEN`. Then the
-//!   roots and pins are queued and the marker thread wakes.
-//! - Marking: mutators run. Refills hand out `BLACK` lines and new LOS
-//!   objects go in front of `los_mark_head`: what is allocated now is
-//!   younger than the mark, which never reads or sweeps it (allocate
-//!   black). The first store into an old object goes through
-//!   `rok_gc_wb_slow` (it is `UNLOGGED`), which here also logs every
-//!   reference the object holds into the thread's SATB chunk
-//!   ([`snapshot`]) before clearing `UNLOGGED`, so nothing reachable at
-//!   the start is lost; later stores only overwrite values stored during
-//!   the mark, which were reachable at the start or are new. The object
-//!   also joins the remembered set (block objects) or dirties its card
-//!   (LOS), as references to the new, young objects must survive the
-//!   next minor collection. An object the marker already scanned
-//!   (`SCANNED`) logs nothing.
-//! - Finish (a pause, [`finish`]): when the marker runs out of work, or
-//!   when the allocation budget runs out first (no minor collection
-//!   runs during a mark), the world stops: every thread's SATB chunk is
-//!   drained, the roots are queued again, the mark completes, the
-//!   snapshot is swept (`BLACK` lines become `TAKEN`: young) and the
-//!   remembered set of the mark (its surviving objects) carries over to
-//!   the next minor collection. No evacuation: if the heap is
-//!   fragmented, the next full collection stops the world for it.
+//! - Start ([`start`], a pause): a minor collection first, so every
+//!   survivor is old (`UNLOGGED`, LOS also `CARDED`). Roots and pins are
+//!   queued and the marker wakes.
+//! - Marking: mutators allocate black (`BLACK` lines, LOS objects in
+//!   front of `los_mark_head`), which the mark never reads or sweeps. The
+//!   first store into an old object takes `rok_gc_wb_slow`, which logs
+//!   every reference it holds into the thread's SATB chunk ([`snapshot`])
+//!   before clearing `UNLOGGED`, so nothing reachable at the start is
+//!   lost; it also remembers the object (or dirties its card) for the
+//!   next minor collection. A `SCANNED` object logs nothing.
+//! - Finish ([`finish`], a pause): when the marker runs dry or the
+//!   allocation budget does, drain every SATB chunk, requeue the roots,
+//!   complete the mark and sweep the snapshot (`BLACK` lines become
+//!   young `TAKEN`). No evacuation: a fragmented heap waits for the next
+//!   stop-the-world full collection.
 //!
 //! The mark state ([`super::Mark`]) belongs to whoever holds the mark
-//! lock: the marker thread while it marks, a pause otherwise (it asks
-//! the marker to let go through [`FINISH`]). The marker never holds the
-//! mark lock while it waits for the world lock.
+//! lock: the marker while marking, a pause otherwise (via [`FINISH`]).
+//! The marker never holds it while waiting for the world lock.
 
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};

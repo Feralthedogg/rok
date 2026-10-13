@@ -1,7 +1,5 @@
-//! Item / statement / expression / pattern / type AST.
-//!
-//! No operator enums. Binary/unary expressions carry the lexical operator
-//! symbol; trait resolution happens in a later pass.
+//! The AST. Operators are kept as their lexical symbol; trait resolution
+//! happens later.
 
 use rokc_core::Visibility;
 use rokc_diagnostic::Span;
@@ -65,9 +63,8 @@ pub fn extern_fn_abi(attrs: &[crate::Attribute]) -> Option<&str> {
     })
 }
 
-/// Whether `attrs` ask for inlining (`#[inline]`, `#[inline(always)]`;
-/// not `#[inline(never)]`): a prebuilt package's function so marked is
-/// copied into its users rather than kept in its `.a` alone.
+/// `#[inline]` / `#[inline(always)]` (not `never`): a prebuilt package's
+/// function so marked is copied into its users.
 #[must_use]
 pub fn inline_wanted(attrs: &[crate::Attribute]) -> bool {
     attrs.iter().any(|a| {
@@ -77,30 +74,23 @@ pub fn inline_wanted(attrs: &[crate::Attribute]) -> bool {
     })
 }
 
-/// Marker attribute of a nested `fn` statement (spec 4.10).
-///
-/// The fn is lifted to a module item named by the attribute's string
-/// (`outer/f`); a second `true` argument marks a sibling visible from
-/// an enclosing block rather than one declared here.
+/// Marks a nested `fn` statement (spec 4.10), lifted to a module item
+/// named by the string (`outer/f`); a second `true` marks a sibling
+/// visible from an enclosing block.
 pub const NESTED_FN_ATTR: &str = "#nested_fn";
 
-/// Marker attribute of an item lifted from a block (spec 3.9.1).
-///
-/// Its string is the lifted path of the fn around it. The item is named
-/// `outer/name` (`rokc_core::local`), every use in its scope renamed
-/// (`rename`); a copy stays in the block as a statement.
+/// Marks an item lifted from a block (spec 3.9.1); the string is the
+/// enclosing fn's lifted path. Uses in scope are renamed to
+/// `outer/name` (`rename`); a copy stays in the block.
 pub const LOCAL_ITEM_ATTR: &str = "#local_item";
 
 /// Marker attribute of a block's `use` copied into the bodies of the fns
 /// lifted from the block (spec 3.9.1).
 pub const INHERITED_USE_ATTR: &str = "#inherited_use";
 
-/// Marker attribute of an item lifted from a block with `use p::*`s
-/// (spec 3.9.1).
-///
-/// One string per glob, its prefix as written. HIR puts the paths of the
-/// names they bring in into the item's headers; its fn bodies have the
-/// `use`s themselves.
+/// Marks a block-lifted item with `use p::*`s in scope (spec 3.9.1), one
+/// prefix per glob. HIR resolves them into the item's headers; its fn
+/// bodies carry the `use`s themselves.
 pub const BLOCK_GLOB_ATTR: &str = "#block_glob";
 
 /// Marker attribute of a `const fn` (spec 5.2.5): callable in const
@@ -151,9 +141,9 @@ pub fn as_assoc_binding(ty: &Ty) -> Option<(&str, &Ty)> {
     }
 }
 
-/// `throws` clause of a fn signature (spec 4.14). `rethrows` is
-/// desugared by the parser into `Typed` over synthetic generic error
-/// parameters (`#E0`, ...), one per throwing fn-typed parameter.
+/// `throws` clause (spec 4.14). The parser desugars `rethrows` into
+/// `Typed` over synthetic error parameters (`#E0`, ...), one per throwing
+/// fn-typed parameter.
 #[derive(Clone, Debug, Default)]
 pub enum ThrowsKind {
     #[default]
@@ -172,9 +162,8 @@ pub struct Generics {
 
 #[derive(Clone, Debug)]
 pub enum GenericParam {
-    /// `T`, `T: Bound`, or `T = Default` (spec 2.10.5). The `default`
-    /// type is applied during instantiation when no concrete type was
-    /// supplied and the generic context provides no inference signal.
+    /// `T`, `T: Bound`, or `T = Default` (spec 2.10.5); the default applies
+    /// when nothing else fixes `T`.
     Type {
         name: String,
         bounds: Vec<Ty>,
@@ -226,25 +215,19 @@ pub enum StmtKind {
         ty: Option<Ty>,
         init: Expr,
     },
-    /// `let (a, b, ...) [: ty] = init;` — tuple destructure.
-    /// `_` in `names` is the discard placeholder.
-    /// `rest`: `Some((index_into_names, optional_name))` records a `..` or
-    /// `..name` rest-pattern (spec 3.15.3). The index is the position
-    /// among `names` *before* which the rest splice slots in, e.g.
-    ///   `(first, ..rest)`              → `names=["first"], rest=(1, Some("rest"))`
-    ///   `(..init, last)`               → `names=["last"], rest=(0, Some("init"))`
-    ///   `(head, ..mid, tail)`          → `names=["head","tail"], rest=(1, Some("mid"))`
-    ///   `(..)`                         → `names=[], rest=(0, None)`
+    /// `let (a, b, ...) [: ty] = init;`; `_` discards. `rest` is a `..` /
+    /// `..name` (spec 3.15.3) spliced in before `names[index]`:
+    ///   `(first, ..rest)`      → `names=["first"], rest=(1, Some("rest"))`
+    ///   `(head, ..mid, tail)`  → `names=["head","tail"], rest=(1, Some("mid"))`
+    ///   `(..)`                 → `names=[], rest=(0, None)`
     LetTuple {
         names: Vec<String>,
         rest: Option<(usize, Option<String>)>,
         ty: Option<Ty>,
         init: Expr,
     },
-    /// `let StructName { f1, f2: alias, .. } [: ty] = init;` — struct destructure.
-    /// Each `(field_name, bind_name)` pair lifts the named field into a
-    /// fresh local. `bind_name` defaults to `field_name` when no rename
-    /// was written. `rest` is true if the pattern ended in `..`.
+    /// `let S { f1, f2: alias, .. } [: ty] = init;`: `(field, binding)`
+    /// pairs; `rest` for a trailing `..`.
     LetStruct {
         path: Path,
         fields: Vec<(String, String)>,
@@ -349,9 +332,8 @@ pub enum ExprKind {
     },
     Dict(Vec<(Expr, Expr)>),
     Set(Vec<Expr>),
-    /// Source matched by registered `#[literal(..)]` patterns (spec
-    /// 6.5.4): one candidate per matching handler; HIR picks one by the
-    /// slot's type, then priority (6.5.5).
+    /// Source matched by `#[literal(..)]` patterns (spec 6.5.4), one
+    /// candidate per handler; HIR picks by slot type, then priority.
     MagicLiteral(Vec<LitCand>),
     Block(Block),
     /// `unsafe { ... }` (spec 4.15.2).
@@ -388,9 +370,8 @@ pub enum ExprKind {
         kind: TryKind,
         operand: Box<Expr>,
     },
-    /// Postfix `e catch pat { .. } ... finally { .. }` (either part may
-    /// be absent, not both). `try { .. } catch ..` is a `Catch` over a
-    /// `Try` of a block.
+    /// `e catch pat { .. } ... finally { .. }` (at least one part).
+    /// `try { .. } catch ..` is a `Catch` over a `Try` of a block.
     Catch {
         body: Box<Expr>,
         catches: Vec<CatchArm>,
@@ -444,8 +425,7 @@ pub enum ExprKind {
         end: Option<Box<Expr>>,
         inclusive: bool,
     },
-    /// `x?.tail` — language-level sum-type-aware access (desugars to match).
-    /// `x?.a.b(..)[i]`: the links after `?.`, all skipped when `x` is
+    /// `x?.a.b(..)[i]`: the links after `?.` are all skipped when `x` is
     /// `none` (spec 3.8.8).
     QuestionDot(Box<Expr>, Vec<AccessTail>),
     /// `lhs ?? rhs` — language-level sum-type-aware coalesce.
@@ -659,9 +639,9 @@ pub enum TyKind {
     /// Function type `fn(A, B) -> R [+ Send + Sync]`. A throwing one has
     /// a `Throws` return type.
     Fn(Vec<Ty>, Box<Ty>, FnTyBounds),
-    /// A sum member that stays one layer (`T` of `T?` / `Maybe<T>`, an
-    /// associated type substituted into a sum): `HirTy::sum` keeps it
-    /// nested when it overlaps the other members (spec 2.6.4).
+    /// A sum member kept as one layer (`T` of `T?`, a substituted
+    /// associated type): `HirTy::sum` keeps it nested when it overlaps
+    /// (spec 2.6.4).
     Nest(Box<Ty>),
     /// An associated-type binding `Name = Ty` among a trait's generic
     /// arguments (`Iterator<Item = i32>`, spec 2.1 `trait_arg`).

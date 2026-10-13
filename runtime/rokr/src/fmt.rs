@@ -82,12 +82,11 @@ pub extern "C" fn rok_fmt_float(v: f64, is_f32: u32, ty: u32, prec: i64) -> RokS
 }
 
 // A `core::fmt::Formatter`'s text: a GC string being filled, held as a
-// `str`-shaped handle `(text, len)`; its room is what the string object's
-// size (`gc_word`) leaves past the header and the NUL. Each writing entry takes
-// the handle and returns it: longer, and moved when the text outgrew
-// its allocation. The spec comes with each call that applies one, as
-// `fmt_spec::pack`'s two words. `rok_fmt_finish` hands the text over
-// in place.
+// `str`-shaped handle `(text, len)`; its room is what the object's size
+// (`gc_word`) leaves past the header and the NUL. Each writing entry
+// takes the handle and returns it, longer and moved when the text
+// outgrew its object. A spec comes as `fmt_spec::pack`'s two words.
+// `rok_fmt_finish` hands the text over in place.
 
 /// A formatter being written.
 struct W {
@@ -117,17 +116,29 @@ impl W {
     }
     /// Room for `n` more bytes (doubling).
     fn reserve(&mut self, n: usize) {
-        if self.len + n <= self.cap {
-            return;
+        if self.len + n > self.cap {
+            self.grow(n);
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self, n: usize) {
         let cap = self.cap.saturating_mul(2).max(self.len + n);
-        // May collect; the caller's frame roots the old text, which stays
-        // in place.
-        let p = alloc_str(cap);
-        // SAFETY: the old text holds `len` bytes; a fresh object never
-        // overlaps.
-        unsafe { ptr::copy_nonoverlapping(self.p, p, self.len) };
-        self.p = p;
+        let old = self.p.wrapping_sub(HEADER_SIZE);
+        // May collect. The pin keeps the old text alive and in place: the
+        // caller's frame roots only the handle's object, not one an earlier
+        // growth in this call allocated (nor `rok_fmt_float`'s own).
+        // SAFETY: a live GC string (no allocation since it was made, or
+        // the handle's); the pin is ours to undo; a fresh object never
+        // overlaps the old text's `len` bytes.
+        unsafe {
+            rokr_gc::pin(old);
+            let p = alloc_str(cap);
+            ptr::copy_nonoverlapping(self.p, p, self.len);
+            rokr_gc::unpin(old);
+            self.p = p;
+        }
         self.cap = cap;
     }
 }

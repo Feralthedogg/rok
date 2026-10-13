@@ -158,9 +158,8 @@ fn copy(s: String, renamed: bool, pkgs: &Pkgs) -> String {
     }
 }
 
-/// A symbol of a unit build that nothing outside the package refers to,
-/// though the package's units share it: a copy's (`Core::renamed`) or a
-/// GC type id's (`gc_symbol`).
+/// A unit-build symbol only the package's units share: a copy's
+/// (`Core::renamed`) or a GC type id's (`gc_symbol`).
 #[must_use]
 pub fn package_internal(symbol: &str) -> bool {
     symbol.contains(".copy_Y") || symbol.contains("_gctype.")
@@ -173,9 +172,8 @@ pub fn gc_symbol(pkg: &str, table: &[u32]) -> String {
     format!("_Y{pkg}_gctype.{:016x}", table_hash(table))
 }
 
-/// The symbol of the `ScanTable` `table` (its words): named by its
-/// contents, a hidden definition every package that registers it has
-/// and the link keeps once.
+/// The symbol of `ScanTable` `table`, named by content: a hidden definition
+/// each registering package has, kept once by the link.
 #[must_use]
 pub fn scan_symbol(table: &[u32]) -> String {
     format!("rok.scan.{:016x}", table_hash(table))
@@ -235,10 +233,9 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         .flat_map(|(u, unit)| unit.fns.iter().map(move |f| (*f, u)))
         .collect();
 
-    // What each unit refers to: its functions' calls and function
-    // addresses, through the bodies of prebuilt functions kept for
-    // inlining (emitted with each unit that calls them). The glue calls
-    // `main` and the lazy statics' initializers.
+    // Each unit's references: calls and function addresses, through the
+    // bodies of prebuilt functions kept for inlining. The glue calls `main`
+    // and lazy static initializers.
     let mut refs: Vec<BTreeSet<FunctionId>> = vec![BTreeSet::new(); units.len()];
     let mut statics: Vec<BTreeSet<String>> = vec![BTreeSet::new(); units.len()];
     let mut glue_calls: Vec<FunctionId> = module
@@ -287,10 +284,8 @@ pub fn plan(module: &MirModule, opts: &PlanOptions<'_>) -> Plan {
         .filter(|g| unit_of.contains_key(g))
         .copied()
         .collect();
-    // Copies: a prebuilt package's code, and a library's of other
-    // packages (compiled from source, as a program using it may be);
-    // not the `any` dispatchers, whose program's one replaces a
-    // library's weak one.
+    // Copies: a prebuilt package's code and a library's of other packages;
+    // not `any` dispatchers, whose program copy overrides the weak one.
     let renamed: HashSet<FunctionId> = shared
         .iter()
         .filter(|g| {
@@ -426,9 +421,8 @@ fn kept_body(f: &MirFunction) -> bool {
     f.facts.linkage == Linkage::Prebuilt && !f.blocks.is_empty()
 }
 
-/// The unit `f` belongs to: the module of its item path (an instance's:
-/// its generic's; a closure's: its creator's); a library instance's
-/// also a bucket of its type arguments.
+/// `f`'s unit: its item path's module (an instance's generic's, a
+/// closure's creator's); a library instance also buckets by type arguments.
 fn home(f: &MirFunction, link: &Link) -> String {
     let path = f.path();
     // A type's arguments (`Pair<..>__m`) or a closure (`f::{closure#0}`)
@@ -525,9 +519,8 @@ impl Key<'_> {
         let s = self.s;
         let (m, core) = (s.m, s.core);
         let _ = writeln!(self.b, "{}\n{}\n{}", s.salt, unit.name, unit.glue);
-        // The link names the packages and what is prebuilt; a package's
-        // hash only through the symbols the unit names, so an edit to one
-        // recompiles the units that refer to it.
+        // A package's hash enters only through symbols the unit names, so an
+        // edit recompiles just the units referring to it.
         let mut link = m.link.clone();
         for (_, h) in &mut link.packages {
             h.clear();
@@ -1046,8 +1039,8 @@ impl Key<'_> {
                 self.ty(r);
             }
             MirTy::GcRef => self.b.push_str("gcref"),
-            MirTy::Union(vs, words) => {
-                let _ = write!(self.b, "union{words}<");
+            MirTy::Union(vs, words, kind) => {
+                let _ = write!(self.b, "union{words}{kind:?}<");
                 for (tag, t) in vs {
                     let _ = write!(self.b, "{tag}:");
                     self.ty(t);
@@ -1103,9 +1096,8 @@ impl Key<'_> {
         }
     }
 
-    /// The layout facts of the structs named so far (`#[repr]`; under
-    /// `-g` the names and field types debug info shows), and under `-g`
-    /// the `any` types.
+    /// Layout facts of the structs named so far (`#[repr]`; under `-g` also
+    /// names, field types and `any` types).
     fn layouts(&mut self) {
         let mut done: BTreeSet<u32> = BTreeSet::new();
         loop {

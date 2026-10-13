@@ -1,14 +1,9 @@
-//! Stdlib bare 1.1.2: in a coroutine body a pointer to a local (`addr_of`
-//! / `many_addr_of` / `MaybeUninit::as_ptr`) is valid only until the next
-//! suspension point. Each resume reloads the frame's locals into new
-//! slots, so a pointer kept across a `yield` / `await` dangles.
-//!
-//! A local of a `rok::bare::ptr` type (or a sum holding one) points into
-//! the frame when its value is built from such an address or from another
-//! such local. Using it after a suspend point it was live at is an error.
-//! Read off the HIR in evaluation order: branches merge, loop bodies are
-//! walked twice for the back edge. A pointer held in a temporary or a
-//! struct field across a suspend is not seen.
+//! Stdlib bare 1.1.2: in a coroutine a pointer to a local is valid only
+//! until the next suspend, since each resume reloads the frame into new
+//! slots. A `rok::bare::ptr` local built from such an address (or another
+//! such local) used after a suspend it was live at is an error. Read off
+//! the HIR in order (branches merge, loops walked twice); pointers in
+//! temporaries or fields aren't seen.
 
 use std::collections::HashSet;
 

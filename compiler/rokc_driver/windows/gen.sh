@@ -1,11 +1,7 @@
 #!/bin/sh
-# Regenerates the module definitions rokc builds Windows import
-# libraries from (`windows/<arch>/<lib>.def`, embedded in rokc): the
-# mingw-w64 CRT's, at a pinned commit, preprocessed for each arch.
-#
-#   compiler/rokc_driver/windows/gen.sh
-#
-# Needs curl and clang (only as the C preprocessor).
+# Regenerate the module definitions rokc builds Windows import libraries
+# from (`windows/<arch>/<lib>.def`): mingw-w64's, at a pinned commit,
+# preprocessed per arch. Needs curl and clang (as the preprocessor).
 set -eu
 
 COMMIT=63ebe6cdb3ec4d5c586b7f0f0c03dd502e44c296

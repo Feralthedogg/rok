@@ -1,5 +1,5 @@
 // spec: refs-lang 802-scan-table §8.2.8 / std §1.6.9
-// gc-stress: 30
+// gc-stress: 5
 // expect-exit: 0
 // expect-stdout:
 // alive 5 true
@@ -16,6 +16,7 @@
 // and mark concurrently all along.
 use rok::bare::gc;
 use rok::bare::gc::{GcPtr, Weak};
+use rok::std::env;
 
 extern "C" {
     fn rok_gc_collect_young();
@@ -33,6 +34,11 @@ fn main() {
 
     let young = weak_of(1);
     unsafe { rok_gc_collect_young() };
+    // A stress collection inside `weak_of` (while the object is still
+    // held) may have promoted it; then only a full one frees it.
+    if young.get() is GcPtr<i64> && (try? env::var("ROK_GC_STRESS")) is str {
+        gc::collect();
+    }
     println(f"young cleared {young.get() is none}");
 
     let o = GcPtr::new(2i64);

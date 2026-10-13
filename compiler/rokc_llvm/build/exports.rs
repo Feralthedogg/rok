@@ -1,11 +1,9 @@
-//! What rokc exports for MLIR plugins: the symbols of archive members
-//! (COFF read here; ELF / Mach-O through `nm` in build.rs) and the module
-//! definition file rokc.exe is linked with. Shared by build.rs and
-//! `tests/exports.rs`.
+//! What rokc exports for MLIR plugins: archive member symbols (COFF here;
+//! ELF / Mach-O via `nm` in build.rs) and rokc.exe's module definition
+//! file. Shared by build.rs and `tests/exports.rs`.
 
-/// The globals of an archive member: defined (weak / COMDAT ones apart),
-/// which of those are data (COFF only), and undefined (weak undefined
-/// ones load no member and are left out).
+/// A member's globals: defined (not weak / COMDAT), which are data (COFF),
+/// and undefined (weak undefined ones load nothing, left out).
 #[derive(Default)]
 pub struct Member {
     pub defs: Vec<String>,
@@ -73,9 +71,8 @@ pub fn coff_object(d: &[u8]) -> Option<Member> {
     let comdat = |s: usize| {
         u32_at(sections + (s - 1) * 40 + 36).is_some_and(|c| c & IMAGE_SCN_LNK_COMDAT != 0)
     };
-    // A COMDAT section's selection, from the aux record of its section
-    // symbol (the first symbol in it). /Gy puts every function in one:
-    // only those of any other selection than "no duplicates" are weak.
+    // A COMDAT's selection from its section symbol's aux record. /Gy puts
+    // every function in one; only non-"no duplicates" ones are weak.
     let mut selection: HashMap<i32, u8> = HashMap::new();
     let mut m = Member::default();
     let mut i = 0;
@@ -140,14 +137,12 @@ pub fn coff_object(d: &[u8]) -> Option<Member> {
 /// The most exports a PE image holds (ordinals are 16-bit).
 pub const MAX_EXPORTS: usize = 65535;
 
-/// rokc.exe's module definition file for `syms` (name, is data), filtered
-/// as `llvm/utils/extract_symbols.py` does for MSVC: no deleting destructors
-/// (link.exe refuses to export them), no string literals (clang-cl's are
-/// COMDATs; link.exe refuses those too), nothing in an anonymous namespace,
-/// x86's decoration of C names dropped. Data is exported `DATA`: the
-/// import library then has only `__imp_<name>`, so a plugin reference that
-/// would bind to a jump thunk fails its link rather than reading the
-/// thunk.
+/// rokc.exe's module definition file, filtered like LLVM's
+/// `extract_symbols.py`: no deleting destructors or string literals
+/// (link.exe refuses both), nothing in anonymous namespaces, x86 C name
+/// decoration dropped. Data is exported `DATA`, so the import library
+/// has only `__imp_<name>` and a plugin binding to a jump thunk fails to
+/// link instead of reading the thunk.
 pub fn def_file(syms: &[(String, bool)], x86: bool) -> Result<String, String> {
     let mut lines: Vec<String> = syms
         .iter()
@@ -179,9 +174,8 @@ pub fn def_file(syms: &[(String, bool)], x86: bool) -> Result<String, String> {
             lines.len()
         ));
     }
-    // The import library names the module `rokc.exe`, the name it runs
-    // under, not the file cargo links (`deps/rokc-<hash>.exe`): a plugin
-    // bound to another name has the loader find and load a second copy.
+    // Name the module `rokc.exe`, the name it runs under, not cargo's
+    // `deps/rokc-<hash>.exe`: otherwise the loader loads a second copy.
     Ok(format!("NAME rokc.exe\nEXPORTS\n{}\n", lines.join("\n")))
 }
 

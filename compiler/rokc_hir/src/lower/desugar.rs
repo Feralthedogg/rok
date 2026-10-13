@@ -3,10 +3,9 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Lift a closure into an anonymous top-level function and return a
-/// closure value. Captures outer locals by value at creation; a `[ref x]`
-/// capture (spec 4.6.2) shares `x`'s cell (`LowerCtx::ref_captured`).
-/// A non-capturing closure stays a plain function pointer.
+/// Lift a closure into an anonymous function and return its value.
+/// Captures copy at creation; `[ref x]` shares `x`'s cell (spec 4.6.2). A
+/// non-capturing closure is a plain function pointer.
 pub(super) fn lower_closure_expr(
     ctx: &mut LowerCtx<'_>,
     capture_list: &[rokc_ast::CaptureSpec],
@@ -77,11 +76,8 @@ pub(super) fn lower_closure_expr(
     let closure_id = FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(closure_id.0 + 1);
 
-    // Spec 4.5/4.8: in a context expecting a function type (e.g. an
-    // argument to a `fn(i32) -> i32` parameter), unannotated params and
-    // the return type come from the expected signature.
-    // A sum holding exactly one function type (`(fn(str) -> str) | none`)
-    // expects that one.
+    // Spec 4.5 / 4.8: with an expected function type (or a sum holding
+    // exactly one), unannotated parameters and the return come from it.
     let expected = ctx.current_expected().and_then(|t| match t {
         HirTy::Sum(vs) => {
             let mut fns = vs
@@ -113,10 +109,9 @@ pub(super) fn lower_closure_expr(
     // expected) return type, else the first `return` value's type.
     let mut fixed_ret = declared_ret.or_else(|| expected_ret.filter(|t| *t != HirTy::Unknown));
 
-    // A closure that may throw needs its error type and its value type
-    // before the body is lowered (both shape its error returns): take the
-    // expected ones, else lower the body once as a probe — errors that
-    // escape it, and the type it returns.
+    // A throwing closure needs its error and value types before the body
+    // (they shape its error returns): the expected ones, else a probe
+    // lowering.
     let mut throws = expected_err;
     if (throws.is_some() || may_throw(body)) && (throws.is_none() || fixed_ret.is_none()) {
         let mark = ctx.probe_mark();
@@ -248,9 +243,9 @@ pub(super) fn lower_closure_expr(
 /// `[ref]` capture) and whether it is by reference.
 type Capture = (String, LocalId, HirTy, bool);
 
-/// Does a closure body contain a `throw` or a plain `try` (so its error
-/// type must be inferred)? Nested closures count too — a harmless
-/// over-approximation that only costs a probe.
+/// Does a closure body `throw` or plain `try` (so its error type must be
+/// inferred)? Nested closures count: an over-approximation costing a
+/// probe.
 pub(super) fn may_throw(body: &Expr) -> bool {
     struct V(bool);
     impl crate::walk::AstVisitor for V {
@@ -274,10 +269,9 @@ pub(super) fn may_throw(body: &Expr) -> bool {
     v.0
 }
 
-/// A fresh lowering context for a closure body: the `env` parameter
-/// (a tuple of the captured values) with one local per capture, then
-/// the closure's own parameters. Returns the context, the parameters,
-/// the capture prelude and the user-visible argument types.
+/// A closure body's context: the `env` tuple unpacked into one local per
+/// capture, then the parameters. Returns (context, parameters, capture
+/// prelude, visible argument types).
 pub(super) fn closure_ctx<'a>(
     ctx: &LowerCtx<'a>,
     params: &[Param],
@@ -466,10 +460,8 @@ pub(super) fn sum_none(sum_ty: &HirTy, span: rokc_diagnostic::Span) -> HirExpr {
     )
 }
 
-/// Desugar `x?.tail` to `match x { v: T => v.tail, none => none }`. The
-/// scrutinee must be `T | none` with one payload variant; the result is
-/// `tail_ty | none` (or the tail's own optional type — spec 3.8.2: `?.`
-/// chains compose monadically).
+/// `x?.tail` → `match x { v: T => v.tail, none => none }`, typed
+/// `tail_ty | none` (`?.` chains compose, spec 3.8.2).
 pub(super) fn desugar_question_dot(
     ctx: &mut LowerCtx<'_>,
     recv: HirExpr,
@@ -603,10 +595,9 @@ pub(super) fn apply_access_tail(
     }
 }
 
-/// Desugar `expr?` (spec 3.14): unwrap the payload of a `T | none` value
-/// or propagate `none` out of the enclosing function, which must itself
-/// return a sum containing `none`. With several payload variants the
-/// value keeps the remaining sum (`A | B | none` → `A | B`).
+/// `expr?` (spec 3.14): unwrap `T | none` or return `none` from the
+/// enclosing function (whose return must hold `none`). Several payload
+/// members keep the rest of the sum.
 pub(super) fn desugar_try_q(
     ctx: &mut LowerCtx<'_>,
     inner: HirExpr,
@@ -683,9 +674,8 @@ pub(super) fn desugar_nullish_coalesce(
     };
     let mut value_ty = without_none(&some);
     let rhs_h = lower_expected(ctx, rhs, value_ty.clone());
-    // `a ?? b` with `b: T | none` too (a fallback chain): the result is
-    // `T | none` (spec 3.8.4: `T | typeof(b)`).
-    // Only the same-optional case; other sums still need `T`.
+    // `a ?? b` with `b: T | none` too is a fallback chain typed `T | none`
+    // (spec 3.8.4). Only that case; other sums still need `T`.
     if rhs_h.ty == lhs.ty {
         value_ty = lhs.ty.clone();
     } else if rhs_h.ty != value_ty && rhs_h.ty != HirTy::Unknown {
@@ -845,14 +835,10 @@ pub(super) fn bind_irrefutable(
     }
 }
 
-/// `for pat in iter { body }` (spec 3.9). Supported iterables: an integer
-/// range `a..b` / `a..=b` (bounds evaluated once) and any array value.
-/// Everything else is rejected — never silently skipped.
-///
-/// Desugars to a block `{ <setup>; while <cond> { <step>; let pat = ..;
-/// body } }` with the step before the body so `continue` can't skip it.
-/// `label` goes on the synthesized `While` so `break 'outer` /
-/// `continue 'outer` inside the body resolve correctly.
+/// `for pat in iter` (spec 3.9) over an integer range (bounds evaluated
+/// once) or an array: `{ setup; while cond { step; let pat = ..; body } }`,
+/// stepping first so `continue` can't skip it; `label` goes on the
+/// `While`.
 pub(super) fn lower_for(
     ctx: &mut LowerCtx<'_>,
     label: Option<&String>,
@@ -928,9 +914,8 @@ pub(super) fn lower_for(
     }
 }
 
-/// `for pat in xs` over anything else (stdlib 2.7.2):
-/// `let it = xs.into_iter(); loop { match it.next() { v: T => { let pat
-/// = v; body } none => break } }`.
+/// `for pat in xs` otherwise (stdlib 2.7.2): `let it = xs.into_iter();
+/// loop { match it.next() { v: T => { let pat = v; body } none => break } }`.
 pub(super) fn lower_for_iter(
     ctx: &mut LowerCtx<'_>,
     label: Option<&String>,
@@ -978,9 +963,8 @@ pub(super) fn lower_for_iter(
     for_next_loop(ctx, label, pat, next, body, span)
 }
 
-/// `for await pat in s` (stdlib 2.8.2 / 2.8.3): `let st =
-/// s.into_stream()` (unless `s` is a `Stream`), then the `for` loop over
-/// `await`-ing `st.poll_next(ref ctx)`.
+/// `for await pat in s` (stdlib 2.8.2): `s.into_stream()` unless already
+/// a `Stream`, then loop awaiting `poll_next(ref ctx)`.
 #[allow(clippy::too_many_arguments)]
 fn lower_for_stream(
     ctx: &mut LowerCtx<'_>,
@@ -1110,9 +1094,8 @@ fn for_next_loop(
     }
 }
 
-/// `for_next_loop` when the item is itself a sum (`T = A | B`, so `next`
-/// is the flattened `A | B | none`): `let item: A | B = match next { a:
-/// A => a, b: B => b, none => break }`, then the body on `item`.
+/// `for_next_loop` for a sum item (`next` is `A | B | none`): match it into
+/// `item: A | B` or `break`.
 #[allow(clippy::too_many_arguments)]
 fn for_next_loop_sum(
     ctx: &mut LowerCtx<'_>,
@@ -1208,9 +1191,8 @@ fn for_next_loop_sum(
     }
 }
 
-/// Integer range loop. Exclusive: `c < end`. Inclusive uses a `go` flag
-/// so `a..=MAX` terminates instead of wrapping. Other bounds (a user
-/// `Step` type) iterate the range value `range` like any iterable.
+/// Integer range loop. Inclusive ranges use a `go` flag so `a..=MAX` ends;
+/// other bounds (a user `Step`) iterate `range` like any iterable.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_for_range(
     ctx: &mut LowerCtx<'_>,

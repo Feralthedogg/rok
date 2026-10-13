@@ -1,43 +1,32 @@
-// The `rokc repl` session host (repl.rs). One process, runtime up
-// once; rokc compiles each cell to an object of the host's format
-// (Mach-O on Apple platforms, COFF on Windows, else ELF; arm64 /
-// x86_64; the native backend at `-O0`, LLVM above) and the host maps,
-// links and runs it itself (`jit_cell`). Commands come on the channel
-// rokc passes as stdin (a socket; Windows: a named pipe):
+// The `rokc repl` session host (repl.rs): one process, runtime up once.
+// rokc compiles each cell to an object of the host's format (Mach-O,
+// COFF, ELF; arm64 / x86_64) and the host maps, links and runs it
+// (`jit_cell`). Commands arrive on stdin (a socket; Windows: a named
+// pipe):
 //
-//   `cell <n>\n` + n bytes of object: link it into the session and run
-//     its `rok_repl_cell` once. Later cells link against it.
-//   `lib <n>\n` + an n-byte path: link every member of a static library
-//     (a prebuilt dependency's, a native package's) into the session, or
-//     load a shared library (`dlopen` / `LoadLibrary`); the reply is
-//     `ok 0\n` or `err\n`.
+//   `cell <n>\n` + n bytes of object: link it and run its
+//     `rok_repl_cell` once; later cells link against it.
+//   `lib <n>\n` + an n-byte path: link every member of a static library,
+//     or load a shared one; reply `ok 0\n` or `err\n`.
 //
-// A cell's reply is `pid <p>\n` (the process running the cell) and then
-// `ok <n>\n<n bytes of the shown value>` or `err\n`. `SIGINT` (Windows:
-// Ctrl-Break to the host's process group) ends a running cell and is
-// ignored between cells.
+// A cell replies `pid <p>\n`, then `ok <n>\n<shown value>` or `err\n`.
+// `SIGINT` (Windows: Ctrl-Break to the host's group) ends a running cell
+// and is ignored between cells.
 //
-// A cell that fails leaves the session as it was before it. POSIX: the
-// cell runs in the host process while a forked copy from before it
-// waits, and takes over when the cell's process dies (panic, signal,
-// exit). Windows has no fork: the host saves the session's memory
-// before the cell (`checkpoint`) and runs it on its main thread from a
-// recovery point; when the cell panics, exits, faults or is interrupted,
-// its threads end, the memory is put back (`rollback`) and the main
-// thread returns to the recovery point (`run_cell`).
+// A failed cell leaves the session as it was. POSIX: the cell runs in the
+// host while a forked copy waits and takes over if the cell's process
+// dies. Windows has no fork: the host saves memory (`checkpoint`), runs
+// the cell from a recovery point, and on failure ends its threads, puts
+// memory back (`rollback`) and returns there (`run_cell`).
 //
-// A cell that defines a symbol an earlier cell defined (a redefined
-// `fn`, `static`, the user `main`, ..) gets it renamed `<name>.r<cell>`,
-// and later cells' references to the name resolve to the newest one: a
-// redefinition takes effect from the next cell (907) while earlier code
-// keeps what it was linked against.
+// A symbol redefined by a later cell is renamed `<name>.r<cell>`; later
+// references resolve to the newest (907), earlier code keeps its own.
 //
-// The loader is one linker over generic sections, symbols and
-// relocation kinds (`struct obj`, `fix`); a format reader (`map_object`,
-// `link_object`) turns Mach-O, COFF or ELF into them. Thread-locals are
-// the host's: a Mach-O cell reaches one through its TLV descriptor, an
-// ELF cell (initial exec) through its thread-pointer offset, a COFF cell
-// through its offset in the TLS block (`_tls_index`, SECREL).
+// The loader is one linker over generic sections, symbols and relocations
+// (`struct obj`, `fix`), fed by per-format readers (`map_object`,
+// `link_object`). Thread-locals are the host's: via TLV descriptors
+// (Mach-O), thread-pointer offsets (ELF initial exec) or TLS block offsets
+// (COFF `_tls_index`, SECREL).
 #if defined(_WIN32)
 #include <stdarg.h>
 #include <stddef.h>
@@ -45,9 +34,8 @@
 #else
 #define _GNU_SOURCE
 #if defined(__linux__)
-// The host links against the toolchain's glibc 2.36 link stubs: none of
-// the __isoc23_* scanf / strto* entry points that glibc 2.38+ headers
-// select for _GNU_SOURCE.
+// The host links against glibc 2.36 stubs, which lack the __isoc23_*
+// entry points 2.38+ headers pick under _GNU_SOURCE.
 #include <features.h>
 #undef __GLIBC_USE_C2X_STRTOL
 #define __GLIBC_USE_C2X_STRTOL 0
@@ -164,11 +152,10 @@ void rok_session_restored(const uint64_t *, size_t);
 static volatile int quiesce_cancel;
 static volatile int quiescing;
 
-// Stop the world at a quiet moment before the cell (`rok_session_hold`:
-// no task mid-poll, no blocking job mid-run, no thread inside a lock's
-// critical section), so a session put back after a failed cell loses
-// nothing that ran on its threads. That waits for them; 0: Ctrl-C
-// cancelled the wait (and the cell).
+// Stop the world at a quiet moment before the cell (`rok_session_hold`: no
+// task mid-poll, no job mid-run, no thread in a critical section) so a
+// restored session loses nothing its threads did. 0: Ctrl-C cancelled the
+// wait (and the cell).
 static int quiesce(void) {
     quiesce_cancel = 0;
     quiescing = 1;
@@ -246,10 +233,9 @@ static void define(const char *name, void *addr) {
     (*sym_slot(as))->addr = addr;
 }
 
-// Executable memory: Apple arm64 toggles a `MAP_JIT` mapping between
-// writable and executable per thread; elsewhere it is mapped RWX.
-// `map_near`: `size` bytes at `at` (rounded up to what the system maps)
-// if that is free, else anywhere; NULL: none.
+// Executable memory: Apple arm64 flips a `MAP_JIT` mapping per thread,
+// elsewhere RWX. `map_near`: `size` bytes at `at` if free, else anywhere;
+// NULL: none.
 #if defined(_WIN32)
 #define jit_writable(on) ((void)0)
 #define flush_code(p, n) FlushInstructionCache(GetCurrentProcess(), p, n)
@@ -274,9 +260,8 @@ static char *map_near(char *at, size_t size, int code) {
 #else
 #define MAP_CODE 0
 #define jit_writable(on) ((void)0)
-// x86_64 keeps instruction fetch coherent; arm64 cleans the data cache
-// and invalidates the instruction cache by line (no libgcc here for
-// `__clear_cache`).
+// x86_64 keeps fetch coherent; arm64 cleans and invalidates caches by line
+// (no libgcc `__clear_cache` here).
 static void flush_code(char *p, size_t n) {
 #if defined(__aarch64__)
     uint64_t ctr;
@@ -312,9 +297,8 @@ static char *map_near(char *at, size_t size, int code) {
 // C names carry a leading `_`.
 #define SYM_PREFIX 1
 
-// A symbol of the host executable by its symbol table, not `dlsym`: a
-// thread-local reference wants its TLV descriptor, which `dlsym` does
-// not give (it returns this thread's instance).
+// Look a host symbol up in its symbol table, not `dlsym`: a thread-local
+// needs its TLV descriptor, not this thread's instance.
 static void *host_symbol(const char *name) {
     const struct mach_header_64 *mh = (const void *)_dyld_get_image_header(0);
     intptr_t slide = _dyld_get_image_vmaddr_slide(0);
@@ -356,10 +340,10 @@ static const char *const modules[] = {
 static HANDLE shared[64];
 static int nshared;
 
-// The host's exports (rokc links it exporting everything), else those
-// of the loaded DLLs, else of the modules. Cells reach the safepoint
-// slow path and the way back from a blocking call through the host,
-// which ends an interrupted cell there (`host_yield`).
+// The host's exports (it exports everything), else loaded DLLs', else the
+// modules'. Cells reach the safepoint slow path and the return from
+// blocking calls through the host, which ends interrupted cells there
+// (`host_yield`).
 static void *host_symbol(const char *name) {
     if (!strcmp(name, "rok_runtime_yield")) return (void *)host_yield;
     if (!strcmp(name, "rok_leave_native")) return (void *)host_leave_native;
@@ -400,9 +384,8 @@ static void *thread_pointer(void) {
     return tp;
 }
 
-// A thread-local's value for a cell: its offset from the thread
-// pointer, the same in every thread (the host's TLS is static). `dlsym`
-// gives this thread's instance (the host exports its symbols).
+// A thread-local for a cell: its offset from the thread pointer, the same
+// in every thread (the host's TLS is static).
 static void *host_tls(const char *name) {
     char *a = dlsym(RTLD_DEFAULT, name);
     return a ? (void *)(a - (char *)thread_pointer()) : NULL;
@@ -488,12 +471,10 @@ static int map_sections(struct obj *o, const struct place *p, size_t nrel) {
     o->slots = data = (data + 15) & ~(size_t)15;
     o->code_cap = code + 16 * nrel + 16;
     o->data_cap = data + 8 * nrel + 16;
-    // Both near each other and near the host (a cell may address the
-    // runtime's data directly): `adrp` reaches 4 GiB, a rip-relative
-    // 2 GiB. A hint only: elsewhere when taken, and then a reference
-    // too far is reported.
-    // The code after the data: COFF's image-relative references count
-    // from the data.
+    // Data and code near each other and the host (cells may address runtime
+    // data directly): `adrp` reaches 4 GiB, rip-relative 2 GiB. Only a hint;
+    // a reference out of range is reported. Code after data, since COFF's
+    // image-relative references count from the data.
     static char *near;
     if (!near) near = (char *)(((uintptr_t)&cells + ((size_t)1 << 29)) & ~(uintptr_t)0xffff);
     o->data = map_near(near, o->data_cap, 0);
@@ -663,9 +644,8 @@ static int fix(struct obj *o, char *p, enum kind k, int64_t sym, uint64_t s, int
 }
 
 #if defined(__APPLE__)
-// Mach-O (MH_OBJECT): sections of the one segment; relocations per
-// section, addends in the instruction (x86_64) or an ARM64_RELOC_ADDEND
-// before (arm64).
+// Mach-O (MH_OBJECT): the segment's sections, per-section relocations,
+// addends in the instruction (x86_64) or a preceding ARM64_RELOC_ADDEND.
 static int map_object(struct obj *o, const unsigned char *buf, size_t n, const char *what) {
     memset(o, 0, sizeof *o);
     o->buf = buf;
@@ -833,9 +813,8 @@ static int link_object(struct obj *o) {
     return ok;
 }
 #elif defined(_WIN32)
-// COFF (also big-object, `/bigobj`): sections with their relocations,
-// addends in the place; symbols with auxiliary records (indices count
-// them; 18-byte records, 20 in a big object).
+// COFF (and `/bigobj`): sections with relocations, addends in place;
+// symbols with aux records (18-byte, 20 in a big object).
 #if defined(__x86_64__)
 #define COFF_MACHINE 0x8664
 #define PDATA_ENTRY 12
@@ -1084,9 +1063,8 @@ static int link_object(struct obj *o) {
             if (s.class == SYM_EXTERNAL || s.class == SYM_WEAK) {
                 sym = i;
                 const char *n = coff_name(o, s.name, 0, name);
-                // `__imp_<name>` nothing defines (a `dllimport` reference):
-                // the import address slot, here one of this object's
-                // slots holding `<name>`.
+                // An undefined `__imp_<name>` (dllimport): an import slot of
+                // this object holding `<name>`.
                 void *imp = !tls && !o->addr[i] && !strncmp(n, "__imp_", 6) && !resolve(n, 0) ? resolve(n + 6, 0) : NULL;
                 v = imp ? (uint64_t)(uintptr_t)slot(o, sym, (uint64_t)(uintptr_t)imp) : sym_value(o, i, n, tls);
                 if (!v) {
@@ -1101,10 +1079,9 @@ static int link_object(struct obj *o) {
             ok = fix(o, p, kind, sym, v, a);
         }
     }
-    // The unwind table, for exceptions to pass through the object's
-    // frames: every `.pdata` section's entries (one per function with
-    // function sections) in one table, image-relative to the data
-    // mapping, sorted by function start.
+    // One unwind table from every `.pdata` section (an entry per function),
+    // image-relative to the data mapping and sorted, so exceptions pass
+    // through the object's frames.
     size_t entries = 0;
     for (uint32_t k = 0; k < o->nsects; k++)
         if (o->base[k] && !strncmp(coff_name(o, coff_section(o, k)->name, 1, name), ".pdata", 6))
@@ -1291,9 +1268,9 @@ static int load_shared(const char *path) {
 #endif
 }
 
-// A prebuilt dependency's or a native package's archive (BSD, GNU or
-// COFF `ar`): every member, now (mapped first, so they refer to each
-// other). Any other file is a shared library (`load_shared`).
+// Link every member of an archive (BSD, GNU or COFF `ar`) now, all mapped
+// first so they can refer to each other; other files are shared libraries
+// (`load_shared`).
 static int link_lib(const char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return 1;
@@ -1382,10 +1359,9 @@ static char *read_ir(size_t n) {
 void rok_runtime_yield(void);
 void rok_leave_native(void);
 void rok_set_exit_hook(void (*)(int));
-// This thread's runtime TLS block (803), from the runtime's accessor:
-// clang guards a C `extern __declspec(thread)` access with
-// `__dyn_tls_on_demand_init`, which needs the MSVC CRT.
-// `ROK_TLS_YIELD_FLAG` comes from `tls_abi` (build.rs).
+// This thread's runtime TLS block (803) via the runtime's accessor: clang
+// guards C `extern __declspec(thread)` with `__dyn_tls_on_demand_init`,
+// which needs the MSVC CRT. `ROK_TLS_YIELD_FLAG` comes from build.rs.
 unsigned char *rok_tls_addr(void);
 
 // Windows stand-in for fork: before a cell, with runtime threads quiesced
@@ -1404,8 +1380,7 @@ unsigned char *rok_tls_addr(void);
 // own memory is write-watched (`rok_watch_writes`) against a shadow copy,
 // so a checkpoint copies only pages written since the last one and a
 // rollback only those written since the checkpoint (everything when
-// `rok_page_epoch` moved).
-// Other writable memory is copied whole each time.
+// `rok_page_epoch` moved). Other writable memory is copied whole.
 
 typedef struct {
     char *base, *alloc;
@@ -1559,9 +1534,8 @@ static int listed64(const uint64_t *ids, size_t n, uint64_t id) {
     return 0;
 }
 
-// Suspend every other thread, also those started meanwhile, into
-// `book->handle` / `id`. Nothing here takes a lock a stopped thread may
-// hold (no heap, no stdio).
+// Suspend every other thread, including new ones, into `book->handle` /
+// `id`. Takes no lock a stopped thread may hold (no heap, no stdio).
 static void stop_others(void) {
     book->nthreads = 0;
     for (int more = 1; more;) {
@@ -1641,11 +1615,10 @@ static int saved(const MEMORY_BASIC_INFORMATION *m) {
            (p == PAGE_READWRITE || p == PAGE_WRITECOPY) && !(m->protect & PAGE_GUARD) && !excluded(m->alloc);
 }
 
-// Image memory read-only now in a section its file marks writable:
-// ntdll's `.mrdata`, unprotected only while written, holds list heads
-// (the dynamic function tables', the loader's) whose nodes are heap
-// memory, so it is saved with the heap. The part of region `m` in the
-// image's section `k`, if that is one.
+// The part of region `m` in image section `k` that is read-only now but
+// marked writable: ntdll's `.mrdata`, unprotected only while written,
+// holds list heads (function tables, loader) whose nodes are heap memory,
+// so it is saved with the heap.
 static int sealed_part(const MEMORY_BASIC_INFORMATION *m, uint32_t k, char **lo, char **hi) {
     const unsigned char *img = (const unsigned char *)m->alloc;
     uint32_t pe, vsize, va, flags;
@@ -1689,9 +1662,9 @@ static size_t extent_of(const char *alloc) {
     return extent;
 }
 
-// Bring the write-watched regions' shadows in step: the pages written
-// since the last checkpoint (all of a region new to its shadow, or every
-// region when `rok_page_epoch` moved), the watch reset. 0: no room.
+// Bring watched regions' shadows up to date (pages written since the last
+// checkpoint; all of a new region, or all when `rok_page_epoch` moved),
+// resetting the watch. 0: no room.
 static int save_watched(void) {
     uint64_t epoch = rok_page_epoch;
     for (size_t i = 0; i < book->nshadows; i++) book->shadows[i].seen = 0;
@@ -1744,9 +1717,8 @@ static int save_watched(void) {
     return 1;
 }
 
-// Save the session (the cell has not started). 0: no room, -1: Ctrl-C
-// while waiting for a quiet moment; nothing to roll back to, so the cell
-// does not run.
+// Save the session before the cell. 0: no room; -1: Ctrl-C while waiting
+// for quiet, so the cell doesn't run.
 static int checkpoint(void) {
     if (!quiesce()) return -1;
     book->nrok = rok_world_threads(book->rok, THREADS);
@@ -1834,10 +1806,9 @@ static void lost(void) {
     ExitProcess(1);
 }
 
-// A saved region as it was: committed again (its allocation reserved
-// again if it was released), its protection, its bytes. A watched one
-// from its shadow: the pages written since the checkpoint (`all`: every
-// page that differs).
+// Restore a saved region: recommit (re-reserving a released allocation),
+// reprotect, rewrite; a watched one from its shadow, pages written since
+// the checkpoint (`all`: every differing page).
 static void put_back(const struct region *r, int all) {
     if (r->type == MEM_PRIVATE && !VirtualAlloc(r->base, r->size, MEM_COMMIT, PAGE_READWRITE)) {
         VirtualAlloc(r->alloc, extent_of(r->alloc), MEM_RESERVE | (r->watched ? MEM_WRITE_WATCH : 0), PAGE_NOACCESS);
@@ -1902,9 +1873,8 @@ static struct before *before_of(DWORD id) {
     return NULL;
 }
 
-// Whether thread `i` (stopped now) is where it was at the checkpoint;
-// then its registers and stack go back (they differ if it ran and came
-// back).
+// Is stopped thread `i` where it was at the checkpoint? Then its registers
+// and stack go back.
 static int put_thread_back(size_t i, const struct before *t) {
     context *now = &book->probe;
     *(DWORD *)(now->b + CTX_FLAGS) = CTX_FULL;
@@ -1922,9 +1892,8 @@ static int put_thread_back(size_t i, const struct before *t) {
     return 1;
 }
 
-// A gone runtime thread's stack as it was at the checkpoint (its memory
-// again if it was freed): what the restored memory links to there (a
-// condition variable's or the wait queue's entry) stays readable.
+// Restore a gone runtime thread's stack (re-mapping freed memory) so what
+// restored memory links to there (a waiter entry) stays readable.
 static void restore_stack(const struct before *t) {
     char *lo = (char *)((uintptr_t)t->sp & ~(uintptr_t)(PAGE - 1));
     size_t n = (size_t)(t->base - lo);
@@ -1934,11 +1903,10 @@ static void restore_stack(const struct before *t) {
     memcpy(t->sp, book->copy + t->copy, (size_t)(t->base - t->sp));
 }
 
-// Whether thread `i` is a worker of the system thread pool (it starts in
-// ntdll): the loader's, which a busy machine may start only after the
-// checkpoint. Ending one ends the process (STATUS_INVALID_THREAD), and
-// one let run faults in the pool's state as it was before it, so it
-// stays suspended (one suspension more than `resume_others` undoes;
+// Is thread `i` a system thread-pool worker (starts in ntdll), which a
+// busy machine may start after the checkpoint? Ending one kills the
+// process (STATUS_INVALID_THREAD) and letting it run faults on the
+// restored pool state, so it stays suspended (one extra suspension;
 // `stop_others` finds it each time, so its stack is never put back).
 static int pool_worker(size_t i) {
     void *start = NULL;
@@ -1990,10 +1958,9 @@ static void fail_cell(void) {
     RtlRestoreContext(&book->recover, NULL);
 }
 
-// The runtime is about to end the process (panic, uncaught error,
-// `exit`, stack overflow): on the cell's thread it ends only the cell,
-// after the stdout flush `exit` would do (a stack overflow's report did
-// it).
+// The runtime is about to end the process (panic, uncaught error, `exit`,
+// stack overflow): on the cell's thread end only the cell, after the
+// stdout flush `exit` would do.
 static void on_exit_hook(int status) {
     (void)status;
     if (!book->running || GetCurrentThreadId() != main_thread) return;
@@ -2032,9 +1999,8 @@ static void host_leave_native(void) {
     if ((*main_yield & INTERRUPT) && GetCurrentThreadId() == main_thread) fail_cell();
 }
 
-// Ctrl-Break (Ctrl-C) on its own thread: the running cell ends at its
-// next safepoint poll or return from a blocking call, both of which see
-// the raised yield flag.
+// Ctrl-Break / Ctrl-C on its own thread: the cell ends at its next poll or
+// return from a blocking call, both of which see the raised yield flag.
 static BOOL on_break(DWORD event) {
     if (event > 1) return 0; // not CTRL_C_EVENT / CTRL_BREAK_EVENT
     if (quiescing) quiesce_cancel = 1;
@@ -2152,14 +2118,11 @@ int main(int argc, char **argv) {
         if (sscanf(line, "cell %zu", &n) == 1) ir = read_ir(n);
         if (!ir) return 1;
         rok_stdio_flush();
-        // A copy of the session from before the cell. When the cell's
-        // process dies (panic, signal, exit, a cell that does not
-        // compile) the copy carries on as the session; otherwise it is
-        // told to go. The JIT has no threads of its own (in-place
-        // compilation). Other threads are not in the copy: they are
-        // stopped at a quiet moment while it is made (`quiesce`), and
-        // the copy forgets them when it takes over (the task executor
-        // starts its own again, the locks they held are released).
+        // A copy of the session from before the cell takes over if the
+        // cell's process dies (panic, signal, exit, compile failure), else
+        // is told to go. The JIT has no threads; other threads are quiesced
+        // while the copy is made and forgotten when it takes over (the
+        // executor restarts its own, their locks are released).
         int verdict[2];
         if (pipe(verdict) != 0) return 1;
         dprintf(ctl, "pid %d\n", (int)getpid());

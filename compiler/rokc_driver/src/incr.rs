@@ -1,9 +1,8 @@
-//! Incremental compilation below the package (spec 9.2.16): what one
-//! build computed, kept in the package's incremental directory for the
-//! next. A store is a file of entries by key; a build reads the entries
-//! it needs and writes back the ones it used or made (others go). Spans
-//! are kept with their files' paths and renumbered on reading; an entry
-//! that does not read back is a miss, and a miss computes afresh.
+//! Incremental compilation below the package (spec 9.2.16). A store is a
+//! file of entries by key in the incremental directory; a build reads what
+//! it needs and writes back what it used or made. Spans keep their file
+//! paths and are renumbered on read; an entry that doesn't read back is a
+//! miss, computed afresh.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -272,9 +271,8 @@ impl Incr {
 /// is written.
 const LIBRARY_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// The folder of `cache_dir` that keeps the library's collected stages,
-/// one file per key: shared by every build of the toolchain (a lone
-/// file's too).
+/// Folder under `cache_dir` with the library's collected stages, one file
+/// per key, shared by every build of the toolchain.
 pub const LIBRARY_STAGES: &str = "library";
 
 fn library_path(k: u64) -> Option<PathBuf> {
@@ -285,9 +283,8 @@ fn library_path(k: u64) -> Option<PathBuf> {
     )
 }
 
-/// The store of the pre-pass summaries of the library's files from
-/// `roots` (one file per set of roots: a build of other roots keeps
-/// other entries), in the stages' folder.
+/// Store of the library files' pre-pass summaries for `roots` (one file
+/// per root set), in the stages' folder.
 pub fn library_prepass(roots: &str) -> Option<Store> {
     let k = key(&[roots.as_bytes()]);
     let dir = crate::cache_dir()?.join(LIBRARY_STAGES);
@@ -447,9 +444,8 @@ pub fn bodies(i: std::sync::Arc<Incr>, files: &rokc_diagnostic::SourceMap) -> ro
     rokc_hir::Bodies(std::sync::Arc::new(BodyStore(i, Ids::of(files))))
 }
 
-/// `ROKC_INCR_VERIFY=1`: lowering is done twice, without the stores and
-/// with them, and the two must agree; the check of the second against
-/// the first (a difference is an error of the build).
+/// `ROKC_INCR_VERIFY=1`: lower with and without the stores and compare;
+/// a difference fails the build.
 pub fn verify() -> Option<fn(&rokc_hir::HirModule, &mut rokc_hir::HirModule)> {
     rokc_core::env_flag("ROKC_INCR_VERIFY").then_some(check)
 }

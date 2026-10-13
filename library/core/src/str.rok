@@ -1,12 +1,9 @@
 // rok::core::str — `str` methods and trait impls (stdlib 2.15).
 //
-// `str` is a `(ptr, len)` value: literals are static bytes, strings
-// built at run time are GC objects, and a slice shares its source's
-// bytes (so slicing, `lines`, `split*`, `trim*` and `strip_*` copy
-// nothing). The bodies call the runtime's `rok_str_*` symbols, which
-// take `str` by value.
-//
-// `str` is immutable (spec 2.15.1); `StrBuf` is the growable buffer.
+// `str` is an immutable `(ptr, len)` value (2.15.1): literals are static
+// bytes, run-time strings GC objects, and a slice shares its source's
+// bytes, so slicing, `lines`, `split*`, `trim*` and `strip_*` copy
+// nothing. `StrBuf` is the growable buffer.
 
 impl str {
     pub const fn new() -> str { "" }
@@ -62,9 +59,9 @@ impl str {
     }
 
     /// The first byte's address, for FFI (`len()` bytes, no NUL
-    /// promised; an empty `str` gives a dangling pointer). Valid while
-    /// `self` stays in a live variable: the GC never moves an object a
-    /// root points to, but may move one reached only through another.
+    /// promised; an empty `str` gives a dangling pointer). Valid while a
+    /// variable holding the string is in scope in a function where a
+    /// pointer type appears (2.15.2); pin it to keep it longer.
     pub fn as_ptr(self) -> rok::bare::ptr::ConstPtr<u8> {
         let p = rok::bare::ptr::ConstPtr::<u8>::dangling();
         if self.is_empty() { p } else { p.with_addr(unsafe { rok_str_addr(self) }) }
@@ -203,7 +200,7 @@ impl Hash for str {
     const fn hash(self) -> u64 { unsafe { rok_str_hash(self) } }
 }
 
-// ---- iterators (stdlib 2.15.3) ----
+// Iterators (stdlib 2.15.3).
 
 /// What `s.bytes()` returns (2.15.1): the bytes of the `as_bytes` view.
 pub type BytesIter = SliceIter<u8>;
@@ -380,7 +377,7 @@ impl Iterator for SplitWhitespaceIter {
     }
 }
 
-// ---- char (stdlib 2.15.4) ----
+// `char` (stdlib 2.15.4).
 //
 // The Unicode properties and case maps are runtime tables generated
 // from the UCD (`runtime/rokr/gen_unicode.py`).
@@ -534,7 +531,7 @@ impl TryFrom<u32> for char {
     }
 }
 
-// ---- StrBuf (stdlib 2.15.2) ----
+// `StrBuf` (stdlib 2.15.2).
 
 /// A growable UTF-8 buffer. A handle like the collections: copies
 /// share the buffer, one object holding the length, the capacity and
@@ -720,7 +717,7 @@ impl Debug for Utf8Error {
 
 impl Error for Utf8Error {}
 
-// ---- FromStr (stdlib 2.15.7) ----
+// `FromStr` (stdlib 2.15.7).
 
 /// `str.parse::<T>()` dispatch.
 pub trait FromStr {

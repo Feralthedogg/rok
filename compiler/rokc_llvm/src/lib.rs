@@ -1,9 +1,7 @@
-//! In-process native backend: MLIR → LLVM IR → object → executable with
-//! the LLVM, MLIR and lld that rokc links statically (`build.rs`). No
-//! subprocess, no textual hand-off between the stages.
-//!
-//! Built without an LLVM prefix, [`AVAILABLE`] is false and every entry
-//! point returns an error.
+//! In-process backend: MLIR → LLVM IR → object → executable with the
+//! statically linked LLVM, MLIR and lld; no subprocesses or textual
+//! hand-offs. Without an LLVM prefix [`AVAILABLE`] is false and every entry
+//! point fails.
 
 use std::ffi::{CString, OsStr, OsString};
 use std::path::Path;
@@ -97,12 +95,11 @@ pub enum Profile<'a> {
     CsGenerate(&'a Path, &'a Path),
 }
 
-/// The MLIR passes rokc runs before the translation to LLVM IR:
-/// `extra` (plugin dialects' own lowerings) first, the cleanup when
-/// optimizing, then the conversion to the LLVM dialect.
+/// MLIR passes run before translation to LLVM IR.
 ///
-/// Passes that work on any op run nested (`any(..)`) on each function
-/// and global, in parallel.
+/// `extra` (plugin lowerings) first, the cleanup when optimizing, then
+/// conversion to the LLVM dialect. Op-agnostic passes run nested
+/// (`any(..)`) per function and global, in parallel.
 #[must_use]
 pub fn mlir_pipeline(optimize: bool, extra: &[String]) -> String {
     let mut v: Vec<&str> = extra.iter().map(String::as_str).collect();
@@ -163,16 +160,14 @@ pub struct UnitsOutput {
     pub warnings: String,
 }
 
-/// A package's codegen units (`(name, input)`, the names stable across
-/// builds) optimized at `c.opt` (above 0) to an object each.
+/// A package's codegen units optimized at `c.opt` (above 0) to an object
+/// each.
 ///
-/// In-process `ThinLTO`: each unit given as MLIR through the pre-link
-/// pipeline, then the thin link, which imports across units what
-/// inlining wants and reuses from the `cache` directory the object of a
-/// unit whose inputs are unchanged. `alloc`: the MLIR module of
-/// `rok.alloc`, linked into each unit at the end. A program's own
-/// symbols (`_Y`) may be internalized; a `library`'s only those its
-/// users cannot refer to (copies `.copy_Y`, GC type ids `_gctype.`).
+/// In-process `ThinLTO`: pre-link pipeline per unit (`(name, input)`, names
+/// stable across builds), then the thin link, reusing unchanged units'
+/// objects from `cache`. `alloc` (`rok.alloc`) is linked into each unit at
+/// the end. A program's `_Y` symbols may be internalized; a `library`'s
+/// only those users can't name (`.copy_Y`, `_gctype.`).
 pub fn compile_units(
     units: &[(&str, UnitInput<'_>)],
     alloc: &str,
@@ -188,9 +183,8 @@ pub fn compile_llvm_ir(src: &str, c: &Compile<'_>) -> Result<Vec<u8>, String> {
     ffi::compile(false, src, c, 1).map(|(mut v, _)| v.remove(0))
 }
 
-/// The raw (`.profraw`), indexed or text IR profiles `inputs` merged into
-/// the indexed profile `out`, as `llvm-profdata merge` does; its warnings
-/// (counter overflow, mismatched counters), one per line.
+/// Merge raw, indexed or text IR profiles into indexed `out`, as
+/// `llvm-profdata merge`; returns its warnings, one per line.
 pub fn profdata_merge(inputs: &[&Path], out: &Path) -> Result<String, String> {
     let inputs = inputs
         .iter()
@@ -227,16 +221,13 @@ pub fn lld<S: AsRef<OsStr>>(args: &[S]) -> Result<String, String> {
     ffi::lld(&args)
 }
 
-/// Links the executable `out` with lld against the platform C library.
+/// Link executable `out` with lld against the platform C library.
 ///
-/// `inputs`: objects, archives, `-l<lib>`, `-L<dir>` and lld options of
-/// the target's flavor; `strip` drops what nothing references.
-///
-/// Mach-O: the SDK is `SDKROOT`, else the selected developer
-/// directory's. A shipped C library (`Libc::shipped`): `libc`, the
-/// toolchain's C runtime objects and C library for the target
+/// `inputs`: objects, archives, `-l`, `-L` and flavor options; `strip` drops
+/// unreferenced code. Mach-O: the SDK from `SDKROOT`, else the developer
+/// directory. A shipped `libc` brings the toolchain's C runtime and library
 /// (`targets/build.sh`). COFF: no default libraries; `inputs` bring the
-/// C runtime (import libraries, [`import_library`]) and the entry point.
+/// CRT (via [`import_library`]) and entry point.
 pub fn link_executable<S: AsRef<OsStr>>(
     t: &Target,
     inputs: &[S],
@@ -278,9 +269,8 @@ pub fn link_executable<S: AsRef<OsStr>>(
     match t.object_format {
         ObjectFormat::MachO => a.extend(macho_args(t)?),
         ObjectFormat::Elf => {
-            // Debug info of code `--gc-sections` dropped points at the
-            // DWARF tombstone (all ones: no address), not at 0, where it
-            // would claim the start of the address space.
+            // Debug info of `--gc-sections`-dropped code points at the DWARF
+            // tombstone (all ones), not 0, the start of the address space.
             a.extend(t.pre_link_args.iter().map(OsString::from));
             a.extend(
                 [
@@ -316,10 +306,9 @@ pub fn link_executable<S: AsRef<OsStr>>(
             a.extend(t.late_link_args.iter().map(late));
             return lld(&a);
         }
-        // The stack first: one that overflows runs off address 0 and
-        // wraps to the top of the address space, which memory never
-        // reaches (its last 64 KiB page is never grown), so a store
-        // there traps. wasm-ld drops unreferenced sections by default.
+        // Stack first: an overflow runs past address 0 and wraps to the top
+        // of memory, which is never grown into, so the store traps.
+        // wasm-ld drops unreferenced sections by default.
         ObjectFormat::Wasm => {
             a.extend(["--stack-first", "-z"].map(OsString::from));
             a.push(format!("stack-size={}", t.stack_size).into());
@@ -387,11 +376,10 @@ pub fn wasm_ld_main() -> i32 {
     }
 }
 
-/// `wasm32-wasi` is a WASI preview 2 component: the toolchain's
-/// `wasm-component-ld` (the Rust toolchain's, shipped beside wasi-libc)
-/// links with rokc as its `wasm-ld` (`args` past the flavor), then wraps
-/// the module, adapting its preview 1 imports with the adapter it
-/// embeds. What it printed; an error carries it.
+/// `wasm32-wasi` is a preview 2 component: `wasm-component-ld` (shipped
+/// with wasi-libc) links with rokc as its `wasm-ld`, then wraps the module
+/// with its embedded preview 1 adapter. Returns what it printed; errors
+/// carry it.
 fn link_component(args: &[OsString], libc: &Path) -> Result<String, String> {
     let rokc = std::env::current_exe().map_err(|e| format!("cannot find rokc: {e}"))?;
     let tool = libc.join(format!("wasm-component-ld{}", std::env::consts::EXE_SUFFIX));
@@ -445,9 +433,8 @@ pub fn import_library(t: &Target, def: &str, out: &Path) -> Result<(), String> {
     ffi::import_library(def, machine, &cstr(out.as_os_str())?)
 }
 
-/// The macOS SDK as `xcrun` finds it, without running it: `SDKROOT`,
-/// else the SDK of the developer directory (`DEVELOPER_DIR`, else the
-/// one `xcode-select` chose, else the command line tools).
+/// The macOS SDK as `xcrun` would find it, without running it: `SDKROOT`,
+/// else `DEVELOPER_DIR`'s, else `xcode-select`'s, else the CLT.
 pub fn apple_sdk() -> Result<std::path::PathBuf, String> {
     if let Some(p) = std::env::var_os("SDKROOT").filter(|p| !p.is_empty()) {
         return Ok(p.into());

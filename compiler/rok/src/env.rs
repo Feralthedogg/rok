@@ -1,6 +1,6 @@
-//! Named environments: `$ROK_HOME/envs/<name>/{rok.rokon, rok.lock}`,
-//! dependency sets used outside a project (no activation step: `--env`,
-//! `$ROK_ENV`, `rok env use`, else `default`).
+//! Named environments, `$ROK_HOME/envs/<name>/`: dependency sets used
+//! outside a project, picked by `--env`, `$ROK_ENV`, `rok env use`, else
+//! `default` (no activation step).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -120,9 +120,8 @@ pub fn cmd(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// Copy a project's (or an export's) `rok.rokon` and `rok.lock` into a
-/// new environment, with relative path dependencies made absolute, then
-/// resolve it (the lock keeps the same commits).
+/// Copy a project's `rok.rokon` / `rok.lock` into a new environment (path
+/// deps made absolute) and resolve; the lock keeps its commits.
 fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
     let (src_dir, path) = if from.is_dir() {
         let m =
@@ -183,8 +182,8 @@ fn import(g: &Global, name: &str, from: &Path) -> Result<(), String> {
     done
 }
 
-/// `$SHELL` (Windows: `%COMSPEC%`) with `ROK_ENV=<name>` and this
-/// toolchain first on `PATH`.
+/// `$SHELL` (`%COMSPEC%`) with `ROK_ENV=<name>` and this toolchain first
+/// on `PATH`.
 fn shell(name: &str) -> Result<i32, String> {
     let (var, default) = if cfg!(windows) {
         ("COMSPEC", "cmd.exe")

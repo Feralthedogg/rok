@@ -220,10 +220,9 @@ void init_llvm() {
 // Pass names, like mlir-opt's. Plugins add theirs under the same lock.
 std::mutex pass_registry_lock;
 
-// The dialects rokc lowers to and those `__mlir_op` offers library
-// authors (spec 8.7.1, 8.7.5), with what lowering them needs:
-// bufferization for tensors, ub and DLTI for the LLVM conversions.
-// Plugins build on these.
+// Dialects rokc lowers to and those `__mlir_op` offers (spec 8.7.1,
+// 8.7.5), with what lowering them needs (bufferization; ub and DLTI for the
+// LLVM conversions). Plugins build on these.
 void register_dialects(mlir::DialectRegistry &r) {
   using namespace mlir;
   r.insert<affine::AffineDialect, arith::ArithDialect, async::AsyncDialect,
@@ -281,9 +280,7 @@ void register_dialects(mlir::DialectRegistry &r) {
   registerLLVMDialectTranslation(r);
 }
 
-// Pass names for pipelines and `--mlir-pass`, as mlir-opt spells them:
-// the general passes, those of the dialects above and the conversions
-// among them.
+// Pass names for pipelines and `--mlir-pass`, as mlir-opt spells them.
 void register_passes() {
   using namespace mlir;
   registerTransformsPasses();
@@ -379,9 +376,9 @@ target_machine(const RokCompile &o, std::string &error) {
     error = "cannot create a target machine for " + triple.str();
     return nullptr;
   }
-  // One instruction selector at every level: at -O0 AArch64 would pick
-  // GlobalISel, which falls back to SelectionDAG per function, and the
-  // two lay out sub-word aggregate arguments on the stack differently.
+  // SelectionDAG at every level: at -O0 AArch64 would pick GlobalISel,
+  // which falls back per function and lays out sub-word stack aggregates
+  // differently.
   tm->setGlobalISel(false);
   return tm;
 }
@@ -398,11 +395,9 @@ bool has_cs_profile(const char *path) {
   return (*r)->hasCSIRLevelProfile();
 }
 
-// `rok.alloc`, the GC allocation the code generator calls, is an
-// allocation function to the optimizer (a fresh, zeroed object no other
-// pointer reaches), so an object that never escapes is deleted with its
-// stores. At the end of the pipeline it is inlined: the bump allocation
-// is inline code again.
+// `rok.alloc` is an allocation function to the optimizer (fresh, zeroed,
+// unaliased), so non-escaping objects die with their stores; it is inlined
+// back to the bump path at the end of the pipeline.
 const char *const ALLOC = "rok.alloc";
 
 struct InlineAlloc : llvm::PassInfoMixin<InlineAlloc> {
@@ -432,11 +427,9 @@ llvm::PipelineTuningOptions tuning(int opt) {
 // -O<level>: 0..3, s or z.
 char level_name(int opt) { return opt <= 3 ? '0' + opt : opt; }
 
-// The end of a module's last optimization (`optimize`'s, or a ThinLTO
-// part's after its backend pipeline): `rok.alloc` inlined, then above
-// -O0 the cleanup of the inlined code. Not at -O0: InstCombine deletes
-// stack slots that are only stored, and with them `-g`'s view of unused
-// parameters.
+// After a module's last optimization: inline `rok.alloc`, then above -O0
+// clean up. Not at -O0, where InstCombine would delete store-only slots and
+// with them `-g`'s view of unused parameters.
 void inline_alloc(llvm::Module &m, llvm::TargetMachine &tm, int opt) {
   if (!m.getFunction(ALLOC))
     return;
@@ -463,13 +456,11 @@ void inline_alloc(llvm::Module &m, llvm::TargetMachine &tm, int opt) {
   mpm.run(m, mam);
 }
 
-// Non-trivial loop unswitching, which LLVM's pipelines run only at -O3,
-// at -O2 too: a bounds check of an invariant index after a store in the
-// loop leaves the loop only by versioning it. LLVM's switch for it is
-// global (the thin link's backend pipelines take no callbacks), so each
-// optimization sets it: another running at the same time at another
-// level may see it, which changes how much that one unswitches, never
-// what its code does.
+// Non-trivial loop unswitching (LLVM: -O3 only) at -O2 too: a bounds check
+// of an invariant index after a store leaves the loop only by versioning.
+// The switch is global (thin backends take no callbacks), so each
+// optimization sets it; a concurrent one at another level may see it,
+// which changes how much it unswitches, never what its code does.
 void unswitch_nontrivial(int opt) {
   static auto *on = static_cast<llvm::cl::opt<bool> *>(
       llvm::cl::getRegisteredOptions().lookup("enable-nontrivial-unswitch"));
@@ -478,10 +469,8 @@ void unswitch_nontrivial(int opt) {
   on->setValue(opt == 2);
 }
 
-// `m` through clang -O<n>'s pipeline, then `inline_alloc`; with `thin`,
-// through its ThinLTO pre-link pipeline instead (`rok.alloc` is inlined
-// after the part's backend pipeline), then written to `thin` as bitcode
-// with a summary.
+// `m` through clang -O<n>'s pipeline, then `inline_alloc`; with `thin`, the
+// ThinLTO pre-link pipeline instead, written as bitcode with a summary.
 void optimize(llvm::Module &m, llvm::TargetMachine &tm, const RokCompile &o,
               llvm::raw_ostream *thin) {
   // As clang marks every function at -Os: the inliner and the code
@@ -548,9 +537,8 @@ int codegen(llvm::Module &m, llvm::TargetMachine &tm,
   return 0;
 }
 
-// What LLVM reports while optimizing: errors fail the compile, warnings
-// go back to rokc. Functions whose control flow changed since the
-// profile was recorded are counted, not listed.
+// LLVM diagnostics while optimizing: errors fail, warnings go back to rokc;
+// functions whose control flow changed since profiling are only counted.
 struct Diags {
   std::string errors, warnings;
   unsigned stale = 0;
@@ -587,11 +575,10 @@ bool copyable(const llvm::GlobalValue *g) {
          llvm::isa<llvm::ConstantData>(v->getInitializer());
 }
 
-// `m` cut into `n` modules of about equal size, as bitcode (modules of
-// one context cannot be compiled in parallel). As in llvm::SplitModule,
-// a local stays with everything that refers to it, but a local constant
-// of pure data (a string literal) is copied into each part that uses it:
-// shared literals would otherwise glue most of the module into one part.
+// Cut `m` into `n` similar-sized bitcode modules (one context can't compile
+// in parallel). As llvm::SplitModule, locals stay with their users, but a
+// pure-data local constant (a literal) is copied into each user part, or
+// shared literals would glue most of the module together.
 std::vector<llvm::SmallString<0>> split(llvm::Module &m, size_t n) {
   using GV = const llvm::GlobalValue *;
   llvm::EquivalenceClasses<GV> together;
@@ -734,16 +721,13 @@ llvm::SmallString<0> take_alloc(llvm::Module &m) {
   return alloc;
 }
 
-// The thin link of `parts` (ThinLTO bitcode with summaries, module ids
-// `names`) into objects: it imports into each part what it would inline
-// from the others, then optimizes and compiles the parts in parallel.
-// A defined symbol stays visible outside unless `internal` says so.
-// After each part's backend pipeline `alloc` (`take_alloc`) is linked in
-// and `inline_alloc` inlines it.
+// Thin link of `parts` (bitcode with summaries, ids `names`) into objects:
+// import what inlining wants across parts, then optimize and compile in
+// parallel. Symbols stay visible unless `internal` says otherwise. After
+// each backend pipeline `alloc` is linked in and inlined.
 //
-// With a `cache` directory, a part whose inputs (its module, what it
-// imports, the options) are unchanged reuses its object from there
-// (`hits` counts them); entries this link did not use are deleted.
+// With `cache`, a part with unchanged inputs reuses its object (`hits`);
+// unused entries are deleted.
 int thin_link(const std::vector<llvm::SmallString<0>> &parts,
               const std::vector<std::string> &names, llvm::StringRef alloc,
               const std::function<bool(llvm::StringRef)> &internal,
@@ -864,15 +848,11 @@ int thin_link(const std::vector<llvm::SmallString<0>> &parts,
   return 0;
 }
 
-// An optimized object in `o.parts` parts, compiled as in-process ThinLTO:
-// each part through the pre-link pipeline on a thread of its own, then
-// `thin_link`. Symbols keep the linkage a whole-module compile gives
-// them: linkonce definitions nothing refers to go, the others stay
-// visible.
-//
-// The parts see `rok.alloc` as a declaration (its allocation attributes
-// are all escape elision needs, and code imported from another part
-// calls the same one).
+// An optimized object in `o.parts` parts via in-process ThinLTO: pre-link
+// per part on its own thread, then `thin_link`. Linkage as a whole-module
+// compile: unreferenced linkonce definitions go, the rest stays visible.
+// Parts see `rok.alloc` only as a declaration (its attributes suffice for
+// escape elision, and imported code calls the same one).
 int thin(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
          RokBuf *warn) {
   llvm::SmallString<0> alloc = take_alloc(m);
@@ -945,9 +925,8 @@ std::unique_ptr<llvm::TargetMachine> prepare(llvm::Module &m,
   }
   m.setTargetTriple(tm->getTargetTriple());
   m.setDataLayout(tm->createDataLayout());
-  // As clang: every function carries the CPU and features it is built
-  // for (`-C target-cpu` / `-C target-feature`), so the inliner and the
-  // vectorizers see them per function.
+  // As clang: each function carries its CPU and features so the inliner
+  // and vectorizers see them.
   for (llvm::Function &f : m)
     if (!f.isDeclaration()) {
       f.addFnAttr("target-cpu", tm->getTargetCPU());
@@ -963,9 +942,8 @@ std::unique_ptr<llvm::TargetMachine> prepare(llvm::Module &m,
     for (llvm::Function &f : m)
       if (!f.isDeclaration())
         f.setUWTableKind(llvm::UWTableKind::Async);
-    // COFF merges duplicates only through a COMDAT: as clang, each
-    // linkonce / weak definition gets one of its own name, or a second
-    // object defining it (a scan table, a shared instance) is a
+    // COFF merges duplicates only via COMDATs: as clang, each linkonce /
+    // weak definition gets its own, or a second definition elsewhere is a
     // duplicate symbol.
     for (llvm::GlobalObject &g : m.global_objects())
       if (!g.isDeclaration() && !g.hasComdat() &&
@@ -1034,11 +1012,10 @@ int finish(llvm::Module &m, const RokCompile &o, RokBuf *out, RokBuf *err,
   return 0;
 }
 
-// MLIR's di_composite_type has no discriminator, and a member's extraData
-// is a node, not a constant. So rokc writes a variant part as its
-// discriminant member first, then a member per variant with the stored
-// tag as the count of a di_subrange in extraData; this makes them DWARF
-// variants (DW_TAG_variant_part / DW_TAG_variant / DW_AT_discr_value).
+// MLIR's di_composite_type has no discriminator and member extraData is a
+// node, so rokc writes a variant part as the discriminant member then one
+// member per variant whose di_subrange count is its tag; this turns them
+// into DWARF variants.
 void variant_parts(llvm::Module &m) {
   llvm::DebugInfoFinder finder;
   finder.processModule(m);
@@ -1167,16 +1144,12 @@ struct RokUnit {
   int bitcode;
 };
 
-// An optimized object per unit, compiled as in-process ThinLTO: each unit
-// given as MLIR through `translate` and the pre-link pipeline (in
-// parallel; its bitcode goes to `bitcode[i]` for the next build), then
-// `thin_link` of every unit, reusing objects from `cache`. `alloc` is an
-// MLIR module defining `rok.alloc`, which every unit only declares.
-// In a program, symbols with rok's mangling (`_Y`) are its own: nothing
-// outside the units refers to them, so the link may internalize them. A
-// `library`'s users refer to its symbols, except to the copies of other
-// packages' code (`.copy_Y`) and the GC type ids (`_gctype.`) its units
-// share. `hits` counts the objects the cache had.
+// An optimized object per unit via in-process ThinLTO: each unit through
+// `translate` and pre-link in parallel (bitcode to `bitcode[i]` for next
+// time), then `thin_link`, reusing `cache`. `alloc` defines `rok.alloc`,
+// which units only declare. A program's `_Y` symbols may be internalized;
+// a `library`'s only `.copy_Y` and `_gctype.` ones. `hits` counts cache
+// hits.
 int rok_llvm_compile_units(const RokUnit *units, size_t n, const char *alloc,
                            size_t alloc_len, const RokCompile *o,
                            const char *cache, int library, RokBuf *objects,
@@ -1210,9 +1183,8 @@ int rok_llvm_compile_units(const RokUnit *units, size_t n, const char *alloc,
       return;
     }
     take_alloc(*m);
-    // The name goes into the module's hash, which the names of locals
-    // the thin link promotes carry: units of the same code in two
-    // packages must not promote to the same symbol.
+    // The name feeds the module hash that promoted locals carry, so the same
+    // code in two packages can't promote to one symbol.
     m->setSourceFileName(units[i].name);
     llvm::raw_svector_ostream os(parts[i]);
     optimize(*m, *tm, *o, &os);
@@ -1300,9 +1272,8 @@ int rok_llvm_dsymutil(const char *const *argv, size_t argc) {
   return dsymutil_main(static_cast<int>(argc), args.data(), ctx);
 }
 
-// lld with argv[0] naming the flavor (ld64.lld, ld.lld, lld-link,
-// wasm-ld; not MinGW's ld.lld, which rokc never runs). Its output goes
-// to `log`. Returns lld's exit code.
+// lld with argv[0] naming the flavor (ld64.lld, ld.lld, lld-link, wasm-ld;
+// never MinGW's); output to `log`; returns its exit code.
 int rok_llvm_lld(const char *const *argv, size_t argc, RokBuf *log) {
   static std::mutex lock; // lld keeps per-link globals
   std::lock_guard<std::mutex> guard(lock);
@@ -1341,10 +1312,8 @@ int rok_llvm_write_archive(const char *path, const char *const *members,
   return 0;
 }
 
-// The raw or indexed IR profiles `inputs` merged into the indexed profile
-// `path` (llvm-profdata merge). An empty raw profile (a run that ended
-// before writing counts) is skipped. What merging a record reports
-// (counter overflow, mismatched counters) is a warning, as there.
+// Merge raw or indexed profiles into indexed `path` (llvm-profdata merge),
+// skipping empty raw ones; per-record problems are warnings, as there.
 int rok_llvm_profdata_merge(const char *const *inputs, size_t n,
                             const char *path, RokBuf *warn, RokBuf *err) {
   auto fs = llvm::vfs::getRealFileSystem();
@@ -1388,10 +1357,9 @@ int rok_llvm_profdata_merge(const char *const *inputs, size_t n,
   return 0;
 }
 
-// A summary of the IR profile `path` (llvm-profdata show): with `all`,
-// each function's hash and counter count; with `topn`, the functions
-// with the largest internal counts. Context-sensitive records (a second
-// instrumented stage) are summed apart.
+// Summary of profile `path` (llvm-profdata show): `all` lists each
+// function's hash and counter count, `topn` the hottest; context-sensitive
+// records are summed apart.
 int rok_llvm_profdata_show(const char *path, int all, size_t topn,
                            RokBuf *out, RokBuf *err) {
   auto fs = llvm::vfs::getRealFileSystem();
@@ -1455,9 +1423,9 @@ int rok_llvm_profdata_show(const char *path, int all, size_t topn,
   return 0;
 }
 
-// The import library `path` of a module definition (`.def`, mingw-w64
-// syntax) for COFF machine type `machine`. x86 names are decorated
-// (`_f`, stdcall `_f@8`) and import undecorated (llvm-dlltool -k).
+// Import library for module definition `def` (mingw-w64 syntax) and COFF
+// machine `machine`; x86 names are decorated and import undecorated
+// (llvm-dlltool -k).
 int rok_llvm_import_lib(const char *def, size_t len, uint16_t machine_type,
                         const char *path, RokBuf *err) {
   auto machine = static_cast<llvm::COFF::MachineTypes>(machine_type);

@@ -1,26 +1,18 @@
-//! REPL cells compile only what is new (906 JIT session): a function
-//! whose text is the same as the one an earlier cell defined under its
-//! symbol, and whose callees are all such functions too, becomes a
-//! declaration of that earlier definition. Library code (and unchanged
-//! user items) is thus compiled once per session.
+//! REPL cells compile only what is new (906): a function whose text equals
+//! an earlier cell's definition of its symbol, with all callees likewise,
+//! becomes a declaration of it, so library code compiles once per session.
 //!
-//! Equal text means equal behaviour: symbols are stable across cells
-//! (mangled paths, the session's fixed package hash, content-named
-//! string literals, GC type ids keyed by their `ScanTable`), and a
-//! function that refers to anything this cell defines anew (a changed
-//! function, a static, a binding slot) is itself defined anew, so it
-//! binds to the new definitions. The session's host gives a redefined
-//! symbol a new name, so later cells use the newest one (907).
-//!
-//! Works on the MLIR text: a top-level op is a line indented by two
-//! spaces up to the next one.
+//! Equal text is equal behaviour: symbols are stable across cells, and a
+//! function referring to anything this cell redefines is redefined too.
+//! The host renames redefined symbols so later cells get the newest
+//! (907). Works on MLIR text: a top-level op is a two-space-indented line
+//! up to the next.
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-/// A function this cell defines anew: its symbol, text hash, and the
-/// symbols it refers to (`ReplCell::known` is dropped for it when one
-/// of them is redefined later).
+/// A function this cell defines anew: symbol, text hash, and referenced
+/// symbols (its `known` entry goes when one is redefined).
 #[derive(Clone, Debug)]
 pub struct ReplFn {
     pub name: String,
@@ -46,9 +38,8 @@ struct Op<'a> {
     refs: Vec<&'a str>,
 }
 
-/// `text` with the functions `known` already has turned into
-/// declarations (how many), the exported symbols it defines anew, and
-/// its new functions.
+/// `text` with functions `known` already has made declarations (and how
+/// many), plus the exported symbols and functions it defines anew.
 pub fn reuse(
     text: &str,
     known: &HashMap<String, u64>,

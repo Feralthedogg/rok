@@ -182,9 +182,7 @@ pub(super) fn of_trait(ctx: &LowerCtx<'_>, p: u32, key: &str) -> Vec<TraitRef> {
         .collect()
 }
 
-/// Is bound `r` one of `wants` of its trait (`<T as Tr<A>>::X`, the
-/// written bounds `T: Tr<A> + Tr<B>`), when there are any? An argument
-/// not yet concrete matches anything.
+/// Is bound `r` one of `wants` (if any)? Non-concrete arguments match.
 fn fits_wants(r: &TraitRef, wants: &[TraitRef]) -> bool {
     let mut of = wants.iter().filter(|w| w.path == r.path).peekable();
     of.peek().is_none()
@@ -197,10 +195,9 @@ fn fits_wants(r: &TraitRef, wants: &[TraitRef]) -> bool {
         })
 }
 
-/// The one bound of `p` an associated item `name` comes from: of
-/// `traits`, agreeing with `wants`, and one `has` accepts. Two left
-/// (`T: Add<i32> + Add<f64>` asked for `T::Output`) are an ambiguity
-/// error (spec 2.8.3, 2.13.4), reported here as `Err`.
+/// The one bound of `p` that associated item `name` comes from (of
+/// `traits`, agreeing with `wants`, accepted by `has`). Two left
+/// (`T: Add<i32> + Add<f64>` for `T::Output`) is ambiguous (spec 2.8.3).
 fn item_bound(
     ctx: &LowerCtx<'_>,
     p: u32,
@@ -263,10 +260,9 @@ fn item_shown(ctx: &LowerCtx<'_>, p: u32, r: &TraitRef, name: &str) -> String {
     format!("{t}::{name}")
 }
 
-/// Associated type `name` of `p` (of `traits` only, when given, and of
-/// the bound `wants` names): the binding the bound gives it
-/// (`I: Iterator<Item = i32>`), else an opaque projection `I::Item`
-/// bounded as the trait declares it and as `where` clauses add.
+/// Associated type `name` of `p`: the binding a bound gives
+/// (`I: Iterator<Item = i32>`), else an opaque `I::Item` bounded as the
+/// trait and `where` clauses say.
 pub(super) fn project(
     ctx: &LowerCtx<'_>,
     p: u32,
@@ -338,10 +334,9 @@ pub(super) fn bound_methods<'e>(
     out
 }
 
-/// `bind_self` for a bound template (`bound_methods`): the trait's
-/// parameters take the arguments of `p`'s bound. With several bounds of
-/// the trait, only the arguments they share; the call's arguments and
-/// expected type bind the rest, and `pick_bound` checks them.
+/// `bind_self` for a bound template: the trait's parameters take `p`'s
+/// bound arguments (only those shared, with several bounds of the trait);
+/// the call binds the rest and `pick_bound` checks them.
 pub(super) fn bind_trait_args(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
@@ -365,11 +360,9 @@ pub(super) fn bind_trait_args(
     }
 }
 
-/// The bound a call of bound template `fn_def` on `p` goes through,
-/// when `p` has its trait more than once: the one whose arguments the
-/// call bound in `subst` (spec 3.1.3), its other arguments then bound
-/// too. None, or several (an argument nothing bound), is an error
-/// (spec 4.9.6).
+/// With `p` bounded by the trait more than once, the bound a call goes
+/// through: the one whose arguments the call bound (spec 3.1.3). None or
+/// several is an error (spec 4.9.6).
 pub(super) fn pick_bound(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
@@ -450,11 +443,9 @@ pub(super) fn pick_bound(
     }
 }
 
-/// The types parameter `i` of bound template `fn_def` takes under each
-/// of `p`'s bounds of its trait, when it is a bare trait parameter
-/// those bounds give differently (`From<T>::from(value: T)` under
-/// `From<i64> + From<str>`): what an unsuffixed literal there chooses
-/// from (spec 3.1.3).
+/// The types parameter `i` takes under each of `p`'s bounds when it is a
+/// bare trait parameter they give differently (`From<T>::from` under
+/// `From<i64> + From<str>`): an unsuffixed literal's choices (spec 3.1.3).
 pub(super) fn slot_choices(ctx: &LowerCtx<'_>, fn_def: &FnDef, p: u32, i: usize) -> Vec<HirTy> {
     let Some(key) = ctx.env.bound_trait(&fn_def.name) else {
         return Vec::new();
@@ -487,11 +478,9 @@ pub(super) fn slot_choices(ctx: &LowerCtx<'_>, fn_def: &FnDef, p: u32, i: usize)
     out
 }
 
-/// The templates `bound_methods` holds: per trait method, its
-/// declaration with the trait's parameters first among its generics
-/// (bound from the receiver's bound, `bind_trait_args`), no body, and
-/// its bare associated types (the trait's and its supertraits') read
-/// as `Self::X`. Also: template name → trait.
+/// `bound_methods` templates: each trait method's declaration with the
+/// trait's parameters first, no body, bare associated types read as
+/// `Self::X`; plus template name → trait.
 pub(super) fn templates(
     trait_info: &HashMap<String, TraitInfo>,
 ) -> (
@@ -632,9 +621,8 @@ fn implicit(f: &FnDef) -> bool {
         .any(|gp| matches!(gp, rokc_ast::GenericParam::Type { name, .. } if name.starts_with("T#")))
 }
 
-/// Check every generic body whose module `wanted` picks: generic fns,
-/// generic impl methods and generic methods, and trait default methods
-/// (once, with an opaque `Self`; a copy in an impl is not checked).
+/// Check every generic body `wanted` picks; trait defaults once with an
+/// opaque `Self` (impl copies aren't checked).
 pub(super) fn check_all(
     env: &Env<'_>,
     incr: Option<&super::incr::Incr<'_>>,
@@ -702,10 +690,9 @@ pub(super) fn check_all(
     check_decl_types(env, &wanted);
 }
 
-/// Spec 2.10.4: a generic alias's bounds on type parameters, used in
-/// types no body check sees (generic struct / enum fields, a generic
-/// trait impl's trait arguments and associated types, a bodiless trait
-/// method's signature), hold by that declaration's bounds.
+/// Spec 2.10.4: generic alias bounds in types no body check sees (generic
+/// fields, generic trait impl arguments and associated types, bodiless
+/// method signatures) must hold by the declaration's bounds.
 fn check_decl_types(env: &Env<'_>, wanted: &impl Fn(&str) -> bool) {
     struct Decl<'a> {
         generics: Vec<&'a rokc_ast::GenericParam>,
@@ -917,9 +904,7 @@ impl Snapshot {
     }
 }
 
-/// Lower body `f` with `generics` (the impl's, or the trait's, then its
-/// own) as opaque type parameters: its errors. The shared state is left
-/// as it was.
+/// Lower `f` with `generics` opaque; its errors. Shared state is restored.
 fn check_one(
     env: &Env<'_>,
     f: &FnDef,
@@ -974,10 +959,9 @@ fn check_one(
     errors
 }
 
-/// Run `run` with `generics` as opaque type parameters bounded by their
-/// bounds and `where_clause`, as a generic body sees them (its context,
-/// substitution and `Self`): its result and the errors reported. The
-/// shared state is left as it was.
+/// Run `run` as a generic body sees things (`generics` opaque under their
+/// bounds and `where_clause`); its result and errors. Shared state is
+/// restored.
 pub(super) fn in_scope<R>(
     env: &Env<'_>,
     generics: &[&rokc_ast::GenericParam],
@@ -1039,9 +1023,8 @@ pub(super) fn in_scope<R>(
         .flat_map(|a| a.path[1..].iter().cloned())
         .collect();
     let mark = ctx.probe_mark();
-    // Bounds on the parameters first, then the `where` clauses that
-    // name one alone, then the rest (`T::Item: Display` projects
-    // through `T`'s bounds).
+    // Parameter bounds first, then `where` clauses naming one parameter
+    // alone, then the rest (`T::Item: Display` projects through `T`).
     for gp in generics {
         if let rokc_ast::GenericParam::Type { name, bounds, .. } = gp {
             for b in bounds {
@@ -1115,10 +1098,9 @@ pub(super) fn const_name(env: &Env<'_>, v: i128) -> Option<String> {
     names.iter().find(|(n, _)| *n == v).map(|(_, s)| s.clone())
 }
 
-/// `T::NAME` (spec 2.8.3a): the const a bound's trait declares, of
-/// its declared type. An integer, `bool` or `char` stands as a value
-/// no other in the body has (as a `const` parameter); another type is
-/// an opaque value.
+/// `T::NAME` (spec 2.8.3a): the bound trait's const, of its declared type.
+/// An integer, `bool` or `char` gets a value unique in the body (like a
+/// `const` parameter); other types are opaque.
 pub(super) fn assoc_const(
     ctx: &LowerCtx<'_>,
     p: u32,

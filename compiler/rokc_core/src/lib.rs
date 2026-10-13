@@ -10,11 +10,8 @@ use std::path::{Path, PathBuf};
 
 pub use def::{DefId, DefInfo, DefKind, DefTable, Visibility};
 
-/// The user's rok directory (spec 9.2.19).
-///
-/// `$ROK_HOME`; else the home the running executable belongs to
-/// (`<home>/bin/rok`, a proxy, or `<home>/toolchains/<name>/bin/rok`);
-/// else `~/.rok` (`%USERPROFILE%\.rok` on Windows).
+/// `$ROK_HOME`, else the home the running executable sits in, else
+/// `~/.rok` (`%USERPROFILE%\.rok`). Spec 9.2.19.
 #[must_use]
 pub fn rok_home() -> Option<PathBuf> {
     if let Some(h) = std::env::var_os("ROK_HOME").filter(|h| !h.is_empty()) {
@@ -26,9 +23,8 @@ pub fn rok_home() -> Option<PathBuf> {
     Some(user_home()?.join(".rok"))
 }
 
-/// Env knob `name` as `parse` reads it; `None` if unset or empty. A
-/// value `parse` rejects is warned about on stderr (once per knob),
-/// naming `expected`, and reads as unset (the default).
+/// Env knob `name`; `None` if unset or empty. An invalid value warns once
+/// (naming `expected`) and reads as unset.
 pub fn env_knob<T>(
     name: &'static str,
     expected: &str,
@@ -70,9 +66,7 @@ pub fn user_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// `fs::canonicalize`, in the spelling users and tools know on Windows:
-/// `C:\..` and `\\server\share\..` rather than `\\?\C:\..` and
-/// `\\?\UNC\server\share\..`.
+/// `fs::canonicalize` without Windows' `\\?\` / `\\?\UNC\` prefixes.
 pub fn real_path(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     let real = std::fs::canonicalize(p)?;
     if cfg!(windows) {
@@ -83,13 +77,11 @@ pub fn real_path(p: impl AsRef<Path>) -> std::io::Result<PathBuf> {
     Ok(real)
 }
 
-/// What changes when the file at `p` is written or replaced.
+/// A stamp that changes whenever the file at `p` is written or replaced.
 ///
-/// For a big file not worth reading: its size, its mtime, and its inode
-/// and status change time (Windows: its file id and creation time; a file
-/// made again under a deleted one's name within seconds inherits its
-/// creation time), so a copy that keeps the mtime is another file. `-`
-/// when it is missing.
+/// Size, mtime, inode and ctime, without reading the file (Windows: file
+/// id and creation time; the id because NTFS gives a recreated name the
+/// old creation time). `-` when missing.
 #[must_use]
 pub fn file_stamp(p: &Path) -> String {
     let Ok(m) = std::fs::metadata(p) else {
@@ -171,9 +163,8 @@ pub fn home_of(exe: &Path) -> Option<PathBuf> {
 /// The standard library's package name.
 pub const STD_PKG: &str = "rok";
 
-/// Why `name` cannot name a package or dependency, if it cannot: it is
-/// the standard library's, so the package would mount into `rok::`
-/// beside the library's own items.
+/// Why `name` can't be a package name: it would mount into `rok::` beside
+/// the standard library.
 #[must_use]
 pub fn reserved_package(name: &str) -> Option<String> {
     (name == STD_PKG).then(|| {
@@ -214,11 +205,9 @@ pub fn command_help(usage: &str, cmd: &str) -> Option<String> {
     (!out.is_empty()).then_some(out)
 }
 
-/// The length of the shebang line `src` starts with (spec 1.2.3).
-///
-/// Without its line terminator; 0 when there is none. A first line
-/// starting with `#!` is one unless the next token past whitespace and
-/// plain comments is `[`: `#![attr]` stays an inner attribute.
+/// Length of the shebang line (spec 1.2.3), terminator excluded; 0 if
+/// none. `#!` followed (past whitespace and comments) by `[` is an inner
+/// attribute, not a shebang.
 #[must_use]
 pub fn shebang_len(src: &str) -> usize {
     let Some(mut rest) = src.strip_prefix("#!") else {

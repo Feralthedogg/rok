@@ -1,12 +1,8 @@
 //! Method path values (spec 3.5.3): `T::m`, `Tr::m`, `<T as Tr>::m`,
-//! `i32::add`, `S::new` written without a call are `fn` values. A static
-//! method is `fn(args) -> R`, an instance one `fn(Self, args) -> R`.
-//!
-//! The value is the eta-expansion `|a, b| T::m(a, b)` (a capture-free
-//! closure, so a plain function pointer): its body is the ordinary path
-//! call, which already does `#[intrinsic]` methods (the closure is their
-//! thunk), trait dispatch, generic instantiation and `throws` (`try` in
-//! the body makes the value a throwing `fn`).
+//! `i32::add` without a call are `fn` values (`fn(args) -> R` static,
+//! `fn(Self, args) -> R` instance). The value is the capture-free
+//! eta-expansion `|a, b| T::m(a, b)`, whose body is the ordinary path call
+//! (intrinsics, trait dispatch, instantiation, `throws`).
 
 use super::expr::{MethodPick, bind_explicit, pick_method, self_path_segs};
 #[allow(clippy::wildcard_imports)]
@@ -19,9 +15,8 @@ struct Shape {
     /// A `ref` parameter or `ref self`.
     has_ref: bool,
     throws: bool,
-    /// `fn` parameter and return types, when the path fixes them (a
-    /// concrete method, or a generic one fully instantiated by its type
-    /// and turbofish); else the expected `fn` type supplies them.
+    /// Parameter and return types when the path fixes them; else the
+    /// expected `fn` type supplies them.
     ty: Option<(Vec<HirTy>, HirTy)>,
 }
 

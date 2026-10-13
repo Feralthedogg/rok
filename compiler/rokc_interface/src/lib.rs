@@ -40,9 +40,8 @@ impl Session {
         Self::default()
     }
 
-    /// Add a `.rok` file to the bootstrap pre-pass that populates the
-    /// operator precedence table. Order matters only for diagnostic
-    /// determinism — registrations are merged with conflict detection.
+    /// Add a `.rok` file to the bootstrap operator pre-pass; order only
+    /// affects diagnostic order.
     pub fn add_bootstrap_file(&mut self, path: PathBuf) {
         self.config.bootstrap_files.push(path);
     }
@@ -156,9 +155,8 @@ impl Session {
         Self::result(r, map)
     }
 
-    /// `compile_file` with the root file's text given (stdin, an editor
-    /// buffer, a REPL session); `path` still locates `mod foo;` files.
-    /// `map` holds what is known before the compile (a REPL's views).
+    /// `compile_file` with the root's text given (stdin, an editor, the
+    /// REPL); `path` still locates `mod foo;` files, `map` holds known views.
     pub fn compile_source(&self, source: &str, path: &Path, mut map: SourceMap) -> CompileResult {
         let r = compile_source(source, path, &self.config, &mut map);
         Self::result(r, map)
@@ -295,9 +293,8 @@ impl CompileResult {
         rokc_driver::check_codegen(self.module()?, &self.source_map, opts)
     }
 
-    /// The user package's files (of a `set_keep_ast` build) after meta
-    /// expansion, as rok source, each under a `// <file> (<module>)`
-    /// line (`--emit=ast`).
+    /// The package's files after meta expansion as source, each under a
+    /// `// <file> (<module>)` line (`--emit=ast`; needs `set_keep_ast`).
     #[must_use]
     pub fn ast_source(&self) -> String {
         let mut out = String::new();
@@ -331,9 +328,8 @@ impl CompileResult {
         rokc_driver::link_executable(self.module()?, &self.source_map, opts, out)
     }
 
-    /// A REPL cell (`opts.repl`) as an object for the session host, from
-    /// the native backend (`native::jit`) or LLVM, and what codegen says
-    /// about it (GC tables, new symbols).
+    /// A REPL cell as an object for the host, from the native backend or
+    /// LLVM, with what codegen says about it (GC tables, new symbols).
     pub fn cell_code(
         &self,
         opts: &BuildOptions,
@@ -345,9 +341,8 @@ impl CompileResult {
         }
     }
 
-    /// Build a library package's static archive at `out` (spec 902.13),
-    /// by codegen units with `opts.incremental`, and then how many it
-    /// compiled (`build_archive`).
+    /// Build a library archive at `out` (spec 902.13); with
+    /// `opts.incremental` by codegen units, returning how many compiled.
     pub fn archive(
         &self,
         opts: &BuildOptions,
@@ -357,19 +352,19 @@ impl CompileResult {
     }
 }
 
-/// The standard library and the runtime of this `rokc` (spec 9.2.19).
+/// The standard library and runtime of this `rokc` (spec 9.2.19).
 ///
-/// They are under its sysroot (the executable's `..`: `lib/rok/{core,std,bare}/src/`,
-/// `lib/librokr.a`, `lib\rokr.lib` on Windows), else, for a build in the
-/// repository, its `library/` and the runtime cargo puts beside `rokc`. `ROK_HOME`
-/// plays no part. Each `Err` lists where it looked.
+/// Under its sysroot (`lib/rok/{core,std,bare}/src/`, `lib/librokr.a`,
+/// `lib\rokr.lib`), else in a repository build the `library/` and the
+/// runtime beside `rokc`. `ROK_HOME` plays no part; each `Err` lists where
+/// it looked.
 pub struct Sysroot {
     /// The library roots to preload (`core`, then `std` / `bare`).
     pub libs: Result<Vec<PathBuf>, String>,
     pub rokr: Result<PathBuf, String>,
-    /// `lib/rok/targets/<target>/`: what a `--target` links (`librokr.a`
-    /// for that target; Linux: its C runtime objects and C library).
-    /// The repository's is `target/lib/rok/targets/` (`targets/build.sh`).
+    /// `lib/rok/targets/<target>/`: what `--target` links (its runtime;
+    /// Linux: C runtime objects and libc). In the repository:
+    /// `target/lib/rok/targets/` (`targets/build.sh`).
     pub targets: PathBuf,
     /// `lib/rok/lldb/rok_lldb.py`: lldb formatters for `-g` programs.
     pub lldb: Result<PathBuf, String>,
@@ -431,9 +426,8 @@ pub fn sysroot() -> Sysroot {
     }
 }
 
-/// The library roots to preload from a library directory: `core/src/lib.rok`,
-/// then `std` / `bare` when present (no implicit glob: user code names
-/// them).
+/// Library roots to preload: `core/src/lib.rok`, then `std` / `bare` if
+/// present (no implicit glob: user code names them).
 fn bootstrap_roots(libs: &Path) -> Vec<PathBuf> {
     let mut out = vec![libs.join("core/src/lib.rok")];
     out.extend(

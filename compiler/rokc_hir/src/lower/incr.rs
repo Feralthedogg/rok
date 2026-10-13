@@ -488,7 +488,7 @@ pub(super) fn log_type(enum_: bool, key: &str, found: Option<u32>) {
     });
 }
 
-/// Note that the entries of function `id` may change.
+/// Record that the entries of function `id` may change.
 pub(super) fn touch(id: FunctionId) {
     REC.with(|r| {
         if let Some(rec) = r.borrow_mut().as_mut() {
@@ -497,7 +497,7 @@ pub(super) fn touch(id: FunctionId) {
     });
 }
 
-/// Note that the entry at a key may change.
+/// Record that the entry at a key may change.
 pub(super) fn touch_key(k: impl FnOnce() -> Key) {
     REC.with(|r| {
         if let Some(rec) = r.borrow_mut().as_mut() {

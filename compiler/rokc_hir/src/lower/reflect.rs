@@ -1,11 +1,8 @@
-//! `Reflect` (refs-lang 6.10.1, stdlib 2.12.2): every type has it, with
-//! no impl in source. A call the type's own methods / impls don't answer
-//! falls back here: `T::type_name()` / `T::size()` / `T::align()` are
-//! constants, `x.type_name_of()` / `x.size_of()` switch on the variant
-//! an `any` (through a tag dispatcher) or a sum value holds.
-//!
-//! Also the intrinsics behind `#[derive(Inspect)]` (`core/reflect.rok`):
-//! `rok.any_cast` and `rok.method_table`.
+//! `Reflect` (refs-lang 6.10.1, stdlib 2.12.2): every type has it without
+//! an impl. Calls nothing else answers land here: `T::type_name()` /
+//! `size()` / `align()` are constants; `x.type_name_of()` / `x.size_of()`
+//! switch on an `any` or sum's held variant. Also `rok.any_cast` and
+//! `rok.method_table`, behind `#[derive(Inspect)]`.
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
@@ -28,9 +25,8 @@ const INTS: [PrimTy; 10] = [
     PrimTy::Usize,
 ];
 
-/// `ty`'s name as `type_name` reports it: `ty_name` without module paths
-/// (`List<i64>`, not `rok::core::collections::list::List<i64>`), a
-/// block-local item by its own name (`S`, spec 3.9.1).
+/// `ty`'s `type_name`: no module paths (`List<i64>`), block-local items by
+/// their own name (spec 3.9.1).
 pub(super) fn type_name(ctx: &LowerCtx<'_>, ty: &HirTy) -> String {
     let full = ctx.ty_name(ty);
     let full = rokc_core::local::unmangle(&full);

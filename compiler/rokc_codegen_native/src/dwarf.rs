@@ -1,13 +1,8 @@
-//! `-g` (spec 9.9.6): DWARF 4 for the functions of an object, as the
-//! MLIR emitter's debug info describes them (`rokc_codegen_mlir::debug`):
-//! one subprogram per function with a source position, named by its rok
-//! path; its parameters and named locals in their stack slots (`fp`
-//! relative), in lexical blocks; their types (primitives, structs with
-//! field names, tuples, `str`, `any` (recursive), arrays, tagged sums as
-//! variant parts, `GcBuf` references and closures' environments as
-//! pointers to their objects, function values as `{code, env}`, the code
-//! a pointer to its subroutine type; scalar returns); a line table. Generated
-//! functions (the C `main`, ..) get a subprogram too.
+//! `-g` (spec 9.9.6): DWARF 4 matching the MLIR emitter's debug info
+//! (`rokc_codegen_mlir::debug`): a subprogram per positioned function
+//! (and generated ones) named by rok path, parameters and named locals in
+//! `fp`-relative slots within lexical blocks, their types (as the LLVM
+//! path describes them), and a line table.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -144,9 +139,8 @@ fn cstr(b: &mut Vec<u8>, s: &str) {
     b.push(0);
 }
 
-/// `split`: code in a section per function (ELF). The unit lists each
-/// function's range; a function's end is an address, so the code of one
-/// the linker dropped is an empty range (both ends 0).
+/// `split`: a code section per function (ELF), so ranges are per function
+/// and a dropped one's is empty (both ends 0).
 fn abbrevs(split: bool) -> Vec<u8> {
     let cu_end = if split {
         (DW_AT_RANGES, DW_FORM_SEC_OFFSET)
@@ -335,9 +329,8 @@ fn abbrevs(split: bool) -> Vec<u8> {
 /// written: an `any` inside a type stored in one is that variant part.
 const ANY_SELF: u32 = u32::MAX;
 
-/// While the `any` is described: where references to it were written,
-/// and the types written since that hold one (as the LLVM path does,
-/// they leave the cache with it done), by key and DIE offset.
+/// While an `any` is described: where references to it were written and
+/// the types since that hold one, dropped from the cache with it.
 #[derive(Default)]
 struct AnyOpen {
     fixups: Vec<usize>,
@@ -591,9 +584,7 @@ impl Info<'_> {
         ])
     }
 
-    /// A value laid out `(i32 tag, payload)` (a tuple, or `any`'s
-    /// struct) whose payload `variants` (`(stored tag, name, payload)`)
-    /// tells apart: a variant part.
+    /// A `(i32 tag, payload)` value as a variant part.
     fn variant_part(
         &mut self,
         name: &str,
@@ -747,7 +738,7 @@ impl Info<'_> {
             MirTy::Array(..) | MirTy::Union(..) => {
                 let (elem, n) = match ty {
                     MirTy::Array(e, n) => ((**e).clone(), *n),
-                    MirTy::Union(_, n) => (MirTy::Prim(PrimTy::Usize), *n),
+                    MirTy::Union(_, n, _) => (MirTy::Prim(PrimTy::Usize), *n),
                     _ => unreachable!(),
                 };
                 let base = self.ty(&elem)?;
@@ -789,9 +780,8 @@ impl Info<'_> {
     }
 }
 
-/// The code of scope `id` of `f` and its nested scopes, as merged
-/// `[start, end)` ranges: interleaved with other scopes' code, so not
-/// one range.
+/// Code of scope `id` and its nested scopes as merged `[start, end)`
+/// ranges (interleaved with other scopes' code).
 fn scope_code(id: u32, d: &crate::lir::FnDebug, f: &FnRange) -> Vec<(u32, u32)> {
     let mut ids = vec![id];
     let mut n = 0;
@@ -827,9 +817,8 @@ pub fn write(obj: &mut Obj, m: &MirModule, sources: &rokc_diagnostic::SourceMap)
     else {
         return;
     };
-    // The files the functions are in, numbered in order of first use: an
-    // object names only its own files (a codegen unit's does not change
-    // when another file is added).
+    // Files numbered by first use: an object names only its own, so a unit's
+    // doesn't change when another file appears.
     let mut used: Vec<u32> = vec![first_file];
     for f in &fns {
         let id = f.debug.as_ref().map_or(0, |d| d.0.file);

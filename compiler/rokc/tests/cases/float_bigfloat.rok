@@ -1,3 +1,4 @@
+// gc-stress: 5
 // expect-exit: 0
 // expect-stdout:
 // 0.30000000000000004 false true
@@ -15,12 +16,9 @@
 // 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 0 true true true 1.0000000000000002e900
 // true true 0.1
 
-// stdlib spec 2.1.3: `float` is `f64` (IEEE round-off, NaN / inf) in
-// `f64`'s range; a finite result past it is promoted (53-bit
-// significand, unbounded exponent) instead of overflowing to inf or
-// underflowing to 0. Literals past `f64` in a `float` slot, parse,
-// `%`, comparisons, conversions and f-strings. Values checked against
-// an exact (fractions) model.
+// A finite `float` result past `f64`'s range is promoted (53-bit
+// significand, unbounded exponent) instead of becoming inf or 0
+// (std 2.1.3). Expected values come from an exact fractions model.
 
 fn main() {
     let a: float = 0.1;

@@ -1,8 +1,6 @@
-//! Operator precedence (spec 3.2.3) is fixed by the language.
-//!
-//! `fixed_prec` is the whole table. `#[infix]` / `#[prefix]` / `#[postfix]` only bind
-//! a token to a trait method (spec 6.7); `PrecTable` records those
-//! bindings for operator dispatch in HIR.
+//! Operator precedence is the language's (spec 3.2.3, `fixed_prec`).
+//! `#[infix]` / `#[prefix]` / `#[postfix]` only bind tokens to trait
+//! methods (6.7); `PrecTable` records that for HIR.
 
 use std::collections::HashMap;
 
@@ -33,11 +31,8 @@ pub const CAST_PREC: u32 = 11;
 /// Binding power of `??` (level 1, right-assoc).
 pub const COALESCE_PREC: u32 = 1;
 
-/// Spec 3.2.3: the language-fixed precedence of a built-in operator.
-///
-/// Dot-prefixed (broadcast) tokens share their scalar sibling's
-/// row. `÷ ≡ ≠ ≤ ≥` are lexed as `/ == != <= >=`. `None` for tokens
-/// outside the table.
+/// A built-in operator's precedence (spec 3.2.3); dotted broadcast tokens
+/// share their scalar's row. `None` outside the table.
 #[must_use]
 pub fn fixed_prec(symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
     let base = match symbol {
@@ -68,9 +63,8 @@ pub fn fixed_prec(symbol: &str, fixity: Fixity) -> Option<(u32, Assoc)> {
     }
 }
 
-/// Spec 3.4.3 / stdlib 2.4: the compound assignment tokens. Their
-/// `#[infix]` binds the `*Assign` trait method; they are statements,
-/// not expression operators, so they have no binding level.
+/// Compound assignment tokens (spec 3.4.3): statements, so no binding
+/// level; their `#[infix]` binds the `*Assign` method.
 #[must_use]
 pub fn is_assign_token(symbol: &str) -> bool {
     matches!(
@@ -188,14 +182,11 @@ impl PrecTable {
     }
 }
 
-/// Walk a program (module `module`'s file, inline modules included) and
-/// collect every `#[infix]` / `#[prefix]` / `#[postfix]` attribute
-/// attached to a trait method into a `PrecTable`.
+/// Collect `#[infix]` / `#[prefix]` / `#[postfix]` on trait methods.
 ///
-/// Errors: a precedence/associativity argument (spec 6.7.2), `like` on a
-/// table token, a token outside the table without `like`, aliases of one
-/// method on different levels (6.7.12), and one token bound to two
-/// different methods.
+/// Errors: precedence arguments (6.7.2), `like` on a table token, a
+/// non-table token without `like`, aliases on different levels (6.7.12),
+/// one token bound to two methods.
 pub fn collect_prec_table(program: &Program, module: &[String]) -> (PrecTable, Vec<RokDiagnostic>) {
     let mut table = PrecTable::new();
     let mut diags = Vec::new();

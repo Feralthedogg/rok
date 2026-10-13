@@ -1,4 +1,4 @@
-//! The global git cache, shared by every project and environment:
+//! The git cache, shared by every project and environment:
 //!
 //! ```text
 //! $ROK_HOME/cache/git/db/<repo>-<hash of url>/   bare clone, one per url
@@ -6,7 +6,7 @@
 //! $ROK_HOME/cache/registry/db/<repo>-<hash>/     bare clone of a stone index
 //! ```
 //!
-//! Everything goes through the `git` command line.
+//! All through the `git` CLI.
 
 // `^{commit}` / `^{tree}` are git revision syntax, not format arguments.
 #![allow(clippy::literal_string_with_formatting_args)]
@@ -47,8 +47,8 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String, String> {
 
 fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
     let mut cmd = Command::new("git");
-    // Checkouts hold the committed bytes (the package hash is over them):
-    // no line-ending conversion, whatever `core.autocrlf` says.
+    // Checkouts are the committed bytes (the package hash covers them),
+    // whatever `core.autocrlf` says.
     cmd.args(["-c", "core.autocrlf=false", "--git-dir"])
         .arg(dir)
         .args(args)
@@ -203,8 +203,8 @@ impl Cache {
             .is_ok()
     }
 
-    /// The files of `commit` at `checkouts/<commit>/` (extracted once,
-    /// and again if they were changed), and the commit's tree hash.
+    /// `commit`'s files in `checkouts/<commit>/` (re-extracted if changed)
+    /// and its tree hash.
     pub fn checkout(&self, url: &str, commit: &str) -> Result<(PathBuf, String), String> {
         let db = self.db(url);
         let tree = git(&db, &["rev-parse", &(commit.to_owned() + "^{tree}")], None)?;

@@ -1,19 +1,15 @@
-//! Type lowering: AST `Ty` → `HirTy`.
-//!
-//! Primitive type names are recognised by spelling, not through the
-//! library's `#[lang]` slots.
+//! Type lowering, AST `Ty` → `HirTy`. Primitive names are recognised by
+//! spelling, not `#[lang]` slots.
 
 use rokc_ast::{Path, Ty, TyKind};
 use rokc_ir_common::PrimTy;
 
 use crate::HirTy;
 
-/// A written sum `A | B | ..` (spec 2.6.4): a member that is itself a
-/// written sum (or an alias of one) spreads into the set, so
-/// `(i32 | none) | none` is `i32 | none`. A generic member (`param`
-/// names a type parameter; `Self`, `<T as Tr>::X`, `T::X`, a `Nest`) stays one
-/// member, so `HirTy::sum` keeps it a nested layer when it overlaps the
-/// written members: `T | none` with `T = i32 | none` is `(i32 | none)?`.
+/// A written sum (spec 2.6.4): written-sum members (or aliases of one)
+/// spread, so `(i32 | none) | none` is `i32 | none`. A generic member
+/// (`param`, `Self`, projections, `Nest`) stays one, so `HirTy::sum` can
+/// keep it nested: `T | none` with `T = i32 | none` is `(i32 | none)?`.
 pub fn written_sum(
     parts: &[Ty],
     param: impl Fn(&str) -> bool,
@@ -90,9 +86,8 @@ pub fn resolve_ty(ty: &Ty) -> HirTy {
     }
 }
 
-/// `throws (err) -> ok`, normalized: nested error sums are flattened and
-/// deduplicated, `NoThrow` parts dropped — no error left means a plain
-/// `ok` (a `rethrows` instance with non-throwing arguments).
+/// `throws (err) -> ok` normalized: error sums flattened, `NoThrow` parts
+/// dropped; no error left is plain `ok`.
 pub fn throws_ty(ok: HirTy, err: HirTy) -> HirTy {
     let parts: Vec<HirTy> = match HirTy::sum([err]) {
         HirTy::Sum(ps) => ps,

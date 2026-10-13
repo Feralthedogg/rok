@@ -1,6 +1,4 @@
-//! Definition identifiers and the global def table.
-//!
-//! `DefId` is assigned by name resolution (HIR lowering) and carried through HIR / MIR / codegen.
+//! Definition ids, assigned by name resolution and carried to codegen.
 
 use std::collections::HashMap;
 

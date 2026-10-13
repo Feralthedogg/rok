@@ -1,8 +1,7 @@
-//! Windows (`*-pc-windows-msvc`) executables without the MSVC tools or a
-//! Windows SDK: import libraries built in process from the mingw-w64
-//! module definitions embedded here (`windows/<arch>/*.def`, `gen.sh`),
-//! rok's own C runtime startup over the UCRT (`ucrtbase.dll`), and
-//! lld-link's options. No MSVC static library is linked.
+//! Windows (`*-pc-windows-msvc`) without MSVC or the Windows SDK: import
+//! libraries built in process from embedded mingw-w64 module definitions
+//! (`windows/<arch>/*.def`, `gen.sh`), rok's own CRT startup over UCRT,
+//! and lld-link options. No MSVC static library is linked.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -25,9 +24,8 @@ const X86_64: Defs = defs!("x86_64");
 const AARCH64: Defs = defs!("aarch64");
 const I686: Defs = defs!("i686");
 
-/// `-C subsystem=console|windows` (`/SUBSYSTEM`): a console program's
-/// entry is `mainCRTStartup`, a GUI program's `WinMainCRTStartup`, which
-/// calls `WinMain` (spec 9.5.9).
+/// `-C subsystem=console|windows` (spec 9.5.9): entry `mainCRTStartup`, or
+/// `WinMainCRTStartup` calling `WinMain`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Subsystem {
     #[default]
@@ -55,11 +53,9 @@ fn defs(t: &rokc_llvm::Target) -> Result<&'static Defs, String> {
     }
 }
 
-/// What a Windows executable links besides its objects and archives, as
-/// lld-link arguments: the startup object and the import libraries
-/// (written into `dir`), `#[link]` libraries the embedded set lacks
-/// (`<name>.lib` on the library path), the subsystem and entry point,
-/// and `/debug` (a PDB from the objects' `CodeView`) with `debug`.
+/// lld-link arguments besides objects and archives: startup object and
+/// import libraries (written to `dir`), `#[link]` libraries the embedded
+/// set lacks, subsystem and entry, and `/debug` with `debug`.
 pub fn link_args(
     t: &rokc_llvm::Target,
     native_libs: &[(String, bool)],
@@ -100,8 +96,7 @@ pub fn link_args(
     };
     a.push(format!("/subsystem:{sub}").into());
     a.push(format!("/entry:{entry}").into());
-    // The main thread reserves 8 MiB, as Linux's default rlimit and
-    // macOS give theirs and the runtime gives the threads it starts
+    // 8 MiB main stack like Linux, macOS and the runtime's own threads
     // (nested `await` runs on it, 7.8.10); Windows' default is 1 MiB.
     a.push(format!("/stack:{}", t.stack_size).into());
     // Nothing refers to the TLS directory but the loader. (`/include`
@@ -116,21 +111,16 @@ pub fn link_args(
     Ok(a)
 }
 
-/// rok's C runtime startup, in place of the MSVC CRT's static parts: the
-/// entry point (UCRT setup, the C initializers in `.CRT$XCA`..`$XCZ`,
-/// the program's `main` wrapper, `exit`), the TLS directory the loader
-/// reads (`_tls_used`; thread-locals are in `.tls$`), `_fltused`
-/// (referenced by code using floating point) and `__chkstk` (the stack
-/// probe LLVM calls for frames of a page or more; x86's C name
-/// `_chkstk`). Every C name is mangled by LLVM and lld-link (a leading
-/// `_` on x86).
+/// rok's CRT startup instead of MSVC's static parts: the entry (UCRT setup,
+/// `.CRT$XC*` initializers, `main`, `exit`), the loader's TLS directory
+/// (`_tls_used`), `_fltused`, and `__chkstk` (LLVM's probe for frames of a
+/// page or more). LLVM and lld-link mangle C names (`_` prefix on x86).
 fn startup_ir(t: &rokc_llvm::Target, subsystem: Subsystem) -> String {
     let chkstk = if t.arch == "x86" {
-        // eax: the frame size. Touches each page below the caller's esp,
-        // then moves esp down by eax itself (MSVC's x86 `_chkstk`, alias
-        // `_alloca_probe`); keeps every other register.
-        // `_tls_array`: the offset of the TEB's TLS array, whose address
-        // LLVM's thread-local accesses read through %fs.
+        // eax: frame size. Touch each page below the caller's esp, then
+        // lower esp by eax (MSVC's x86 `_chkstk` / `_alloca_probe`); other
+        // registers kept. `_tls_array`: the TEB offset of the TLS array
+        // that thread-local accesses read through %fs.
         r#"module asm ".globl __tls_array"
 module asm "__tls_array = 0x2c"
 module asm ".text"
@@ -261,12 +251,10 @@ declare i32 @main()
     )
 }
 
-/// `printf` / `fprintf` / `sprintf` / `snprintf`: UCRT exports none of
-/// them (its headers define them inline over `__stdio_common_v*printf`),
-/// so C variadic calls (spec 8.6.10) reach these, which do the same. A
-/// Windows `va_list` is a pointer on every arch. Options as the headers'
-/// defaults. Selectany COMDATs, as a C object's inline copies are: the
-/// link keeps one.
+/// `printf` / `fprintf` / `sprintf` / `snprintf`: UCRT exports none (its
+/// headers inline them over `__stdio_common_v*printf`), so C variadic
+/// calls (spec 8.6.10) reach these. `va_list` is a pointer on every
+/// Windows arch. Selectany COMDATs, like a C object's inline copies.
 fn stdio_ir(t: &rokc_llvm::Target) -> String {
     let n = format!("i{}", t.pointer_width);
     // (signature, setup, call) per function; `%va` is the va_list.

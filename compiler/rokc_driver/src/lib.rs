@@ -63,9 +63,7 @@ pub struct CompilerConfig {
     /// Files containing operator declarations to pre-load before parsing
     /// the user input. Populates the `PrecTable`.
     pub bootstrap_files: Vec<PathBuf>,
-    /// `--cfg` flags. Each entry is either a bare flag (`"test"`) or a
-    /// `key=value` pair (`"target_os=macos"`). Consulted by `#[cfg(...)]`
-    /// during the pre-HIR filter pass.
+    /// `--cfg` flags: bare (`"test"`) or `key=value` (`"target_os=macos"`).
     pub cfg_flags: Vec<String>,
     /// Test build (`rokc test`): `#[test]` functions are kept and a
     /// generated `main` runs the one named by `argv[1]`.
@@ -76,9 +74,9 @@ pub struct CompilerConfig {
     /// Keep every parsed file's AST in `CompiledProject::sources`
     /// (`rokc lint` / `rokc doc`).
     pub keep_ast: bool,
-    /// With `keep_ast`: a library stage may stand for the library's
-    /// files, its items in `CompiledProject::library` (a check's lints
-    /// and tools read items; `rokc doc` reads files).
+    /// With `keep_ast`: a library stage may stand for the library's files,
+    /// items in `CompiledProject::library` (lints and tools read items;
+    /// `rokc doc` reads files).
     pub library_items: bool,
     /// The input is a lone file outside any package (spec 4.16.8): it is
     /// the anonymous package's `main.rok` and cannot have `mod foo;`.
@@ -86,21 +84,19 @@ pub struct CompilerConfig {
     /// Source files read from these texts instead of the disk (an
     /// editor's unsaved buffers), by absolute path.
     pub buffers: Vec<(PathBuf, String)>,
-    /// Dependency packages (`--extern name=path`, spec 902.3): each
-    /// `lib.rok` is compiled with the user package and mounted at the
-    /// top-level path `name`; a `<name>.rokhir` (spec 904) is a prebuilt
-    /// one, linked from the `lib<name>.a` beside it.
+    /// Dependencies (`--extern name=path`, spec 902.3), each mounted at
+    /// top-level `name`: a `lib.rok` compiles with the package, a
+    /// `<name>.rokhir` (904) is prebuilt and links its `lib<name>.a`.
     pub externs: Vec<(String, PathBuf)>,
     /// The extern that is the package's own library (`src/lib.rok` of
     /// the `src/main.rok` being built, spec 0.3.1).
     pub own_library: Option<String>,
-    /// Build the library package as prebuilt dependency `name`: it is
-    /// mounted as `name` (as its users will see it), every body is
-    /// compiled, and `CompiledModule::interface` holds its ROKHIR.
+    /// Build as prebuilt dependency `name`: mounted as its users see it,
+    /// every body compiled, ROKHIR in `CompiledModule::interface`.
     pub lib_name: Option<String>,
-    /// Keep the library's parse for the next build with the same
-    /// library and the same user declarations that change its lexing
-    /// (`#[infix]`, meta blocks, keywords): a long-lived session (REPL).
+    /// Keep the library's parse for the next build with the same library
+    /// and lexing-relevant declarations (`#[infix]`, meta blocks,
+    /// keywords): a REPL session.
     pub cache_library: bool,
     /// The target (`--target`): `#[cfg]`, layout and code follow it.
     pub target: rokc_mir::Target,
@@ -112,18 +108,16 @@ pub struct CompilerConfig {
     /// Build the bootstrap tiers as one prebuilt library, `rok`: its
     /// ROKHIR covers every tier, its archive their concrete code.
     pub std_lib: bool,
-    /// The bootstrap tiers prebuilt (`rok.rokhir`, its `librok.a` beside
-    /// it): their concrete code is linked, not compiled. Ignored when
-    /// stale or not of these tiers.
+    /// The prebuilt bootstrap tiers (`rok.rokhir` + `librok.a`): linked, not
+    /// compiled. Ignored when stale or not these tiers.
     pub std_prebuilt: Option<PathBuf>,
     /// The package's incremental directory (spec 9.2.16): parses and
     /// lowered bodies of the last build are kept there for the next.
     pub incremental: Option<PathBuf>,
 }
 
-/// The environment `rok` runs a script from (`ROK_ENV`) and the
-/// libraries installed in it (`ROK_ENV_LIBS`, comma-separated), which
-/// the script does not see.
+/// The environment `rok` runs a script from (`ROK_ENV`) and its installed
+/// libraries (`ROK_ENV_LIBS`), which the script doesn't see.
 fn script_env() -> Option<(String, Vec<String>)> {
     let env = std::env::var("ROK_ENV").ok().filter(|e| !e.is_empty())?;
     let libs = std::env::var("ROK_ENV_LIBS").unwrap_or_default();
@@ -137,9 +131,8 @@ pub fn cfg_env(config: &CompilerConfig) -> CfgEnv {
     package_cfg(config, None)
 }
 
-/// The cfg a package of the build is parsed with: the build's, with its
-/// `feature` keys replaced by `features` when given (features are per
-/// package).
+/// The build's cfg for one package, `feature` keys replaced by `features`
+/// (features are per package).
 fn package_cfg(config: &CompilerConfig, features: Option<&[String]>) -> CfgEnv {
     let mut env = CfgEnv::new();
     cfg::add_target(&mut env, &config.target);
@@ -262,9 +255,8 @@ fn load_prebuilt(
     (config, out)
 }
 
-/// The prebuilt standard library at `path` when it holds every
-/// bootstrap root of `config` (else `None`: they compile from source),
-/// its files overlaid.
+/// The prebuilt std at `path` if it holds every bootstrap root (else
+/// compile from source), its files overlaid.
 fn load_std(path: &Path, config: &CompilerConfig) -> Option<Prebuilt> {
     let r = rokhir::Rokhir::load(path)
         .ok()
@@ -334,9 +326,8 @@ fn lib_roots(config: &CompilerConfig) -> Vec<LibRoot> {
     out
 }
 
-/// One parsed source file, as tools see it: after `#[cfg]` filtering,
-/// before the driver flattens modules (so `use` / `mod` items, nested
-/// item names and inner attributes are as written).
+/// A parsed file as tools see it: after `#[cfg]`, before modules are
+/// flattened.
 #[derive(Clone, Debug)]
 pub struct SourceFile {
     pub path: PathBuf,
@@ -356,9 +347,8 @@ pub struct SourceFile {
     pub expanded: Vec<String>,
 }
 
-/// A user module named like a dependency would merge with it: dependency
-/// names are top-level (902.3). Modules are seen through their items and
-/// `use`s (an empty one can't clash).
+/// A user module named like a dependency would merge with it (902.3).
+/// Empty modules can't clash.
 fn check_dependency_names(
     items: &[ModItem],
     uses: &[(String, rokc_core::Visibility, rokc_ast::UseTree)],
@@ -673,13 +663,11 @@ fn compile_unit_in(
 ) -> Result<CompiledProject, Vec<RokDiagnostic>> {
     let mut diags: Vec<RokDiagnostic> = Vec::new();
 
-    // Bootstrap PrecTable from operator-declaration sources, if any.
-    // The same pre-pass gathers every meta block (spec 6.8) of the
-    // library and the user package before any derive is expanded.
+    // Bootstrap the PrecTable from operator declarations; the same pre-pass
+    // gathers every meta block (spec 6.8) before derives expand.
     let roots = lib_roots(config);
-    // The library's parses are cached across builds (a REPL session)
-    // when nothing that changes them changed; never with prebuilt
-    // dependencies (their sources are an overlay) or kept ASTs.
+    // Cache the library's parses across builds (REPL) unless prebuilt deps
+    // (sources are an overlay) or kept ASTs are involved.
     let cache = config.cache_library && prebuilt.is_empty() && !config.keep_ast && lib.is_none();
     let (mut prec, mut d, mut metas) = rokc_diagnostic::time("prepass library", || {
         cached(
@@ -778,9 +766,8 @@ fn compile_unit_in(
         .collect();
     let incr = incr::current();
     let ids = incr::Ids::of(files);
-    // The library's collected stage, kept in this process or read back
-    // from the store: with it, the library's files are not parsed (but
-    // under `ROKC_INCR_VERIFY`, which lowers once more without it).
+    // The library's collected stage, kept or read back, spares parsing the
+    // library's files (except under `ROKC_INCR_VERIFY`).
     let verify = incr::verify().is_some();
     let flags = format!(
         "{:?} {lib:?} {:?} {} {} {} {} {} {:?} {} {}",
@@ -824,10 +811,8 @@ fn compile_unit_in(
             config.keep_ast,
         );
     });
-    // Walk the user package's module tree (`mod foo;` follows files
-    // alongside the entry `main.rok` / `lib.rok`) and merge every
-    // visited file's items into one `Program` so HIR sees a single
-    // flat compilation unit.
+    // Walk the package's module tree from `main.rok` / `lib.rok` and merge
+    // every file's items into one flat `Program`.
     let root_dir = path
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
@@ -876,9 +861,8 @@ fn compile_unit_in(
         diags.push(entry::stmts_outside_entry(path));
     }
     check_dependency_names(&all_items, &all_uses, &config.externs, &mut diags);
-    // Mount each library root (`rok::<tier>`, then the dependencies) and
-    // compile its items with the user's; HIR gives every module an
-    // implicit `use rok::core::**;` (stdlib spec 0.1).
+    // Mount each library root (`rok::<tier>`, then dependencies); HIR gives
+    // every module an implicit `use rok::core::**;` (stdlib 0.1).
     let key = format!(
         "{roots:?}|{}|{}|{}|{ext:?}|{user_metas}|{keywords:?}",
         incr::target_key(&cfg_env, &config.target),
@@ -969,9 +953,8 @@ fn compile_unit_in(
         &mut diags,
         files,
     );
-    // A component exporting WIT whose entry file has neither `main` nor
-    // statements is a reactor: its exports, no `wasi:cli/run` (its empty
-    // implicit `main` is never called).
+    // A WIT component whose entry has neither `main` nor statements is a
+    // reactor: exports only, no `wasi:cli/run`.
     if let Some(w) = wit_link
         .as_mut()
         .filter(|w| no_entry && w.exports.iter().any(|e| e != "cabi_realloc"))
@@ -1016,17 +999,14 @@ fn compile_unit_in(
         tops: Vec::new(),
     };
 
-    // Name resolution and type / exhaustiveness checking happen during
-    // HIR lowering (`rokc_hir::lower_full`), where every type is known.
-    // Warnings go out with the errors (a failed build still shows them).
+    // Names, types and exhaustiveness are checked in HIR lowering. Warnings
+    // go out with errors.
     if diags.iter().any(RokDiagnostic::is_error) {
         return Err(diags);
     }
 
-    // Convert raw use trees into a per-module table of resolution
-    // entries that the HIR resolver can consult during name lookup, plus
-    // a list of `pub use` re-exports the lower pass installs as fn-table
-    // aliases.
+    // Use trees → per-module resolution tables, plus the `pub use`
+    // re-exports.
     let (use_table, reexports, mut use_diags) = rokc_diagnostic::time("use table", || {
         rokc_hir::build_use_table(&all_uses, &input.packages)
     });
@@ -1150,11 +1130,9 @@ pub fn relower(m: &mut CompiledModule) {
     m.mir.link = link;
 }
 
-/// Spec 0.3.3: each package's hash is the SHA-256 (first 8 hex digits)
-/// of its source files in path order — `rok::<tier>` for each library
-/// root, `""` for the user package. A file belongs to the package whose
-/// directory is its closest ancestor. Longest prefix first (mangling
-/// picks the first match). `known`: hashes of packages already taken.
+/// Spec 0.3.3: each package's hash (`rok::<tier>` per library root, `""`
+/// for the user's) over its files; a file belongs to its closest package
+/// directory, longest prefix first. `known`: hashes already taken.
 fn package_hashes(
     user_dir: &Path,
     roots: &[LibRoot],
@@ -1203,11 +1181,9 @@ fn package_hashes(
     out
 }
 
-/// Spec 0.3.3: SHA-256 over the files in byte-wise order of their
-/// package-relative `/` paths, each as `path \0 content \0`; the first
-/// 8 hex digits.
-/// Each package's hash is computed once per process (a REPL session
-/// hashes the same library every cell), by a fast hash of its files.
+/// Spec 0.3.3: SHA-256 over files in byte order of their package-relative
+/// `/` paths, each `path \0 content \0`; the first 8 hex digits. Cached
+/// per process by a fast hash of the files (a REPL rehashes every cell).
 fn hash_package(files: &mut Vec<(String, &str)>) -> String {
     static DONE: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> =
         std::sync::Mutex::new(None);
@@ -1267,12 +1243,8 @@ fn build_prec_table(
 /// Pre-pass parses by path, with their file ids.
 type PreFiles = std::collections::HashMap<PathBuf, (u32, Prepassed)>;
 
-/// The pre-pass parses of the module trees from `roots` (path, text or
-/// the file's, directory of its submodules), by path. Breadth first:
-/// each level's files are read and registered in order (file ids stay
-/// deterministic), then lexed and parsed in parallel.
-/// `job` of each index below `n`, on a thread per core (each `stack`
-/// bytes deep); `None` for an index no thread got to.
+/// `job(i)` for each `i < n` on a thread per core (`stack` bytes each);
+/// `None` where no thread got to it.
 pub(crate) fn on_cores<T: Send>(
     n: usize,
     stack: usize,
@@ -1381,9 +1353,8 @@ fn prepass_file(
     }
 }
 
-/// File `id` lexed without extension operators and parsed: the program,
-/// and `then` of its tokens, the program and whether no diagnostic came
-/// up.
+/// Lex file `id` without extension operators, parse it, and pass `then`
+/// the tokens, program and whether it was diagnostic-free.
 fn plain_parse<T>(
     file: &str,
     source: &str,
@@ -1420,11 +1391,9 @@ fn mod_files(
     }
 }
 
-/// The pre-pass over a package's module tree from `path` (parsed by
-/// `prepass_parse` into `files`), module `module`: each module parsed
-/// without extension operators (they are what it finds), submodules
-/// first, gathering meta blocks, keywords and literals. Errors are left
-/// to the real parse.
+/// The pre-pass over a package's module tree: each module parsed without
+/// extension operators (that's what it finds), submodules first, gathering
+/// meta blocks, keywords and literals. Errors are the real parse's.
 fn prepass_tree(
     path: &Path,
     sub_dir: Option<&Path>,
@@ -1449,9 +1418,8 @@ fn prepass_tree(
     PREPASSED.with(|p| p.borrow_mut().insert(path.to_path_buf(), (id, f)));
 }
 
-/// Whether the real parse of `p` (with the build's extension operators,
-/// keywords, meta blocks, literals and cfg) would give the pre-pass's
-/// tokens and AST: the file uses none of them.
+/// Would the real parse match the pre-pass's? Yes when the file uses no
+/// extension operators, keywords, meta blocks, literals or cfg.
 fn reusable(p: &Prepassed, ext: &ExtOps, metas: &MetaCtx) -> bool {
     let sum = &p.sum;
     let prefixes: Vec<Vec<u8>> = metas
@@ -1515,10 +1483,9 @@ fn prepass_mods(
     }
 }
 
-/// The file of `mod name;` declared in a module whose submodules live in
-/// `dir` (spec 5.4.4), and the directory of its own submodules. A
-/// `#[path("f.rok")]` (5.4.6) names the file relative to `dir`; its
-/// submodules are in `f/` beside it.
+/// The file of `mod name;` in a module whose submodules live in `dir`
+/// (spec 5.4.4) and its own submodule directory. `#[path("f.rok")]`
+/// (5.4.6) is relative to `dir`, submodules in `f/`.
 fn mod_file(
     m: &rokc_ast::ModDef,
     dir: Option<&Path>,
@@ -1593,9 +1560,8 @@ fn prepass_gather(sum: &Summary, source: &str, file: &str, id: u32, metas: &mut 
     metas.literals.extend(sum.literals.iter().cloned());
 }
 
-/// Spec 1.4.2: distinct names of one package with the same confusable
-/// skeleton warn. The lexer checks each file; this checks pairs across
-/// the package's files.
+/// Spec 1.4.2: confusable names across a package's files warn (the lexer
+/// checks within a file).
 fn cross_file_confusables(idents: Vec<(String, rokc_diagnostic::Span)>) -> Vec<RokDiagnostic> {
     if idents.iter().all(|(n, _)| n.is_ascii()) {
         return Vec::new();
@@ -1629,9 +1595,8 @@ fn cross_file_confusables(idents: Vec<(String, rokc_diagnostic::Span)>) -> Vec<R
     out
 }
 
-/// The pre-pass lexed meta block bodies before the extension operators
-/// (spec 1.10.4) were known: gather them again with those operators, so
-/// a template can use `⊕`.
+/// Re-gather meta block bodies with the extension operators (spec 1.10.4)
+/// so templates can use `⊕`.
 fn relex_metas(metas: &mut PrePass, ext: &rokc_parser::ExtOps) {
     let symbols = ext.symbols();
     if symbols.is_empty() || metas.meta_files.is_empty() {
@@ -1674,9 +1639,7 @@ struct PrePass {
     literals: Vec<LiteralDef>,
 }
 
-/// A file the pre-pass parsed (without extension operators, keywords,
-/// meta blocks, literals or cfg), for the real parse to take when it
-/// is `reusable`.
+/// A pre-pass parse, for the real parse to take when `reusable`.
 struct Prepassed {
     source: String,
     sum: Summary,
@@ -1785,9 +1748,8 @@ impl Summary {
     }
 }
 
-/// What `collect_prec_table` reads of `items`: the `mod` and `trait`
-/// items (inline modules' too), and the functions and `impl` methods
-/// with an operator attribute (misplaced ones), bodies dropped.
+/// What `collect_prec_table` reads: `mod` and `trait` items and the
+/// functions / methods with an operator attribute, bodies dropped.
 fn skeleton(items: &[rokc_ast::Item]) -> Vec<rokc_ast::Item> {
     use rokc_ast::{ImplItem, Item, TraitItem};
     let op = |f: &rokc_ast::FnDef| {
@@ -1844,10 +1806,8 @@ thread_local! {
     static NO_IMPLICIT: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// A file's real parse, ready for the module tree walk: its items
-/// with `#[cfg]` applied, top-level statements, a copy for
-/// `CompilerConfig::keep_ast` (module path not yet set), and its
-/// diagnostics.
+/// A file's real parse: items with `#[cfg]` applied, top-level
+/// statements, a `keep_ast` copy, diagnostics.
 struct Parsed {
     items: Vec<rokc_ast::Item>,
     stmts: Vec<rokc_ast::Stmt>,
@@ -1859,17 +1819,14 @@ struct Parsed {
     includes: Vec<PathBuf>,
 }
 
-// An AST is as deep as its longest operator chain, and dropping or
-// cloning it recurses that deep: the threads that do get the stack of
-// rokc's main thread (address space until used).
+// AST depth follows the longest operator chain and dropping or cloning
+// recurses that deep, so those threads get the main thread's stack.
 const AST_STACK: usize = 1 << 30;
 
-/// The real parse of every pre-passed file, in parallel, into `PARSED`:
-/// a file's package (the closest of `user_dir` and the library roots'
-/// directories) picks its `metas` (user first, then each root). File ids
-/// are the pre-pass's, so the result does not depend on the order the
-/// threads finish in. Token buffers are dropped, and the `keep` copies
-/// made, on the worker threads.
+/// Real-parse every pre-passed file in parallel into `PARSED`, each with
+/// its package's `metas`. File ids are the pre-pass's, so thread order
+/// doesn't matter; token buffers are dropped and `keep` copies made on the
+/// workers.
 fn real_parse(
     incr: Option<(&incr::Incr, &incr::Ids)>,
     user_dir: &Path,
@@ -1932,10 +1889,9 @@ fn included(path: &Path, includes: &[String]) -> Vec<(PathBuf, Vec<u8>)> {
         .collect()
 }
 
-/// The real parse of pre-passed file `file_id` at `path`: the
-/// pre-pass's when `reusable`, else with the package's tables; from the
-/// incremental store when it has it (and the files it includes are
-/// unchanged).
+/// The real parse of `file_id`: the pre-pass's when `reusable`, else with
+/// the package's tables; from the incremental store when present and its
+/// includes are unchanged.
 fn cached_parse(
     path: &Path,
     file_id: u32,
@@ -1986,9 +1942,8 @@ fn cached_parse(
     })
 }
 
-/// Check the `#[cfg]` predicates of `program` (before filtering drops
-/// the items they guard), drop the items they rule out, check the other
-/// attributes, and (`keep`) copy the file.
+/// Check `#[cfg]` predicates (before filtering drops what they guard),
+/// filter, check other attributes, and copy the file if `keep`.
 fn settle(
     path: &Path,
     file_id: u32,
@@ -2094,10 +2049,8 @@ rokc_core::codec_struct!(LibParts {
 /// The parts of the library stage kept in this process, by key.
 static LIB_PARTS: std::sync::Mutex<Option<(u64, LibParts)>> = std::sync::Mutex::new(None);
 
-/// The library stage of key `k` and its parts: kept in this process, or
-/// read back from the store (and kept). The compile holds the stage it
-/// gets: a concurrent compile of another library may replace the kept
-/// one.
+/// Library stage `k`, kept in process or read back (and kept). The compile
+/// holds its copy, since a concurrent compile may replace the kept one.
 fn kept_library(
     k: u64,
     incr: Option<&incr::Incr>,
@@ -2152,12 +2105,10 @@ fn keep_library(k: u64, parts: LibParts, files: &SourceMap) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((k, parts));
 }
 
-/// The key of the library's collected stage: the build's flags, each
-/// library package's parse tables, the operators, every file of a
-/// library package (id, path, text, what it includes) and the source
-/// files under the library's directories (a module's file or folder).
-/// Files of no package (a REPL cell's `<repl>`) are views of the user's
-/// text.
+/// Key of the library's collected stage: build flags, each library
+/// package's parse tables, operators, every library file (id, path, text,
+/// includes) and the source files under the library directories. Files of
+/// no package (`<repl>`) are views of the user's text.
 fn library_key(
     flags: &str,
     roots: &[LibRoot],
@@ -2235,11 +2186,10 @@ fn source_listing(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// `parse(files)`, or (`on`) a copy of its last result when `key` and
-/// the number of files before it are the same: its files are added
-/// again, so they get the ids its spans have.
-// One entry per parse; files are not rechecked on disk
-// (`CompilerConfig::cache_library` is for a fixed library).
+/// `parse(files)`, or (`on`) a copy of its last result for the same `key`
+/// and file count, its files re-added so spans keep their ids.
+// One entry per parse; files aren't rechecked on disk (`cache_library`
+// assumes a fixed library).
 fn cached<T: Clone>(
     slot: &Cached<T>,
     on: bool,
@@ -2287,9 +2237,8 @@ struct MetaCtx {
 }
 
 impl MetaCtx {
-    /// A key of what, besides its text, a file's parse in this package
-    /// depends on: the extension operators, meta blocks, keywords,
-    /// literals and cfg.
+    /// Key of what a file's parse here depends on besides its text:
+    /// operators, meta blocks, keywords, literals, cfg.
     fn tables_key(&self, ext: &ExtOps) -> u64 {
         *self.key.get_or_init(|| {
             let mut levels: Vec<String> = ext.levels.iter().map(|l| format!("{l:?}")).collect();
@@ -2305,11 +2254,10 @@ impl MetaCtx {
     }
 }
 
-/// Spec 6.6: per package (user first, then each library root), its
-/// registered keywords and the handler's absolute path. A keyword
-/// registered twice in a build is an error (6.6.4). A standard library
-/// type keyword (`#[keyword("int")] struct Int`, stdlib 2.1) goes to
-/// every package; only the standard library may register one.
+/// Spec 6.6: per package (user first), its keywords and handler paths. A
+/// keyword registered twice is an error (6.6.4). Type keywords
+/// (`#[keyword("int")] struct Int`) apply everywhere and only the
+/// standard library may register them.
 fn keyword_tables(
     defs: Vec<KeywordDef>,
     entry: &Path,
@@ -2394,11 +2342,9 @@ fn package_of<'a>(
         .max_by_key(|(_, (dir, _))| dir.components().count())
 }
 
-/// The package index and absolute path of `handler` defined in `file`:
-/// the closest package directory owns the file; its path below that
-/// directory is the module path (`a/b.rok` → `a::b`); the build's entry
-/// file is its package's root module; `handler` may go through inline
-/// `mod`s (`inner::f`).
+/// Package index and absolute path of `handler` in `file`: the closest
+/// package directory owns it; the path below is the module path, the entry
+/// file its root; `handler` may go through inline `mod`s.
 fn handler_path(
     pkgs: &[(PathBuf, Vec<String>)],
     entry: &Path,
@@ -2420,10 +2366,9 @@ fn handler_path(
     Some((i, path))
 }
 
-/// Spec 6.5: the `#[literal]` patterns the parser matches — the
-/// libraries' (seen by every package) and the user package's own (seen
-/// by it only). The built-in shapes are dispatched by HIR instead, and
-/// an invalid pattern is reported by the real parse.
+/// Spec 6.5: the `#[literal]` patterns the parser matches: the libraries'
+/// (for everyone) and the package's own. HIR dispatches the built-in
+/// shapes; the real parse reports bad patterns.
 fn literal_tables(
     defs: Vec<LiteralDef>,
     entry: &Path,
@@ -2465,12 +2410,8 @@ fn literal_tables(
     (std::sync::Arc::new(lib), std::sync::Arc::new(user))
 }
 
-/// Walk a package's module tree starting from `body_path`. Inline
-/// `mod foo { ... }` extends the module path; file-mapped `mod foo;`
-/// recurses into `foo.rok` with the same extension.
-///
-/// Items are flattened into one list of (module path, item), names as
-/// written (HIR qualifies them).
+/// Walk a package's module tree from `body_path`, flattening items into
+/// (module path, item); names stay as written for HIR to qualify.
 #[allow(clippy::too_many_arguments)] // recursive walker threading accumulators; a context struct buys nothing
 fn collect_module_tree(
     body_path: &Path,

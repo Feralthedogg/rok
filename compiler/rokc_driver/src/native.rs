@@ -1,18 +1,13 @@
-//! Which backend generates the machine code.
-//!
-//! rok's own (`rokc_codegen_native`, no LLVM) builds `-O0` where it has
-//! the arch (`aarch64`, `x86_64`); LLVM (`toolchain`) builds the optimized
-//! code, and every other target at `-O0` too (the 32-bit ones).
+//! Backend choice. rok's own (`rokc_codegen_native`) builds `-O0` for
+//! `aarch64` and `x86_64`; LLVM builds everything else.
 
 use rokc_diagnostic::{RokDiagnostic, SourceMap};
 
 use crate::{BuildOptions, CompiledModule};
 
-/// The object of `module` from the native backend, when it builds this
-/// one (`None`: LLVM does).
-///
-/// A `-g` build for Windows goes through LLVM: the native backend
-/// writes DWARF, Windows debuggers read `CodeView`.
+/// The native backend's object for `module`, or `None` when LLVM builds it
+/// (also any Windows `-g` build: we write DWARF, Windows debuggers read
+/// `CodeView`).
 pub fn object(
     module: &CompiledModule,
     sources: &SourceMap,
@@ -56,9 +51,8 @@ pub fn jit(opts: &BuildOptions) -> bool {
     crate::repl_host() && wanted(opts)
 }
 
-/// A REPL cell (`opts.repl`) as a native object, compiling only the
-/// functions the session does not have (decided on the MLIR text, like
-/// for LLVM), and what codegen says about it.
+/// A REPL cell as a native object, compiling only functions the session
+/// lacks (decided on the MLIR text, as for LLVM).
 pub fn cell_object(
     module: &CompiledModule,
     sources: &SourceMap,
@@ -82,9 +76,9 @@ pub fn cell_object(
     Ok((o.object, out))
 }
 
-/// `-O0` builds (unless `-C backend=llvm` / `ROK_BACKEND=llvm`), or
-/// `-C backend=native` at any level; and nothing only LLVM does: MLIR
-/// plugins and passes, profile-guided optimization.
+/// `-O0` (unless `-C backend=llvm` / `ROK_BACKEND=llvm`) or
+/// `-C backend=native`, and nothing LLVM-only: MLIR plugins and passes,
+/// PGO.
 fn wanted(opts: &BuildOptions) -> bool {
     let native = match opts.backend.as_deref() {
         Some("native") => true,

@@ -1,6 +1,6 @@
 //! MIR → MLIR text in upstream dialects (`func`, `arith`, `cf`, `llvm`;
-//! user `__mlir_op` regions may bring more). The MLIR passes, the translation
-//! to LLVM IR and the code generation follow (`rokc_llvm`).
+//! `__mlir_op` may add more). Passes, LLVM IR and codegen follow in
+//! `rokc_llvm`.
 
 pub mod abi;
 mod alias;
@@ -35,12 +35,9 @@ pub struct MlirOutput {
     pub reused: usize,
 }
 
-/// One REPL cell (`rokc repl`).
-///
-/// Code the session host links into a process whose runtime is
-/// already up. Instead of a C `main`,
-/// `rok_repl_cell()` registers the cell's GC types and roots and runs
-/// the user `main`.
+/// One REPL cell: code the host links into a process whose runtime is
+/// up. Instead of a C `main`, `rok_repl_cell()` registers its GC types and
+/// roots and runs the user `main`.
 #[derive(Clone, Debug, Default)]
 pub struct ReplCell {
     /// The `ScanTable`s earlier cells registered (type id

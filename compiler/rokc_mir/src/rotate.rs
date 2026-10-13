@@ -1,13 +1,12 @@
 //! Loops and loop rotation. A counted loop whose header tests its exit
-//! (a range `for`, `while i < n` with `n` fixed) is rotated: its back
-//! edges go to a copy of the header, so the body is the loop header and
-//! runs at least once per entry, and the test is at the bottom. LLVM's own rotation leaves a
-//! loop alone when its latch already exits (the back-edge poll's yield
-//! path), and a load hoisted out of an unrotated body is speculated,
-//! which drops its TBAA tag: rotated, a length load leaves the loop with
-//! its tag, so it stays valid across the poll's yield (`REF_ONLY_CALLS`)
-//! and leaves the enclosing loop too. The counter's step moves into the
-//! bottom test (`sink_step`).
+//! (a range `for`, `while i < n` with `n` fixed) is rotated: back edges
+//! go to a copy of the header, so the test sits at the bottom. LLVM's
+//! own rotation skips a loop whose latch already exits (the back-edge
+//! poll's yield path), and a load hoisted out of an unrotated body is
+//! speculated and loses its TBAA tag; rotated, a length load leaves the
+//! loop with its tag and stays valid across the poll's yield
+//! (`REF_ONLY_CALLS`). The counter's step moves into the bottom test
+//! (`sink_step`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -584,6 +583,7 @@ mod tests {
             name: "f".into(),
             facts: rokc_ir_common::FnFacts::default(),
             strips: Vec::new(),
+            pins: Vec::new(),
             params: vec![LocalId(0), LocalId(1)],
             locals: (0..3)
                 .map(|i| LocalDecl {

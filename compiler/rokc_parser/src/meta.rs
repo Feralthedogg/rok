@@ -1,27 +1,17 @@
 //! User meta blocks (refs-lang 6.8 / 6.9): `#[impl_derive(Tr)]`,
-//! `#[impl_derive_attribute(Tr, attr)]` (`@derive { .. }`) and
-//! `#[impl_attribute(name)]` (`@attribute { .. }`).
+//! `#[impl_derive_attribute(Tr, attr)]` and `#[impl_attribute(name)]`.
 //!
-//! A meta block's body is kept as tokens. The driver's pre-pass gathers
-//! every block of the library and user package into a `MetaTable`
-//! (`collect_meta_blocks`) before the real parse, the same way the
-//! operator pre-pass feeds `ExtOps`. The parser then expands a
-//! `#[derive(Tr)]` / `#[name]` use by substituting the template tokens
-//! (`@Self`, `@for_fields`, `@field.name`, ...) against the item and
-//! parsing the result (fixed-point: generated items expand again).
+//! Bodies stay tokens. A driver pre-pass collects them into a `MetaTable`
+//! (`collect_meta_blocks`) before the real parse; a use then expands by
+//! substituting template tokens (`@Self`, `@for_fields`, `@field.name`,
+//! ...) and parsing the result, to a fixpoint. Tokens keep their origin's
+//! spans; errors point at the template with a label at the use.
 //!
-//! Template tokens keep their template spans, tokens taken from the
-//! item keep the item's spans; expansion errors point at the template
-//! with a secondary label at the use.
-//!
-//! Hygiene (6.9.8): locals the template introduces (`let x`, `for x`,
-//! closure params) are renamed `x__meta`, so they neither capture nor
-//! shadow names the item brings in (`@item.body`, `@item.params`,
-//! `let @field.name = ..`); enum payloads are bound to generated names.
+//! Hygiene (6.9.8): template locals are renamed `x__meta` so they neither
+//! capture nor shadow the item's names; enum payloads get generated names.
 
-// The expander indexes token slices (`k`, `j`, `b`) and its template
-// dispatch is one flat match; `meta_block` distinguishes "not a block"
-// from "a malformed block".
+// Slice indexing and one flat template match; `meta_block` tells "not a
+// block" from "a malformed block".
 #![allow(
     clippy::many_single_char_names,
     clippy::cognitive_complexity,
@@ -70,9 +60,8 @@ pub struct MetaDef {
 }
 
 impl MetaDef {
-    /// Place the block in `package` (its mount path, `""` for the one
-    /// being built): a `pkg::` path in the body names that package
-    /// wherever the block expands (6.9.8), as the root `pkg@<package>`.
+    /// Mount path of the block's package (`""`: the one being built); its
+    /// `pkg::` paths keep naming it wherever the block expands (6.9.8).
     pub fn set_package(&mut self, package: &str) {
         package.clone_into(&mut self.package);
         for k in 0..self.body.len() {
@@ -145,10 +134,8 @@ impl MetaTable {
         self.defs.iter().any(|d| d.name == name)
     }
 
-    /// Whether a meta block defines attribute `name`: an
-    /// `#[impl_attribute(name)]`, the field attribute of an
-    /// `#[impl_derive_attribute(D, name)]`, or a field attribute a
-    /// template tests (`@field.has_attr(name)`, 6.9.3).
+    /// Whether some meta block defines attribute `name` (as the attribute,
+    /// a derive's field attribute, or one tested by `@field.has_attr`).
     #[must_use]
     pub fn knows_attribute(&self, name: &str) -> bool {
         let tested = |d: &MetaDef| {
@@ -1161,9 +1148,8 @@ fn fn_parts(item: &[Token]) -> Option<(Vec<Token>, Vec<Token>, Vec<Token>)> {
 }
 
 impl Parser<'_> {
-    /// `#[cfg(..)] mod m {`: steps into the body and returns the index
-    /// of its closing `}` and the `cfg`s. Anything else: `None`, nothing
-    /// consumed.
+    /// `#[cfg(..)] mod m {`: enter it; its closing `}` index and `cfg`s.
+    /// `None` consumes nothing.
     fn cfg_mod_open(&mut self) -> Option<(usize, Vec<Attribute>)> {
         if self.peek() != &TokenKind::HashLBracket {
             return None;
@@ -1190,9 +1176,8 @@ impl Parser<'_> {
         Some((end, cfg))
     }
 
-    /// At `#[..] pub? @derive { .. }`: consume the meta block. `None`
-    /// (position unchanged) when the attributes aren't a meta block;
-    /// `Some(None)` for a malformed one (reported).
+    /// Consume a meta block at `#[..] pub? @derive { .. }`. `None`: not one
+    /// (nothing consumed); `Some(None)`: malformed (reported).
     pub(crate) fn meta_block(&mut self) -> Option<Option<MetaDef>> {
         if self.peek() != &TokenKind::HashLBracket {
             return None;

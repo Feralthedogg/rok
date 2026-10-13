@@ -4,10 +4,8 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Match an AST parameter type against a concrete `HirTy` (the call
-/// argument's inferred type) to discover bindings for generic type
-/// parameters. Walks structurally — `[T; N]` against `[i32; 4]` binds
-/// `T → i32`, etc.
+/// Match an AST parameter type against an argument's `HirTy` to bind
+/// generic parameters (`[T; N]` against `[i32; 4]` binds `T → i32`).
 pub(super) fn unify_param_ty_with(
     param_ty: &rokc_ast::Ty,
     arg_ty: &HirTy,
@@ -22,9 +20,8 @@ pub(super) fn unify_param_ty_with(
         (rokc_ast::TyKind::Path(p), _)
             if p.segments.len() == 1 && generic_names.contains(&p.segments[0].name) =>
         {
-            // First binding wins; a conflicting later argument surfaces
-            // as an argument type mismatch at the call site. `!` (a
-            // diverging argument) fits any `T`, so a later one rebinds.
+            // First binding wins; a conflict surfaces as an argument
+            // mismatch. `!` fits any `T`, so a later argument rebinds it.
             let b = subst
                 .entry(p.segments[0].name.clone())
                 .or_insert_with(|| arg_ty.clone());
@@ -79,10 +76,9 @@ pub(super) fn unify_param_ty_with(
                 rec(p, a);
             }
         }
-        // Sums are sets (spec 2.6.4): the members the parameter names
-        // outright (`none`, `str`) cancel out, and a lone type parameter
-        // takes what is left — `T | none` against `i32 | str | none`
-        // binds `T = i32 | str`.
+        // Sums are sets (spec 2.6.4): members named outright cancel and a
+        // lone parameter takes the rest (`T | none` against
+        // `i32 | str | none` binds `T = i32 | str`).
         (rokc_ast::TyKind::Sum(parts), HirTy::Sum(arg_parts)) => {
             let is_param = |p: &rokc_ast::Ty| {
                 matches!(&p.kind, rokc_ast::TyKind::Path(path)
@@ -257,11 +253,8 @@ pub(super) fn ty_size(ty: &HirTy) -> usize {
     }
 }
 
-/// Look up or generate a specialized version of a generic function.
-/// Returns `(specialized_fn_id, return_type)` on success; `None` after
-/// reporting why the call can't be instantiated. Type-parameter
-/// substitution is inferred by zipping the call's lowered argument types
-/// with the AST parameter type ascriptions.
+/// Find or make the instance of a generic function for the call's lowered
+/// argument types; `(fn id, return type)`, or `None` after reporting.
 pub(super) fn monomorphize(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
@@ -315,10 +308,8 @@ pub(super) fn monomorphize_on(
     for (i, arg) in args.iter().enumerate() {
         bind_from_arg(ctx, fn_def, self_ty, i, &arg.ty, &mut subst);
     }
-    // A type param the arguments leave open (one that only appears in
-    // the return type, or only met `!`) binds from the call's expected
-    // type: the `let` annotation, the parameter slot, the enclosing
-    // `return`.
+    // A parameter the arguments leave open (only in the return type, or
+    // only met `!`) binds from the expected type.
     if let Some(expected) = ctx.current_expected().filter(|t| **t != HirTy::Unknown) {
         let names: std::collections::HashSet<String> = fn_def
             .generics
@@ -516,9 +507,8 @@ pub(super) fn monomorphize_on(
         },
     );
 
-    // By stable keys (types by name, not by this build's ids): the
-    // instance's symbol is the same in every build that makes it (a
-    // prebuilt package's users, a REPL session's cells).
+    // Stable keys (types by name) so the symbol is the same in every build
+    // that makes it (prebuilt users, REPL cells).
     let mono_args = subst_tys
         .iter()
         .map(HirTy::stable_key)
@@ -566,9 +556,8 @@ pub(super) fn monomorphize_on(
     Some((new_id, ret_ty))
 }
 
-/// Each `T: Bound` (or `where` predicate, `where Item: Ord` on a trait
-/// default method too) of a call of `fn_def` under `subst` needs an
-/// impl for the bound type.
+/// Each `T: Bound` and `where` predicate of a call of `fn_def` under
+/// `subst` needs an impl.
 fn check_call_bounds(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
@@ -716,9 +705,8 @@ fn var_instance(
     (id, ret_ty)
 }
 
-/// Lower one function body. `subst` is the type-parameter substitution
-/// of a monomorphization (empty otherwise); `module` is where the
-/// body's names resolve.
+/// Lower one body; `subst` is the instance's substitution (empty if not
+/// generic), `module` where its names resolve.
 pub(super) fn lower_fn_inner(
     env: &Env<'_>,
     fn_def: &FnDef,
@@ -758,10 +746,8 @@ pub(super) fn lower_fn_inner(
     lower_fn_with(env, fn_def, id, name, self_ty, module, subst, ret, None)
 }
 
-/// Spec 4.1.3: no `-> T`, and the body has a value (a trailing
-/// expression or a `return v`) or may diverge on every path (4.3.7,
-/// `may_diverge`): the return type comes from the body. `main` keeps
-/// `()`.
+/// Spec 4.1.3: without `-> T`, the return type comes from the body when it
+/// has a value or may diverge everywhere (4.3.7). `main` keeps `()`.
 pub(super) fn infers_ret(f: &FnDef, may_diverge: impl Fn(rokc_diagnostic::Span) -> bool) -> bool {
     struct V {
         depth: u32,
@@ -874,11 +860,10 @@ fn with_ok(declared: HirTy, ok: HirTy) -> HirTy {
     }
 }
 
-/// Lower the body once with an open return type and join the types of
-/// its `return` values and trailing value (spec 4.3.4: one path, its
-/// type; several, their sum). With `keep`, a body whose paths agree on
-/// one type (no `throws`, no `ref` parameter) is final as lowered;
-/// otherwise the lowering is rolled back.
+/// Lower the body with an open return type and join its `return` and tail
+/// types (spec 4.3.4: one path, its type; several, their sum). With
+/// `keep`, a body whose paths agree (no `throws`, no `ref` parameter) is
+/// final as lowered; otherwise it is rolled back.
 #[allow(clippy::too_many_arguments)]
 fn infer_ret_of(
     env: &Env<'_>,
@@ -1197,11 +1182,9 @@ pub(super) fn all_defaulted(generics: &rokc_ast::Generics) -> bool {
     })
 }
 
-/// Spec 2.10.5: trailing type arguments left out take their defaults,
-/// each resolved by `res` under the arguments before it. Then `args`
-/// must fit `generics` (of `name`): a list too long is cut, one too
-/// short padded with `Unknown` (which fits anything, so the instance's
-/// uses add no errors), and the error (message, help) comes back.
+/// Spec 2.10.5: omitted trailing type arguments take their defaults. Then
+/// `args` must fit `generics`: too long is cut, too short padded with
+/// `Unknown` (so uses add no errors), and the error comes back.
 pub(super) fn fit_args(
     name: &str,
     generics: &rokc_ast::Generics,
@@ -1320,9 +1303,8 @@ fn param_name(p: &rokc_ast::GenericParam) -> &str {
     name
 }
 
-/// Spec 2.11.3: a const generic argument `v` (tagged `char` when it is
-/// one) for parameter `name: ty`, range-checked and tagged with the
-/// parameter's type (integers, `bool`, `char`, `c_char`).
+/// Spec 2.11.3: const argument `v` for `name: ty`, range-checked and
+/// tagged with the parameter's type.
 pub(super) fn typed_const(
     ctx: &LowerCtx<'_>,
     name: &str,
@@ -1452,9 +1434,8 @@ pub(super) fn lower_fn(
     method: Option<(HirTy, String)>,
     module: String,
 ) -> HirFunction {
-    // Methods are named by their `fn_table` key (`Ty__m`, see
-    // `method_key`) so impls of the same method name don't collide as
-    // MLIR symbols.
+    // Methods are named by `fn_table` key (`Ty__m`) so same-named methods
+    // don't collide as MLIR symbols.
     let (method_self_ty, name) = match method {
         Some((ty, key)) => (Some(ty), key),
         None => (None, fn_def.name.clone()),
@@ -1470,10 +1451,8 @@ pub(super) fn lower_fn(
     )
 }
 
-/// The parameter and return types of declaration `i` (its signature's
-/// other parts, `base`, read off the AST at registration), resolved as
-/// its body resolves them: in its module, with `Self` and its trait
-/// parameters bound and its bounds known.
+/// Parameter and return types of declaration `i` resolved as its body
+/// sees them: in its module, `Self` and trait parameters bound.
 pub(super) fn decl_sig(env: &Env<'_>, i: usize, base: &FnSig) -> FnSig {
     let no_subst = HashMap::new();
     let id = FunctionId(u32::try_from(i).expect("FunctionId overflow"));
@@ -1541,9 +1520,8 @@ pub(super) fn lower_param(ctx: &mut LowerCtx<'_>, p: &Param) -> HirParam {
     }
 }
 
-/// Lower a function body and check its value against the return type:
-/// the trailing expression must match, and a non-unit function without
-/// a trailing value must not fall off the end.
+/// Lower a body against its return type: the tail must match, and a
+/// non-unit function must not fall off the end.
 pub(super) fn lower_fn_body(ctx: &mut LowerCtx<'_>, b: &Block, fn_name: &str) -> HirBlock {
     ctx.push_expected(ctx.fn_ret_ty.clone());
     if ctx.uncaught_in_main {
@@ -1638,12 +1616,10 @@ fn check_fn_body(ctx: &mut LowerCtx<'_>, mut block: HirBlock, fn_name: &str) -> 
     block
 }
 
-/// A function with `ref` parameters really returns `ret` packed with
-/// their final values: `(ret, r1, ..)`, without a unit `ret`, and a
-/// single field unwrapped (`ref self` on a unit method returns `Self`).
-/// A throwing function's `ret` is its whole carrier: the `ref` values
-/// sit beside it, so they come back on the error path too (spec 4.7)
-/// while the carrier's payload overlays ok and error (spec 8.6.5).
+/// A function with `ref` parameters returns `(ret, r1, ..)` (no unit `ret`;
+/// one field unwrapped). A throwing function's whole carrier is `ret`, so
+/// `ref` values come back on the error path too (spec 4.7) while the
+/// payload overlays ok and error (8.6.5).
 pub(super) fn ref_packed(ret: &HirTy, refs: &[HirTy]) -> HirTy {
     if refs.is_empty() {
         return ret.clone();
@@ -1703,13 +1679,10 @@ pub(super) fn ref_pack(ctx: &LowerCtx<'_>, v: HirExpr, span: rokc_diagnostic::Sp
     }
 }
 
-/// The call of a function with `ref` parameters (`call` returns the
-/// packed values, `out` its shape): each `ref` parameter's final value
-/// goes back into its argument place (`places`, by parameter index: a
-/// local, a field chain on one, or a `[ref]` cell), the value comes
-/// out. A throwing callee's carrier is packed whole (`ref_packed`), so
-/// the values are written back before a thrown error moves on, as with
-/// a real reference.
+/// Call a function with `ref` parameters: write each final `ref` value back
+/// into its argument place (`places` by parameter index: a local, a field
+/// chain, a `[ref]` cell) and yield the value. A throwing callee's values
+/// are written back before its error moves on, as with real references.
 pub(super) fn ref_unpack(
     ctx: &mut LowerCtx<'_>,
     call: HirExpr,

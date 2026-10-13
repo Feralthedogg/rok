@@ -330,13 +330,11 @@ impl Flow {
 /// The locals `tracked` accepts that hold a value while a collection can
 /// run; only these need a GC root.
 ///
-/// That is at the function's entry when `entry` (its arguments; an
-/// entry poll), at the end of a
-/// block `poll` accepts (a back-edge poll, before the terminator), and
-/// during a statement `safepoint` takes for one (live after it, or one
-/// of its operands when `safepoint` says the statement reads them after
-/// its own allocation: a runtime function does, a rok function roots
-/// what it still needs itself).
+/// Collections run at entry when `entry`
+/// (an entry poll), at the end of a block `poll` accepts (a back-edge
+/// poll), and during a statement `safepoint` takes for one: its live-out
+/// locals, plus its operands when it reads them after allocating (a
+/// runtime function; a rok callee roots what it needs itself).
 pub fn live_across(
     f: &MirFunction,
     tracked: impl Fn(LocalId) -> bool,
@@ -345,6 +343,7 @@ pub fn live_across(
     entry: bool,
 ) -> HashSet<LocalId> {
     let mut always: HashSet<LocalId> = addressed(f);
+    always.extend(&f.pins);
     always.retain(|&l| tracked(l));
     let flow = Flow::new(f, tracked);
     let n = flow.dense.ids.len();
@@ -395,8 +394,10 @@ pub fn deaths(f: &MirFunction, tracked: impl Fn(LocalId) -> bool) -> Deaths {
             .map(|b| vec![Vec::new(); b.stmts.len()])
             .collect(),
     };
-    let addressed = addressed(f);
-    let flow = Flow::new(f, |l| tracked(l) && !addressed.contains(&l));
+    // Their roots hold until the scope ends (`StorageDead`).
+    let mut held = addressed(f);
+    held.extend(&f.pins);
+    let flow = Flow::new(f, |l| tracked(l) && !held.contains(&l));
     let Flow {
         dense,
         succs,
@@ -465,6 +466,7 @@ mod tests {
             name: "f".into(),
             facts: rokc_ir_common::FnFacts::default(),
             strips: Vec::new(),
+            pins: Vec::new(),
             params: vec![LocalId(1), LocalId(3)],
             locals: (0..5).map(local).collect(),
             blocks: vec![

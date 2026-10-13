@@ -1,20 +1,13 @@
-//! Compile-time evaluation (spec 5.2, 6.5.8): an interpreter over
-//! lowered HIR.
+//! Compile-time evaluation (spec 5.2, 6.5.8): an interpreter over HIR for
+//! consts, array lengths, const generic arguments, static initializers and
+//! `const fn` literal handlers. Callees come from `Bodies`: lowered on
+//! demand with a context (`CtxBodies`), none in the pre-body pass
+//! (`syntactic_int`).
 //!
-//! Const items, array lengths, const generic arguments, static
-//! initializers and `const fn` literal handlers all run through `Interp`.
-//! Callee bodies come from a `Bodies` provider: with a lowering context
-//! they are lowered on demand (`CtxBodies`); the pre-pass front-end
-//! (`syntactic_int`, item signatures before any body exists) has none.
-//!
-//! Integers are `i128` tagged with their primitive; every result is
-//! range-checked, so overflow, division by zero, bad shifts and failed
-//! float-to-int casts are errors, never wrapped (the `wrapping_*`
-//! intrinsics wrap). Loops and calls are bounded by `STEP_LIMIT` and
-//! `DEPTH_LIMIT`.
-//!
-//! Only a `const fn` is entered (spec 5.2.5), standard library ones
-//! included; lifted closures belong to the function that defines them.
+//! Integers are `i128` tagged with their primitive and range-checked:
+//! overflow, division by zero, bad shifts and failed float-to-int casts are
+//! errors (only `wrapping_*` wraps). `STEP_LIMIT` / `DEPTH_LIMIT` bound
+//! loops and calls. Only `const fn`s are entered (spec 5.2.5).
 
 // `a` / `b` operands, `p` their primitive, `f` the frame, `v` a value.
 #![allow(clippy::many_single_char_names)]
@@ -498,9 +491,8 @@ impl<'b> Interp<'b> {
                 let v = self.expr(operand, f)?;
                 unop(*op, v, span)
             }
-            // A buffer here holds elements, not bytes: its byte-size
-            // check has nothing to check, and its size argument (a type
-            // layout) is never evaluated.
+            // A buffer holds elements, not bytes: no byte-size check, and its
+            // layout argument is never evaluated.
             K::Call { callee, args } if self.is_buf_len(*callee) => match args.first() {
                 Some(len) => self.expr(len, f),
                 None => Err(Stop::Poisoned),
@@ -899,9 +891,8 @@ impl<'b> Interp<'b> {
     }
 }
 
-/// The byte size of a primitive, `()` or an array of them: the target
-/// layout (`rokc_mir::Target::size_align`) needs no more than the
-/// pointer width there.
+/// Byte size of a primitive, `()` or an array of them; only the pointer
+/// width matters.
 fn plain_size(ty: &HirTy) -> Option<u32> {
     let word = pointer_width() / 8;
     Some(match ty {
@@ -913,12 +904,10 @@ fn plain_size(ty: &HirTy) -> Option<u32> {
     })
 }
 
-/// The runtime functions computed at compile time: the pure ones
-/// `rok::core` is built on, by the runtime's own code where it is more
-/// than a line (`fmt_text`, `str_ops`, `unicode`, shared by `#[path]`),
-/// so a constant equals the run-time result (5.2.5). libm's inexact
-/// functions are not here (the target's libm may round differently),
-/// nor the `int` kernels (`rok_nat_*`).
+/// Runtime functions evaluable at compile time: the pure ones core uses,
+/// sharing the runtime's own code where nontrivial (`#[path]`), so a
+/// constant equals the run-time result (5.2.5). Not libm's inexact ones
+/// (the target's may round differently) nor the `int` kernels.
 const EVALUABLE: &[&str] = &[
     "rok_str_len",
     "rok_str_char_count",
@@ -1362,10 +1351,8 @@ fn bad_spec(spec: &str, why: &str) -> Ext {
     Ext::Panic(m)
 }
 
-/// Spec 5.2.5: a `const fn` calls only `const fn`s and reads no
-/// `static`, whether or not it is ever evaluated. Checks the package's
-/// lowered `const fn` bodies (`fns`); a lifted closure called there is
-/// checked as part of its definer.
+/// Spec 5.2.5: a `const fn` calls only `const fn`s and reads no `static`,
+/// evaluated or not. Lifted closures are checked with their definer.
 pub(super) fn check_const_fns(env: &Env<'_>, fns: &[&HirFunction]) {
     let Some(first) = fns.first() else { return };
     let no_subst = HashMap::new();
@@ -1904,10 +1891,9 @@ pub(super) fn constant(ctx: &LowerCtx<'_>, what: &str, v: HirExpr) -> HirExpr {
     }
 }
 
-/// A `#[literal]` handler call (spec 6.5.8): the outermost call to a
-/// `const fn` in `h` runs now when its arguments are constants. A
-/// failure inside the handler (a panic, a `throw`) is a compile error
-/// at the literal.
+/// A `#[literal]` handler call (spec 6.5.8) runs now when its arguments
+/// are constants; a panic or `throw` inside is a compile error at the
+/// literal.
 pub(super) fn fold_literal(ctx: &LowerCtx<'_>, h: &mut HirExpr, at: Span) {
     if let HirExprKind::Call { callee, .. } = &h.kind {
         if is_const_fn(ctx, *callee) {
@@ -2090,9 +2076,6 @@ pub(super) fn static_init(env: &Env<'_>, init_fn: &HirFunction) -> Option<ConstV
     }
 }
 
-/// Pre-pass integer constant (item signatures, before any body is
-/// lowered): literals, names `lookup` knows, unary `-` and `+ - * / %
-/// << >> & | ^` over them, as `i64` on the same evaluator.
 /// `a::b::C` as written.
 fn path_text(p: &rokc_ast::Path) -> String {
     p.segments

@@ -1,7 +1,6 @@
-//! Stones: packages published to a registry index, a git repository laid
-//! out like crates.io-index (`rokstones.io-index`). One file per stone,
-//! one `Stone { .. }` ROKON value per line, one line per version, oldest
-//! first:
+//! Stones: packages on a registry index, a git repository laid out like
+//! crates.io-index. One file per stone, one `Stone { .. }` line per
+//! version, oldest first:
 //!
 //! ```text
 //! config.rokon     Config { api: "https://rokstones.io" }   the registry API
@@ -13,14 +12,10 @@
 //! Stone { name: "geom", vers: "0.3.1", deps: [{ name: "num", req: "^1.2", kind: "normal" }], source: Dep::git("https://github.com/o/geom", rev: "<commit>"), cksum: "<tree>", yanked: false }
 //! ```
 //!
-//! A stone with features has `features: { "name": [..] }` after `deps`,
-//! and a dependency `optional: true`, `features: [..]` and
-//! `default_features: false` (each only when not the default), as in
-//! `rok.rokon`.
-//!
-//! Sources are not uploaded: `source` names a git commit, and `cksum` is
-//! that commit's tree hash, checked after the checkout. A dependency
-//! without `registry` is on the same index.
+//! Feature fields are written only where not the default, as in
+//! `rok.rokon`. Sources are not uploaded: `source` is a git commit and
+//! `cksum` its tree hash, checked after checkout. A dependency without
+//! `registry` is on the same index.
 
 // `HEAD^{tree}` is git revision syntax, not a format argument.
 #![allow(clippy::literal_string_with_formatting_args)]
@@ -240,8 +235,7 @@ fn entry(d: Decoder<'_>) -> Result<Entry, String> {
     })
 }
 
-/// The entries of one index file (`file` names it in errors); blank lines
-/// are skipped.
+/// Entries of one index file; blank lines skipped.
 pub fn parse_file(text: &str, file: &str) -> Result<Vec<Entry>, String> {
     let mut out = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -319,8 +313,7 @@ impl Entry {
 }
 
 /// The file of `name` under `prefix` (`""` / `"native/"`) in the cached
-/// index `url`, and its text, if any. `a_b` finds `a-b` (and back): one
-/// name, two spellings.
+/// index, and its text. `a_b` finds `a-b` and back.
 pub fn index_file(
     cache: &Cache,
     url: &str,
@@ -340,8 +333,7 @@ pub fn index_file(
     Ok(None)
 }
 
-/// The versions of stone `name` in the cached index `url` (none when it
-/// has no such stone).
+/// Versions of stone `name` in the cached index (none if absent).
 pub fn entries(cache: &Cache, url: &str, name: &str) -> Result<Vec<Entry>, String> {
     let Some((file, text)) = index_file(cache, url, "", name)? else {
         return Ok(Vec::new());
@@ -393,9 +385,8 @@ pub fn open(home: &Path, url: &str, offline: bool, quiet: bool) -> Result<Cache,
     Ok(cache)
 }
 
-/// The index entry for the package at `dir` (its `rok.rokon`): its git
-/// remote `origin`, HEAD commit and tree. The work tree must be clean and
-/// the package at the repository's root.
+/// The index entry for the package at `dir`: `origin`, HEAD commit and
+/// tree. The tree must be clean, the package at the repository root.
 pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
     let name = m.name.clone().ok_or("rok.rokon has no `name`")?;
     manifest::check_name(&name)?;
@@ -517,8 +508,8 @@ pub fn commit(index: &Path, file: &Path, text: &str, msg: &str) -> Result<(), St
     git::run(index, &["commit", "--quiet", "-m", msg, "--", &rel]).map(drop)
 }
 
-/// Add `e` to the index checkout `index` (checked against what is there);
-/// with `write`, as a new commit. The file it goes to.
+/// Add `e` to the index checkout (checked); with `write`, as a commit.
+/// Returns the file.
 pub fn publish(index: &Path, e: &Entry, write: bool) -> Result<PathBuf, String> {
     let (file, text) = local(index, &path(&e.name))?;
     let have = parse_file(&text, &file.display().to_string())?;
@@ -544,10 +535,8 @@ pub fn publish(index: &Path, e: &Entry, write: bool) -> Result<PathBuf, String> 
     Ok(file)
 }
 
-/// Fail when the index checkout `index` has a name under `prefix` (or
-/// in `have`, the target file's) that is `name` spelled otherwise: `a-b`
-/// and `a_b` (or another case) are one package, but each spelling has
-/// its own file.
+/// Fail when the checkout has `name` under another spelling (`a-b`,
+/// `a_b`, case): one package, but each spelling would get its own file.
 pub fn taken(
     index: &Path,
     prefix: &str,
@@ -574,8 +563,7 @@ pub fn taken(
     }
 }
 
-/// Set `yanked` of `name`'s version `vers` in the index checkout `index`,
-/// as a new commit: a stone's, or with `native`, a native package's.
+/// Set `yanked` on `name` `vers` in the index checkout, as a commit.
 pub fn yank(
     index: &Path,
     name: &str,
@@ -643,8 +631,7 @@ pub fn check_token(token: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The token for the registry API: `$ROK_REGISTRY_TOKEN`, else
-/// `rok login`'s.
+/// `$ROK_REGISTRY_TOKEN`, else `rok login`'s.
 pub fn token(home: &Path) -> Result<String, String> {
     pick_token(std::env::var("ROK_REGISTRY_TOKEN").ok(), home)
 }
@@ -672,8 +659,7 @@ fn pick_token(env: Option<String>, home: &Path) -> Result<String, String> {
     Ok(t)
 }
 
-/// Keep `token` in `$ROK_HOME/credentials.rokon` (mode 0600 on Unix);
-/// the file.
+/// Store `token` in `$ROK_HOME/credentials.rokon` (0600 on Unix).
 pub fn save_token(home: &Path, token: &str) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = credentials(home);
@@ -704,9 +690,8 @@ pub fn logout(home: &Path) -> Result<bool, String> {
     }
 }
 
-/// The registry API of the index `url`: `api` of its `config.rokon`
-/// (`Config { api: "https://.." }`), without a trailing `/`. HTTPS only,
-/// except on the loopback host.
+/// The index's registry API (`config.rokon` `api`, no trailing `/`).
+/// HTTPS only, except loopback.
 pub fn api(home: &Path, url: &str, quiet: bool) -> Result<String, String> {
     let cache = open(home, url, false, quiet)?;
     let text = cache.show(url, "config.rokon")?.ok_or_else(|| {
@@ -731,10 +716,9 @@ fn check_api(a: &str) -> Result<(), String> {
     }
 }
 
-/// `{api}{path}` with `token` as a bearer token: `GET`, or `POST` of
-/// `body`. The reply's text on a 2xx status; else an error, the reply's
-/// `Error { message }` if it has one. The token reaches `curl` on stdin,
-/// never on its command line, and is stripped from errors.
+/// `GET` (or `POST` of `body`) `{api}{path}` with a bearer token; the
+/// reply on 2xx, else its `Error { message }`. The token goes to curl on
+/// stdin, never argv, and is stripped from errors.
 fn call(api: &str, path: &str, token: &str, body: Option<&str>) -> Result<String, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -792,8 +776,7 @@ fn call(api: &str, path: &str, token: &str, body: Option<&str>) -> Result<String
     }))
 }
 
-/// The account `token` belongs to at `api`: its login, and whether it
-/// may publish.
+/// The login `token` belongs to, and whether it may publish.
 pub fn me(api: &str, token: &str) -> Result<(String, bool), String> {
     let text = call(api, "/api/v1/me", token, None)?;
     let file = format!("{api}/api/v1/me");
@@ -802,8 +785,7 @@ pub fn me(api: &str, token: &str) -> Result<(String, bool), String> {
     Ok((r.req("login")?.string()?, r.req("publish")?.bool()?))
 }
 
-/// Publish the index line `line` (`Stone { .. }` / `Native { .. }`)
-/// through `api`; the name and version it took.
+/// Publish index line `line` through `api`; the name and version taken.
 pub fn publish_api(api: &str, token: &str, line: &str) -> Result<(String, String), String> {
     let text = call(api, "/api/v1/publish", token, Some(line))?;
     let file = format!("{api}/api/v1/publish");
@@ -812,8 +794,7 @@ pub fn publish_api(api: &str, token: &str, line: &str) -> Result<(String, String
     Ok((r.req("name")?.string()?, r.req("vers")?.string()?))
 }
 
-/// Yank (with `undo`, unyank) `name`'s version `vers` through `api`: a
-/// stone's, or with `native`, a native package's.
+/// Yank (`undo`: unyank) `name` `vers` through `api`.
 pub fn yank_api(
     api: &str,
     token: &str,

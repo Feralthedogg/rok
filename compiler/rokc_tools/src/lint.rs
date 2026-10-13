@@ -1,19 +1,17 @@
-//! `rokc lint` (spec 901 `rokc lint`, 6.2.9): style and common-mistake
-//! checks over a package that type-checked (front end through HIR, no
-//! codegen).
+//! `rokc lint` (spec 901, 6.2.9): style and common-mistake checks over a
+//! type-checked package (no codegen).
 //!
-//! Most lints walk the user package's AST as parsed (`SourceFile`s, kept
-//! by the driver); `redundant_cast` / `redundant_clone` read HIR types.
-//! Levels: each lint's default, then the command line (`-A/-W/-D name`,
-//! later wins; `rok` turns `rok.rokon` `lints` into leading flags), then
-//! `#[allow/warn/deny(name)]` on an enclosing item, `mod`, or `#![..]`
-//! at the top of a file (innermost wins).
+//! Most lints walk the parsed AST; `redundant_cast` / `redundant_clone`
+//! read HIR types. Levels: each lint's default, then `-A/-W/-D name`
+//! (later wins; `rok` prepends `rok.rokon` `lints`), then
+//! `#[allow/warn/deny]` on an enclosing item, `mod` or `#![..]`
+//! (innermost wins).
 //!
-//! Items have only start spans, so an item's attribute scope runs to the next sibling item's start. Name-based lints (`dead_code`,
-//! `unused_imports`, `deprecated`, `unused_must_use`) match by the last
-//! path segment, so a same-named item elsewhere hides a finding (never
-//! the reverse). Names starting with an uppercase letter are not tracked
-//! as locals (a pattern `Foo` may name a constant).
+//! Items only have start spans, so an attribute's scope runs to the next
+//! sibling's start. Name-based lints match the last path segment, so a
+//! same-named item elsewhere can hide a finding (never invent one).
+//! Capitalized names aren't tracked as locals (a pattern `Foo` may be a
+//! constant).
 
 use std::collections::{HashMap, HashSet};
 
@@ -200,10 +198,9 @@ struct Region {
 
 /// Lint a front-end result (`Session::set_keep_ast`).
 ///
-/// `cli` is the command line's `-A/-W/-D` in order. Returns what to report: the
-/// compile warnings (confusable-identifier ones become the
-/// `confusable_idents` lint), then the findings, as warnings or (deny)
-/// errors.
+/// `cli` is the command line's `-A/-W/-D` in order. Returns compile
+/// warnings (confusables become `confusable_idents`), then findings as
+/// warnings or (deny) errors.
 #[must_use]
 pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic> {
     let mut out = Vec::new();
@@ -362,9 +359,8 @@ fn item_start(attrs: &[Attribute], span: Span) -> u32 {
         .unwrap_or(span.start)
 }
 
-/// Attribute scopes of one file, outermost first: the file (its `mod`
-/// declarations' attributes up the module path, then its `#![..]`),
-/// then each item down the tree.
+/// One file's attribute scopes, outermost first: the file (its `mod`
+/// declarations up the path, then `#![..]`), then each item down the tree.
 fn file_regions(f: &SourceFile, user: &[&SourceFile], out: &mut Vec<RokDiagnostic>) -> Vec<Region> {
     let mut attrs: Vec<Attribute> = Vec::new();
     // `#[allow(x)] mod m;` in the parent file covers all of `m.rok`.
@@ -540,9 +536,8 @@ fn collect_traits(items: &[Item], out: &mut HashSet<String>) {
     }
 }
 
-/// Every function of `items` (impl / trait methods too), by short name:
-/// for each of `attrs`, the attribute's message, for names no function
-/// without it shares.
+/// Every function in `items` by short name: per attribute in `attrs`, its
+/// message, for names no unmarked function shares.
 fn marked_fns<const N: usize>(items: &[&[Item]], attrs: [&str; N]) -> [HashMap<String, String>; N] {
     let mut marked: [HashMap<String, String>; N] = std::array::from_fn(|_| HashMap::new());
     for i in items {
@@ -1055,9 +1050,8 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// `redundant_cast` / `redundant_clone` from typed HIR. Generic
-    /// instances (`__mono__`) are skipped: a cast to `T` is not
-    /// redundant just because one instance has `T = i32`.
+    /// `redundant_cast` / `redundant_clone` from typed HIR, skipping generic
+    /// instances (a cast to `T` isn't redundant because `T = i32` in one).
     fn hir(&mut self, hir: &rokc_hir::HirModule, user: &[&SourceFile]) {
         let files: HashSet<u32> = user.iter().map(|f| f.file_id).collect();
         let mut hits: Vec<(&'static str, Span, String)> = Vec::new();
@@ -1094,9 +1088,8 @@ impl<'a> Cx<'a> {
                             format!("casting to the same type `{}`", hir_ty(to_ty)),
                         ));
                     }
-                    // A primitive's `clone` is the `rok.clone.copy` intrinsic:
-                    // the call lowers to its receiver, which starts where
-                    // the call does.
+                    // A primitive's `clone` is the `rok.clone.copy` intrinsic,
+                    // lowered to its receiver, which starts with the call.
                     _ if matches!(e.ty, HirTy::Prim(_))
                         && self.clones.contains(&key(e.span))
                         && cloned.insert(key(e.span)) =>
@@ -1138,10 +1131,9 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// Values of a `#[must_use]` type left unused: a statement whose value
-    /// has the type (`unused_must_use`), and an unused `let` of it (its
-    /// `unused_variables` finding says why that matters). The message
-    /// is `noun phrase: fix`, `{}` in the fix standing for the value.
+    /// Unused `#[must_use]` values: a statement of the type
+    /// (`unused_must_use`) and an unused `let` of it. Messages are
+    /// `noun phrase: fix`, `{}` standing for the value.
     fn must_use_values(&mut self, types: &MustUse, blocks: &[&rokc_hir::HirBlock]) {
         let msg_of = |t: &HirTy| {
             match t {
@@ -1414,12 +1406,10 @@ impl<'h> Resources<'h> {
     }
 }
 
-/// `unclosed_resource`: a named local of a type with a `Drop` impl whose
-/// every use is a call of its own non-closing methods. The GC never
-/// closes it (stdlib 2.13), so the descriptor leaks. Any other use
-/// (passed on, returned, stored, captured, `using`) counts as handled.
-/// Ownership follows the value: a local and its aliases are judged
-/// together, and nothing a param holds is this function's to close.
+/// `unclosed_resource`: a named `Drop` local whose every use is a call of
+/// its own non-closing methods; the GC never closes it (stdlib 2.13), so
+/// it leaks. Any other use counts as handled. Aliases are judged together;
+/// what a parameter holds isn't this function's to close.
 fn unclosed(
     res: &Resources<'_>,
     f: &rokc_hir::HirFunction,
@@ -1507,10 +1497,9 @@ fn unclosed(
     }
 }
 
-/// Each local bound to another local's value, renamed, narrowed or
-/// destructured (`let g = f`, `x: T => ..` on `v`, `let (a, _) = pair`, a
-/// coroutine's or closure's capture read from `__env`), mapped to the
-/// local first holding it; and the reads that only form such an alias.
+/// Each local bound to another's value (renamed, narrowed, destructured, a
+/// capture from `__env`) mapped to the first holder, and the reads that
+/// only form such aliases.
 fn aliases(
     body: &rokc_hir::HirBlock,
 ) -> (HashMap<LocalId, LocalId>, HashSet<*const rokc_hir::HirExpr>) {

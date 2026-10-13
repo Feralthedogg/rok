@@ -1,14 +1,9 @@
-//! `rokc fmt` (spec 901): the standard layout for `.rok` sources and
-//! `.rokon` data files.
+//! `rokc fmt` (spec 901): the standard layout for `.rok` and `.rokon`.
 //!
-//! Layout only: lines are re-indented by bracket nesting (4 spaces per
-//! level), trailing whitespace is stripped, blank-line runs collapse to
-//! one and the file ends with one newline. Tokens never move between
-//! lines and nothing between tokens on a line changes, so comments
-//! survive and the token stream is unchanged by construction.
-//!
-//! Not an AST printer: the parser desugars (`if let`, `catch`, derives,
-//! f-strings) and drops comments. No line breaking or intra-line spacing.
+//! Layout only: re-indent by bracket nesting (4 spaces), strip trailing
+//! whitespace, collapse blank-line runs, end with one newline. Tokens
+//! never move between lines and nothing within a line changes, so
+//! comments survive and the token stream is unchanged by construction.
 
 use std::path::Path;
 
@@ -29,9 +24,8 @@ pub fn format_file(path: &Path, src: &str) -> Result<String, String> {
 fn format_source(src: &str) -> Result<String, String> {
     let (mut tokens, mut diags) = Lexer::new(src, "<fmt>").lex_all();
     if diags.iter().any(rokc_diagnostic::RokDiagnostic::is_error) {
-        // The file may register extension operators (`#[infix("⊕")]`,
-        // spec 1.10.4): lex again with them. Operators registered in
-        // other files are not seen.
+        // Re-lex with the file's own extension operators (spec 1.10.4);
+        // other files' aren't seen.
         let (program, _) = rokc_parser::parse_program(&tokens, "<fmt>");
         let ops = rokc_parser::collect_prec_table(&program, &[])
             .0
@@ -97,9 +91,8 @@ fn format_source(src: &str) -> Result<String, String> {
             .get(next_tok)
             .map(|t| (t.span.start as usize, &t.kind));
         let closes_first = first.is_some_and(|(at, k)| at == ls + lead && is_close(k));
-        // Extra indentation is kept only on a continuation line: one
-        // whose previous token does not end a statement / item / list
-        // entry (comments are not tokens).
+        // Keep extra indentation only on a continuation line, whose previous
+        // token doesn't end a statement, item or list entry.
         let continuation = next_tok > 0
             && !matches!(
                 tokens[next_tok - 1].kind,

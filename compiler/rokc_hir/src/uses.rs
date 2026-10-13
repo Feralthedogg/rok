@@ -1,8 +1,5 @@
-//! `use` declarations as a name-resolution table.
-//!
-//! Each `use` tree, tagged with its module, is flattened into per-module
-//! `UseEntry` lists. Name resolution consults them when a bare name
-//! misses the local scopes and module ancestors.
+//! `use` declarations flattened into per-module `UseEntry` lists, read
+//! when a bare name misses the local scopes and module ancestors.
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,13 +34,9 @@ pub struct ReExport {
     pub vis: Visibility,
 }
 
-/// Build the per-module use table plus the re-export list from
-/// `(module_path, vis, UseTree)` triples; `packages`: the dependencies'
-/// top-level names (`HirInput::packages`).
-///
-/// A `pub use` single yields both a use entry (for the declaring module)
-/// and a re-export. Diagnoses one short name imported from two different
-/// paths in one module (spec 5.5.12).
+/// Per-module use table and re-export list from `(module, vis, UseTree)`.
+/// A `pub use` gives both an entry and a re-export. One short name imported
+/// from two paths in a module is an error (spec 5.5.12).
 #[must_use]
 pub fn build_use_table(
     raw: &[(String, Visibility, UseTree)],
@@ -97,13 +90,10 @@ pub fn build_use_table(
     (table, reexports, diags)
 }
 
-/// `reexports` plus one re-export per item each `pub use p::*` /
-/// `p::**` reaches (spec 5.8.6), re-exports under `p` included. A
-/// re-exported module (5.8.8) re-exports what is under it the same way,
-/// so paths through it resolve. An item the re-exporting module can't
-/// see is left out, and one narrower than the re-export keeps its own
-/// reach (5.8.12). A name that already means something else in the
-/// module is an error.
+/// `reexports` plus one per item a `pub use p::*` / `p::**` reaches (spec
+/// 5.8.6), through re-exported modules too (5.8.8). Items the module can't
+/// see are left out; narrower ones keep their reach (5.8.12). A name that
+/// already means something else in the module is an error.
 #[must_use]
 pub fn glob_reexports(
     raw: &[(String, Visibility, UseTree)],
@@ -314,9 +304,8 @@ pub struct Missing<'a> {
 }
 
 impl Missing<'_> {
-    /// The help for `use <root>::..` in module `module`, where `root`
-    /// names nothing: none inside a dependency. A script's has a note
-    /// when the active environment has `root`.
+    /// Help for `use <root>::..` when `root` names nothing (none inside a
+    /// dependency); a script gets a note when its environment has `root`.
     fn help(&self, root: &str, module: &str) -> Option<(String, Option<String>)> {
         let first = module.split("::").next().unwrap_or_default();
         if self.packages.iter().any(|p| p == first) {
@@ -350,14 +339,13 @@ impl Missing<'_> {
     }
 }
 
-/// Unresolved module-level imports, reported at the leaf's path.
+/// Unresolved module-level imports, reported at the leaf.
 ///
-/// A leaf must name an item, an enum variant, a module, or a re-export. A
-/// path rooted at a bare name (not `pkg` / `sup` / `rok`) may also start
-/// with a name the module sees through one of its globs or the implicit
-/// `use rok::core::**` (`use Result::*`). One rooted at a name nothing
-/// has gets `missing`'s help. Apart: each item that hides a named
-/// import of its name, with its error; its uses report nothing more.
+/// A leaf names an
+/// item, variant, module or re-export; a path rooted at a bare name may
+/// also start with something a glob or the implicit core glob brings in
+/// (`use Result::*`). Separately: each item hiding a named import of its
+/// name, with its error.
 #[must_use]
 pub fn check_use_targets(
     raw: &[(String, Visibility, UseTree)],
@@ -617,9 +605,9 @@ fn namespaces(items: &[&rokc_ast::Item]) -> HashMap<String, (u8, Span)> {
     out
 }
 
-/// `use <full>` binding `local` (`me` in its module) where the module
-/// defines an item of that name in a namespace the import fills: the
-/// item would win unseen, so it is an error. A glob's names give way.
+/// `use <full>` binding `local` where the module defines an item of that
+/// name in the same namespace: the item would win unseen, so it's an
+/// error. Globs give way.
 fn shadowed_import(
     names: &HashMap<String, (u8, Span)>,
     reexported: &HashMap<String, &str>,
@@ -725,9 +713,8 @@ const fn vis_word(v: Visibility) -> &'static str {
     }
 }
 
-/// Every item key a glob can reach (enum variants and re-exports
-/// included) → its visibility, the module that visibility is from and
-/// the item it ends at.
+/// Item keys a glob can reach (variants and re-exports too) → (visibility,
+/// its module, the item it ends at).
 pub struct GlobNames(HashMap<String, (Visibility, String, String)>);
 
 impl GlobNames {
@@ -782,12 +769,10 @@ impl GlobNames {
         Self(out)
     }
 
-    /// Spec 3.9.1: the names the `use p::*`s of the blocks around an
-    /// item lifted into `module` bring into its headers, each to its
-    /// path as written. `blocks`: their prefixes as written, innermost
-    /// block first. The module's own items win; an inner block over an
-    /// outer one; a name two globs of one block bring in from different
-    /// items stays the module's to resolve.
+    /// Spec 3.9.1: names the enclosing blocks' `use p::*`s bring into the
+    /// headers of an item lifted into `module` (`blocks` innermost first).
+    /// Module items win, inner blocks beat outer; a name two globs of one
+    /// block disagree on is left to the module.
     #[must_use]
     pub fn block_paths(
         &self,
@@ -854,10 +839,9 @@ pub fn flatten_tree_for_local(tree: &UseTree, module_path: &str, out: &mut Vec<U
     out.extend(leaves.into_iter().map(|(e, _)| e));
 }
 
-/// One `UseEntry` per leaf of `tree`; `module_path` resolves `pkg::` /
-/// `sup::` roots. `self::` is not a root: lookup already walks the
-/// module's ancestors. `parent` is the resolved prefix of the enclosing
-/// group, `None` at the top of the tree.
+/// One `UseEntry` per leaf; `module_path` resolves `pkg::` / `sup::`
+/// (lookup already walks ancestors, so no `self::`). `parent`: the
+/// enclosing group's resolved prefix.
 fn flatten_tree(
     tree: &UseTree,
     parent: Option<&[String]>,
@@ -872,10 +856,9 @@ fn flatten_tree(
         .iter()
         .map(|s| s.name.clone())
         .collect();
-    // Only the first segment of the whole path is a root (`pkg`, `sup`,
-    // `rok`, an earlier import, or a child module); group members extend
-    // their prefix as written. A resolved parent may be empty
-    // (`pkg::{..}` at the package root), so presence, not length, decides.
+    // Only the path's first segment is a root; group members extend their
+    // prefix. A resolved parent may be empty (`pkg::{..}` at the root), so
+    // presence decides, not length.
     let prefix_segs: Vec<String> = match parent {
         None => resolve_root(&raw_segs, module_path, earlier),
         Some(p) => p.iter().cloned().chain(raw_segs).collect(),

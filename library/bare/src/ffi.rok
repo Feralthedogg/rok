@@ -1,11 +1,9 @@
-// rok::bare::ffi — foreign interfaces: NUL-terminated C strings
-// (stdlib spec 1.7.2). `wit`: what the WIT bindings of
-// `ffi::wit::import` / `ffi::wit::export` (stdlib spec 1.8) run on.
+// rok::bare::ffi — NUL-terminated C strings (stdlib 1.7.2); `wit` is
+// what the WIT bindings run on (1.8).
 //
 // `CStr` and `CString` keep their bytes, NUL included, in one `str`
-// object: its address stays put while the value is in a live variable
-// (as `str::as_ptr`), so `as_ptr` is valid for C as long as that.
-// `CStr::from_ptr` copies the C string in.
+// object, so `as_ptr` holds as `str::as_ptr` does (2.15.2).
+// `CStr::from_ptr` copies.
 
 pub mod wit;
 

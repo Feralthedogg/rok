@@ -2,26 +2,20 @@
 //! machine over MIR, in place of `llvm.coro.*`.
 //!
 //! A coroutine body (HIR `is_async` / `is_generator`) is lowered like any
-//! function, with `Terminator::Suspend` at its `yield` / `await` points.
-//! This pass turns it into
+//! function, with `Terminator::Suspend` at its `yield` / `await` points,
+//! then split into
 //!
-//! - `resume(frame, resume_args..) -> step`: reloads the live locals from the
-//!   frame, dispatches on the frame's state to the entry or the block
-//!   after the suspend point it stopped at, and at each suspend point
-//!   spills every local back, records the next state and returns the
-//!   step value;
-//! - a constructor `new(args..) -> {resume, frame}`: allocates the zeroed
-//!   frame (state 0) and stores the initial arguments into it.
+//! - `resume(frame, resume_args..) -> step`: reloads the live locals,
+//!   dispatches on the frame's state, and at each suspend point spills
+//!   them back, records the next state and returns the step value;
+//! - `new(args..) -> {resume, frame}`: allocates the zeroed frame
+//!   (state 0) and stores the arguments.
 //!
-//! The frame is a GC object whose payload is `(i32 state, locals..)`;
-//! codegen registers its `ScanTable` from that type, so the collector
-//! traces the frame's GC references through the object, not the shadow
-//! stack (704). While `resume` runs its locals are ordinary shadow-stack
-//! roots.
-//!
-//! Only locals live into a resume point are spilled / reloaded there
-//! (`live_in`); the frame holds the union of those (plus the initial
-//! arguments).
+//! The frame is a GC object of `(i32 state, locals..)`, traced through
+//! its `ScanTable` rather than the shadow stack (704); inside `resume`
+//! the locals are ordinary roots. Only locals live into a resume point
+//! (`live_in`) get a slot; a pinned local's slot holds ambiguous words
+//! so its referent cannot move while the coroutine is suspended.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -32,8 +26,15 @@ use crate::{BasicBlock, LocalDecl, MirFunction, MirTy, Operand, RValue, Statemen
 
 /// Rewrite coroutine body `f` (whose last `n_resume` params come with
 /// every resume) into its resume function, keeping `f.id`, and return its
-/// constructor `ctor`.
-pub fn transform(f: &mut MirFunction, n_resume: usize, ctor: FunctionId) -> MirFunction {
+/// constructor `ctor`. `pinning(ty)`: the type a frame slot of a pinned
+/// local (`f.pins`) is allocated as, so its referent never moves while
+/// the frame holds it (ambiguous words pin, 703 §7.3.1).
+pub fn transform(
+    f: &mut MirFunction,
+    n_resume: usize,
+    ctor: FunctionId,
+    pinning: impl Fn(&MirTy) -> MirTy,
+) -> MirFunction {
     remove_block_params(f);
     let n_init = f.params.len() - n_resume;
     let resume_params: Vec<LocalId> = f.params[n_init..].to_vec();
@@ -100,6 +101,17 @@ pub fn transform(f: &mut MirFunction, n_resume: usize, ctor: FunctionId) -> MirF
             .map(|l| f.locals[l.0 as usize].ty.clone()),
     );
     let frame_ty = MirTy::Tuple(fields);
+    // The frame as allocated: a pinned local's slot scans as pinning words.
+    let mut alloc_fields = vec![MirTy::Prim(PrimTy::I32)];
+    alloc_fields.extend(frame_locals.iter().map(|l| {
+        let ty = &f.locals[l.0 as usize].ty;
+        if f.pins.contains(l) {
+            pinning(ty)
+        } else {
+            ty.clone()
+        }
+    }));
+    let alloc_ty = MirTy::Tuple(alloc_fields);
     let field_of = |l: LocalId| -> u32 {
         1 + u32::try_from(
             frame_locals
@@ -260,9 +272,7 @@ pub fn transform(f: &mut MirFunction, n_resume: usize, ctor: FunctionId) -> MirF
     let result = local(fat.clone());
     let mut body = vec![Statement::Assign {
         target: new_frame,
-        rvalue: RValue::HeapAlloc {
-            ty: frame_ty.clone(),
-        },
+        rvalue: RValue::HeapAlloc { ty: alloc_ty },
     }];
     for (i, a) in args.iter().enumerate() {
         let p = f.params[i];
@@ -307,6 +317,7 @@ pub fn transform(f: &mut MirFunction, n_resume: usize, ctor: FunctionId) -> MirF
         span: f.span,
         facts: rokc_ir_common::FnFacts::default(),
         strips: Vec::new(),
+        pins: Vec::new(),
     };
 
     let mut params = vec![frame];
@@ -370,6 +381,8 @@ fn live_in(f: &MirFunction) -> HashMap<BlockId, BTreeSet<LocalId>> {
                     value,
                     ..
                 } => ops.extend([Operand::Copy(*array), index.clone(), value.clone()]),
+                // A pinned local stays in the frame until its scope ends.
+                Statement::StorageDead(l) if f.pins.contains(l) => ops.push(Operand::Copy(*l)),
                 Statement::StorageDead(_) | Statement::Loc(..) | Statement::MlirRegionEnd => {}
                 Statement::MlirRegion { params } => defd.extend(params.iter().copied()),
                 Statement::BufStore {
@@ -401,7 +414,12 @@ fn live_in(f: &MirFunction) -> HashMap<BlockId, BTreeSet<LocalId>> {
                 ops.extend(then_args.iter().cloned());
                 ops.extend(else_args.iter().cloned());
             }
-            Terminator::Return(v) | Terminator::Suspend { value: v, .. } => ops.extend(v.clone()),
+            // Pinned locals of the body's own scope (no `StorageDead`)
+            // live until it ends.
+            Terminator::Return(v) | Terminator::Suspend { value: v, .. } => {
+                ops.extend(v.clone());
+                ops.extend(f.pins.iter().map(|l| Operand::Copy(*l)));
+            }
             Terminator::Unreachable => {}
         }
         for op in &ops {
@@ -655,13 +673,14 @@ mod tests {
             span: rokc_diagnostic::Span::default(),
             facts: rokc_ir_common::FnFacts::default(),
             strips: Vec::new(),
+            pins: Vec::new(),
         }
     }
 
     #[test]
     fn transform_builds_state_machine() {
         let mut f = generator();
-        let ctor = transform(&mut f, 0, FunctionId(1));
+        let ctor = transform(&mut f, 0, FunctionId(1), MirTy::clone);
 
         // resume(frame) -> step; the constructor takes the initial args.
         assert_eq!(f.params.len(), 1);
@@ -702,7 +721,7 @@ mod tests {
     #[test]
     fn suspend_spills_live_locals_and_next_state() {
         let mut f = generator();
-        let _ = transform(&mut f, 0, FunctionId(1));
+        let _ = transform(&mut f, 0, FunctionId(1), MirTy::clone);
         // The first suspend point (old block 0, now renumbered) stores
         // `a` (field 2) and `n` (field 1), then state 1, and returns `a`.
         let first = f
@@ -761,7 +780,7 @@ mod tests {
     #[test]
     fn resume_args_come_with_every_resume() {
         let mut f = awaiting();
-        let ctor = transform(&mut f, 1, FunctionId(1));
+        let ctor = transform(&mut f, 1, FunctionId(1), MirTy::clone);
         // The constructor takes `n` only; `resume(frame, r)`.
         assert_eq!(ctor.param_tys, vec![I64]);
         assert_eq!(f.param_tys, vec![MirTy::GcRef, I64]);

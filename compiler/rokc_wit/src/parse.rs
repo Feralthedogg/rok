@@ -1,9 +1,6 @@
-//! WIT text to its syntax tree (component model `WIT.md`).
-//!
-//! Packages (nested ones too), interfaces, worlds, `use`, type
-//! definitions, functions. Feature gates (`@since`, `@deprecated`) are
-//! read and dropped; `@unstable` items are left out, as `wit-parser`
-//! does by default.
+//! WIT text to syntax tree (component model `WIT.md`): packages,
+//! interfaces, worlds, `use`, types, functions. `@since` / `@deprecated`
+//! are dropped and `@unstable` items left out, as `wit-parser` does.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

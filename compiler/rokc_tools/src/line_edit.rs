@@ -1,9 +1,7 @@
-//! Line editing for the terminal REPL: raw-mode termios (Windows: console
-//! modes with VT input), cursor keys,
-//! a history kept in `$ROK_HOME/repl_history`, and the Emacs control
+//! Terminal line editing for the REPL: raw termios (Windows: VT console
+//! modes), cursor keys, history in `$ROK_HOME/repl_history`, and Emacs
 //! keys (`C-a` `C-e` `C-b` `C-f` `C-k` `C-u` `C-w` `C-d` `C-p` `C-n`
-//! `C-l`). A line wider than the terminal scrolls sideways to keep the
-//! cursor in view (characters count one column each).
+//! `C-l`). Long lines scroll sideways (one column per character).
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -377,9 +375,8 @@ impl Drop for Raw {
     }
 }
 
-/// Windows: the console's input without line input, echo and Ctrl-C
-/// processing, keys as VT sequences (`ESC [ A`, ..); its output
-/// interpreting them.
+/// Windows: console input without line mode, echo or Ctrl-C processing,
+/// keys as VT sequences; output interpreting them.
 #[cfg(windows)]
 struct Raw {
     saved: [(Handle, u32); 2],

@@ -1,23 +1,15 @@
-//! Dependency resolution: from a manifest's `deps` (and `dev_deps`)
-//! through every dependency's own `rok.rokon`, to one package per name,
-//! each after its own dependencies (the order rokc builds them in). Git
-//! packages and stones come from the lock unless `update` names them.
+//! Dependency resolution: from the manifest's `deps` (and `dev_deps`)
+//! through every dependency's `rok.rokon` to one package per name, each
+//! after its dependencies. Git packages and stones come from the lock
+//! unless `update` names them; a stone takes the highest non-yanked match
+//! (the locked one while it matches) and one version per name, so an unmet
+//! later requirement is a conflict. Native packages are resolved the same
+//! way afterwards, in their own namespace.
 //!
-//! A stone requirement takes the highest non-yanked version in its index
-//! that matches (the locked one while it still matches); its dependencies
-//! are the index entry's. One version per name: a later requirement the
-//! chosen version does not meet is a conflict.
-//!
-//! Native packages (`native` of every package reached, an index entry's
-//! `kind: "native"` dependencies, a native package's `deps`) are a
-//! namespace of their own, resolved the same way afterwards.
-//!
-//! That graph, optional dependencies included, is what `rok.lock` pins,
-//! whatever features a build asks for. Features then pick the packages a
-//! build has, and each one's features: from the root's (`--features`,
-//! `default` unless `--no-default-features`), along every dependency
-//! enabled, one set per package for the whole graph. The root's
-//! `dev_deps` count only for a test build.
+//! `rok.lock` pins the whole graph, optional deps included. Features then
+//! pick what a build has: from the root's (`--features`, `default`) along
+//! every enabled edge, one set per package. `dev_deps` count only for
+//! tests.
 // Greedy, no backtracking: a root requirement both sides accept
 // (`rok add x@=1.2.0`) settles a conflict.
 
@@ -81,9 +73,8 @@ struct Node {
     features: Features,
 }
 
-/// What a build uses: packages each after its own dependencies, native
-/// packages each before its own (the order a linker wants), and the
-/// root's features.
+/// What a build uses: packages after their dependencies, native packages
+/// before theirs (linker order), and the root's features.
 pub struct Graph {
     pub packages: Vec<Resolved>,
     pub natives: Vec<native::Resolved>,
@@ -97,9 +88,8 @@ enum NativeId {
     File { sha256: String },
 }
 
-/// A native requirement: the dependency, what its relative url is
-/// relative to, who requires it, and the package that does (its key;
-/// `""` the root).
+/// (dependency, base of its relative url, requirer, requirer's key; `""`
+/// is the root).
 type NativeReq = (NativeDep, Option<String>, String, String);
 
 /// Where a package came from: two requirements of one name must agree.
@@ -333,8 +323,7 @@ impl Activation<'_> {
         Ok(())
     }
 
-    /// Package `n`'s dependency `dep` is enabled: it is in the build with
-    /// the features `n` asks of it. Its key.
+    /// Enable `n`'s dependency `dep` with the features `n` asks; its key.
     fn edge(&mut self, n: usize, dep: &str) -> Result<usize, String> {
         let Some(d) = self.nodes[n]
             .deps
@@ -371,8 +360,7 @@ impl Activation<'_> {
         Ok(t)
     }
 
-    /// Feature `f` of package `n` (which is in the build), required by
-    /// `by`.
+    /// Feature `f` of package `n` (in the build), required by `by`.
     fn feature(&mut self, n: usize, f: &str, by: &str) -> Result<(), String> {
         let Some((_, list)) = self.nodes[n].features.iter().find(|(x, _)| x == f) else {
             return Err(format!(
@@ -424,9 +412,8 @@ impl Activation<'_> {
     }
 }
 
-/// The index entry `e`'s `features` against the stone's own `rok.rokon`
-/// at its commit (checked out at `dir`): the same features, each enabling
-/// the same entries, in any order.
+/// The entry's `features` must match the stone's own `rok.rokon` at its
+/// commit (any order).
 fn check_stone_features(dir: &Path, name: &str, e: &registry::Entry) -> Result<(), String> {
     let own = match manifest::find(dir) {
         Some(p) => manifest::load(&p)?.features,
@@ -482,10 +469,8 @@ fn order<T>(
     idx.into_iter().filter_map(|i| slots[i].take()).collect()
 }
 
-/// The directory of package `dep` (any kind, library or not), fetched
-/// into the cache when it is not there; a path is relative to `base`.
-/// Also the exact source it came from: a stone's `=<version>`, a git
-/// commit's `rev`, a path as given.
+/// Directory of `dep`, fetched into the cache if missing (paths relative
+/// to `base`), and its exact source: `=<version>`, a commit, or the path.
 pub fn fetch_package(
     home: &Path,
     dep: &Dep,
@@ -637,8 +622,8 @@ impl<'a> Resolver<'a> {
             .is_some_and(|names| names.is_empty() || names.iter().any(|n| manifest::same(n, name)))
     }
 
-    /// The package directory of `dep`, its identity, and for a stone its
-    /// dependencies and native packages (the index's).
+    /// `dep`'s directory and identity; for a stone also its dependencies
+    /// and native packages from the index.
     fn locate(
         &mut self,
         dep: &Dep,
@@ -735,8 +720,7 @@ impl<'a> Resolver<'a> {
         ))
     }
 
-    /// Stone `name` from index `url`: the version `req` picks, checked
-    /// out and verified against the entry's `cksum`.
+    /// The version `req` picks, checked out and verified against `cksum`.
     fn locate_stone(
         &mut self,
         name: &str,
@@ -952,8 +936,8 @@ impl<'a> Resolver<'a> {
         Ok(out)
     }
 
-    /// Native package `name` from index `url`: the version `req` picks
-    /// (the locked one while it matches), checked against the lock.
+    /// The version `req` picks (locked while it matches), checked against
+    /// the lock.
     fn locate_native(&mut self, name: &str, req: &str, url: &str) -> Result<native::Entry, String> {
         let parsed = Req::parse(req).map_err(|e| format!("native package `{name}`: {e}"))?;
         let updating = self.updating(name);

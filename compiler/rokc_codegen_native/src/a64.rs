@@ -1,14 +1,12 @@
 //! LIR → arm64 machine code.
 //!
-//! Frame: `fp` / `lr` pushed, `fp` = that pair, then the slots, with
-//! the outgoing argument area at `sp`. Only caller-saved registers are
-//! used (`x9`..`x17`, `v16`..`v18`), so nothing else is saved and the
-//! compact unwind entry is a plain frame. Every LIR value lives in its
-//! slot. Within straight-line code the emitter remembers which register
-//! still holds a slot's value (`Held`) and reads it there, and delays
-//! the store into a slot written and read once (`Pend`): a read from
-//! the register makes it dead. Branches, labels and calls see every
-//! slot in memory.
+//! Frame: `fp` / `lr` pushed, `fp` = that pair, then the slots, outgoing
+//! arguments at `sp`. Only caller-saved registers are used (`x9`..`x17`,
+//! `v16`..`v18`), so nothing is saved and compact unwind sees a plain
+//! frame. Every LIR value lives in its slot; in straight-line code the
+//! emitter tracks which register still holds a slot (`Held`) and delays
+//! the store of a slot written and read once (`Pend`). Branches, labels
+//! and calls see every slot in memory.
 
 use crate::lir::{
     Bin, Callee, Cc, Conv, Func, Inst, K, Label, Loc, Mem, Rmw, Un, V, Waits, scalar, waitable,
@@ -105,9 +103,9 @@ struct Pend {
 const POOL: [u32; 5] = [X9, X10, X11, X12, X13];
 const FP_POOL: [u32; 3] = [V16, V17, V18];
 
-/// Every function's prologue (then the frame's `sub sp`, which the
-/// frame pointer undoes): `stp x29, x30, [sp, #-16]!; mov x29, sp`. The
-/// unwind encodings (`coff::A64_CODES`, Mach-O's frame mode) say this.
+/// Every prologue (before the frame's `sub sp`, undone via `fp`): `stp
+/// x29, x30, [sp, #-16]!; mov x29, sp`, as the unwind encodings
+/// (`coff::A64_CODES`, Mach-O frame mode) say.
 pub const PROLOGUE: [u32; 2] = [0xa9bf_7bfd, 0x9100_03fd];
 /// Every epilogue: `mov sp, x29; ldp x29, x30, [sp], #16; ret`.
 pub const EPILOGUE: [u32; 3] = [0x9100_03bf, 0xa8c1_7bfd, 0xd65f_03c0];
@@ -200,10 +198,9 @@ pub fn emit(obj: &mut Obj, f: &Func) {
 }
 
 impl Em<'_> {
-    /// Append `w`. Every instruction this emitter writes a register
-    /// with names it in bits 0..5 (a load / store's base write-back and
-    /// `cas`'s `rs` aside), so a store waiting on that register goes
-    /// out first, and its `Held` goes.
+    /// Append `w`. Every instruction written names its destination in bits
+    /// 0..5 (write-back bases and `cas`'s `rs` aside), so a store pending on
+    /// that register goes out first and its `Held` is dropped.
     fn ins(&mut self, w: u32) {
         self.flush_reg(w & 31);
         if let Some((kind, sym)) = self.next_rel.take() {
@@ -551,10 +548,9 @@ impl Em<'_> {
         }
     }
 
-    /// A register holding `v` as `k` extended by `signed`, other than
-    /// `avoid` (what the instruction writes before it reads this one):
-    /// one that already does, else a value register, loaded. Never a
-    /// base or address scratch (`x14`, `x15`, `x17`).
+    /// A register holding `v` as `k` extended by `signed`, not in `avoid`
+    /// (registers written before this is read): one already holding it,
+    /// else a loaded value register; never `x14`, `x15`, `x17`.
     fn reg(&mut self, v: V, k: K, signed: bool, avoid: &[u32]) -> u32 {
         let signed = signed && !k.is_float();
         if let V::M(m) = v {

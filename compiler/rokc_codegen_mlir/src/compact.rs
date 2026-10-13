@@ -1,8 +1,6 @@
-//! Smaller function bodies, on the emitted text: constant ops (and
-//! `insertvalue`s over constants, a string literal's `{ptr, len}`) are
-//! hoisted into the entry block once each, and identical panic blocks
-//! are merged. LLVM folds all of them to constants, so the code is the
-//! same; the MLIR passes and LLVM read less.
+//! Smaller bodies on the emitted text: constant ops (and `insertvalue`s of
+//! constants) hoisted into the entry block once each, identical panic
+//! blocks merged. LLVM folds them anyway; this only means less to read.
 
 use std::collections::{HashMap, HashSet};
 

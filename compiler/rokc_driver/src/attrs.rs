@@ -1,9 +1,6 @@
-//! Attribute placement and argument checks (spec 6.1 / 6.2 / 6.3).
-//!
-//! Runs on each file's items after `#[cfg]` filtering and meta
-//! expansion. A name that is neither built in nor defined by a meta
-//! block (an `#[impl_attribute]`, or a field attribute of an
-//! `#[impl_derive_attribute]`) is an error (6.1.6).
+//! Attribute placement and argument checks (spec 6.1 / 6.2 / 6.3), after
+//! `#[cfg]` filtering and meta expansion. A name neither built in nor
+//! defined by a meta block is an error (6.1.6).
 
 use rokc_ast::{
     AttrArg, AttrBody, Attribute, EnumVariantKind, ExternItem, ImplItem, Item, Literal, StructKind,

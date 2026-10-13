@@ -26,9 +26,8 @@ pub fn is_pictographic(c: char) -> bool {
     c as u32 > 0xFF && in_ranges(t::EXT_PICT, c)
 }
 
-/// Emoji components allowed after the first character: variation
-/// selectors (stripped by normalization), skin tones, regional
-/// indicators and tags. ZWJ is handled by the lexer (between pictographs).
+/// Emoji components allowed after the first character. ZWJ is the
+/// lexer's (between pictographs).
 #[must_use]
 pub const fn is_emoji_component(c: char) -> bool {
     matches!(c,
@@ -51,9 +50,8 @@ pub fn is_ident_start(c: char) -> bool {
         || is_pictographic(c)
 }
 
-/// Spec 1.4.1: `XID_Continue`, the math profile continue set (sub- and
-/// superscript digits, signs, parentheses), primes `′ ″ ‴ ⁗`, pictographs
-/// and emoji components. ZWJ is not included (see the lexer).
+/// Spec 1.4.1: `XID_Continue`, the math profile set, primes, pictographs
+/// and emoji components; not ZWJ (the lexer's).
 #[must_use]
 pub fn is_ident_continue(c: char) -> bool {
     if c.is_ascii() {
@@ -156,9 +154,8 @@ fn normalize(s: &str, compat: bool) -> String {
         }
         d[start..i].sort_by_key(|&c| ccc(c));
     }
-    // Canonical composition (UAX #15 sample algorithm). `last` is the
-    // class of the last character kept after the starter (0 = adjacent;
-    // 256 = no starter yet).
+    // Canonical composition (UAX #15 sample). `last`: class of the last
+    // kept char after the starter (0 adjacent, 256 no starter yet).
     let mut out: Vec<char> = Vec::with_capacity(d.len());
     let mut starter: Option<usize> = None;
     let mut last: u16 = 256;
@@ -210,9 +207,8 @@ pub const fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
-/// Cheap confusable skeleton (not full UTS #39): NFKC, then Cyrillic and
-/// Greek letters that look like Latin ones mapped to Latin. `σ²` and
-/// `σ2` share a skeleton, as do Latin `a` and Cyrillic `а`.
+/// Cheap confusable skeleton (not full UTS #39): NFKC, then Latin
+/// look-alike Cyrillic / Greek letters mapped to Latin.
 #[must_use]
 pub fn skeleton(s: &str) -> String {
     nfkc(s)
@@ -345,9 +341,8 @@ mod tests {
         assert!(!mixed_script("Δt"));
     }
 
-    /// Full check against an external oracle: `ROK_NFC_VECTORS=<file>`
-    /// with lines `input;nfc;nfkc` (hex code points), e.g. from python's
-    /// `unicodedata.normalize`. Skipped when unset.
+    /// Check against `ROK_NFC_VECTORS=<file>` (`input;nfc;nfkc` hex lines,
+    /// e.g. from Python's `unicodedata`); skipped when unset.
     #[test]
     fn normalization_vectors() {
         let Ok(path) = std::env::var("ROK_NFC_VECTORS") else {

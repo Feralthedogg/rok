@@ -25,6 +25,7 @@ pub fn shell(name: &str) -> MirFunction {
         span: rokc_diagnostic::Span::default(),
         facts: rokc_ir_common::FnFacts::default(),
         strips: Vec::new(),
+        pins: Vec::new(),
     }
 }
 

@@ -1,14 +1,12 @@
 //! Coroutines (spec 4.11 generators, 4.12 async, 4.13 streams).
 //!
-//! A coroutine block `yield { .. }` / `async { .. }` / `async yield { .. }`
-//! is lifted like a closure into a body function marked `is_generator` /
-//! `is_async`, whose return type is the *step* value one resume hands
-//! back: `T | none` (generator), `Poll<T>` (async), `Poll<T | none>`
-//! (stream) — inside the `throws` carrier when the body may throw. `yield`
-//! and a pending `await` become `HirExprKind::Suspend` of a step value;
-//! MIR (`rokc_mir::coro`) turns the body into a resumable state machine.
-//! The block's value is a library wrapper holding the coroutine
-//! (`CoroNew`, a function value whose env is the frame):
+//! A coroutine block (`yield { .. }`, `async { .. }`, `async yield { .. }`)
+//! is lifted like a closure into a body function (`is_generator` /
+//! `is_async`) returning the *step* one resume hands back: `T | none`,
+//! `Poll<T>` or `Poll<T | none>`, inside `throws` when it may throw.
+//! `yield` and a pending `await` become `Suspend`; MIR (`rokc_mir::coro`)
+//! makes the state machine. The block's value is a library wrapper over
+//! `CoroNew` (a function value whose env is the frame):
 //!
 //! | form            | wrapper (`throws (E)` form)                       |
 //! |-----------------|---------------------------------------------------|
@@ -16,9 +14,8 @@
 //! | `async`         | `future::AsyncFuture<T>` (`TryAsyncFuture<T, E>`) |
 //! | `async yield`   | `stream::AsyncStream<T>` (`TryAsyncStream<T, E>`) |
 //!
-//! `yield fn` / `async fn` are rewritten by the driver into a plain `fn`
-//! returning the wrapper whose body is such a block (labelled
-//! `FN_BLOCK_LABEL`); `yield ||` / `async ||` are closures returning one.
+//! `yield fn` / `async fn` become a plain `fn` returning such a block
+//! (labelled `FN_BLOCK_LABEL`); `yield ||` / `async ||` closures return one.
 //!
 //! The body function:
 //! ```text
@@ -28,9 +25,9 @@
 //!     suspend_final <final step: none / Ready(#r) / Ready(none)>;
 //! }
 //! ```
-//! `return v` breaks out of `'#coro`; an escaping error returns the
-//! error carrier (MIR then parks the coroutine at its final point). The
-//! `if true` keeps the final point reachable when the body diverges.
+//! `return v` breaks out of `'#coro`; an escaping error returns the carrier
+//! (MIR parks the coroutine). `if true` keeps the final point reachable
+//! when the body diverges.
 
 use rokc_ast::{Block, CallArg, Expr, ExprKind};
 use rokc_ir_common::{ConstVal, PrimTy};
@@ -46,9 +43,8 @@ use crate::{
 /// Label of the block the driver wraps a `yield fn` / `async fn` body in
 /// (its params are then the function's own, assignable).
 pub const FN_BLOCK_LABEL: &str = "#coro_fn";
-/// The body block of an `async ||` / `yield ||` closure: its `[ref x]`
-/// captures (the closure's boxed cells) pass into the coroutine as the
-/// same cells, so every call's future shares them (spec 4.6.2).
+/// Body label of an `async ||` / `yield ||` closure: its `[ref x]` cells
+/// pass into the coroutine, so every call's future shares them (4.6.2).
 const CLOSURE_BLOCK_LABEL: &str = "#coro_closure";
 const BODY_LABEL: &str = "#coro";
 const CTX: &str = "#ctx";
@@ -217,10 +213,9 @@ pub(super) fn lower_yield(
     suspend(step(ctx, value), false, span)
 }
 
-/// `await e` (spec 4.12.2, stdlib 2.20.3): poll `e` (or
-/// `e.into_future()`) until it is ready, suspending with `Pending` in
-/// between. A throwing `poll` (a `throws` async body) must sit under a
-/// `try`, like any throwing call.
+/// `await e` (spec 4.12.2): poll `e` (or `e.into_future()`) until ready,
+/// suspending with `Pending`. A throwing `poll` needs a `try` like any
+/// throwing call.
 pub(super) fn lower_await(
     ctx: &mut LowerCtx<'_>,
     e: &Expr,
@@ -263,8 +258,7 @@ pub(super) fn lower_await(
 }
 
 /// `loop { match f.<method>(ref #ctx) { Ready(v) => break v, Pending =>
-/// suspend Pending } }` over the value `fut` (kept in a local, so a
-/// `ref self` poll writes its state back).
+/// suspend Pending } }`, `fut` in a local so a `ref self` poll persists.
 pub(super) fn poll_loop(
     ctx: &mut LowerCtx<'_>,
     f: rokc_ir_common::LocalId,
@@ -390,12 +384,10 @@ pub(super) fn poll_loop(
         ty: out.clone(),
         span,
     };
-    // Checks: on entry, after a ready poll (an awaited coroutine may
-    // have left because of the cancel: `unwinding`, not the bare flag —
-    // a hand-written future's value, like a received message or a lock
-    // guard, is kept and the next check leaves) and before suspending
-    // (after a resume the awaited future is polled first, so a nested
-    // coroutine leaves through its own cleanups before this one).
+    // Check on entry, after a ready poll (`unwinding`, not the bare flag: a
+    // hand-written future's value, e.g. a received message, is kept and the
+    // next check leaves) and before suspending (the awaited future is
+    // polled first after a resume, so nested coroutines clean up first).
     let Some(entry) = cancel_check(ctx, "cancel_requested", span) else {
         return lp;
     };
@@ -410,12 +402,9 @@ pub(super) fn poll_loop(
     }
 }
 
-/// A cancellation point (stdlib 2.18.4, refs-lang 7.7.10): `if
-/// task::<check>(#ctx) { <leave the body like a return> }`, `check`
-/// being `cancel_requested` or (after a ready poll) `unwinding`.
-/// The exit runs the `finally` / `using` cleanups it passes; the
-/// coroutine's result is a zero value the executor drops. `None` in the
-/// probe pass.
+/// A cancellation point (stdlib 2.18.4): `if task::<check>(#ctx) { leave
+/// like a return }`, running the cleanups passed; the result is a zero
+/// value the executor drops. `None` in the probe pass.
 fn cancel_check(
     ctx: &mut LowerCtx<'_>,
     check: &str,
@@ -544,8 +533,7 @@ fn lower_coro_block<'a>(
         }),
         span: body.span,
     };
-    // Item / output and error types: from the expected wrapper type
-    // (a `yield fn` / `async fn` signature, an annotated `let`), else
+    // Item / output and error types from the expected wrapper type, else
     // inferred.
     let (mut val_ty, mut throws) = (HirTy::Unknown, None);
     // The probe's errors, re-reported when it cannot infer a type (else

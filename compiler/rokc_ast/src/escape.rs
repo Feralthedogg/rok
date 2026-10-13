@@ -1,9 +1,6 @@
-//! Escape-sequence decoding for string / char literal bodies (spec 1.7.1,
-//! 1.8.1).
-//!
-//! `Literal::Str` / `Char` / `CChar` keep the body as written;
-//! the lexer validates with these functions and later passes decode
-//! with them, so both agree on one definition.
+//! Escape decoding for string / char literal bodies (spec 1.7.1, 1.8.1).
+//! Literals keep the raw body; the lexer validates and later passes
+//! decode with the same functions.
 
 /// Which literal the body belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,9 +1,7 @@
-//! rok source for WIT bindings: types as rok declarations, imported
-//! functions as rok functions that lower their arguments and lift the
-//! result through the canonical ABI around the core import, exported
-//! functions as `extern "C"` entries that lift, call the user's
-//! function and lower its result (with a post-return function freeing
-//! what the result was lowered into).
+//! rok source for WIT bindings: types as declarations, imports as rok
+//! functions that lower arguments and lift results through the canonical
+//! ABI, exports as `extern "C"` entries that lift, call the user's
+//! function and lower the result (a post-return frees it).
 //!
 //! Mapping: `record` → `struct`, `variant` / `enum` → `enum`, `flags` →
 //! a `struct` of `bool`s, `option<T>` → `T?`, `result<T, E>` →
@@ -1325,9 +1323,9 @@ impl Gen<'_> {
         });
     }
 
-    /// The function giving the ops (`FutureOps` / `StreamOps`) of future
-    /// or stream type `t` of the function being bound: its path. The
-    /// built-ins are named after that function and `t`'s place in it.
+    /// Path of the function giving the ops (`FutureOps` / `StreamOps`) of
+    /// future or stream type `t`, named after the bound function and `t`'s
+    /// place in it.
     fn ops_fn(&mut self, t: &Type) -> Result<String, String> {
         let t = self.unalias(t);
         let ctx = self
@@ -1441,10 +1439,9 @@ impl Gen<'_> {
         Ok(path)
     }
 
-    /// The rok function calling import `f` (`module` names its instance).
-    /// An `async func` is lowered async: the call starts a subtask the
-    /// function's future awaits; its arguments and result stay in memory
-    /// until it returned.
+    /// The rok function calling import `f`. An `async func` starts a subtask
+    /// its future awaits; arguments and result stay in memory until it
+    /// returns.
     fn import_fn(&mut self, m: &[String], module: &str, f: &Function) -> Result<String, String> {
         let r = self.r;
         self.set_ctx(module, f);
@@ -1585,9 +1582,8 @@ impl Gen<'_> {
         })
     }
 
-    /// The core export `export` running `f` through `call` (a path; for
-    /// a method, the method's name); its built-ins live in core module
-    /// `module` (`[export]..`).
+    /// Core export `export` running `f` via `call` (a method: its name);
+    /// built-ins in core module `module`.
     fn export_fn(
         &mut self,
         export: &str,
@@ -1679,9 +1675,8 @@ impl Gen<'_> {
         Ok(())
     }
 
-    /// An `async func` export, lifted with a callback: the call starts
-    /// the user's future on the host's event loop; the result goes back
-    /// through `task.return`.
+    /// An `async func` export lifted with a callback: starts the user's
+    /// future on the host's event loop, result through `task.return`.
     fn export_async(
         &mut self,
         export: &str,
@@ -1889,11 +1884,9 @@ extern \"C\" fn {cid}(a0: i32, a1: i32, a2: i32) -> i32 {{
     }
 }
 
-/// The bindings of `requests` for the module whose rok path is `base`.
-///
-/// `requests` are in the order `load` read them, so `loaded.roots`
-/// lines up; `drops` are the user's exported resource types (rok names)
-/// that implement `Drop`.
+/// Bindings of `requests` for the module at rok path `base`, in `load`
+/// order (so `loaded.roots` lines up); `drops`: exported resources that
+/// implement `Drop`.
 pub fn bind(
     loaded: &Loaded,
     requests: &[Request],
@@ -1944,9 +1937,8 @@ fn targets(loaded: &Loaded, requests: &[Request]) -> Result<Targets, String> {
             let worlds: Vec<WorldId> = (0..r.worlds.len())
                 .filter(|w| files.contains(&r.worlds[*w].file))
                 .collect();
-            // A world is the component (its imports and exports, whatever
-            // the keyword); without one, the interfaces are imported or
-            // exported.
+            // A world is the component; without one, the interfaces are
+            // imported or exported themselves.
             if worlds.is_empty() && req.export {
                 exports.extend(ifaces);
             } else if worlds.is_empty() {

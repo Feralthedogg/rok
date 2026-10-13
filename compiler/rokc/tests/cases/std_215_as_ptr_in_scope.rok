@@ -1,0 +1,138 @@
+// spec: std 215-string §2.15.2
+// gc-stress: 5
+// expect-exit: 0
+// expect-stdout:
+// ok A
+// ok B
+// ok B2
+// ok D
+// ok G
+// ok H
+// ok I
+// ok J
+// ok K
+// ok R
+// ok F
+// ok M
+// ok L
+
+// `as_ptr` stays valid while the `str`'s variable is in scope, however
+// the pointer travels (fn value, list, struct, `ref` parameter), across
+// `yield` / `await` too. The stress runs move objects all along.
+use rok::bare::ptr::ConstPtr;
+use rok::bare::ffi::{CStr, CString};
+
+struct W { s: str; n: i64; }
+struct View { p: ConstPtr<u8>; n: usize; }
+impl W { fn view(self) -> View { View { p: self.s.as_ptr(), n: self.s.len() } } }
+
+fn mk(tag: str, i: i64) -> str { f"{tag}-{i}-abcdefghijklmnopqrstuvwxyz" }
+fn churn() -> i64 {
+    let t = 0i64;
+    for i in 0..400i64 { let xs: List<str> = [f"{i}", f"{i}{i}"]; t += xs[1].len() as i64; }
+    t
+}
+fn read(p: ConstPtr<u8>, n: usize) -> str {
+    let b: List<u8> = [];
+    for i in 0..n { b.push(unsafe { p.add(i).read() }); }
+    str::from_utf8_lossy(b)
+}
+fn get_ptr(s: str) -> ConstPtr<u8> { s.as_ptr() }
+fn ptrs(s: str) -> List<ConstPtr<u8>> { [s.as_ptr()] }
+fn take(s: str, ref p: ConstPtr<u8>) { p = s.as_ptr(); }
+fn check(name: str, want: str, got: str) {
+    if want != got { println(f"FAIL {name}: {got}"); } else { println(f"ok {name}"); }
+}
+
+yield fn gen(tag: str) -> str {
+    let s = mk(tag, 7);
+    let n = s.len();
+    let p = s.as_ptr();
+    yield "first";
+    churn();
+    yield read(p, n);
+}
+
+// Collections while suspended: the frame keeps the string in place.
+yield fn bytes(tag: str) -> u32 {
+    let s = f"{tag}-hello";
+    let p = s.as_ptr();
+    yield unsafe { p.read() } as u32;
+    yield unsafe { p.add(1).read() } as u32;
+}
+
+async fn later(tag: str) -> str {
+    let s = mk(tag, 8);
+    let n = s.len();
+    let p = s.as_ptr();
+    await task::yield_now();
+    churn();
+    read(p, n)
+}
+
+fn main() {
+    {
+        let s = mk("A", 1); let n = s.len(); let p = s.as_ptr();
+        churn(); check("A", mk("A", 1), read(p, n));
+    }
+    {
+        let g: fn(str) -> ConstPtr<u8> = get_ptr;
+        let s = mk("B", 2); let n = s.len(); let p = g(s);
+        churn(); check("B", mk("B", 2), read(p, n));
+    }
+    {
+        let fs: List<fn(str) -> ConstPtr<u8>> = [|x: str| x.as_ptr()];
+        let s = mk("B2", 2); let n = s.len(); let p = fs[0](s);
+        churn(); check("B2", mk("B2", 2), read(p, n));
+    }
+    {
+        let s = mk("D", 3); let n = s.len(); let ps = ptrs(s);
+        churn(); check("D", mk("D", 3), read(ps[0], n));
+    }
+    {
+        let s = mk("G", 4); let n = s.len(); let p = s.as_ptr();
+        let reset = [ref s] || { s = mk("G", 99); };
+        churn(); check("G", mk("G", 4), read(p, n));
+        if n == 0 { reset(); }
+    }
+    {
+        let bad = 0;
+        for i in 0..5i64 {
+            let s = mk("H", i); let n = s.len(); let p = s.as_ptr();
+            churn(); if read(p, n) != mk("H", i) { bad += 1; }
+        }
+        check("H", "0", f"{bad}");
+    }
+    {
+        let w = W { s: mk("I", 5), n: 1 }; let n = w.s.len(); let p = w.s.as_ptr();
+        churn(); check("I", mk("I", 5), read(p, n));
+    }
+    {
+        let w = W { s: mk("J", 6), n: 1 }; let v = w.view();
+        churn(); check("J", mk("J", 6), read(v.p, v.n));
+    }
+    {
+        let c = try! CString::from_str(mk("K", 9)); let p = c.as_ptr();
+        churn();
+        match CStr::from_ptr(p) { x: CStr => check("K", mk("K", 9), try! x.to_str()), none => println("FAIL K null") }
+    }
+    {
+        let s = mk("R", 10); let n = s.len();
+        let p = ConstPtr::<u8>::dangling();
+        take(s, ref p);
+        churn(); check("R", mk("R", 10), read(p, n));
+    }
+    {
+        let out = "";
+        for x in gen("F") { out = x; }
+        check("F", mk("F", 7), out);
+    }
+    {
+        let o = "";
+        for x in bytes("F") { churn(); o = f"{o} {x}"; }
+        check("M", " 70 45", o);
+    }
+    {
+        check("L", mk("L", 8), task::block_on(later("L")));
+    }
+}

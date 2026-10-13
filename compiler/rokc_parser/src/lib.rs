@@ -1,8 +1,6 @@
-//! Parser. Tokens in, AST out.
-//!
-//! Operator precedence is fixed by the language (spec 3.2.3, `prec.rs`).
-//! stdlib's `#[infix]` / `#[prefix]` / `#[postfix]` attributes only bind
-//! tokens to trait methods (`PrecTable`, consumed by HIR).
+//! Parser: tokens to AST. Precedence is fixed by the language (spec
+//! 3.2.3, `prec.rs`); `#[infix]` / `#[prefix]` / `#[postfix]` only bind
+//! tokens to trait methods (`PrecTable`).
 
 pub mod cfg;
 pub mod derive;

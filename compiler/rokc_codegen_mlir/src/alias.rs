@@ -1,13 +1,11 @@
 //! Alias scopes of `List`s (LLVM scoped `noalias` metadata).
 //!
-//! A `List`'s object and its element buffer belong to that list alone:
-//! the library allocates both and never gives a buffer to another list
-//! (stdlib 2.9.2). So two locals that only ever take lists fresh from a
-//! call never reach the same memory through them. A call that touches
-//! no memory but its first argument's list (`xs[i]`, `xs[i] = v`,
-//! `xs.len()`) gets the scope of its local and every other such local's
-//! as `noalias`; LLVM puts both on the accesses it inlines, so a store
-//! into one list no longer clobbers loads from another.
+//! A `List`'s object and buffer belong to it alone (stdlib 2.9.2), so
+//! locals that only ever take lists fresh from calls never share memory. A
+//! call touching only its first argument's list (`xs[i]`, `xs.len()`) gets
+//! its local's scope and `noalias` for the others; LLVM keeps both on the
+//! inlined accesses, so a store to one list doesn't clobber loads from
+//! another.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,9 +17,8 @@ use rokc_mir::{MirFunction, MirModule, MirTy, Operand, RValue, Statement, Target
 pub struct ListAlias {
     /// Every value it returns is a list allocated during the call.
     fresh: HashSet<FunctionId>,
-    /// Reaches no memory but the list object and element buffer of its
-    /// first argument, writes no GC reference, and reaches no safepoint
-    /// (a collection could move another list's buffer).
+    /// Touches only its first argument's list object and buffer, writes no
+    /// reference and reaches no safepoint (which could move another list).
     confined: HashSet<FunctionId>,
 }
 

@@ -1,7 +1,6 @@
-//! The part of libclang's C API `rokc bindgen` uses, loaded at run time
-//! (`dlopen` / `LoadLibraryW`): rokc does not link libclang, so no other
-//! command needs it. Layouts and constants are clang-c/Index.h's, a
-//! stable ABI.
+//! The part of libclang's C API `rokc bindgen` uses, loaded at run time so
+//! nothing else needs libclang. Layouts and constants follow
+//! clang-c/Index.h's stable ABI.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_longlong, c_uint, c_ulong, c_ulonglong, c_void};
 use std::path::Path;

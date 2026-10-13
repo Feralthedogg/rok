@@ -1,8 +1,6 @@
-//! The REPL's session host (`src/repl_host.c`) as an object, linked
-//! with the runtime when a session starts. Empty where the host does not
-//! run (it loads Mach-O / ELF / COFF objects of arm64 / `x86_64`:
-//! `REPL_HOST`). Windows: compiled by clang (`CC`) without the Windows
-//! SDK or MSVC headers.
+//! The REPL host (`src/repl_host.c`) as an object, linked with the runtime
+//! when a session starts; empty where the host can't run (`REPL_HOST`).
+//! On Windows clang (`CC`) builds it without the SDK or MSVC headers.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,13 +20,11 @@ fn main() {
     let flags: &[&str] = match (os.as_str(), arch.as_str()) {
         ("macos", "aarch64") => &["-arch", "arm64", "-mmacosx-version-min=11.0"],
         ("macos", "x86_64") => &["-arch", "x86_64", "-mmacosx-version-min=11.0"],
-        // Linked into a PIE against the toolchain's libc stubs, which
-        // lack the loader's __stack_chk_guard (aarch64; distributions'
-        // compilers protect the stack by default).
+        // A PIE against the toolchain's libc stubs, which lack
+        // __stack_chk_guard (aarch64 distro compilers protect by default).
         ("linux", "aarch64" | "x86_64") => &["-fPIC", "-fno-stack-protector"],
-        // No MSVC CRT or headers. Unwind tables, which -ffreestanding
-        // drops: a cell's fault unwinds through the host's frames to its
-        // top-level filter.
+        // No MSVC CRT or headers. Keep unwind tables (-ffreestanding drops
+        // them): a cell's fault unwinds through the host to its filter.
         ("windows", "aarch64") => &[
             "--target=aarch64-pc-windows-msvc",
             "-ffreestanding",

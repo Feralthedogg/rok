@@ -1,5 +1,5 @@
-//! `rokc`: the rok compiler (spec 901). Arguments are parsed by hand: the
-//! workspace takes no external crates (targets.md).
+//! `rokc`, the rok compiler (spec 901). Arguments are parsed by hand: the
+//! workspace takes no external crates.
 //!
 //! Exit codes (901.6): 0 ok, 1 user error (compile error / failed test),
 //! 2 usage error, 101 internal error. `run` exits with the program's own
@@ -207,14 +207,12 @@ struct Args {
     name: Option<String>,
     target_dir: Option<PathBuf>,
     cfg: Vec<String>,
-    /// `--print <what>`: print it and exit (`cfg`, `target-list`,
-    /// `target-spec`).
+    /// `--print <what>` (`cfg`, `target-list`, `target-spec`), then exit.
     print: Option<String>,
-    /// `--target`: a built-in target or a `<name>.rokon` file; `None`
-    /// is the host.
+    /// `--target`: a built-in target or a `<name>.rokon` file; `None` is
+    /// the host.
     target: Option<String>,
-    /// The target `--target` names (set once the arguments are read),
-    /// built for `target_cpu` / `target_features`.
+    /// The resolved `--target`, for `target_cpu` / `target_features`.
     spec: Option<TargetSpec>,
     /// `-C target-cpu`.
     target_cpu: Option<String>,
@@ -465,8 +463,7 @@ fn parse_args(raw: Vec<String>) -> Args {
     if a.cmd.is_empty() && a.print.is_none() {
         usage_error("missing command");
     }
-    // A `debug` profile build's executable or archive carries debug
-    // info; `-g` adds it to a `release` one (9.2.15).
+    // Debug builds carry debug info; `-g` adds it to release (9.2.15).
     let output = matches!(a.cmd.as_str(), "build" | "run" | "test") && a.emit.is_empty();
     if output && !a.opts.release() {
         a.opts.debug = true;
@@ -545,9 +542,8 @@ fn parse_lib(v: &str) -> (String, bool) {
     (name.to_owned(), kind == "static")
 }
 
-/// `--extern name=path` (spec 902.3). The path is the dependency's
-/// package directory or its `src/lib.rok`, or a prebuilt `<name>.rokhir` /
-/// `lib<name>.a` (spec 904).
+/// `--extern name=path` (spec 902.3): a package directory, its
+/// `src/lib.rok`, or a prebuilt `<name>.rokhir` / `lib<name>.a` (904).
 fn parse_extern(v: &str) -> (String, PathBuf) {
     let Some((name, path)) = v.split_once('=') else {
         usage_error(&format!("`--extern {v}`: expected <name>=<path>"));
@@ -581,9 +577,8 @@ fn parse_extern(v: &str) -> (String, PathBuf) {
     (name.to_owned(), root)
 }
 
-/// Every pass recurses over the tree (the parser caps its depth): run
-/// the whole command on a thread whose stack is sized for that cap in a
-/// debug build (address space only until used).
+/// Every pass recurses over the tree (the parser caps depth), so run on a
+/// thread sized for that cap in debug builds; it's only address space.
 const COMPILER_STACK: usize = 1 << 30;
 
 fn main() {
@@ -763,8 +758,8 @@ fn real_main() {
     }
 }
 
-/// The implicit `use rok::core::**;` (spec 0.0.5) needs `rok/core`,
-/// and linking needs `librokr.a`; find both without flags.
+/// Find `rok/core` (implicit `use rok::core::**;`, spec 0.0.5) and
+/// `librokr.a` without flags.
 fn with_defaults(mut a: Args) -> Args {
     let sys = rokc_interface::sysroot();
     if a.bootstrap.is_empty() {
@@ -782,8 +777,8 @@ fn with_defaults(mut a: Args) -> Args {
     ) || (a.cmd == "build" && a.emit.is_empty());
     let t = a.spec().clone();
     let name = &t.name;
-    // The host's runtime is the sysroot's own; another target's (and its
-    // C library, when the toolchain ships one) is in its directory.
+    // The host runtime is the sysroot's; other targets' (and their libc,
+    // when shipped) are in their directory.
     let dir = sys.targets.join(name);
     let missing = || {
         format!(
@@ -885,8 +880,7 @@ fn create_dir(dir: &Path) {
     }
 }
 
-/// Prebuild the source `--extern`s into `<out dir>/deps` and use their
-/// ROKHIRs; the deps directory.
+/// Prebuild source `--extern`s into `<out>/deps` and use their ROKHIRs.
 fn prebuild(a: &mut Args, pkg: Option<&Package>) -> Result<PathBuf, String> {
     let dir = out_dir(a, pkg).join("deps");
     // A native build links the standard library prebuilt.
@@ -978,9 +972,8 @@ fn progress(a: &Args, verb: &str, pkg: &Package) {
     }
 }
 
-/// Front end for `pkg` (its dependencies prebuilt); reports the warnings
-/// (also returned, rendered) and exits 1 on errors. Prints the 901.8
-/// progress line unless `-q`.
+/// Front end for `pkg`: reports warnings (also returned, rendered), exits
+/// 1 on errors, prints the 901.8 progress line unless `-q`.
 fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Instant) {
     let started = Instant::now();
     progress(
@@ -999,8 +992,7 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
     }
     session.set_test(mode == Mode::Test);
     session.set_bench(mode == Mode::Bench);
-    // A build lints as `check` does (6.2.9): the library stage stands
-    // for the library's files unless `doc` / `--emit` reads them.
+    // A build lints as `check` does (6.2.9).
     let lints = mode != Mode::Doc;
     let library_files = a.emit.contains(&EmitKind::Expanded) || a.emit.contains(&EmitKind::Ast);
     session.set_keep_ast(true);
@@ -1037,11 +1029,9 @@ fn compile(a: &Args, pkg: &Package, mode: Mode) -> (CompileResult, String, Insta
     (result, warnings, started)
 }
 
-/// The package's incremental directory (spec 9.2.16):
-/// `<out dir>/incremental/<name>-<hash of its root>`, under
-/// `$ROKC_INCREMENTAL` instead of `<out dir>/incremental` when set. A
-/// lone file (outside any package) gets one only under
-/// `$ROKC_INCREMENTAL`; `ROKC_INCREMENTAL=0` turns it off.
+/// Incremental directory (spec 9.2.16): `<out>/incremental/<name>-<hash>`,
+/// or under `$ROKC_INCREMENTAL`. A lone file gets one only there;
+/// `ROKC_INCREMENTAL=0` turns it off.
 fn incremental_dir(a: &Args, pkg: &Package) -> Option<PathBuf> {
     let env = std::env::var_os("ROKC_INCREMENTAL").filter(|v| !v.is_empty());
     let root = match env {
@@ -1055,14 +1045,13 @@ fn incremental_dir(a: &Args, pkg: &Package) -> Option<PathBuf> {
     Some(root.join(format!("{}-{h:016x}", pkg.name)))
 }
 
-/// A library's package name (`--name`, else its directory's) as code
-/// spells it.
+/// The library's package name as code spells it.
 fn lib_name(pkg: &Package) -> String {
     rokc_interface::code_name(&pkg.name)
 }
 
-/// The codegen-unit name of `pkg`'s build (`unit_opts`): a library's is
-/// `lib<name>`, apart from the executable of a package with both.
+/// Codegen-unit name: `lib<name>` for a library, to keep it apart from a
+/// package's executable.
 fn unit_name(pkg: &Package) -> String {
     if pkg.lib {
         format!("lib{}", pkg.name)
@@ -1071,8 +1060,8 @@ fn unit_name(pkg: &Package) -> String {
     }
 }
 
-/// A package with both root files: build its library (`build_lib`) and
-/// mount it as dependency `<name>` of the executable (spec 0.3.1).
+/// Package with both root files: build the library and mount it as dep
+/// `<name>` of the executable (spec 0.3.1).
 fn mount_library(a: &mut Args, pkg: &Package) {
     let Some(lib) = pkg.library_target() else {
         return;
@@ -1084,9 +1073,8 @@ fn mount_library(a: &mut Args, pkg: &Package) {
     ));
 }
 
-/// Build library `pkg` into `out` (default:
-/// `target/<profile>/lib<name>.a`, `<name>.rokhir` beside it) unless up
-/// to date; the archive.
+/// Build library `pkg` into `out` (default `target/<profile>/lib<name>.a`
+/// plus `.rokhir`) unless up to date; the archive.
 fn build_lib(a: &Args, pkg: &Package, out: Option<PathBuf>) -> PathBuf {
     let out = out.unwrap_or_else(|| {
         let target = out_dir(a, Some(pkg));
@@ -1117,8 +1105,7 @@ fn finished(a: &Args, started: Instant) {
     }
 }
 
-/// `r`'s value, or exit 1 reporting its error, whose spans `sources`
-/// has.
+/// `r`'s value, or report its error and exit 1.
 fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>, sources: &SourceMap) -> T {
     r.unwrap_or_else(|d| {
         sources.report(&d);
@@ -1126,9 +1113,8 @@ fn fail_on<T>(r: Result<T, rokc_interface::RokDiagnostic>, sources: &SourceMap) 
     })
 }
 
-/// Cargo-like output directory: `<target>/[<target name>/]<profile>/`, the
-/// profile `release` at `-O2` and above or `-Os`, else `debug`. Without a
-/// package, `<target>` is the system temp directory's `rokc-target/`.
+/// `<target>/[<triple>/]<profile>/`: `release` at `-O2`+ or `-Os`, else
+/// `debug`. Without a package, `<target>` is `$TMPDIR/rokc-target/`.
 fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
     let mut dir = a
         .target_dir
@@ -1147,12 +1133,9 @@ fn exe_file(a: &Args, name: &str) -> String {
     format!("{name}{}", a.spec().exe_suffix)
 }
 
-/// Layout: `target/<profile>/<name>` (executable, `<name>.exe` for Windows,
-/// `<name>.wasm` for wasm32),
-/// `target/<profile>/lib<name>.a` + `<name>.rokhir` (library; a package
-/// with both builds both, `-o` naming the executable),
-/// `target/<profile>/build/<name>.<ext>` (`--emit`, of the executable when
-/// there is one).
+/// `target/<profile>/<name>` (`.exe`, `.wasm`), `lib<name>.a` + `.rokhir`
+/// for a library (a package with both builds both; `-o` names the
+/// executable), and `build/<name>.<ext>` for `--emit`.
 fn cmd_build(mut a: Args) {
     let pkg = discover_arg(&a);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
@@ -1198,8 +1181,7 @@ fn cmd_build(mut a: Args) {
     });
 }
 
-/// Build `pkg` into `out` with `link` unless the record says it is up to
-/// date (then its warnings are printed again).
+/// Build unless up to date; a fresh build reprints its warnings.
 fn build_fresh(a: &Args, pkg: &Package, fp: Fingerprint, link: impl FnOnce(&Args, &CompileResult)) {
     if let Some(warnings) = fp.fresh() {
         print_rendered(&warnings);
@@ -1218,10 +1200,8 @@ fn build_fresh(a: &Args, pkg: &Package, fp: Fingerprint, link: impl FnOnce(&Args
     finished(a, started);
 }
 
-/// The options of a build by codegen units, reusing the unchanged ones'
-/// objects from `target/<profile>/incremental/<unit>/` (902.16); an
-/// anonymous file's are in the target directory without a package
-/// (`out_dir`), one per file.
+/// Codegen-unit build options reusing unchanged units' objects (902.16);
+/// a lone file gets its own directory under the target dir.
 fn unit_opts(a: &Args, pkg: &Package, unit: &str) -> BuildOptions {
     let mut opts = a.opts.clone();
     opts.incremental = Some(if pkg.anonymous {
@@ -1286,8 +1266,7 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
             .map_or_else(|| pkg.dir.clone(), Path::to_path_buf)
     }];
     let mut stamped = vec![PathBuf::from(&a.opts.rokr)];
-    // The C runtime objects, C library and linker the toolchain ships
-    // for the target, all in its directory.
+    // Shipped C runtime objects, libc and linker for the target.
     if let Some(dir) = &a.opts.libc {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
             .into_iter()
@@ -1313,14 +1292,13 @@ fn fingerprint(a: &Args, pkg: &Package, out: &Path) -> Fingerprint {
         inputs.push(rokhir);
         stamped.push(archive);
     }
-    // An executable's shared libraries are copied beside it: a missing
-    // copy rebuilds.
+    // Shared libraries are copied beside the executable; a missing copy
+    // rebuilds.
     stamped.extend(a.opts.runtime_files.iter().cloned());
     Fingerprint::new(out, also(a, pkg, out), &words, &inputs, &stamped)
 }
 
-/// The files besides `out` a build of `pkg` makes (a library's ROKHIR,
-/// an executable's shared libraries).
+/// Files a build makes besides `out` (ROKHIR, copied shared libraries).
 fn also(a: &Args, pkg: &Package, out: &Path) -> Vec<PathBuf> {
     if pkg.lib {
         vec![rokc_interface::rokhir::companions(out).0]
@@ -1337,15 +1315,10 @@ fn also(a: &Args, pkg: &Package, out: &Path) -> Vec<PathBuf> {
 /// Lone-file executables unused this long go when another is built.
 const SCRIPT_KEPT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
-/// The executable of lone file `pkg`, built unless cached (spec
-/// 9.10.7): `<target>/scripts/<key>/<name>` under the out directory
-/// without a package, `<key>` the hash of everything the build is made
-/// from (`fingerprint` without the output path: the compiler, options,
-/// lint levels, target, sources, the `--extern`s and their prebuilt
-/// files, the runtime and the target's C library). A hit compiles
-/// nothing and prints the warnings the build printed. A build links to
-/// a scratch name and renames it into place, so runs racing on one key
-/// end with one complete executable.
+/// Lone file `pkg`'s executable, cached (spec 9.10.7) at
+/// `scripts/<key>/<name>`, `<key>` hashing everything the build reads. A
+/// hit compiles nothing and reprints the warnings. Linking to a scratch
+/// name and renaming keeps racing runs safe.
 fn script_exe(a: &Args, pkg: &Package) -> PathBuf {
     let root = out_dir(a, None).join("scripts");
     let name = exe_file(a, &pkg.name);
@@ -1358,13 +1331,12 @@ fn script_exe(a: &Args, pkg: &Package) -> PathBuf {
         create_dir(&dir);
         let tmp = dir.join(format!(".{name}.{}", process::id()));
         link_exe(a, pkg, result, &tmp, &pkg.name);
-        // On Windows a running executable cannot be replaced: one that
-        // is there is this one already.
+        // Windows can't replace a running executable; if one is there, it
+        // is this one.
         if std::fs::rename(&tmp, &exe).is_err() && exe.is_file() {
             let _ = std::fs::remove_file(&tmp);
         }
-        // Apple debug info (a `.dSYM` beside the executable): another
-        // run's, if there, is as good.
+        // Another run's `.dSYM` is as good.
         let dsym = |p: &Path| {
             let name = p.file_name().unwrap_or_default().to_string_lossy();
             p.with_file_name(format!("{name}.dSYM"))
@@ -1397,11 +1369,9 @@ fn sweep_scripts(root: &Path, keep: &Path) {
     }
 }
 
-/// `rokc check` (with codegen) and `rokc lint` (without): the check
-/// pipeline over the package; exit 1 on an error or a `deny` lint. A
-/// package with both root files: its library, then (when that has no
-/// error) its executable with the library compiled in as dependency
-/// `<name>`.
+/// `rokc check` (codegen) / `rokc lint` (none); exit 1 on an error or a
+/// `deny` lint. A package with both roots checks the library, then the
+/// executable on top of it.
 fn cmd_check(mut a: Args, codegen: bool) {
     // `check -`: the source is stdin (901.9), an anonymous package.
     let stdin = a.positional.first().is_some_and(|p| p == "-");
@@ -1460,9 +1430,9 @@ fn cmd_repl(mut a: Args) {
     if a.positional.first().is_some_and(|p| p == "-") {
         usage_error("`rokc repl -`: standard input is the cell input; give a path or none");
     }
-    // `repl <path>`: a library is a dependency of the session, and its
-    // first cell is `use <name>::*;` (901.2); a program is loaded into it,
-    // its package's library (0.3.1) a dependency.
+    // `repl <path>`: a library becomes a session dependency with
+    // `use <name>::*;` as the first cell (901.2); a program is loaded,
+    // with its package's library (0.3.1) as a dependency.
     let pkg = a.positional.first().map(|p| discover_at(&a, p));
     if let Some(lib) = pkg.as_ref().and_then(|p| p.library.clone()) {
         a.externs
@@ -1529,8 +1499,8 @@ fn cmd_run(mut a: Args) {
     process::exit(status.code().unwrap_or(1));
 }
 
-/// `[path] [filter]` of `test` / `bench`: a lone argument that is not an
-/// existing path is the filter.
+/// `[path] [filter]`: a lone argument that isn't an existing path is the
+/// filter.
 fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
     match a.positional.as_slice() {
         [] => (".", None),
@@ -1541,11 +1511,9 @@ fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
     }
 }
 
-/// `rokc test [path] [filter]` and `rokc bench [path] [filter]` (an
-/// optimized build, `-O2` unless an `-O` level was given): the harness
-/// of `#[test]` / `#[bench]` functions built and run. A package with
-/// both root files runs its library's, then, when they pass, its
-/// executable's.
+/// `rokc test` / `rokc bench [path] [filter]` (`-O2` unless given):
+/// build and run the harness. A package with both roots runs the
+/// library's first, then the executable's if those passed.
 fn cmd_harness(mut a: Args, mode: Mode) {
     if mode == Mode::Bench && !a.opt_set {
         "2".clone_into(&mut a.opts.opt_level);
@@ -1648,8 +1616,8 @@ fn cmd_doc(mut a: Args) {
     }
 }
 
-/// `rokc fmt [path]`: a file, or every source file under a directory; of
-/// a package directory, those under `src/` and `tests/` and its manifest.
+/// `rokc fmt [path]`: a file, a directory's sources, or a package's
+/// `src/`, `tests/` and manifest.
 fn cmd_fmt(a: &Args) {
     let roots: Vec<PathBuf> = if a.positional.is_empty() {
         vec![PathBuf::from(".")]
@@ -1713,9 +1681,9 @@ fn cmd_fmt(a: &Args) {
     }
 }
 
-/// `rokc profdata merge [-o <file>] <file | dir>...`: the raw profiles of
-/// instrumented runs (and indexed profiles) into one indexed profile for
-/// `-C profile-use`; a directory stands for its `.profraw` / `.profdata`.
+/// `rokc profdata merge [-o <file>] <file | dir>...`: merge raw and
+/// indexed profiles (a directory's `.profraw` / `.profdata`) for
+/// `-C profile-use`.
 fn cmd_profdata(a: &Args) {
     let usage = "usage: rokc profdata merge [-o <file>] <file | dir>... | profdata show \
                  [--all-functions] [--topn N] <file>";
@@ -1776,8 +1744,8 @@ fn cmd_profdata(a: &Args) {
     }
 }
 
-/// Spec 905.4 output, one block per symbol.
-/// `rokc bindgen <header>` (std 1.7.6).
+/// `rokc bindgen <header>` (std 1.7.6): spec 905.4 output, one block per
+/// symbol.
 fn cmd_bindgen(a: &Args) {
     let [header] = a.positional.as_slice() else {
         usage_error("usage: rokc bindgen <header> [--target <t>] [-o <file>] [-- <clang args>]");
@@ -1796,10 +1764,9 @@ fn cmd_bindgen(a: &Args) {
         stdcall: spec.stdcall_system(),
         sdk,
         clang_args: &a.run_args,
-        // This machine's headers serve its own platform, every Apple
-        // target (the SDK holds all of them) and every MSVC target on an
-        // MSVC host (one set for all architectures); another target's
-        // come from the clang arguments.
+        // Host headers serve the host, every Apple target (the SDK has
+        // them all) and every MSVC target on an MSVC host; others come
+        // from clang arguments.
         system_headers: spec.is_host()
             || spec.vendor == "apple"
             || spec.env == "msvc" && TargetSpec::host().env == "msvc"

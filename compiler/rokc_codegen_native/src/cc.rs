@@ -1,14 +1,11 @@
 //! Calling conventions: where each scalar of a signature goes.
 //!
 //! A rok function's parameters and result are LLVM first-class values
-//! (spec 8.6.6: the platform C ABI with no variations, as LLVM lowers
-//! the emitter's `func.func` types), except aggregates over 64 bytes,
-//! which go by address (`FnLower::rok_shapes`). LLVM splits an aggregate into its
-//! scalar leaves and passes each like a separate argument, so this
-//! backend does the same, leaf by leaf: objects of both backends call
-//! each other. A C function's signature is first classified by
-//! `rokc_codegen_mlir::abi` (spec 8.6.3); its coerced types are then
-//! placed the same way.
+//! (spec 8.6.6: the plain platform C ABI), except aggregates over 64 bytes,
+//! passed by address (`FnLower::rok_shapes`). LLVM passes an aggregate
+//! leaf by leaf, so this backend does too and objects of both backends
+//! call each other. C signatures are classified by
+//! `rokc_codegen_mlir::abi` (8.6.3) first, then placed the same way.
 
 use rokc_ir_common::PrimTy;
 use rokc_mir::{MirTy, Target};
@@ -35,9 +32,8 @@ pub struct Shape {
     /// Passed as a copy on the stack (`x86_64` `byval`): the leaves are
     /// its 8-byte words.
     pub byval: bool,
-    /// An LLVM aggregate (struct / array): on Apple arm64 its narrow
-    /// leaves past the registers take 4-byte stack slots, a scalar's its
-    /// own size (`SelectionDAG`).
+    /// An LLVM aggregate: on Apple arm64 its narrow stack leaves take 4-byte
+    /// slots, a scalar its own size (`SelectionDAG`).
     pub aggregate: bool,
 }
 
@@ -141,7 +137,7 @@ pub fn leaves(ty: &MirTy, t: &Target, at: u32, out: &mut Vec<Leaf>) {
                 leaves(e, t, at + i * s, out);
             }
         }
-        MirTy::Union(_, n) => {
+        MirTy::Union(_, n, _) => {
             for i in 0..*n {
                 out.push(Leaf {
                     off: at + i * wb,
@@ -351,9 +347,9 @@ const fn part(loc: Loc, l: Leaf) -> Part {
     }
 }
 
-/// Place `params` and `ret` (`None`: nothing returned, or, with `sret`,
-/// a C result through a hidden pointer). `variadic_from`: parameters
-/// from this index on are a C variadic call's `...`.
+/// Place `params` and `ret` (`None`: nothing, or with `sret` a C result
+/// through a hidden pointer); parameters from `variadic_from` on are C
+/// variadics.
 #[must_use]
 pub fn assign(
     conv: Conv,

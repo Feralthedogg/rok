@@ -2,9 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-/// A package to build: a directory holding `src/main.rok` (executable),
-/// `src/lib.rok` (library) or both, or a lone file outside any package's
-/// `src/` (the anonymous executable package, 4.16.8).
+/// A package: a directory with `src/main.rok`, `src/lib.rok` or both, or a
+/// lone file outside any `src/` (anonymous executable, 4.16.8).
 #[derive(Clone, Debug)]
 pub struct Package {
     /// `src/main.rok` when there, else `src/lib.rok`; or the anonymous
@@ -80,9 +79,8 @@ pub fn root_file(dir: &Path) -> Option<PathBuf> {
         .find(|f| f.is_file())
 }
 
-/// Find the package `path` belongs to: the nearest directory at or
-/// above it with `src/main.rok` / `src/lib.rok` (902.2). A file outside
-/// that package's `src/` is anonymous.
+/// The package of `path`: the nearest directory with `src/main.rok` /
+/// `src/lib.rok` (902.2); a file outside its `src/` is anonymous.
 pub fn discover(path: &Path) -> Result<Package, String> {
     if !path.exists() {
         return Err(format!("`{}` does not exist", path.display()));

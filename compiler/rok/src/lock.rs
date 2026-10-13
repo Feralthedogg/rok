@@ -1,8 +1,7 @@
-//! `rok.lock` (ROKON): the exact commit (and its content hash) of every git
-//! package and stone the build uses, and the version and entry hash of
-//! every native package from an index. Path packages are not pinned:
-//! they are always their current content; `Dep::native(url:, sha256:)`
-//! is pinned by its hash already.
+//! `rok.lock`: the exact commit and content hash of every git package and
+//! stone, and the version and entry hash of every index native package.
+//! Path packages are never pinned; a direct native dep is pinned by its
+//! hash.
 
 use std::path::Path;
 
@@ -13,8 +12,8 @@ use crate::manifest::{GitRef, Source};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Locked {
     pub name: String,
-    /// A stone's version; `url` is then its registry index
-    /// (`Dep::registry(url)`), and `reference` is `Default`.
+    /// A stone's version; `url` is then its index and `reference` is
+    /// `Default`.
     pub vers: Option<String>,
     pub url: String,
     pub reference: GitRef,

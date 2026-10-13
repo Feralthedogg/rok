@@ -1,7 +1,4 @@
-//! Lexer.
-//!
-//! Input:  source string.
-//! Output: a `Vec<Token>`.
+//! Lexer: source text to `Vec<Token>`.
 
 pub mod lexer;
 pub mod token;

@@ -1,11 +1,8 @@
-//! `rokc test` harness (spec 901 `rokc test`, 6.2.5 `#[test]`): collect
-//! the user package's `#[test]` functions and replace the entry point
-//! with a generated `main` that runs the test named by `argv[1]`. The
-//! runner spawns the binary once per test, so a panic (exit 101) or an
-//! escaping error (exit 1) fails only that test.
-//!
-//! `rokc bench` uses the same scheme over `#[bench]` functions; its
-//! `main` times rounds of calls (see `bench_main`).
+//! `rokc test` / `rokc bench` harness (spec 901, 6.2.5): the entry point is
+//! replaced by a generated `main` running the `#[test]` named by
+//! `argv[1]`; the runner spawns one process per test, so a panic (101) or
+//! escaping error (1) fails only that test. `bench_main` times rounds of
+//! calls instead.
 
 use rokc_ast::{Item, ThrowsKind};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic};
@@ -22,9 +19,8 @@ pub fn has_attr(attrs: &[rokc_ast::Attribute], name: &str) -> bool {
     attrs.iter().any(|a| a.path.len() == 1 && a.path[0] == name)
 }
 
-/// Turn the user items into a test program (`bench`: a benchmark
-/// program over the `#[bench]` functions); returns the test / bench names
-/// (`::`-qualified, in source order).
+/// Turn the user items into a test (`bench`: benchmark) program; the
+/// `::`-qualified names in source order.
 pub fn install(
     items: &mut Vec<(String, Item)>,
     ext: &ExtOps,
@@ -91,10 +87,8 @@ fn test_main(tests: &[(String, bool)]) -> String {
     src
 }
 
-/// `main` for `rokc bench`: `argv` = `name iters samples`. Runs `samples`
-/// timed rounds of `iters` calls of the bench `name`, printing each
-/// round's elapsed nanoseconds as a `#rokbench <ns>` line (the runner
-/// ignores the bench's own output).
+/// `rokc bench`'s `main`, `argv` = `name iters samples`: `samples` rounds of
+/// `iters` calls, each printed as `#rokbench <ns>`.
 fn bench_main(benches: &[(String, bool)]) -> String {
     let mut src = String::from(
         "extern \"C\" { fn rok_time_now_ns() -> i64; }\n\

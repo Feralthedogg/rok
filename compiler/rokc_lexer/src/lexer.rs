@@ -1,8 +1,5 @@
-//! Lexer driver. Handles whitespace, comments, identifiers, numeric and
-//! string literals, and the fixed punctuation/operator table.
-//!
-//! Positions: lines are 1-based and end at LF, CRLF or a lone CR;
-//! columns count code points, not bytes (spec 1.1.3, 1.1.5).
+//! Lexer driver. Lines are 1-based and end at LF, CRLF or a lone CR;
+//! columns count code points (spec 1.1.3, 1.1.5).
 
 use rokc_ast::escape::{EscapeMode, unescape};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
@@ -30,9 +27,8 @@ pub struct Lexer<'src> {
     /// The previous token can end an expression (`x`, `1`, `)`, ...).
     /// Also marks a following `-` as binary (see `prev_minus`).
     prev_ends_expr: bool,
-    /// The previous token was a unary `-` (it did not follow an
-    /// expression): `-128i8` may use the magnitude
-    /// `MAX + 1` of a signed suffix type.
+    /// Previous token was a unary `-`, so `-128i8` may use magnitude
+    /// `MAX + 1`.
     prev_minus: bool,
     /// First occurrence of each distinct (normalized) identifier, for
     /// the confusable check (spec 1.4.3); `any_non_ascii` gates it.
@@ -723,9 +719,8 @@ impl<'src> Lexer<'src> {
         self.error_from(lit_start, msg);
     }
 
-    /// An explicit suffix fixes the type: the value must fit it. An
-    /// unsuffixed literal takes its type from the slot (`int` / `float`
-    /// hold any value, stdlib 2.1), so HIR checks it.
+    /// A suffix fixes the type, so the value must fit. Unsuffixed literals
+    /// are checked by HIR against the slot (`int` / `float` hold anything).
     fn check_range(&mut self, start: usize, body: &str, radix: u32, is_float: bool, suffix: &str) {
         if suffix.is_empty() {
             return;
@@ -846,9 +841,8 @@ impl<'src> Lexer<'src> {
         }
     }
 
-    /// Advance over a quoted body up to the closing `quote` (consumed).
-    /// Returns the body end offset, or `None` at EOF / (for chars) at a
-    /// line end.
+    /// Skip to past the closing `quote`; the body's end, or `None` at EOF
+    /// (for chars, at a line end).
     fn scan_quoted(&mut self, quote: u8) -> Option<usize> {
         loop {
             match self.bytes.get(self.pos) {
@@ -913,9 +907,8 @@ impl<'src> Lexer<'src> {
         TokenKind::ByteStrLit(body)
     }
 
-    /// Inside a hole (spec 1.7.3): what ends or splits the hole (`}` /
-    /// `:` at bracket depth 0). `None` lexes `b` as ordinary code
-    /// (brackets counted).
+    /// Inside a hole (spec 1.7.3): `}` / `:` at depth 0 end or split it;
+    /// `None` lexes `b` as code.
     fn hole_punct(&mut self, b: u8, next: Option<u8>) -> Option<TokenKind> {
         let Some(Frame::Hole { triple, depth }) = self.fstr.last_mut() else {
             return None;
@@ -1224,12 +1217,9 @@ impl<'src> Lexer<'src> {
     }
 }
 
-/// The text of a block doc comment whose inside is `body` (spec 1.2.3).
-///
-/// A blank first line and a blank last line go; when every later line
-/// starts with optional whitespace and `*`, that prefix goes; then the
-/// indentation common to the non-blank lines and the whitespace before
-/// `*/` go. Line breaks become LF.
+/// Text of a block doc comment (spec 1.2.3): drop a blank first and last
+/// line, a common `*` prefix, common indentation and the whitespace
+/// before `*/`; line breaks become LF.
 fn block_doc_text(body: &str) -> String {
     let body = body.replace("\r\n", "\n").replace('\r', "\n");
     let mut lines: Vec<&str> = body.split('\n').collect();

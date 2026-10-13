@@ -1,5 +1,5 @@
-//! C ABI lowering of aggregate parameters / results of `extern "C"`
-//! functions (spec 8.6.3).
+//! C ABI lowering of `extern "C"` aggregate parameters and results (spec
+//! 8.6.3).
 //!
 //! LLVM does not classify aggregates, so, like clang, the front end rewrites
 //! a by-value `struct` into what the platform C ABI uses and converts
@@ -7,15 +7,12 @@
 //!
 //! - AAPCS64 (Linux / Windows / Apple arm64): a homogeneous float
 //!   aggregate (HFA, 1-4 members of one float type) goes in `v`
-//!   registers as `[n x fT]`; other aggregates up to 16 bytes as `i64` /
-//!   `[2 x i64]` arguments (results ≤ 8 bytes as `iN`); bigger ones are
-//!   passed as a pointer to a caller copy and returned through `x8`
-//!   (`sret`). Apple's variant only differs for variadic arguments
-//!   (all on the stack — LLVM does it, the call is marked variadic) and
-//!   for extended small integers (`signext` / `zeroext`, which the
-//!   emitter puts where the platform has them, `c_ext_attr`).
-//! - System V `x86_64`: each eightbyte is INTEGER or SSE; ≤ 16 bytes go
-//!   in registers when enough of both kinds are left (else the whole
+//! - AAPCS64 (Linux / Windows / Apple arm64): a homogeneous float
+//!   aggregate (HFA, 1-4 members of one float type) goes in `v` registers
+//!   as `[n x fT]`; others up to 16 bytes as `i64` / `[2 x i64]` (results
+//!   ≤ 8 bytes as `iN`); bigger ones by pointer to a caller copy, returned
+//!   through `x8` (`sret`). Apple differs only for variadics (all on the
+//!   stack; LLVM handles it) and small-integer extension (`c_ext_attr`).
 //!   aggregate is MEMORY), > 16 bytes are MEMORY (`byval` / `sret`).
 //! - Windows x64: 1 / 2 / 4 / 8-byte aggregates as `iN`, others by
 //!   reference / `sret`.
@@ -121,7 +118,7 @@ fn leaves(ty: &MirTy, at: u32, target: &Target, out: &mut Vec<(u32, u32, Leaf)>)
                 leaves(e, at + i * s, target, out);
             }
         }
-        MirTy::Union(_, n) => {
+        MirTy::Union(_, n, _) => {
             for i in 0..*n {
                 out.push((at + i * word, word, Leaf::Int));
             }
@@ -156,9 +153,8 @@ fn hfa(ty: &MirTy, target: &Target) -> Option<String> {
     Some(format!("!llvm.array<{} x {elem}>", ls.len()))
 }
 
-/// Classify a C function's signature on `target`. `params` are the
-/// declared (fixed) parameters; variadic extras are always scalars.
-/// `None`: the target cannot pass these aggregates.
+/// Classify a C signature on `target`; `params` are the fixed ones
+/// (variadic extras are scalars). `None`: aggregates the target can't pass.
 #[must_use]
 pub fn classify(target: &Target, params: &[MirTy], ret: &MirTy, variadic: bool) -> Option<FnAbi> {
     // A `#[repr(transparent)]` struct passes as its field.
@@ -296,14 +292,10 @@ pub const BY_REF_BYTES: u32 = 64;
 
 /// A rok-to-rok argument or result passed by address (spec 8.6.6).
 ///
-/// That is an aggregate over [`BY_REF_BYTES`]; on 32-bit Arm also an
-/// array of 1- or 2-byte elements, whose stack leaves LLVM's Arm
-/// lowering puts in 4-byte slots at the call but reads packed in the
-/// callee.
-///
-/// Such an argument is a pointer to the
-/// caller's value, which the callee copies on entry; such a result is
-/// stored through a pointer passed before the arguments, and the
+/// An aggregate over [`BY_REF_BYTES`], or on 32-bit Arm an array of 1- or
+/// 2-byte elements (LLVM's Arm lowering writes their stack leaves in 4-byte
+/// slots but reads them packed). The argument is a pointer the callee
+/// copies from; the result goes through a pointer passed first and the
 /// function returns nothing.
 #[must_use]
 pub fn rok_by_ref(ty: &MirTy, target: &Target) -> bool {
@@ -494,10 +486,9 @@ fn riscv_arg(ty: &MirTy, target: &Target, gprs: &mut u32, fprs: &mut u32) -> Arg
     }
 }
 
-/// A struct the floating-point convention passes as its fields: one float,
-/// two floats, or a float and an integer of at most 8 bytes, after
-/// flattening nested structs and arrays (a union is never one). Its MLIR
-/// type and the integer and float registers it takes.
+/// A struct the RISC-V float convention passes as fields (one float, two
+/// floats, or a float and an integer ≤ 8 bytes, flattened; never a
+/// union): its MLIR type and the integer and float registers it takes.
 fn riscv_fp(ty: &MirTy, target: &Target) -> Option<(String, u32, u32)> {
     fn has_union(ty: &MirTy) -> bool {
         match ty {
@@ -840,7 +831,11 @@ mod tests {
         // Two integers, or a union, are not a float struct.
         assert_eq!(c(&[st(&[I32, I32])], &MirTy::Unit).args[0], co("i64"));
         assert_eq!(
-            c(&[MirTy::Union(Vec::new(), 1)], &MirTy::Unit).args[0],
+            c(
+                &[MirTy::Union(Vec::new(), 1, rokc_mir::UnionKind::Plain)],
+                &MirTy::Unit
+            )
+            .args[0],
             co("i64")
         );
         // Eight floats take every `fa`: the struct goes in `a` registers.

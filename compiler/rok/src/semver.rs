@@ -2,9 +2,8 @@
 //! (`^1.2`, `~1.2.3`, `=1.0`, `>=1.2, <2`, `1.*`, `*`; a bare version is
 //! `^`), with Cargo's meaning.
 //!
-//! A pre-release version matches only a requirement that names a
-//! pre-release of the same `major.minor.patch` (`^1.0.0-rc.1` matches
-//! `1.0.0-rc.2`, `^1.0` does not).
+//! A pre-release matches only a requirement naming a pre-release of the
+//! same `x.y.z` (`^1.0.0-rc.1` matches `1.0.0-rc.2`; `^1.0` does not).
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -31,8 +30,7 @@ fn ident(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// `pre` and build of `x.y.z-pre+build`: the dotted part before `-`, the
-/// pre-release identifiers.
+/// Split `x.y.z-pre+build` into `x.y.z` and the pre-release identifiers.
 fn split_pre(s: &str) -> Result<(&str, Vec<String>), String> {
     let s = match s.split_once('+') {
         Some((v, b)) if b.split('.').all(ident) => v,
@@ -195,9 +193,8 @@ impl Req {
             pre,
             ..Version::new(ma, minor.unwrap_or(0), patch.unwrap_or(0))
         };
-        // The release above every `ma.mi.pa` with the unwritten parts
-        // free (`1` -> `2.0.0`, `1.2` -> `1.3.0`); `None` when all three
-        // are written.
+        // The release above `ma.mi.pa` with unwritten parts free (`1` ->
+        // `2.0.0`, `1.2` -> `1.3.0`); `None` when all are written.
         let next = match (minor, patch) {
             (None, _) => Some(Version::new(ma + 1, 0, 0)),
             (Some(mi), None) => Some(Version::new(ma, mi + 1, 0)),

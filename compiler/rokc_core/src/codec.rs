@@ -1,9 +1,8 @@
-//! A compact binary encoding of compiler data (the incremental caches,
-//! spec 9.2.16).
+//! Compact binary encoding for the incremental caches (spec 9.2.16).
 //!
-//! LEB128 integers, length-prefixed strings and lists. `Codec` is
-//! implemented next to each type, mostly by `codec_struct!` and
-//! `codec_enum!`. A decode that fails yields `None`: a cache miss.
+//! LEB128 integers, length-prefixed strings and lists, `Codec` impls next
+//! to each type (mostly `codec_struct!` / `codec_enum!`). A failed decode
+//! is `None`: a cache miss.
 
 use std::collections::HashMap;
 
@@ -15,9 +14,8 @@ pub struct Enc {
     pub spans: bool,
     /// The source file ids of the spans encoded.
     pub files: Vec<u32>,
-    /// A stretch of one file (file id, start, end): `foreign` gets the
-    /// files of the spans encoded outside it, each with the furthest end
-    /// of those spans.
+    /// (file id, start, end): `foreign` collects the files of spans
+    /// encoded outside it, each with their furthest end.
     pub home: Option<(u32, u32, u32)>,
     pub foreign: Vec<(u32, u32)>,
     /// When set, gets every id written by `Enc::id`.
@@ -95,9 +93,8 @@ pub enum IdKind {
 /// here, the decode fails).
 pub type IdMap<'a> = &'a dyn Fn(IdKind, u32) -> Option<u32>;
 
-/// A decoder. `files` maps the encoded source file ids to this build's
-/// (index: old id); an id not in it fails the decode. `ids` renumbers
-/// the other ids.
+/// `files` maps encoded file ids to this build's (missing: decode fails);
+/// `ids` renumbers the other ids.
 pub struct Dec<'a> {
     buf: &'a [u8],
     pos: usize,

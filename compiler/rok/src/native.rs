@@ -1,18 +1,16 @@
-//! Native packages: prebuilt C / C++ libraries, one archive per target
-//! triple, described by a `Native { .. }` value. rok compiles no C and
-//! runs nothing from a package; it checks hashes, unpacks, and tells
-//! rokc where the libraries are.
+//! Native packages: prebuilt C / C++ libraries, one archive per target,
+//! described by `Native { .. }`. rok compiles and runs nothing from them:
+//! it checks hashes, unpacks, and tells rokc where the libraries are.
 //!
 //! ```rokon
 //! Native { name: "zlib", vers: "1.3.1", deps: { "other": Dep::native("^1") }, targets: { "aarch64-apple-darwin": Artifact { url: "https://example.com/zlib-1.3.1-aarch64-apple-darwin.tar.gz", sha256: "<hex>", links: { "z": "static" }, runtime: [] } }, yanked: false, license: "Zlib" }
 //! ```
 //!
-//! An index holds one such line per version in `native/<shard path>`; a
-//! `Dep::native(url: .., sha256: ..)` names a file holding one value
-//! (its artifact urls may be relative to it). An archive (any format
-//! `tar` reads) holds `lib/` (`lib<name>.a`, `lib<name>.dylib` / `.so`,
-//! Windows `<name>.lib`), the `runtime` files (shared libraries copied
-//! beside executables, e.g. `bin/<name>.dll`) and license files.
+//! An index has one line per version in `native/<shard>`; a
+//! `Dep::native(url, sha256)` names a file with one value (artifact urls
+//! may be relative to it). An archive (anything `tar` reads) holds `lib/`,
+//! the `runtime` files copied beside executables (`bin/<name>.dll`) and
+//! licenses.
 //!
 //! ```text
 //! $ROK_HOME/cache/native/<sha256>/          an archive, unpacked after its hash matched
@@ -298,8 +296,7 @@ pub fn dir_of(loc: &str) -> String {
     }
 }
 
-/// The bytes at `loc`: `http(s)://` through `curl` (into `tmp`),
-/// `file://` or a path read.
+/// Bytes at `loc`: `http(s)://` via curl (into `tmp`), else a file.
 fn fetch(loc: &str, tmp: &Path) -> Result<Vec<u8>, String> {
     let file = if remote(loc) {
         let out = Command::new("curl")
@@ -346,8 +343,8 @@ fn scratch(home: &Path, what: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!(".tmp-{what}-{}", std::process::id())))
 }
 
-/// The `Native { .. }` file `Dep::native(url: loc, sha256)` names: from
-/// the cache, else fetched and checked.
+/// The `Native { .. }` file a direct dep names: cached, else fetched and
+/// checked.
 pub fn direct(
     home: &Path,
     name: &str,
@@ -386,9 +383,8 @@ pub fn direct(
     Ok(e)
 }
 
-/// The files of `name`'s build for target `t`: unpacked in the cache (once;
-/// never fetched again), after its SHA-256 matched and its contents were
-/// checked.
+/// `name`'s files for target `t`, unpacked in the cache once after the
+/// hash and contents checked out.
 pub fn unpack(
     home: &Path,
     n: &Resolved,
@@ -446,8 +442,7 @@ pub fn unpack(
     done.map(|()| (dir, a.clone()))
 }
 
-/// `tar -xf archive` into `to`, after its listing has no absolute or `..`
-/// paths.
+/// `tar -xf` into `to`, refusing absolute or `..` paths.
 fn extract(archive: &Path, to: &Path) -> Result<(), String> {
     let tar = |args: &[&std::ffi::OsStr]| {
         let out = Command::new("tar")
@@ -482,8 +477,8 @@ fn extract(archive: &Path, to: &Path) -> Result<(), String> {
     .map(drop)
 }
 
-/// The library file a link of kind `stat` needs, for target `t`
-/// (COFF links a shared library through its import library).
+/// The file a `stat` link needs on `t` (COFF links a DLL through its
+/// import library).
 fn lib_file(name: &str, stat: bool, t: &TargetSpec) -> String {
     if stat || t.object_format == ObjectFormat::Coff {
         format!("lib/{}", t.staticlib(name))
@@ -540,8 +535,8 @@ fn check(files: &Path, a: &Artifact, t: &TargetSpec) -> Result<(), String> {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        // ELF: executables name the library by its soname, and look for
-        // that file beside themselves.
+        // ELF executables name a library by soname and look for it beside
+        // themselves.
         if t.object_format == ObjectFormat::Elf && file.contains(".so") {
             let bytes = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
             match soname(&bytes) {
@@ -572,8 +567,7 @@ fn check(files: &Path, a: &Artifact, t: &TargetSpec) -> Result<(), String> {
     Ok(())
 }
 
-/// A little-endian ELF shared library's `DT_SONAME` (through the section
-/// headers: `SHT_DYNAMIC` and the string table it links).
+/// `DT_SONAME` of a little-endian ELF shared library.
 fn soname(b: &[u8]) -> Option<String> {
     let n = |o: usize, w: usize| -> Option<usize> {
         let mut v = 0u64;
@@ -659,8 +653,7 @@ fn install_name(b: &[u8]) -> Option<String> {
     None
 }
 
-/// rokc's arguments for linking `natives` (dependents first) for
-/// target `t`: `-L <lib>`, `-l kind=name`, `--native-runtime <file>`.
+/// rokc arguments linking `natives` (dependents first) for `t`.
 pub fn rokc_args(
     home: &Path,
     natives: &[&Resolved],
@@ -697,9 +690,8 @@ pub fn rokc_args(
     Ok(out)
 }
 
-/// `rok publish --native <file>`: the entry in `file`, each build fetched,
-/// hash-checked and checked (license files too); with `index`, checked
-/// against that checkout; with `write`, committed there.
+/// `rok publish --native <file>`: fetch and check every build (licenses
+/// too), against `index` if given; `write` commits there.
 pub fn publish(
     home: &Path,
     file: &Path,

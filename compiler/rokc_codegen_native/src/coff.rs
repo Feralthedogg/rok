@@ -1,13 +1,11 @@
 //! COFF relocatable object writer (Windows), `x86_64` and arm64.
 //!
-//! A COMDAT section per function and data object (`.text`, `.rdata`,
-//! `.data`), so `/opt:ref` drops what nothing uses; their relocations,
-//! the unwind tables `.pdata` / `.xdata` (every function is a
-//! frame-pointer frame: the unwinder takes the stack pointer back from
-//! it; arm64 functions past 1 MiB in fragments) in COMDATs associated
-//! with the code, symbols and the string table; a big object (`/bigobj`) past 65279 sections. No debug info
-//! (`-g` builds for Windows go through LLVM, whose `CodeView` lld-link
-//! turns into a PDB).
+//! A COMDAT section per function and data object so `/opt:ref` drops the
+//! unused; their relocations; `.pdata` / `.xdata` unwind tables (frame
+//! pointer frames; arm64 functions past 1 MiB in fragments) in COMDATs
+//! associated with the code; symbols and strings; `/bigobj` past 65279
+//! sections. No debug info: Windows `-g` builds go through LLVM's
+//! `CodeView`.
 
 use crate::obj::{FnRange, Obj, RelKind, Reloc, Sect};
 
@@ -47,15 +45,13 @@ const REL_ARM64_SECREL_LOW12A: u16 = 9;
 const REL_ARM64_SECREL_HIGH12A: u16 = 0xa;
 const REL_ARM64_ADDR64: u16 = 0xe;
 
-/// x64 `UNWIND_INFO` of every function: version 1, a 4-byte prolog,
-/// `rbp` the frame register at offset 0; the codes in reverse order:
-/// `mov rbp, rsp` at 4 (`UWOP_SET_FPREG`), `push rbp` at 1
-/// (`UWOP_PUSH_NONVOL`). What `x64::prologue` emits.
+/// x64 `UNWIND_INFO` shared by every function: version 1, 4-byte prolog,
+/// `rbp` frame register at offset 0; codes in reverse: `mov rbp, rsp` at 4
+/// (`UWOP_SET_FPREG`), `push rbp` at 1 (`UWOP_PUSH_NONVOL`).
 const X64_UNWIND: [u8; 8] = [0x01, 0x04, 0x02, 0x05, 0x04, 0x03, 0x01, 0x50];
 
-/// arm64 unwind codes of every prolog and epilog (shared, index 0):
-/// `set_fp` (`mov x29, sp`), `save_fplr_x` 16 (`stp x29, x30, [sp,
-/// #-16]!`), `end`, a `nop` pad. What `a64::prologue` / `epilogue` emit.
+/// arm64 unwind codes shared by every prolog and epilog: `set_fp`,
+/// `save_fplr_x` 16, `end`, a `nop` pad (`a64::prologue` / `epilogue`).
 const A64_CODES: [u8; 4] = [0xe1, 0x81, 0xe4, 0xe3];
 /// The codes of a fragment without the prolog: `end_c`, then those.
 const A64_CODES_NO_PROLOG: [u8; 4] = [0xe5, 0xe1, 0x81, 0xe4];
@@ -186,9 +182,8 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     let x86 = obj.x86;
     let (pieces, piece_of) = obj.pieces();
     let data_flags = SCN_CNT_INITIALIZED_DATA | SCN_MEM_READ;
-    // Sections: the pieces; x64's shared `UNWIND_INFO`; each function's
-    // unwind info (arm64 `.xdata`, then `.pdata`), associated with its
-    // code so it goes when the linker drops that.
+    // Sections: the pieces, x64's shared `UNWIND_INFO`, then each
+    // function's unwind info associated with its code so they drop together.
     let mut outs: Vec<Out> = pieces
         .iter()
         .map(|p| {
@@ -254,10 +249,9 @@ pub fn write(obj: &Obj) -> Vec<u8> {
         unwind.push((k, xdata, outs.len() - 1));
     }
 
-    // Symbols: each section's (a COMDAT's followed by its leader, the
-    // first symbol defined in it), then the rest. A weak definition is a
-    // weak external aliasing `.weak.<name>.default`, as LLVM writes one:
-    // that default leads a COMDAT any copy of which will do.
+    // Symbols: each section's (a COMDAT's then its leader), then the rest.
+    // A weak definition is a weak external aliasing `.weak.<name>.default`
+    // as LLVM writes it, that default leading an any-copy COMDAT.
     let mut syms = SymTab {
         big: outs.len() > MAX_SECTIONS16,
         ..SymTab::default()
@@ -445,9 +439,8 @@ pub fn write(obj: &Obj) -> Vec<u8> {
     b
 }
 
-/// arm64 `.xdata` of `f`, `(offset, record)` per fragment: the length
-/// field holds at most 2^18 - 1 words, so a longer function is split
-/// (never inside an epilog), as LLVM does.
+/// arm64 `.xdata` per fragment: the length field holds 2^18 - 1 words, so
+/// longer functions split (never inside an epilog), as LLVM does.
 fn a64_xdata(obj: &Obj, f: &FnRange) -> Vec<(u32, Vec<u8>)> {
     let text = &obj.sects[&Sect::Text].data;
     let word = |at: usize| u32::from_le_bytes(text[at..at + 4].try_into().unwrap_or([0; 4]));
@@ -477,11 +470,10 @@ fn a64_xdata(obj: &Obj, f: &FnRange) -> Vec<(u32, Vec<u8>)> {
     out
 }
 
-/// The `.xdata` record of a fragment of `len` bytes: one epilog scope
-/// per epilog (offsets in it), the shared codes. A fragment after the
-/// first has no prolog: its codes start with `end_c`, so the unwinder
-/// takes the prolog as done; without an epilog, the `E` form's single
-/// epilog starts at that `end_c`.
+/// `.xdata` of a `len`-byte fragment: an epilog scope per epilog, the
+/// shared codes. Later fragments have no prolog (codes start with
+/// `end_c`); without an epilog, the `E` form's epilog starts at that
+/// `end_c`.
 fn a64_fragment(len: u32, epilogs: &[u32], prolog: bool) -> Vec<u8> {
     let words = len / 4;
     let n = epilogs.len() as u32;

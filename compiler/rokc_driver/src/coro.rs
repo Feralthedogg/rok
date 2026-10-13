@@ -1,6 +1,5 @@
 //! `yield fn` / `async fn` / `async yield fn` (spec 4.1.11) as plain
-//! functions returning the coroutine's wrapper type, whose body is the
-//! matching coroutine block:
+//! functions returning the coroutine wrapper, the body a coroutine block:
 //!
 //! ```text
 //! async fn f(x: i32) throws (E) -> T { body }
@@ -9,9 +8,9 @@
 //!      }
 //! ```
 //!
-//! The error leaves through the coroutine (at `await` / `next`, spec
-//! 4.14.10), so the rewritten function itself does not throw. `async fn
-//! main` (4.16.5) instead runs its body to completion on the executor:
+//! The error leaves through the coroutine (`await` / `next`, spec 4.14.10),
+//! so the rewritten function doesn't throw. `async fn main` (4.16.5) runs
+//! its body on the executor:
 //! `fn main() -> T { rok::core::task::block_on(async { body }) }`.
 
 use rokc_ast::{
@@ -144,9 +143,9 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
     f.is_async = false;
     f.is_generator = false;
     if is_main {
-        // 4.16.5: the body is the top-level task of the executor.
-        // `block_on_try::<T, E>`: the body's future type comes from the
-        // signature, so a body that never throws still fits.
+        // 4.16.5: the body is the executor's top-level task. The future's
+        // type comes from the signature, so a non-throwing body still fits
+        // `block_on_try::<T, E>`.
         let (runner, generics, throws) = match err {
             Some(e) => (
                 "block_on_try",

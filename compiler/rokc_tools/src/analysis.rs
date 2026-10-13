@@ -11,11 +11,11 @@ use rokc_interface::{BuildOptions, CompileResult, Session, SourceFile};
 
 use crate::lint::{self, Level};
 
-/// Front end, then the lints at `levels`, then with `codegen` MLIR codegen.
+/// Front end, lints at `levels`, then with `codegen` MLIR codegen.
 ///
-/// Codegen rejects what the backend cannot lower. `source` stands for the
-/// root file's text (`None`: read `path`). The diagnostics are in report
-/// order; the result keeps the parsed files.
+/// Codegen rejects what the backend can't lower. `source`: the root file's
+/// text (`None`: read `path`). Diagnostics in report order; the parsed
+/// files are kept.
 pub fn check(
     session: &mut Session,
     source: Option<&str>,
@@ -45,18 +45,15 @@ pub fn check(
     (result, diags)
 }
 
-/// Run `f` (a compile) on the compile thread: a panic there or on a
-/// thread it spawns (an internal compiler error) is `Err(message)` for
-/// the caller to report, and the caller goes on.
+/// Run compile `f` on the compile thread; a panic there or on a thread it
+/// spawns is `Err(message)` and the caller goes on.
 ///
-/// Compiles run one at a time on one long-lived thread, so the compiler's per-thread state
-/// carries from one to the next as on a single thread (a REPL cell's
-/// front end, then its codegen). rokc aborts on panic, so the panicking
-/// thread is parked forever instead of unwinding (the next compile gets
-/// a new thread): what it holds stays allocated, and a later panic of a
-/// compile already given up (a sibling parse thread) may be blamed on
-/// the one running then. A panic on a thread that called `isolate` is
-/// fatal as before.
+/// Compiles run one at a time on one long-lived thread, so per-thread
+/// state carries over (a REPL cell's front end, then its codegen). rokc
+/// aborts on panic, so a panicking thread is parked forever instead (the
+/// next compile gets a new thread); what it holds leaks, and a late panic
+/// of an abandoned compile may be blamed on the current one. A panic on
+/// the thread that called `isolate` is fatal as before.
 pub fn isolate<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
     use std::sync::Mutex;
     use std::sync::mpsc::{Sender, channel};
@@ -239,10 +236,9 @@ impl Analysis {
             .or_else(|| Some(self.file(d.primary.as_ref()?.span)?.0.clone()))
     }
 
-    /// A typed expression of `path` whose span matches `pick`: the
-    /// innermost (smallest span, deepest on ties), or with `outer` the
-    /// outermost. A compound expression's span is its first token's
-    /// (the parser's convention), so equal spans are common.
+    /// A typed expression of `path` at `pick`: the innermost (smallest span,
+    /// deepest on ties), or with `outer` the outermost. Compound
+    /// expressions span from their first token, so ties are common.
     pub fn find_expr(
         &self,
         path: &str,
@@ -360,11 +356,9 @@ pub fn signature(hir: &HirModule, f: &HirFunction) -> String {
     )
 }
 
-/// The name a user writes for a HIR function.
-///
-/// The last `::` segment, and the method name of an `<Type>__method`
-/// impl function (a dependency's: `<module>::<Type>.method[__by_Trait]`);
-/// a fn in a block (`f/g`, spec 4.10) by its own name.
+/// The name a user writes for a HIR function: the last `::` segment, the
+/// method name of an `<Type>__method` (a dependency's
+/// `<module>::<Type>.method[__by_Trait]`), a nested fn's own name.
 pub fn short_name(name: &str) -> &str {
     let last = name.rsplit("::").next().unwrap_or(name);
     let mut segs = last.rsplit('/');
