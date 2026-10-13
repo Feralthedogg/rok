@@ -45,12 +45,8 @@ fn installed(home: &Path) -> Vec<(String, String)> {
                 .collect()
         })
         .unwrap_or_default();
-    // Numeric order: 0.10 after 0.9.
-    v.sort_by_key(|(_, ver)| {
-        ver.split(['.', '-'])
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect::<Vec<_>>()
-    });
+    // Semver order: 0.10 after 0.9, 0.1.0-rc.1 before 0.1.0.
+    v.sort_by_key(|(_, ver)| crate::semver::Version::parse(ver).ok());
     v
 }
 
@@ -648,6 +644,23 @@ mod tests {
         assert!(super::matches("0.3", "0.3.1"));
         assert!(super::matches("0.3.1", "0.3.1"));
         assert!(!super::matches("0.3", "0.30.0"));
+        assert!(super::matches("0.1", "0.1.0-rc.1"));
+        assert!(!super::matches("0.1.0", "0.1.0-rc.1"));
         assert!(!super::matches("0.3.1", "0.3"));
+    }
+
+    #[test]
+    fn installed_in_semver_order() {
+        let home = std::env::temp_dir().join(format!("rok-tc-order-{}", std::process::id()));
+        for v in ["0.10.0", "0.1.0", "0.1.0-rc.1", "0.9.0"] {
+            std::fs::create_dir_all(super::root(&home).join(format!("{v}-{}", super::HOST)))
+                .unwrap();
+        }
+        let got: Vec<String> = super::installed(&home)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        let _ = std::fs::remove_dir_all(&home);
+        assert_eq!(got, ["0.1.0-rc.1", "0.1.0", "0.9.0", "0.10.0"]);
     }
 }

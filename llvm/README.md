@@ -28,8 +28,9 @@ Hosts:
   has these with clang, which reads the PGO profile). rokc_llvm
   links the C++ runtime the archives were built against: libstdc++, or
   libc++ when they name `std::__1`.
-- Windows (x86_64, arm64; MSVC ABI): `llvm\build.ps1 [prefix]` from a
-  Developer PowerShell for VS (the MSVC C++ build tools, cmake, ninja, Python 3) →
+- Windows (MSVC ABI; x86_64 verified, arm64 not yet run): `llvm\build.ps1
+  [prefix]` from a Developer PowerShell for VS (the MSVC C++ build tools,
+  cmake, ninja, Python 3) →
   `%LOCALAPPDATA%\rok\llvm-22.1.8`. The same libraries as `.lib` with
   the dynamic CRT (`/MD`, as rustc links), no DIA SDK. rokc_llvm compiles
   its shim with `cl` (or `CXX`, e.g. `clang-cl`) and archives it with
@@ -68,15 +69,13 @@ llvm-profdata). gcc reads no clang profile: a Linux build with gcc
 CC=clang` gives it. Nothing extra is fetched either way.
 
 An MSVC-ABI build names functions by MSVC mangling, which that profile
-does not have. `build.ps1` uses `rok-msvc.profdata.tar.xz` instead,
-with clang-cl (`CXX=clang-cl`) when it can read it; cl reads no clang
-profile, made by `train-pgo.ps1` (below) on a Windows x86_64 host; the
-dynamic CRT and clang-cl 22 read it (indexed v12). On that host (8
-cores, 2026-10-19), rokc's `-O2` builds of `bench/` as objects take
-6.97 s (best of 5) against 7.83 s with clang-cl and no profile (−11%)
-and 8.92 s with cl (−22%); the cases training left out, built and
-linked one after another, 66.1 s against 68.7 s and 71.1 s (best of 3).
-The file is 2 MB.
+does not have. `build.ps1` reads `rok-msvc.profdata.tar.xz` (2 MB, made
+by `train-pgo.ps1` on a Windows x86_64 host) when built with clang-cl
+(`CXX=clang-cl`, 22 or newer); `cl` reads no clang profile and builds
+without PGO. On an 8-core host, rokc's `-O2` builds of `bench/` as
+objects take 6.97 s with the profile, 7.83 s with clang-cl alone (−11%)
+and 8.92 s with cl (−22%); the cases training left out, built and linked
+in turn, 66.1 s, 68.7 s and 71.1 s.
 
 `llvm/train-pgo.sh [profile...]` trains on the host (macOS, Xcode's
 clang; or Linux, clang and its llvm-profdata): an instrumented LLVM
@@ -98,17 +97,17 @@ llvm/train-pgo.sh        # → ~/.cache/rok/rok-linux.profdata
 llvm/train-pgo.sh rok-linux.profdata
 ```
 
-On the reference machines (bench/ built at `-O2`, instructions):
-against a profile of the host alone, the merged one costs 0.1% on Linux
-and 0.5% on macOS, where the other host's alone costs 2.8% and 0.9%;
-the merged file is 3 MB.
+Against a profile of the host alone (bench/ at `-O2`, instructions),
+the merged one costs 0.1% on Linux and 0.5% on macOS, where the other
+host's alone costs 2.8% and 0.9%; the merged file is 3.6 MB.
+`train-pgo.sh` peaks at ~5 GB of scratch space and takes about 35
+minutes on a 10-core Apple Silicon machine (55 on a 16-thread x86_64
+laptop with `ROK_LLVM_JOBS=12`).
+
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other
-Windows architecture) into `rok-msvc.profdata.tar.xz` (26 min for the
-instrumented LLVM and 5.5 for the rest on 8 cores). `train-pgo.sh`
-peaks at ~5 GB of scratch space and takes about 35 minutes on a 10-core
-Apple Silicon machine (55 on a 16-thread x86_64 laptop with
-`ROK_LLVM_JOBS=12`). Regenerate after a change of the pinned LLVM or
+Windows architecture) into `rok-msvc.profdata.tar.xz`: 26 minutes for
+the instrumented LLVM and 5.5 for the rest on 8 cores. Regenerate after a change of the pinned LLVM or
 a large change of what rokc asks LLVM to do; a stale profile still
 builds, with less benefit.
 
@@ -157,7 +156,7 @@ info for `-target` is its own), no tools, tests or docs. The prefix holds
 headers, passed as `-resource-dir`); the build tree is deleted at the end.
 On a 10-core Apple Silicon machine: 5.5 minutes, a build tree of ~2 GB at
 its peak, 36 MB installed (libclang.dylib 29 MB, headers 7.7 MB; 12 MB
-compressed).
+compressed). On an 8-core Windows host: 16 minutes, 30 MB.
 
 rokc looks for it in its toolchain's `lib/` (`dist.sh` copies it there,
 from `ROK_LIBCLANG_PREFIX` or this script's prefix), else, for a build in

@@ -24,7 +24,8 @@ arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 
   host; an entry made on a branch serves that branch only, so the first push to `main` builds every host
   once). On a private repository's standard runners a build took 0.5 h (macOS arm64), 2.2 h (macOS x86_64,
   Linux aarch64), 4.5 h (Linux x86_64) and 6.0 h (Windows: at the 6 h job limit). Linux needs clang 19+ to
-  read `rok.profdata.xz`; a build without PGO fails.
+  read `rok.profdata.xz`; a build without PGO fails. Windows builds with `cl`, which reads no clang profile,
+  so its prefix has no PGO (`rok-msvc.profdata.tar.xz` needs clang-cl; llvm/README.md).
 - `check`, per host: fmt, clippy, every test but the two corpora (`-- --exact --skip end_to_end_cases --skip
   differential`), `rokc fmt --check library`, and the compiler / runtime crate isolation check; every step
   runs even after one fails. On Linux after `targets/build.sh <host>`.

@@ -70,6 +70,7 @@ A bare name is looked up in the directories of `ROK_MLIR_PLUGIN_PATH` as `lib<na
 
 ## Requirements
 
+- A static (musl) `rokc` loads no plugins.
 - Build against the bundle's headers, with the flags above: no RTTI, `NDEBUG`, C++17. A plugin linked
   against its own MLIR registers into registries rokc never sees.
 - Export the entry points: `extern "C" LLVM_ATTRIBUTE_WEAK LLVM_ALWAYS_EXPORT` (on Windows

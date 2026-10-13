@@ -9,17 +9,20 @@ guide are at [rok-lang.org](https://rok-lang.org).
 
 - A toolchain needs no LLVM install: `rokc` links LLVM, MLIR and lld (pinned LLVM 22.1.8) and runs the whole
   back end in process. On macOS the link needs the SDK of Xcode's command line tools (`xcode-select --install`).
-  Linux targets need nothing: the toolchain ships their runtime and C library (musl, and link stubs of glibc
-  2.36: executables need glibc 2.34 or later) in `lib/rok/targets/<triple>/`, so `--target <linux triple>` works
-  from any host, and so does the other macOS arch. Set `ROK_CC` to link with a C compiler driver instead.
+  Other targets need nothing: the toolchain ships each one's runtime and C library in
+  `lib/rok/targets/<triple>/` (musl; link stubs of glibc 2.36, whose executables need glibc 2.34 or later;
+  Windows import libraries; wasi-libc), so `--target <triple>` links from any host; Apple targets link from
+  macOS. Set `ROK_CC` to link with a C compiler driver instead.
 - Code generation: rok's native backend builds `-O0` for arm64 and x86_64; every other target (the 32-bit
   `i686-unknown-linux-gnu`, `i686-pc-windows-msvc`, `armv7-unknown-linux-gnueabihf`;
-  `riscv64gc-unknown-linux-gnu`) and every optimized build goes through LLVM.
-- The REPL and the Jupyter kernel run on macOS and Linux (arm64, x86_64).
+  `riscv64gc-unknown-linux-gnu`; `wasm32-*`) and every optimized build goes through LLVM.
+- The REPL and the Jupyter kernel run on macOS, Linux and Windows; a static (musl) `rokc` has no REPL,
+  `rokc bindgen` or MLIR plugins.
 - Building from source needs Rust (`rust-toolchain.toml`; no external crates are used), and for anything above
   `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see
   `llvm/README.md`). Without it `rokc` builds `-O0` only (the native backend), linking with the system `cc`.
-  `targets/build.sh` builds what `--target` links into `target/lib/rok/targets/` (rustup, curl, python3, clang).
+  `targets/build.sh` builds what `--target` links into `target/lib/rok/targets/` (rustup with llvm-tools, curl, make,
+  python3, bash, clang).
   `rokc bindgen` loads libclang at run time (nothing else needs it): a toolchain ships it, a build from source
   uses `llvm/build-libclang.sh`'s (about 5 minutes on 10 cores; `llvm/README.md`).
 
@@ -32,26 +35,37 @@ curl -fsSL https://rok-lang.org/install.sh | sh
 Or from a release archive:
 
 ```sh
-sh install.sh --archive rok-0.1.0-aarch64-apple-darwin.tar.gz
-# from inside an unpacked archive
-rok-0.1.0-aarch64-apple-darwin/install.sh
+sh install.sh --archive rok-0.1.0-rc.1-aarch64-apple-darwin.tar.gz
+rok-0.1.0-rc.1-aarch64-apple-darwin/install.sh     # from inside an unpacked archive
 ```
 
-On Windows (PowerShell; installs into `%USERPROFILE%\.rok` and puts its `bin` on the user's `PATH`):
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://rok-lang.org/install.ps1 | iex"
-powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-x86_64-pc-windows-msvc.zip
-```
-
-`-NoModifyPath` leaves the user's `PATH` alone.
-
-Then add `~/.rok/bin` to `PATH` (the script tells you how).
+`install.sh` does not edit shell files; add `~/.rok/bin` to `PATH` as it says:
 
 ```sh
 export PATH="$HOME/.rok/bin:$PATH"      # bash / zsh
 fish_add_path ~/.rok/bin                 # fish
 ```
+
+On Windows (PowerShell) the toolchain goes into `%USERPROFILE%\.rok` and its `bin` onto the user's `PATH`
+(`-NoModifyPath` leaves `PATH` alone):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://rok-lang.org/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-rc.1-x86_64-pc-windows-msvc.zip
+```
+
+`install.sh --version <v>` and `install.ps1 -Version <v>` pick a release; both check a download against its
+`.sha256`.
+
+## Platforms
+
+The toolchain (`rok`, `rokc`, `rokls`) is tested on macOS arm64, Linux x86_64 (NixOS, Ubuntu 24.04, Alpine)
+and Windows 11 x86_64. macOS x86_64 and aarch64 Linux and Windows are untested as hosts.
+
+`--target` covers 15 triples. The test corpus runs programs for Apple arm64 and x86_64 (Rosetta); Linux
+x86_64 and aarch64 (gnu and musl; aarch64 under qemu-user), i686, armv7 (qemu-user) and riscv64 (a riscv64
+kernel under qemu-system); Windows x86_64 and i686; and the three wasm32 targets (wasmtime, node).
+`aarch64-pc-windows-msvc` links but has not run.
 
 ## Install layout
 
@@ -77,9 +91,9 @@ $ROK_HOME/
 
 ```sh
 rok toolchain list
-rok toolchain install 0.1.0 --from rok-0.1.0-aarch64-apple-darwin.tar.gz   # directory, archive, or URL
+rok toolchain install 0.1.0-rc.1 --from rok-0.1.0-rc.1-aarch64-apple-darwin.tar.gz   # directory, archive, or URL
 rok toolchain default 0.1
-rok toolchain remove 0.1.0-aarch64-apple-darwin
+rok toolchain remove 0.1.0-rc.1-aarch64-apple-darwin
 rok toolchain update             # the newest release becomes the default (older ones stay installed)
 rok toolchain update 0.1.1       # a given release
 ```
@@ -104,7 +118,8 @@ cargo build --release                 # target/release/{rok,rokc,rokls}, librokr
 sh install.sh --archive dist/rok-*.tar.gz
 ```
 
-During development you can use `target/debug/rok` / `rokc` directly (they find the repository's `library/`).
+During development use `target/debug/rok` / `rokc` directly (they find the repository's `library/`). On
+Windows, `dist.sh` runs from Git Bash inside a Developer PowerShell for VS.
 
 ### Checks
 
