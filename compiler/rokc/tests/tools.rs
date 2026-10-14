@@ -223,7 +223,7 @@ fn repl_loads_and_uses_a_library() {
     // The library is archived by LLVM.
     let Some(env) = setup() else { return };
     let rokr = env.rokr.display().to_string();
-    let dir = std::env::temp_dir().join(format!("rok_repl_pkg_{}", std::process::id()));
+    let dir = scratch("repl-pkg");
     let lib = dir.join("geom");
     std::fs::create_dir_all(lib.join("src")).unwrap();
     std::fs::write(
@@ -295,7 +295,7 @@ fn repl_static_library_calls_a_dll_import() {
 fn repl_runs_each_cell_once() {
     let env = setup_runtime();
     let rokr = env.rokr.display().to_string();
-    let log = std::env::temp_dir().join(format!("rok_repl_once_{}", std::process::id()));
+    let log = scratch("repl-once").join("log");
     let log_s = log.display().to_string().replace('\\', "/");
     let _ = std::fs::remove_file(&log);
     // Cell 1 appends to `log`: a rerun would append again.
@@ -1161,7 +1161,7 @@ fn jupyter_kernel_speaks_the_wire_protocol() {
 
     let env = setup_runtime();
     let key = b"secret-key";
-    let dir = std::env::temp_dir().join(format!("rok_jupyter_{}", std::process::id()));
+    let dir = scratch("jupyter");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("kernel.json");
     // The kernel says `ready` on stderr once every socket accepts. A
@@ -1454,4 +1454,113 @@ fn completion_inspect_history(
         Some("fn sum(self: P) -> i32\n\nSum of the coordinates."),
         "{reply}"
     );
+}
+
+/// Entries in the temp directory `tmp` other than the lone-file cache.
+fn leftovers(tmp: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(tmp)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "rokc-target")
+        .collect();
+    v.sort();
+    v
+}
+
+/// Processes whose executable or command line names `dir`.
+fn processes_in(dir: &std::path::Path) -> Vec<String> {
+    let dir = dir.display().to_string();
+    let out = if cfg!(windows) {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process | ForEach-Object { $_.ExecutablePath }",
+            ])
+            .output()
+    } else {
+        Command::new("ps").args(["-axo", "command"]).output()
+    };
+    text(&out.unwrap().stdout)
+        .lines()
+        .filter(|l| l.contains(&dir))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+#[cfg_attr(
+    not(any(
+        all(
+            any(target_os = "macos", target_os = "linux"),
+            any(target_arch = "aarch64", target_arch = "x86_64")
+        ),
+        windows
+    )),
+    ignore = "the REPL host runs on macOS, Linux and Windows (arm64, x86_64)"
+)]
+// spec: §9.7.0
+fn rokc_leaves_no_temporaries() {
+    let env = setup_runtime();
+    let rokr = env.rokr.display().to_string();
+    let root = scratch("no-temporaries");
+    let tmp = root.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let rokc = |args: &[&str]| {
+        let mut c = Command::new(ROKC);
+        c.args(args).arg("--rokr").arg(&rokr).current_dir(&root);
+        for v in ["TMPDIR", "TMP", "TEMP"] {
+            c.env(v, &tmp);
+        }
+        c.env("ROK_HOME", workspace());
+        c
+    };
+    std::fs::write(root.join("hi.rok"), "println(\"hi\");\n").unwrap();
+    std::fs::write(root.join("bad.rok"), "let x: i32 = \"no\";\n").unwrap();
+    let out = rokc(&["run", "-q", "hi.rok"]).output().unwrap();
+    assert_eq!(text(&out.stdout), "hi\n", "{}", text(&out.stderr));
+    let out = rokc(&["build", "-q", "bad.rok"]).output().unwrap();
+    assert!(!out.status.success());
+    assert_eq!(leftovers(&tmp), Vec::<String>::new());
+
+    // rokc killed while a cell runs: its host ends too, and nothing stays.
+    let mark = root.join("started");
+    let cell = format!(
+        "use rok::std::fs;\ntry! fs::write(\"{}\", \"\"); loop {{}}\n",
+        mark.display().to_string().replace('\\', "/")
+    );
+    let mut child = rokc(&["repl"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(cell.as_bytes())
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !mark.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(mark.exists(), "the cell did not start");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let (left, procs) = (leftovers(&tmp), processes_in(&tmp));
+        // Windows: the job ends the host; its directory, still holding the
+        // host's image as it ends, is left to the sweep.
+        if procs.is_empty() && (left.is_empty() || cfg!(windows)) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "left behind: {left:?}, running: {procs:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }

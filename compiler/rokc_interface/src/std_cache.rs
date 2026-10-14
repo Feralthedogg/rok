@@ -250,8 +250,7 @@ mod tests {
 
     #[test]
     fn prune_keeps_the_option_sets_used_last() {
-        let root = std::env::temp_dir().join(format!("rokc-std-cache-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = rokc_core::tmp::test_dir("std-cache");
         for i in 0..KEEP + 2 {
             let dir = root.join(format!("tc-opt{i}-src"));
             std::fs::create_dir_all(&dir).unwrap();

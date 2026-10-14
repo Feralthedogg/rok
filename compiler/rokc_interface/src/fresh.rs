@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn fresh_until_an_input_or_the_output_changes() {
-        let dir = std::env::temp_dir().join(format!("rokc-fresh-{}", std::process::id()));
+        let dir = rokc_core::tmp::test_dir("fresh");
         std::fs::create_dir_all(dir.join("target")).unwrap();
         let src = dir.join("main.rok");
         let out = dir.join("target/app");
@@ -195,7 +195,7 @@ mod tests {
         fp("a").clear();
         assert!(fp("a").fresh().is_none());
         // A file read outside the inputs is checked by content.
-        let outside = std::env::temp_dir().join(format!("rokc-fresh-{}.rok", std::process::id()));
+        let outside = rokc_core::tmp::test_dir("fresh-outside").join("a.rok");
         std::fs::write(&outside, "a").unwrap();
         fp("a").save(&[src, outside.clone()], "");
         assert!(fp("a").fresh().is_some());

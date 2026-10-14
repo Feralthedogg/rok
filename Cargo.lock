@@ -149,6 +149,7 @@ dependencies = [
 name = "rokc_llvm"
 version = "0.1.0-rc.1"
 dependencies = [
+ "rokc_core",
  "rokc_target",
 ]
 

@@ -307,7 +307,7 @@ fn doc_writes_html_with_links_and_search_index() {
             .unwrap_or_else(|| panic!("{s} not in {index}"))
     };
     assert!(
-        at("rokc-test") < at("util/index.html"),
+        at("doc/index.html") < at("util/index.html"),
         "user package first"
     );
 

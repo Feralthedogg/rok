@@ -632,6 +632,7 @@ pub fn end_if_output_closed(info: &std::panic::PanicHookInfo<'_>) {
     if !output_closed(info) {
         return;
     }
+    rokc_core::tmp::remove_live();
     #[cfg(unix)]
     {
         const SIGPIPE: i32 = 13;

@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn installed_in_semver_order() {
-        let home = std::env::temp_dir().join(format!("rok-tc-order-{}", std::process::id()));
+        let home = rokc_core::tmp::test_dir("tc-order");
         for v in ["0.10.0", "0.1.0", "0.1.0-rc.1", "0.9.0"] {
             std::fs::create_dir_all(super::root(&home).join(format!("{v}-{}", super::HOST)))
                 .unwrap();

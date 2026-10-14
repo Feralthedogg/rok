@@ -90,7 +90,7 @@ println(f\"{twice(s)}\");
 fn scripted_session() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/src/lib.rok");
-    let dir = std::env::temp_dir().join(format!("rokc-lsp-{}", std::process::id()));
+    let dir = rokc_core::tmp::test_dir("lsp");
     std::fs::create_dir_all(&dir).unwrap();
     // A lone file: the anonymous package.
     let file = dir.join("demo.rok");
@@ -272,7 +272,7 @@ println(f\"{u}\");
 fn members_references_rename() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/src/lib.rok");
-    let dir = std::env::temp_dir().join(format!("rokc-lsp-members-{}", std::process::id()));
+    let dir = rokc_core::tmp::test_dir("lsp-members");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("members.rok");
     let uri = path_to_uri(&file.display().to_string(), cfg!(windows));
@@ -459,7 +459,7 @@ fn manifest_buffer() {
 fn unsaved_submodule_buffer() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/src/lib.rok");
-    let dir = std::env::temp_dir().join(format!("rokc-lsp-sub-{}", std::process::id()));
+    let dir = rokc_core::tmp::test_dir("lsp-sub");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/main.rok"), "mod m;\n\nlet x: i32 = m::v();\n").unwrap();
     std::fs::write(dir.join("src/m.rok"), "pub fn v() -> i32 {\n    1\n}\n").unwrap();
@@ -523,9 +523,7 @@ fn unsaved_submodule_buffer() {
 fn library_and_executable_package() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/src/lib.rok");
-    let dir = std::env::temp_dir()
-        .join(format!("rokc-lsp-both-{}", std::process::id()))
-        .join("app");
+    let dir = rokc_core::tmp::test_dir("lsp-both").join("app");
     std::fs::create_dir_all(dir.join("src")).unwrap();
     let lib = "pub fn v() -> i32 {\n    1\n}\n\nfn hidden() -> i32 {\n    2\n}\n";
     std::fs::write(dir.join("src/lib.rok"), lib).unwrap();
@@ -631,7 +629,7 @@ println(f\"{f()}\");
 fn block_local_items() {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let bootstrap = workspace.join("library/core/src/lib.rok");
-    let dir = std::env::temp_dir().join(format!("rokc-lsp-local-{}", std::process::id()));
+    let dir = rokc_core::tmp::test_dir("lsp-local");
     std::fs::create_dir_all(&dir).unwrap();
     let uri = path_to_uri(&dir.join("local.rok").display().to_string(), cfg!(windows));
     let uri = uri.as_str();

@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use rokc_core::tmp::{TempEntry, private_dir};
 use rokc_diagnostic::{ErrorKind, RokDiagnostic, SourceMap};
 use rokc_mir::TargetSpec;
 use rokc_target::{Linker, ObjectFormat};
@@ -184,26 +185,22 @@ impl Default for BuildOptions {
 pub struct TempDir {
     path: PathBuf,
     keep: bool,
+    /// What `new` made, removed by its own drop; `beside`'s has none.
+    entry: Option<TempEntry>,
 }
 
 impl TempDir {
     pub fn new(keep: bool) -> Result<Self, RokDiagnostic> {
-        let base = std::env::temp_dir();
-        let pid = std::process::id();
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        for attempt in 0..100u32 {
-            let path = base.join(format!("rokc-{pid}-{nanos:x}-{attempt}"));
-            match private_dir(&path) {
-                Ok(()) => return Ok(Self { path, keep }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => {
-                    return Err(err(format!("cannot create {}: {e}", path.display())));
-                }
-            }
+        let mut e = TempEntry::dir("rokc-")
+            .map_err(|e| err(format!("cannot create a temporary directory: {e}")))?;
+        if keep {
+            e.keep();
         }
-        Err(err("cannot create a unique temporary directory".to_owned()))
+        Ok(Self {
+            path: e.path().to_owned(),
+            keep,
+            entry: Some(e),
+        })
     }
 
     /// `.<name>.objs` beside the output `out`, made anew: the same
@@ -215,7 +212,11 @@ impl TempDir {
         let path = out.with_file_name(name);
         let _ = std::fs::remove_dir_all(&path);
         private_dir(&path).map_err(|e| err(format!("cannot create {}: {e}", path.display())))?;
-        Ok(Self { path, keep })
+        Ok(Self {
+            path,
+            keep,
+            entry: None,
+        })
     }
 
     #[must_use]
@@ -224,21 +225,11 @@ impl TempDir {
     }
 }
 
-/// Create `path` readable by this user alone (Windows: the user's temp
-/// directory is private already).
-fn private_dir(path: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    return std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
-        .create(path);
-    #[cfg(not(unix))]
-    std::fs::create_dir(path)
-}
-
 impl Drop for TempDir {
     fn drop(&mut self) {
         if self.keep {
             eprintln!("rokc: kept temporaries in {}", self.path.display());
-        } else {
+        } else if self.entry.is_none() {
             let _ = std::fs::remove_dir_all(&self.path);
         }
     }

@@ -22,10 +22,7 @@ fn skip() -> bool {
 
 #[cfg(target_vendor = "apple")]
 fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("rokc-llvm-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+    rokc_core::tmp::test_dir(&format!("llvm-{name}"))
 }
 
 const fn opts<'a>(t: &'a Target, opt: OptLevel, emit: Emit, pipeline: &'a str) -> Compile<'a> {

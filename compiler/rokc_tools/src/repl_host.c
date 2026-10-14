@@ -43,7 +43,10 @@
 #define __GLIBC_USE_C23_STRTOL 0
 #endif
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
@@ -51,8 +54,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/event.h>
+#else
+#include <sys/syscall.h>
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#endif
 #endif
 
 #if !defined(__aarch64__) && !defined(__x86_64__)
@@ -2045,7 +2057,10 @@ int main(void) {
     for (;;) {
         char line[8192], out[64];
         size_t n = 0;
-        if (!read_command(line, sizeof line)) return 0;
+        if (!read_command(line, sizeof line)) {
+            remove_session();  // rokc has ended the session, or died
+            return 0;
+        }
         char *ir = NULL;
         if (sscanf(line, "lib %zu", &n) == 1) {
             char *path = read_ir(n);
@@ -2090,9 +2105,82 @@ static void on_sigint(int sig) {
     quiesce_cancel = 1;
 }
 
+// rokc, and its session directory (the host's own). The host ends with
+// rokc: between cells on the channel's EOF, during a cell through the
+// copy waiting for it (`await_verdict`). Whichever ends last removes the
+// directory, unless rokc keeps temporaries.
+static pid_t rokc_pid;
+static char session_dir[4096];
+
+static int remove_entry(const char *p, const struct stat *st, int flag, struct FTW *f) {
+    (void)st;
+    (void)flag;
+    (void)f;
+    remove(p);
+    return 0;
+}
+
+static void remove_session(void) {
+    char keep[4200];
+    snprintf(keep, sizeof keep, "%s/.rok-keep", session_dir);
+    if (session_dir[0] && access(keep, F_OK) != 0)
+        nftw(session_dir, remove_entry, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+// `exe`'s directory, if it is a rokc temporary (`rokc-<pid>-...`).
+static void set_session_dir(const char *exe) {
+    const char *slash = strrchr(exe, '/');
+    if (!slash || (size_t)(slash - exe) >= sizeof session_dir) return;
+    memcpy(session_dir, exe, (size_t)(slash - exe));
+    session_dir[slash - exe] = 0;
+    const char *base = strrchr(session_dir, '/');
+    if (!base || strncmp(base + 1, "rokc-", 5) != 0) session_dir[0] = 0;
+}
+
+// A descriptor readable once rokc exits; -1 if it has, -2 if it can't be
+// watched (then polled).
+static int watch_rokc(void) {
+#if defined(__APPLE__)
+    int kq = kqueue();
+    if (kq < 0) return -2;
+    struct kevent ev;
+    EV_SET(&ev, rokc_pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    if (kevent(kq, &ev, 1, NULL, 0, NULL) == 0) return kq;
+#else
+    long kq = syscall(SYS_pidfd_open, rokc_pid, 0);  // Linux 5.3+
+    if (kq >= 0) return (int)kq;
+#endif
+    int gone = errno == ESRCH;
+#if defined(__APPLE__)
+    close(kq);
+#endif
+    return gone ? -1 : -2;
+}
+
+// The copy from before a cell waits for its verdict on `fd`. Should rokc
+// die meanwhile, nothing would end the cell: end it and the session.
+static ssize_t await_verdict(int fd, char *c, pid_t host) {
+    int w = watch_rokc();
+    while (w != -1) {
+        struct pollfd p[2] = {{fd, POLLIN, 0}, {w, POLLIN, 0}};
+        int n = poll(p, w >= 0 ? 2 : 1, w >= 0 ? -1 : 1000);
+        if (n < 0 && errno != EINTR) break;
+        if (n > 0 && p[0].revents) {
+            if (w >= 0) close(w);
+            ssize_t r;
+            while ((r = read(fd, c, 1)) < 0 && errno == EINTR) {}
+            return r;
+        }
+        if (w >= 0 ? n > 0 : kill(rokc_pid, 0) != 0 && errno == ESRCH) break;
+    }
+    if (getppid() == host) kill(host, SIGKILL);
+    remove_session();
+    _exit(0);
+}
+
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    rokc_pid = getppid();
+    if (argc > 0) set_session_dir(argv[0]);
     ctl = dup(0);
     int nul = open("/dev/null", O_RDONLY);
     dup2(nul, 0);  // the cells' stdin
@@ -2137,13 +2225,12 @@ int main(int argc, char **argv) {
             dprintf(ctl, "err\n");
             continue;
         }
+        pid_t host = getpid();
         pid_t snap = fork();
         rok_session_resume();
         if (snap == 0) {
             close(verdict[1]);
-            ssize_t r;
-            while ((r = read(verdict[0], &c, 1)) < 0) {}
-            if (r == 1) _exit(0);
+            if (await_verdict(verdict[0], &c, host) == 1) _exit(0);
             close(verdict[0]);
             free(ir);
             rok_session_restored(NULL, SIZE_MAX);

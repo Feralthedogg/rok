@@ -45,11 +45,20 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dir.display());
     }
     let msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if let Some(p) = prefix
+        .as_deref()
+        .filter(|p| apple_host() && p.is_dir() && !x1_patched(p))
+    {
+        println!(
+            "cargo:warning={} predates llvm/patches/arm64e-x1.patch; rebuild it with llvm/build.sh",
+            p.display()
+        );
+    }
     let Some(prefix) = prefix.filter(|p| usable(p, msvc)) else {
         assert!(
             explicit.is_none(),
-            "ROK_LLVM_PREFIX={} has no LLVM {LLVM_VERSION} with MLIR and lld \
-             (build one with llvm/build.sh or llvm/build.ps1)",
+            "ROK_LLVM_PREFIX={} has no LLVM {LLVM_VERSION} with MLIR, lld and \
+             llvm/patches (build one with llvm/build.sh or llvm/build.ps1)",
             Path::new(&explicit.unwrap_or_default()).display()
         );
         return;
@@ -411,6 +420,18 @@ fn usable(prefix: &Path, msvc: bool) -> bool {
         && archive(prefix, "lldMachO", msvc).is_file()
         && prefix.join("include/lld/Common/Driver.h").is_file()
         && prefix.join("share/rok/dsymutil/Options.inc").is_file()
+        && (!apple_host() || x1_patched(prefix))
+}
+
+fn apple_host() -> bool {
+    env::var("CARGO_CFG_TARGET_VENDOR").as_deref() == Ok("apple")
+}
+
+/// llvm/patches/arm64e-x1.patch: without it ld64.lld rejects the macOS 27
+/// SDK, and Apple targets only link on macOS.
+fn x1_patched(prefix: &Path) -> bool {
+    std::fs::read_to_string(prefix.join("include/llvm/TextAPI/Architecture.def"))
+        .is_ok_and(|d| d.contains("arm64e_x1"))
 }
 
 /// Does the prefix run on the cargo target (`LLVM_HOST_TRIPLE`'s arch and

@@ -133,6 +133,7 @@ struct Binding {
 struct Host {
     ctl: Ctl,
     _child: Reaped,
+    _job: Option<Job>,
 }
 
 struct Reaped(Child);
@@ -140,6 +141,92 @@ struct Reaped(Child);
 impl Drop for Reaped {
     fn drop(&mut self) {
         let _ = self.0.wait();
+    }
+}
+
+/// Windows: a job that ends the host when its last handle, ours, closes:
+/// when rokc exits, however it ends. POSIX hosts watch rokc themselves
+/// (`repl_host.c`).
+#[cfg(windows)]
+struct Job(*mut std::ffi::c_void);
+
+// SAFETY: a job handle may be used and closed from any thread.
+#[cfg(windows)]
+unsafe impl Send for Job {}
+
+#[cfg(windows)]
+impl Job {
+    fn ending(child: &Child) -> Option<Self> {
+        use std::os::windows::io::AsRawHandle;
+        type Handle = *mut std::ffi::c_void;
+        unsafe extern "system" {
+            fn CreateJobObjectW(security: *mut std::ffi::c_void, name: *const u16) -> Handle;
+            fn SetInformationJobObject(job: Handle, class: i32, info: *const u8, len: u32) -> i32;
+            fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct Limits {
+            per_process_time: i64,
+            per_job_time: i64,
+            flags: u32,
+            min_working_set: usize,
+            max_working_set: usize,
+            active_processes: u32,
+            affinity: usize,
+            priority_class: u32,
+            scheduling_class: u32,
+            io: [u64; 6],
+            process_memory: usize,
+            job_memory: usize,
+            peak_process_memory: usize,
+            peak_job_memory: usize,
+        }
+        const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+        const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+        // SAFETY: an unnamed job with default security, not inherited.
+        let job = Self(unsafe { CreateJobObjectW(std::ptr::null_mut(), std::ptr::null()) });
+        if job.0.is_null() {
+            return None;
+        }
+        let limits = Limits {
+            flags: KILL_ON_JOB_CLOSE,
+            ..Limits::default()
+        };
+        // SAFETY: `limits` has the layout of
+        // JOBOBJECT_EXTENDED_LIMIT_INFORMATION; both handles are live.
+        let ok = unsafe {
+            SetInformationJobObject(
+                job.0,
+                EXTENDED_LIMIT_INFORMATION,
+                (&raw const limits).cast(),
+                std::mem::size_of::<Limits>() as u32,
+            ) != 0
+                && AssignProcessToJobObject(job.0, child.as_raw_handle()) != 0
+        };
+        ok.then_some(job)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        unsafe extern "system" {
+            fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
+        }
+        // SAFETY: the job handle is ours.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[cfg(not(windows))]
+struct Job;
+
+#[cfg(not(windows))]
+impl Job {
+    #[allow(clippy::unnecessary_wraps)]
+    const fn ending(_: &Child) -> Option<Self> {
+        None
     }
 }
 
@@ -309,6 +396,16 @@ pub struct Repl {
     /// The host process running the current cell (0: none). `SIGINT`
     /// to it ends the cell; the session goes on as before it.
     pub running: Arc<AtomicU32>,
+}
+
+impl Drop for Repl {
+    /// A host still being built writes into `tmp`: wait for it (and end
+    /// it) before `tmp` goes.
+    fn drop(&mut self) {
+        if let Some(h) = self.starting.take() {
+            drop(h.join());
+        }
+    }
 }
 
 impl Repl {
@@ -1467,6 +1564,7 @@ fn start_host(dir: &std::path::Path, opts: &BuildOptions) -> Option<Host> {
     match cmd.spawn() {
         Ok(child) => Some(Host {
             ctl,
+            _job: Job::ending(&child),
             _child: Reaped(child),
         }),
         Err(e) => {

@@ -160,7 +160,8 @@ build options:
                                library's is in its symbols
   --target-dir <dir>           instead of the package's target/ (without a
                                package: the system temp directory's
-                               rokc-target/)
+                               rokc-target/, a cache trimmed to what was
+                               built in the last week)
   -g                           debug info in a release build too (a debug
                                build always has it; macOS: a .dSYM next to
                                the executable)
@@ -1121,11 +1122,50 @@ fn out_dir(a: &Args, pkg: Option<&Package>) -> PathBuf {
         .clone()
         .or_else(|| pkg.map(Package::target_dir))
         .or_else(|| std::env::var_os("ROKC_TARGET_DIR").map(PathBuf::from))
-        .unwrap_or_else(|| std::env::temp_dir().join("rokc-target"));
+        .unwrap_or_else(lone_target_dir);
     if a.target.is_some() {
         dir.push(&a.spec().name);
     }
     dir.join(if a.opts.release() { "release" } else { "debug" })
+}
+
+/// `$TMPDIR/rokc-target`, the target directory of lone files: a cache.
+/// Once a day, files nobody wrote for a week go (`evict`).
+fn lone_target_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join("rokc-target");
+    let stamp = dir.join(".evicted");
+    let day = std::time::Duration::from_secs(86_400);
+    let due = std::fs::metadata(&stamp)
+        .and_then(|m| m.modified())
+        .map_or(true, |t| t.elapsed().map_or(true, |a| a > day));
+    if due && std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&stamp, "").is_ok() {
+        evict(&dir, 7 * day);
+    }
+    dir
+}
+
+/// Remove files under `dir` older than `age`, then emptied directories.
+fn evict(dir: &Path, age: std::time::Duration) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut empty = true;
+    for e in entries.flatten() {
+        let p = e.path();
+        let gone = match e.file_type() {
+            Ok(t) if t.is_dir() => evict(&p, age) && std::fs::remove_dir(&p).is_ok(),
+            Ok(_) => {
+                let old = e
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > age));
+                old && std::fs::remove_file(&p).is_ok()
+            }
+            Err(_) => false,
+        };
+        empty &= gone;
+    }
+    empty
 }
 
 /// The file name of executable `name` for the build's target.

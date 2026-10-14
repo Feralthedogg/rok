@@ -11,6 +11,16 @@ The pin is **LLVM 22.1.8** (`VERSION` in `build.sh`, `LLVM_VERSION` in
 which change between majors, so exactly one version is supported; 22.1.8
 is the last release of the newest major the emitted MLIR is tested with.
 
+`build.sh` applies `patches/*.patch` to the source:
+
+- `arm64e-x1.patch`: upstream b8007a8e4020 (in LLVM 23.1), library
+  sources only. The macOS 27 SDK's `.tbd` files list `arm64e.x1-macos`,
+  which 22.1.8's TextAPI rejects ("malformed file … unknown
+  architecture"), so ld64.lld found no libSystem symbols and every
+  macOS link failed. On Apple hosts rokc_llvm only takes a prefix with
+  the patch (`build.sh` rebuilds an older one; `build.ps1` does not apply
+  it, as Windows hosts don't link Apple targets).
+
 ## Building it
 
 ```sh
@@ -21,9 +31,10 @@ llvm/build.sh <prefix>   # anywhere else
 Hosts:
 
 - macOS (arm64, x86_64): Xcode's command line tools, cmake, ninja.
-- Linux (x86_64, aarch64; glibc or musl): cmake, ninja, curl, xz and a
-  C++17 compiler (`apt install cmake ninja-build g++ curl xz-utils`;
-  Alpine: `apk add cmake samurai g++ curl xz linux-headers`; NixOS or
+- Linux (x86_64, aarch64; glibc or musl): cmake, ninja, curl, xz, patch
+  and a C++17 compiler (`apt install cmake ninja-build g++ curl xz-utils
+  patch`; Alpine: `apk add cmake samurai g++ curl xz patch
+  linux-headers`; NixOS or
   any nix host: `nix-shell` at the repository root, whose `shell.nix`
   has these with clang, which reads the PGO profile). rokc_llvm
   links the C++ runtime the archives were built against: libstdc++, or

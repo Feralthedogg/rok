@@ -70,6 +70,9 @@
 //!     executables through it (split on whitespace), e.g.
 //!     `qemu-aarch64 -L <sysroot>` or `wine` where no binfmt handler
 //!     is registered.
+//!   - `ROK_TEST_TMP=<dir>` — where each test binary's scratch root
+//!     `rok-test-<pid>` goes (default: the temp directory); the root is
+//!     removed at exit, unless `ROK_KEEP_TEST_TMP` is set.
 #![allow(dead_code)]
 
 use std::env;
@@ -88,14 +91,17 @@ pub fn workspace() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// A fresh, empty scratch directory for this test binary.
+/// A fresh, empty scratch directory for this test binary, removed when
+/// it exits (`rokc_core::tmp::test_root`).
 pub fn scratch(name: &str) -> PathBuf {
-    static PRUNE: std::sync::Once = std::sync::Once::new();
-    PRUNE.call_once(prune_scratch);
-    let dir = env::temp_dir().join(format!("rokc-test-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    rokc_core::tmp::test_dir(name)
+}
+
+/// The temp directory case programs see: inside the scratch root, so
+/// what they leave goes with it.
+pub fn case_tmp() -> &'static Path {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| scratch("t"))
 }
 
 /// `fs::write`, creating the parent directories first (`app/src/..`).
@@ -104,24 +110,6 @@ pub fn put(path: impl AsRef<Path>, data: impl AsRef<[u8]>) -> std::io::Result<()
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, data)
-}
-
-/// Scratch directories of runs that ended (killed, failed, or never
-/// cleaned) are removed once they are three hours old.
-fn prune_scratch() {
-    let Ok(entries) = std::fs::read_dir(env::temp_dir()) else {
-        return;
-    };
-    let stale = std::time::Duration::from_secs(3 * 3600);
-    for e in entries.flatten() {
-        let old = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > stale));
-        if old && e.file_name().to_string_lossy().starts_with("rokc-test-") {
-            let _ = std::fs::remove_dir_all(e.path());
-        }
-    }
 }
 
 pub fn text(b: &[u8]) -> String {
@@ -352,8 +340,16 @@ pub fn exe_name(name: &str) -> String {
 /// under `wasmtime` (`ROK_TEST_WASM_RUNNER`; the host's environment and
 /// file system, the engine stack as deep as a native main thread's) or
 /// `node` with the toolchain's `rok.mjs`; a native one under
-/// `ROK_TEST_RUNNER` when set.
+/// `ROK_TEST_RUNNER` when set. Its temp directory is [`case_tmp`].
 pub fn run_command(exe: &Path) -> Command {
+    let mut c = runner_command(exe);
+    for v in ["TMPDIR", "TMP", "TEMP"] {
+        c.env(v, case_tmp());
+    }
+    c
+}
+
+fn runner_command(exe: &Path) -> Command {
     let t = spec();
     match t.object_format {
         ObjectFormat::Wasm if t.linker == Linker::WasmComponentLd => {

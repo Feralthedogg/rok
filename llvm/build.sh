@@ -10,10 +10,11 @@
 #
 # Release static libraries only: no tools, tests, examples, docs or
 # bindings; no zlib / zstd / libxml2 / terminfo, so the archives need
-# nothing beyond the platform C++ runtime. Needs cmake, ninja, curl, xz
-# and a C++17 compiler (Linux: `apt install cmake ninja-build g++ curl
-# xz-utils`, `apk add cmake samurai g++ curl xz linux-headers`). Windows
-# hosts: llvm/build.ps1.
+# nothing beyond the platform C++ runtime. llvm/patches/*.patch are
+# applied to the source. Needs cmake, ninja, curl, xz, patch and a C++17
+# compiler (Linux: `apt install cmake ninja-build g++ curl xz-utils
+# patch`, `apk add cmake samurai g++ curl xz patch linux-headers`).
+# Windows hosts: llvm/build.ps1.
 set -eu
 
 VERSION=22.1.8
@@ -25,8 +26,10 @@ prefix=${1:-$cache/llvm-$VERSION}
 work=$prefix.work
 jobs=${ROK_LLVM_JOBS:-$(getconf _NPROCESSORS_ONLN)}
 
+# A prefix from before llvm/patches/arm64e-x1.patch is rebuilt.
 built() {
-	[ -f "$prefix/lib/cmake/mlir/MLIRConfig.cmake" ] && [ -f "$prefix/lib/liblldCommon.a" ]
+	[ -f "$prefix/lib/cmake/mlir/MLIRConfig.cmake" ] && [ -f "$prefix/lib/liblldCommon.a" ] &&
+		grep -q arm64e_x1 "$prefix/include/llvm/TextAPI/Architecture.def"
 }
 dsym=$prefix/share/rok/dsymutil
 if built && [ -f "$dsym/Options.inc" ]; then
@@ -47,12 +50,16 @@ if [ "$got" != "$SHA256" ]; then
 	exit 1
 fi
 
+here=$(cd "$(dirname "$0")" && pwd)
 src=$work/llvm-project-$VERSION.src
 if [ ! -d "$src" ]; then
 	# Only what the build reads.
 	top=llvm-project-$VERSION.src
 	tar -xJf "$tarball" -C "$work" "$top/llvm" "$top/mlir" "$top/lld" \
 		"$top/cmake" "$top/third-party" "$top/libunwind/include"
+	for p in "$here"/patches/*.patch; do
+		patch -d "$src" -p1 -s <"$p"
+	done
 fi
 
 extra=
@@ -62,7 +69,6 @@ extra=
 # no clang profile, and a clang older than the profile's indexed format
 # cannot: those build without it (said here). ROK_LLVM_INSTRUMENT=1
 # builds the instrumented libraries train-pgo.sh profiles instead.
-here=$(cd "$(dirname "$0")" && pwd)
 if [ -n "${ROK_LLVM_INSTRUMENT-}" ]; then
 	extra="-DLLVM_BUILD_INSTRUMENTED=IR"
 	# Value-profile nodes all from malloc. With the static pool, the

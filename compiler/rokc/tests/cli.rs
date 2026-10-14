@@ -4928,3 +4928,52 @@ fn env_knob_bad_value_warns() {
         ]
     );
 }
+
+/// A macOS program links against the default SDK (no SDKROOT) and against
+/// every installed one: the macOS 27 SDK's .tbd files list arm64e.x1.
+// spec: §9.2.15
+#[test]
+fn links_against_every_installed_macos_sdk() {
+    if !cfg!(target_os = "macos") || common::test_target().is_some() {
+        return;
+    }
+    let Some(env) = setup() else { return };
+    let dir = scratch("macos_sdks");
+    put(dir.join("h.rok"), "fn main() { println(\"hi\"); }\n").unwrap();
+    let mut sdks: Vec<Option<PathBuf>> = vec![None];
+    for d in [
+        "/Library/Developer/CommandLineTools/SDKs",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs",
+    ] {
+        let Ok(rd) = fs::read_dir(d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            let n = e.file_name().to_string_lossy().into_owned();
+            if n.starts_with("MacOSX")
+                && !p.is_symlink()
+                && p.join("usr/lib/libSystem.tbd").is_file()
+            {
+                sdks.push(Some(p));
+            }
+        }
+    }
+    for sdk in &sdks {
+        let exe = dir.join("h");
+        let mut cmd = Command::new(ROKC);
+        cmd.current_dir(&dir).env("ROK_HOME", workspace());
+        match sdk {
+            Some(p) => cmd.env("SDKROOT", p),
+            None => cmd.env_remove("SDKROOT"),
+        };
+        let out = cmd
+            .args(["-q", "build", "h.rok", "-o"])
+            .arg(&exe)
+            .arg("--rokr")
+            .arg(&env.rokr)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{sdk:?}: {}", text(&out.stderr));
+        let run = Command::new(&exe).output().unwrap();
+        assert_eq!(text(&run.stdout), "hi\n", "{sdk:?}");
+    }
+}

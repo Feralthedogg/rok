@@ -62,10 +62,7 @@ fn q(s: impl std::fmt::Display) -> String {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rok-test-{}-{name}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    rokc_core::real_path(dir).unwrap()
+    rokc_core::tmp::test_dir(name)
 }
 
 fn write(path: &Path, text: &str) {
@@ -3476,4 +3473,44 @@ fn lib_and_main_packages() {
         "is an executable package (src/main.rok, no src/lib.rok): a dependency must be a \
          library; a program is installed with `rok install`",
     );
+}
+
+/// rok leaves nothing in the temp directory: a script run, a failing
+/// build, an environment library's prebuild, an executable install.
+#[test]
+fn rok_leaves_no_temporaries() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("no-temporaries");
+    let home = root.join("home");
+    let tmp = root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let run = |args: &[&str]| {
+        let mut c = rok_cmd(&home, &root, args);
+        for v in ["TMPDIR", "TMP", "TEMP"] {
+            c.env(v, &tmp);
+        }
+        c.output().unwrap()
+    };
+    write(
+        &root.join("greet/rok.rokon"),
+        "Package { name: \"greet\" }\n",
+    );
+    write(&root.join("greet/src/lib.rok"), LIB_V1);
+    write(&root.join("tool/rok.rokon"), "Package { name: \"tool\" }\n");
+    write(&root.join("tool/src/main.rok"), "println(\"tool\");\n");
+    write(&root.join("hi.rok"), "println(\"hi\");\n");
+    write(&root.join("bad.rok"), "let x: i32 = \"no\";\n");
+    assert_eq!(ok(&run(&["-q", "hi.rok"])), "hi\n");
+    assert_ne!(run(&["-q", "bad.rok"]).status.code(), Some(0));
+    ok(&run(&["install", "--path", "greet"]));
+    ok(&run(&["install", "--path", "tool"]));
+    let left: Vec<String> = fs::read_dir(&tmp)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != "rokc-target")
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
 }

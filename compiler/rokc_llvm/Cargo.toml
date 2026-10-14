@@ -11,5 +11,8 @@ links = "rokc_llvm"
 [dependencies]
 rokc_target = { workspace = true }
 
+[dev-dependencies]
+rokc_core = { workspace = true }
+
 [lints]
 workspace = true

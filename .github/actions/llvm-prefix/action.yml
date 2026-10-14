@@ -50,7 +50,7 @@ runs:
         ROOT: ${{ inputs.root }}
         ARCH: ${{ inputs.arch }}
         ENVIRONMENT: ${{ runner.environment }}
-        HASH: ${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root)) }}
+        HASH: ${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root), format('{0}llvm/patches/*.patch', inputs.root)) }}
       run: |
         v=$(sed -n 's/^VERSION=//p' "${ROOT}llvm/build.sh")
         arch=${ARCH:-$RUNNER_ARCH}

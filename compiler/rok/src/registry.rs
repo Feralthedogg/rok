@@ -838,8 +838,7 @@ mod tests {
         ] {
             assert!(check_api(a).is_err(), "{a}");
         }
-        let home = std::env::temp_dir().join(format!("rok-token-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
+        let home = rokc_core::tmp::test_dir("token");
         let e = pick_token(None, &home).unwrap_err();
         assert!(e.contains("run `rok login` first"), "{e}");
         let file = save_token(&home, "ghp_file").unwrap();

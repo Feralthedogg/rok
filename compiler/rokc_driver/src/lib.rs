@@ -2656,7 +2656,7 @@ mod tests {
             target: super::Target::builtin(triple),
             ..super::CompilerConfig::default()
         };
-        let path = std::env::temp_dir().join("rokc_driver_test_main.rok");
+        let path = rokc_core::tmp::test_dir("driver-main").join("main.rok");
         let mut files = super::SourceMap::new();
         let p = super::compile_source(src, &path, &config, &mut files).unwrap_or_else(|d| {
             panic!(
@@ -2694,7 +2694,7 @@ mod tests {
                 target: super::Target::builtin(triple),
                 ..super::CompilerConfig::default()
             };
-            let path = std::env::temp_dir().join("rokc_driver_test_usize.rok");
+            let path = rokc_core::tmp::test_dir("driver-usize").join("main.rok");
             let mut files = super::SourceMap::new();
             super::compile_source(src, &path, &config, &mut files)
                 .err()

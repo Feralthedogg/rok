@@ -35,6 +35,7 @@ use std::process::Command;
 
 use manifest::{Dep, GitRef, MANIFEST, Manifest, NativeSource, Source};
 use resolve::{Context, Options, Resolved};
+use rokc_core::tmp::TempEntry;
 use rokc_diagnostic::Json;
 use rokc_rokon::{Kind, Value};
 
@@ -267,6 +268,7 @@ fn canonical_edit(old: &str, new: &str) -> String {
 
 /// Run `rok` with `args` (without the program name); the exit code.
 pub fn main_with(args: Vec<String>) -> i32 {
+    rokc_core::tmp::sweep_once(&["rok-install-", "rok-prebuild-"]);
     let mut g = Global::default();
     let mut rest = Vec::new();
     let mut it = args.into_iter();
@@ -1927,15 +1929,15 @@ fn install_bin(
     }
     std::fs::create_dir_all(&bin).map_err(|e| format!("{}: {e}", bin.display()))?;
     let id = std::process::id();
-    let work = std::env::temp_dir().join(format!("rok-install-{id}-{name}"));
+    let work = TempEntry::adopt(std::env::temp_dir().join(format!("rok-install-{id}-{name}")));
     let from = if copy {
-        let _ = std::fs::remove_dir_all(&work);
-        toolchain::copy_tree(src, &work)?;
-        work.as_path()
+        let _ = std::fs::remove_dir_all(work.path());
+        toolchain::copy_tree(src, work.path())?;
+        work.path()
     } else {
         src
     };
-    let tmp = bin.join(format!(".{name}.{id}{}", std::env::consts::EXE_SUFFIX));
+    let tmp = TempEntry::adopt(bin.join(format!(".{name}.{id}{}", std::env::consts::EXE_SUFFIX)));
     let mut c = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
     for (on, flag) in [
         (g.offline, "--offline"),
@@ -1946,7 +1948,10 @@ fn install_bin(
             c.arg(flag);
         }
     }
-    c.arg("build").arg(from).args(["--release", "-o"]).arg(&tmp);
+    c.arg("build")
+        .arg(from)
+        .args(["--release", "-o"])
+        .arg(tmp.path());
     if !dep.features.is_empty() {
         c.arg(format!("--features={}", dep.features.join(",")));
     }
@@ -1954,14 +1959,11 @@ fn install_bin(
         c.arg("--no-default-features");
     }
     let built = c.status().map_err(|e| format!("cannot run rok: {e}"));
-    if copy {
-        let _ = std::fs::remove_dir_all(&work);
-    }
+    drop(work);
     if !built?.success() {
-        let _ = std::fs::remove_file(&tmp);
         return Err(format!("`{name}` did not build; nothing was installed"));
     }
-    std::fs::rename(&tmp, &exe).map_err(|e| format!("{}: {e}", exe.display()))?;
+    std::fs::rename(tmp.path(), &exe).map_err(|e| format!("{}: {e}", exe.display()))?;
     let text = manifest::add_dep(&old, &file, "deps", dep)?;
     std::fs::write(&record, text).map_err(|e| format!("cannot write {file}: {e}"))?;
     if !g.quiet {
@@ -1995,8 +1997,8 @@ fn installed_as(source: &Source) -> String {
 /// Prebuild environment `env`'s libraries into its `target/` by building
 /// an empty file, as its REPL would. Whether that worked.
 fn prebuild_env(g: &Global, env: &str) -> Result<bool, String> {
-    let id = std::process::id();
-    let probe = std::env::temp_dir().join(format!("rok-prebuild-{id}.rok"));
+    let dir = TempEntry::dir("rok-prebuild-").map_err(|e| format!("temporary directory: {e}"))?;
+    let probe = dir.path().join("probe.rok");
     let out = probe.with_extension(std::env::consts::EXE_EXTENSION);
     std::fs::write(&probe, "").map_err(|e| format!("{}: {e}", probe.display()))?;
     let args = [
@@ -2006,8 +2008,7 @@ fn prebuild_env(g: &Global, env: &str) -> Result<bool, String> {
     ];
     let built = rokc_command(g, "build", &["-q".to_owned()], &args, Some(env))
         .and_then(|(mut c, _)| c.status().map_err(|e| format!("cannot run rokc: {e}")));
-    let _ = std::fs::remove_file(&probe);
-    let _ = std::fs::remove_file(&out);
+    drop(dir);
     Ok(built?.success())
 }
 
