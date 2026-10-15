@@ -581,6 +581,10 @@ fn io_err(e: TlsError) -> IoError {
 /// One side of a connection; `Client` and `Server` are views of it.
 struct Shared {
     c: GcBuf<Conn>;
+    /// Held by an async operation from its step until its records are
+    /// written: a reader answering a KeyUpdate while a write waits on
+    /// the socket would otherwise put its records inside that write's.
+    wl: Mutex<i32>;
 }
 
 impl Shared {
@@ -588,7 +592,7 @@ impl Shared {
         unsafe {
             let b: GcBuf<Conn> = buf_new(1);
             b[0] = c;
-            Shared { c: b }
+            Shared { c: b, wl: Mutex::new_unshared(0) }
         }
     }
 
@@ -681,39 +685,41 @@ impl Shared {
     async fn pump(self, op: u8, buf: List<u8>, data: Slice<u8>) throws (TlsError) -> usize {
         loop {
             let c = unsafe { self.c[0] };
-            match c.failed {
-                m: str => throw TlsError { kind: TlsErrorKind::Protocol, msg: f"connection failed: {m}", alert: 0u8 },
-                none => {},
-            }
-            c.nb = true;
-            c.need = false;
             let failure: TlsError | none = none;
-            let r: usize | none = try c.step(op, buf, data) catch e {
-                if !c.need {
-                    c.fail(e);
-                    failure = e;
-                }
-                none
-            };
-            c.nb = false;
-            let out = c.out;
-            c.out = [];
-            unsafe { self.c[0] = c; }
-            if out.len() > 0 {
-                let werr: TlsError | none = none;
-                try await c.sock.write_all_async(out) catch e { werr = io_tls(e); };
-                match werr {
-                    e: TlsError => {
-                        if failure is none {
-                            unsafe {
-                                let cur = self.c[0];
-                                cur.fail(e);
-                                self.c[0] = cur;
+            let r: usize | none = none;
+            using g = await self.wl.lock_async() {
+                c = unsafe { self.c[0] };
+                match c.failed {
+                    m: str => failure = TlsError { kind: TlsErrorKind::Protocol, msg: f"connection failed: {m}", alert: 0u8 },
+                    none => {
+                        c.nb = true;
+                        c.need = false;
+                        r = try c.step(op, buf, data) catch e {
+                            if !c.need {
+                                c.fail(e);
+                                failure = e;
                             }
-                            throw e;
+                            none
+                        };
+                        c.nb = false;
+                        let out = c.out;
+                        c.out = [];
+                        unsafe { self.c[0] = c; }
+                        if out.len() > 0 {
+                            let werr: TlsError | none = none;
+                            try await c.sock.write_all_async(out) catch e { werr = io_tls(e); };
+                            if let e: TlsError = werr {
+                                if failure is none {
+                                    unsafe {
+                                        let cur = self.c[0];
+                                        cur.fail(e);
+                                        self.c[0] = cur;
+                                    }
+                                    failure = e;
+                                }
+                            }
                         }
                     },
-                    none => {},
                 }
             }
             match failure {

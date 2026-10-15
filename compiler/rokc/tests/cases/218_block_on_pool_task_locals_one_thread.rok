@@ -1,0 +1,50 @@
+// spec: std 218 §2.18.3
+// expect-exit: 0
+// expect-stdout:
+// rounds: 200
+// split: 0
+// lost: 0
+
+// The locals a pool task spawns while the `block_on` thread polls it
+// share that task's values: they run on one pool worker, and only once
+// that poll is over (a TLS connection's reader and writer share it).
+use rok::core::task;
+use rok::std::thread;
+
+let split = 0;
+let lost = 0;
+for _ in 0..200 {
+    let n = task::block_on(async {
+        let t = task::spawn(async {
+            let xs: List<i32> = [];
+            let ids: List<u64> = [];
+            let a = task::spawn_local(async {
+                ids.push(thread::current().id().as_u64());
+                for i in 0..2000 {
+                    xs.push(i);
+                    if i % 100 == 0 { await task::yield_now(); }
+                }
+                0
+            });
+            let b = task::spawn_local(async {
+                ids.push(thread::current().id().as_u64());
+                for i in 0..2000 {
+                    xs.push(i);
+                    if i % 100 == 0 { await task::yield_now(); }
+                }
+                0
+            });
+            // Still this poll: the locals must not be running yet.
+            for i in 0..2000 { xs.push(i); }
+            await a;
+            await b;
+            (xs.len(), ids[0] == ids[1])
+        });
+        await t
+    });
+    if !n.1 { split += 1; }
+    if n.0 != 6000 { lost += 1; }
+}
+println("rounds: 200");
+println(f"split: {split}");
+println(f"lost: {lost}");

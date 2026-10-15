@@ -301,6 +301,12 @@ pub struct Worker {
     orphan: bool;
     /// A pool worker's thread id (`rok_thread_new_id`).
     tid: GcBuf<u64>;
+    /// A guest polling a task it does not own: the one pool worker that
+    /// task's `spawn_local`s go to (its index + 1; 0: none yet), and those
+    /// locals, held until the poll ends so they never run beside it
+    /// (`local_home`).
+    lend: GcBuf<usize>;
+    lent: Queue;
 }
 
 fn new_worker(pool: Pool, index: usize, guest: bool, orphan: bool) -> Worker {
@@ -326,6 +332,8 @@ fn new_worker(pool: Pool, index: usize, guest: bool, orphan: bool) -> Worker {
             locals: buf_new(1),
             orphan,
             tid: buf_new(1),
+            lend: buf_new(1),
+            lent: queue_new(),
         }
     }
 }
@@ -799,7 +807,14 @@ fn run(t: TaskRef) {
         let armed = rok_lane_arm(1);
         let ready = poll(ctx);
         rok_lane_arm(armed);
-        current_worker().running[0] = outer;
+        // The worker may have been handed on: this thread's guest held
+        // what the poll's `spawn_local`s made since.
+        let now = current_worker();
+        now.running[0] = outer;
+        if outer is none {
+            if w.guest { release_lent(w); }
+            if now.guest && !buf_same(now.locals, w.locals) { release_lent(now); }
+        }
         if ready || cancelled {
             if !ready {
                 // Ended without a result (no cancellation point reached).
@@ -994,6 +1009,13 @@ fn awake(w: Worker, found: bool) {
 }
 
 fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
+    let t = make_task(poll, local);
+    schedule(t);
+    t
+}
+
+/// `new_task` without scheduling it.
+fn make_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
     unsafe {
         let pool = executor();
         let home = pool.no_home;
@@ -1019,7 +1041,6 @@ fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
             id: NEXT_TASK_ID.fetch_add(1),
             up: pool.no_up,
         };
-        schedule(t);
         t
     }
 }
@@ -1390,7 +1411,8 @@ pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> where F::Output: Send 
 /// Where a `spawn_local` from `w` lives: `w`, unless `w` is a guest
 /// polling a task that is not its own. A guest leaves once its own tasks
 /// are done, so `block_on` would wait for that task's locals too (a
-/// connection's reader and writer: forever); they go to a pool worker.
+/// connection's reader and writer: forever); they go to a pool worker,
+/// the same one for every local of that poll (they share its values).
 fn local_home(w: Worker) -> Worker {
     if !w.guest || w.pool.solo || w.pool.workers() == 0 {
         return w;
@@ -1400,19 +1422,41 @@ fn local_home(w: Worker) -> Worker {
             if let h: Worker = t.home[0] {
                 if buf_same(h.locals, w.locals) { return w; }
             }
-            return w.pool.home_for();
+            if w.lend[0] > 0 && w.lend[0] <= w.pool.workers() {
+                return w.pool.workers[w.lend[0] - 1];
+            }
+            let l = w.pool.home_for();
+            w.lend[0] = l.index + 1;
+            return l;
         }
     }
     w
 }
 
+/// Start the locals `w` held while it polled a task it does not own.
+fn release_lent(w: Worker) {
+    unsafe {
+        w.lend[0] = 0;
+        while let t: TaskRef = pop_front(w.lent) {
+            schedule(t);
+        }
+    }
+}
+
 /// Run `fut` as a new task on this worker only (it need not be `Send`).
-/// From a task a `block_on` thread happens to poll, that is a pool worker.
+/// From a task a `block_on` thread happens to poll, that is one pool
+/// worker, and the task starts once that poll ends.
 pub fn spawn_local<F: Future>(fut: F) -> Task<F::Output> {
     unsafe {
-        let w = local_home(current_worker());
+        let w = current_worker();
+        let h = local_home(w);
         let slot: GcBuf<F::Output> = buf_new(1);
-        let t = new_task(poll_fn(fut, slot), w);
+        let t = make_task(poll_fn(fut, slot), h);
+        if buf_same(h.locals, w.locals) {
+            schedule(t);
+        } else {
+            push(w.lent, t);
+        }
         Task { task: t, slot: slot }
     }
 }

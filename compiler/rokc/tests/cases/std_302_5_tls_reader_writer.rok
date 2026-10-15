@@ -1,0 +1,104 @@
+// needs: net
+// expect-exit: 0
+// expect-stdout:
+// client got 4000000 bytes, intact true
+// client updates: ok
+// server: wrote ok, read 4000 bytes, intact true
+
+// One connection's reader and writer on one worker: the reader answers
+// KeyUpdate requests while the writer's large write waits on a full
+// socket, and its records must not land inside the write's.
+use rok::std::net::{TcpListener, SocketAddr};
+use rok::std::net;
+use rok::std::net::tls::{Client, Server, ClientConfig, ServerConfig, Certificate, PrivateKey};
+
+
+const CA: str = "-----BEGIN CERTIFICATE-----
+MIIBUzCCAQWgAwIBAgIUHuDQmdyLUvVYGHs5rDw1vYU8bIIwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAWMRQwEgYDVQQDDAtyb2sgdGVzdCBDQTAqMAUGAytlcAMhAPEMYwkJArdk
+aV3E4nOSir4hNCOt5rCjhq6U1sYe6lTWo2MwYTAdBgNVHQ4EFgQUqTSORZgmA5IP
+oVjCUMKRtKdC4BkwHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwDwYD
+VR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAgQwBQYDK2VwA0EAp7tJ5xbNuoRw
+zTq/y0kOz917MctSi+O2E5DLqAoAjtPGehC8163+j0KTLVeOwoTW1dtCRoWHyyYj
+gDBrha3fDQ==
+-----END CERTIFICATE-----
+";
+
+const CERT: str = "-----BEGIN CERTIFICATE-----
+MIIBuTCCAWugAwIBAgIUceOw315SUu5KnTBYX6EEY5MLRJUwBQYDK2VwMBYxFDAS
+BgNVBAMMC3JvayB0ZXN0IENBMCAXDTI2MTAxNTA3MzYwN1oYDzIxMjYwOTIxMDcz
+NjA3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwWTATBgcqhkjOPQIBBggqhkjOPQMB
+BwNCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZEFaEpq/6UIdEL3wPK3Oj3v+97CWRf
+3SsIe8X0/ZpoW+ppyMMO58QOQHyVo4GbMIGYMCYGA1UdEQQfMB2CCWxvY2FsaG9z
+dIIKKi5yb2sudGVzdIcEfwAAATATBgNVHSUEDDAKBggrBgEFBQcDATAOBgNVHQ8B
+Af8EBAMCB4AwCQYDVR0TBAIwADAdBgNVHQ4EFgQU+2+6RW+JViHg6KgvFa5XUjSQ
+rA8wHwYDVR0jBBgwFoAUqTSORZgmA5IPoVjCUMKRtKdC4BkwBQYDK2VwA0EAukE7
+pzRC2g3t6ouc4acMO0OmyO0MjbYSFNJm/1YtvDDcyD0wdOLGa2h0yIV88yXy0+08
+tk985FEEIDyk5wcNDg==
+-----END CERTIFICATE-----
+";
+
+const KEY: str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcgH7+8UZOnSmYIn9
+1ftUi+QOk+yiBJQf//N6N0MgirqhRANCAASlRTaxGpC5fl2aWOE4A94IQYOlLaZE
+FaEpq/6UIdEL3wPK3Oj3v+97CWRf3SsIe8X0/ZpoW+ppyMMO58QOQHyV
+-----END PRIVATE KEY-----
+";
+
+fn data(n: usize) -> List<u8> {
+    let d: List<u8> = [];
+    for i in 0..n { d.push((i % 251) as u8); }
+    d
+}
+
+const BIG: usize = 4000000;
+const ROUNDS: usize = 40;
+
+let any: SocketAddr = try! "127.0.0.1:0".parse::<SocketAddr>();
+let l = try! TcpListener::bind(any);
+let addr = try! l.local_addr();
+let cfg = try! ServerConfig::new(try! Certificate::from_pem(CERT), try! PrivateKey::from_pem(KEY));
+let server = task::spawn_local(async {
+    let (s, _) = try! await l.accept_async();
+    l.close();
+    let srv = try! await Server::new_async(s, cfg);
+    // A reader answering the client's KeyUpdate requests beside a writer
+    // whose large write waits on a full socket.
+    let reader = task::spawn_local(async {
+        let err = "";
+        let got = try await srv.read_to_end_async() catch e {
+            err = f"read: {e.message}";
+            List::<u8>::new()
+        };
+        if err.len() > 0 { err } else { f"{got.len()} bytes, intact {got == data(ROUNDS * 100)}" }
+    });
+    let wrote = "ok";
+    try await srv.write_all_async(data(BIG)) catch e { wrote = f"write: {e.message}"; };
+    let _ = try? await srv.close_notify_async();
+    let r = await reader;
+    srv.close();
+    f"wrote {wrote}, read {r}"
+});
+let ccfg = ClientConfig::new();
+ccfg.root_certs = try! Certificate::from_pem(CA);
+let s = try! await net::tcp_connect_async(f"{addr}");
+let c = try! await Client::with_config_async(s, "localhost", ccfg);
+let updates = task::spawn_local(async {
+    let chunk = data(ROUNDS * 100);
+    let r = "ok";
+    for i in 0..ROUNDS {
+        try await c.write_all_async(chunk[i * 100:(i + 1) * 100]) catch e { r = f"write: {e.message}"; };
+        try await c.key_update_async() catch e { r = f"key update: {e.message}"; };
+        if r != "ok" { break; }
+        await task::yield_now();
+    }
+    let _ = try? await c.close_notify_async();
+    r
+});
+let back = try await c.read_to_end_async() catch e { println(f"client read: {e.message}"); [] };
+println(f"client got {back.len()} bytes, intact {back == data(BIG)}");
+println(f"client updates: {await updates}");
+println(f"server: {await server}");
+c.close();
+// spec: std 302-net §3.2.5
