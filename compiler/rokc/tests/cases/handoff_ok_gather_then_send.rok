@@ -1,0 +1,24 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 3
+// got 0
+
+// spec: std 213-marker §2.13.9
+// Gather results from one channel, send the list on.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    let (it, ir) = channel::<List<i32>>();
+    for i in 0..3 { try! it.send([i]); }
+    it.close();
+    let all: List<List<i32>> = [];
+    while let r: List<i32> = ir.recv() { all.push(r); }
+    let (bt, br) = channel::<List<List<i32>>>();
+    try! bt.send(all);
+    let got = br.recv() ?? [];
+    println(f"{got.len()}");
+    tx.close();
+    println(f"got {try! c.join()}");
+}

@@ -1,0 +1,23 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 2
+// got 1
+
+// spec: std 213-marker §2.13.9
+// Pushed, reassigned, pushed again: two different lists.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    let q: List<List<i32>> = [];
+    let x: List<i32> = [1];
+    q.push(x);
+    x = [2];
+    q.push(x);
+    if let e: List<i32> = q.pop() { try! tx.send(e); }
+    q[0].push(1);
+    println(f"{q[0].len()}");
+    tx.close();
+    println(f"got {try! c.join()}");
+}

@@ -1,0 +1,25 @@
+// needs: threads
+// expect-error: `root.payload` shares what `send_all(tx, root)` sent through a channel
+// spec: std 213-marker §2.13.9
+// A by-value `self` is a copy: the callee's `self.buf = []` doesn't reach
+// the caller, which still holds the sent list.
+// Recursive tree: every leaf's payload is sent; the tree is then reset.
+use rok::std::thread;
+struct Node { payload: List<i32>; kids: List<Node>; }
+fn send_all(tx: Sender<List<i32>>, n: Node) -> i32 {
+    let k = 0;
+    while let c: Node = n.kids.pop() { k += send_all(tx, c); }
+    try! tx.send(n.payload);
+    n.payload = [];
+    k + 1
+}
+fn leaf(i: i32) -> Node { Node { payload: [i], kids: [] } }
+fn main() {
+    let root = Node { payload: [0], kids: [leaf(1), Node { payload: [2], kids: [leaf(3), leaf(4)] }] };
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; for p in rx.iter() { n += p.len(); } n });
+    let sent = send_all(tx, root);
+    tx.close();
+    root.payload.push(9);
+    println(f"{sent} {try! c.join()} {root.kids.len()} {root.payload.len()}");
+}

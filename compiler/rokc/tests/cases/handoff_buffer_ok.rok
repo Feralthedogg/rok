@@ -1,0 +1,75 @@
+// needs: threads
+// gc-stress: 5
+// spec: std 213-marker §2.13.9
+// expect-exit: 0
+// expect-stdout:
+// sent 3 kept 1
+// rows 6 3
+// dict 1 2 1
+// snap 4
+// par 2 3
+// jobs 1 false
+
+// Collections of collections: taking an element out and handing it over
+// leaves the collection usable; reading without handing over is free.
+use rok::std::thread;
+
+struct Job { items: List<i32>; id: i32; }
+
+fn fill(n: i32) -> List<List<i32>> {
+    let out: List<List<i32>> = [];
+    for i in 0..n {
+        let row: List<i32> = [i, i + 1];
+        out.push(row);
+    }
+    out
+}
+
+fn main() {
+    let q: List<List<i32>> = [[1], [2], [3]];
+    let (tx, rx) = channel::<List<i32>>();
+    while let job: List<i32> = q.pop() {
+        try! tx.send(job);
+    }
+    q.push([4]);
+    let t = thread::spawn(|| {
+        let n: usize = 0;
+        for _ in 0..3 {
+            if let o: List<i32> = rx.recv() { n += o.len(); }
+        }
+        n
+    });
+    println(f"sent {try! t.join()} kept {q.len()}");
+
+    let rows = fill(3);
+    let total: usize = 0;
+    for r in rows { total += r.len(); }
+    rows[0].push(7);
+    println(f"rows {total} {rows[0].len()}");
+
+    let (dt, dr) = channel::<List<i32>>();
+    let d: Dict<str, List<i32>> = Dict::new();
+    d.insert("a", [5]);
+    d.insert("b", [6]);
+    if let v: List<i32> = d.remove("a") { try! dt.send(v); }
+    d["b"].push(8);
+    let got = dr.recv() ?? [];
+    println(f"dict {d.len()} {d["b"].len()} {got.len()}");
+
+    let m = Mutex::new([1, 2, 3]);
+    let snap: List<i32> = [];
+    using g = m.lock() { snap = g.get().clone(); }
+    snap.push(4);
+    println(f"snap {snap.len()}");
+
+    let chunks: List<List<i32>> = [[1, 2], [3, 4, 5]];
+    let sizes = par::map(chunks, |c: List<i32>| c.len());
+    println(f"par {sizes[0]} {sizes[1]}");
+
+    let jobs: List<Job> = [Job { items: [1], id: 1 }, Job { items: [2], id: 2 }];
+    let (jt, jr) = channel::<Job>();
+    while let j: Job = jobs.pop() { try! jt.send(j); }
+    jobs.push(Job { items: [], id: 3 });
+    let first = jr.recv();
+    println(f"jobs {jobs.len()} {first is none}");
+}

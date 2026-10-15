@@ -1,0 +1,21 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 1
+// got 9
+
+// spec: std 213-marker §2.13.9
+// Send a list, start a new one under the same name in a loop.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    let cur: List<i32> = [];
+    for i in 0..10 {
+        cur.push(i);
+        if i % 3 == 2 { try! tx.send(cur); cur = []; }
+    }
+    println(f"{cur.len()}");
+    tx.close();
+    println(f"got {try! c.join()}");
+}

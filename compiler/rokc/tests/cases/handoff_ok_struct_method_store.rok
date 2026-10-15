@@ -1,0 +1,23 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 2 got 1
+
+// spec: std 213-marker §2.13.9
+// A method storing a fresh row per call; rows taken out and sent.
+use rok::std::thread;
+struct Table { rows: List<List<i32>>; }
+impl Table {
+    fn add(self, i: i32) { self.rows.push([i]); }
+    fn take(self) -> List<i32> | none { self.rows.pop() }
+}
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    let t = Table { rows: [] };
+    for i in 0..3 { t.add(i); }
+    if let e: List<i32> = t.take() { try! tx.send(e); }
+    t.rows[0].push(5);
+    tx.close();
+    println(f"{t.rows.len()} got {try! c.join()}");
+}

@@ -1,0 +1,20 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// even chunk 2
+// got 3
+
+// spec: std 213-marker §2.13.9
+// par::map over chunks, then send the results.
+use rok::std::thread;
+fn main() {
+    let chunks: List<List<i32>> = [[1, 2], [3, 4, 5], [6]];
+    let sums = par::map(chunks, |c: List<i32>| { let s = 0; for x in c { s += x; } [s] });
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    while let s: List<i32> = sums.pop() { try! tx.send(s); }
+    tx.close();
+    let evens = par::filter(chunks, |c: List<i32>| c.len() % 2 == 0);
+    if let e: List<i32> = evens.pop() { println(f"even chunk {e.len()}"); }
+    println(f"got {try! c.join()}");
+}

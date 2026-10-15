@@ -1,0 +1,21 @@
+// needs: threads
+// expect-error: `h.items` and `h` share an object, and `H::go` hands over the one and keeps using the other
+// spec: std 213-marker §2.13.9
+// A method's self field and its argument are one object.
+use rok::std::thread;
+struct H { items: List<i32>; }
+impl H {
+    fn go(self, tx: Sender<List<i32>>, l: List<i32>) -> usize {
+        try! tx.send(l);
+        for i in 0..200000 { self.items.push(i); }
+        self.items.len()
+    }
+}
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| { if let l: List<i32> = rx.recv() { for i in 0..200000 { l.push(i); } } 0 });
+    let h = H { items: [] };
+    let n = h.go(tx, h.items);
+    let _ = try! t.join();
+    println(f"len {n}");
+}

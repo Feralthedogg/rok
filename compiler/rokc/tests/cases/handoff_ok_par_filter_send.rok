@@ -1,0 +1,17 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// got 4
+
+// spec: std 213-marker §2.13.9
+// par::filter, then send what passed; the input is no longer used.
+use rok::std::thread;
+fn main() {
+    let chunks: List<List<i32>> = [[1, 2], [3, 4, 5], [6, 7]];
+    let evens = par::filter(chunks, |c: List<i32>| c.len() % 2 == 0);
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    while let e: List<i32> = evens.pop() { try! tx.send(e); }
+    tx.close();
+    println(f"got {try! c.join()}");
+}

@@ -1,0 +1,23 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// got 95
+
+// spec: std 213-marker §2.13.9
+// Producer sends fixed-size batches, starting a fresh one each time.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let s: usize = 0; while let b: List<i32> = rx.recv() { s += b.len(); } s });
+    let batch: List<i32> = [];
+    for i in 0..95 {
+        batch.push(i);
+        if batch.len() == 10 {
+            try! tx.send(batch);
+            batch = [];
+        }
+    }
+    if !batch.is_empty() { try! tx.send(batch); }
+    tx.close();
+    println(f"got {try! c.join()}");
+}

@@ -1,0 +1,16 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 2
+
+// spec: std 213-marker §2.13.9
+// A thread's result (via join) forwarded to another thread.
+use rok::std::thread;
+fn main() {
+    let h = thread::spawn(|| { let l: List<i32> = [1, 2]; l });
+    let l = try! h.join();
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { if let r: List<i32> = rx.recv() { r.len() } else { 0 as usize } });
+    try! tx.send(l);
+    println(f"{try! c.join()}");
+}

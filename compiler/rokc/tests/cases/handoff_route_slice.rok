@@ -1,0 +1,16 @@
+// needs: threads
+// expect-error: `s.buf` shares `xs`, which was sent through a channel
+// spec: std 213-marker §2.13.9
+// A slice view kept after the list is sent.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| { if let l: List<i32> = rx.recv() { for i in 0..100000 { l[0] = i; } } 0 });
+    let xs: List<i32> = [0, 0, 0];
+    let s = xs[0:2];
+    try! tx.send(xs);
+    let sum: i64 = 0;
+    for _ in 0..100000 { sum += s[0] as i64; }
+    let _ = try! t.join();
+    println(f"{sum}");
+}

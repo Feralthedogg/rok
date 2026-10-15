@@ -1,0 +1,18 @@
+// needs: threads
+// expect-error: `d` still holds `a`, which was handed to another owner
+// spec: std 213-marker §2.13.9
+// A key handed over while the dict still holds it: `contains_key`
+// (allowed by name) compares keys, reading the list the other thread grows.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| { if let l: List<i32> = rx.recv() { for i in 0..2000000 { l.push(1); } } 0 });
+    let d: Dict<List<i32>, i32> = Dict::new();
+    let a: List<i32> = [1];
+    d.insert(a, 1);
+    try! tx.send(a);
+    let hits = 0;
+    for _ in 0..200000 { if d.contains_key([1]) { hits += 1; } }
+    let _ = try! t.join();
+    println(f"hits {hits}");
+}

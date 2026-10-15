@@ -32,13 +32,40 @@ fn untrack(path: &Path) {
         .retain(|p| p != path);
 }
 
+/// Run by [`remove_live`] first: ends what still holds files in live
+/// entries (Windows can't delete a running executable's image).
+static RELEASE: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
+
+/// Have [`remove_live`] call `f` before removing anything.
+pub fn on_release(f: fn()) {
+    let mut r = RELEASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !r.contains(&f) {
+        r.push(f);
+    }
+}
+
 /// Remove every live entry: for an exit that runs no drops (`exit`,
 /// dying of a signal on purpose). Skips them if another thread holds the
 /// list.
 pub fn remove_live() {
+    let released = RELEASE.try_lock().is_ok_and(|r| {
+        r.iter().for_each(|f| f());
+        !r.is_empty()
+    });
     if let Ok(live) = LIVE.try_lock() {
         for p in live.iter() {
             remove(p);
+            // Windows unmaps an ended process's image a moment after it
+            // ends: until then its file can't be deleted.
+            for _ in 0..if released && cfg!(windows) { 100 } else { 0 } {
+                if !p.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                remove(p);
+            }
         }
     }
 }

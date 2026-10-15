@@ -199,7 +199,11 @@ fn members(archive: &Path, flags: &[&str], msvc: bool) -> Vec<Member> {
         let n = n.to_owned();
         match ty {
             "U" => m.undefs.push(n),
-            "W" | "V" => m.weak.push(n),
+            "W" => m.weak.push(n),
+            "V" => {
+                m.data.push(n.clone());
+                m.weak.push(n);
+            }
             "w" | "v" => {}
             _ => m.defs.push(n),
         }
@@ -231,7 +235,9 @@ fn macho_exportable(archive: &Path) -> std::collections::HashSet<String> {
 /// MLIR member the link loads (found as the linker would) and of all of
 /// [`EXPORTED_LIBS`]. Weak definitions stay internal (a plugin has its own,
 /// and dyld would bind each exported one at launch), except MSVC's in the
-/// whole libraries and explicit `TypeID`s. Mach-O takes a name list, ELF a
+/// whole libraries and explicit `TypeID`s, and ELF's weak objects: GCC
+/// puts every vtable and typeinfo in a COMDAT, and a plugin deriving from
+/// `mlir::Pass` must bind to rokc's. Mach-O takes a name list, ELF a
 /// dynamic list, PE a module definition file.
 fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: bool) {
     use std::collections::{HashMap, HashSet};
@@ -291,10 +297,13 @@ fn write_exports(shim: &Path, lib: &Path, names: &[String], to: &Path, msvc: boo
             // clang-cl explicit TypeIDs' `id`s; plugins' `extern template`
             // uses (`SmallVectorBase<uint32_t>::grow_pod`) and TypeIDs
             // (rok/mlir_typeid.h) must bind to rokc's, so those are exported.
-            let weak = member
-                .weak
-                .iter()
-                .filter(|w| msvc && (*whole || w.starts_with("?id@?$TypeIDResolver@")));
+            let weak = member.weak.iter().filter(|w| {
+                if msvc {
+                    *whole || w.starts_with("?id@?$TypeIDResolver@")
+                } else {
+                    !apple && member.data.contains(*w)
+                }
+            });
             syms.extend(
                 (member.defs.iter().chain(weak))
                     .filter(|d| strong.as_ref().is_none_or(|s| s.contains(*d)))

@@ -9,9 +9,16 @@
 //! guard's drop) on, and using it, a place inside it or one containing it is
 //! an error. Aliases are edges: `Same` (a copy, a struct/tuple field) makes
 //! two places one object; `In` (a capture, an array/enum literal, a `match`
-//! binding) holds one in the other both ways; `Into` (an element stored in a
-//! buffer, coroutine arguments) one way only. Going away takes every alias
-//! along; assigning a place re-arms it. Paths split on known tags (`bool`,
+//! binding) holds one in the other both ways; `Into` (coroutine arguments)
+//! one way only. A buffer's elements are one place, `buf ++ [ELEM]`: what is
+//! stored into it and what is read out of it are that place, so handing over
+//! either side takes the other along. An element taken out (`pop`, `remove`)
+//! is `Taken` from it: handing it over takes what was stored there, not the
+//! buffer, unless the buffer may hold one object twice (`St::dup`). Going
+//! away takes every alias along; assigning a place re-arms it. A value read
+//! out of a `Sync` object (an `unsafe impl Sync` type's field, a
+//! thread-local's slot) is `WORLD`: other threads may reach it, so handing it
+//! over is an error. Paths split on known tags (`bool`,
 //! variant, carrier error) so `if`/`while`/`match`/`catch`/`try?`/`??`
 //! pass only the paths they let through; equal paths merge, and past
 //! `MAX_PATHS` or `MAX_SPLIT_PASSES` all do. Joins are unions; loops run to
@@ -26,8 +33,9 @@
 //! A call through a function value may reach any function used as a value
 //! with those parameter types (closed world, as for `any`); `extern` and
 //! intrinsics keep nothing; a `Handoff::new` never leaves its function.
-// An element read out of a buffer is a value of its own (`pop`, `remove`,
-// iteration): reading it back after handing the buffer over is not caught.
+//! Elements are not told apart by index: copying elements from one buffer
+//! into another takes them to be distinct objects unless the source may hold
+//! one twice.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -148,6 +156,65 @@ const TAG_KEY: u32 = 0x6000_0000;
 const RET: LocalId = LocalId(0x7fff_ffff);
 /// The return value as a summary root.
 const RET_ROOT: u32 = u32::MAX;
+/// What other threads may reach: a value read out of a `Sync` object
+/// (an `unsafe impl Sync` type's field, a thread-local's slot).
+const WORLD: LocalId = LocalId(0x7fff_fffd);
+const WORLD_ROOT: u32 = u32::MAX - 1;
+/// A path step: the elements of the buffer the place holds.
+const ELEM: u32 = 0x3fff_fffe;
+
+/// Functions whose value is an element taken out of argument 0's buffer:
+/// the buffer no longer holds it, unless it may hold it twice.
+const TAKES: &[&str] = &[
+    "rok::core::collections::list::List__pop",
+    "rok::core::collections::list::List__remove",
+    "rok::core::collections::deque::Deque__pop_front",
+    "rok::core::collections::deque::Deque__pop_back",
+    "rok::core::collections::dict::Dict__remove",
+    "rok::core::collections::ordered_dict::OrderedDict__remove",
+    "rok::core::collections::heap::BinaryHeap__pop",
+];
+
+/// Functions whose value may be argument 0 itself (no body to walk).
+const PASSES: &[&str] = &["rok::core::reflect::cast"];
+
+/// Collection literals (`[a, b]`, `{k: v}`): their elements are the
+/// argument array's, so the result holds an object twice only if two
+/// of the written elements are one.
+const LITERALS: &[&str] = &[
+    "rok::core::collections::list::list_literal",
+    "rok::core::collections::set::set_literal",
+    "rok::core::collections::dict::dict_literal",
+];
+
+/// Modules whose functions move elements between slots of one collection
+/// and copy each element of another one once (`stores_twice`).
+const TRUSTED: &[&str] = &["rok::core::collections::", "rok::core::par::"];
+
+/// Functions that drop every element of argument 0's buffer.
+const CLEARS: &[&str] = &[
+    "rok::core::collections::list::List__clear",
+    "rok::core::collections::deque::Deque__clear",
+    "rok::core::collections::dict::Dict__clear",
+    "rok::core::collections::ordered_dict::OrderedDict__clear",
+];
+
+/// Functions that store every element of argument 1 into argument 0's
+/// buffer (`xs.extend(ys)`, `xs += ys`).
+const COPIES: &[&str] = &["rok::core::collections::list::List__extend"];
+
+/// `par` functions that give each item of argument 0 to a worker.
+const PAR: &[&str] = &[
+    "rok::core::par::for_each",
+    "rok::core::par::map",
+    "rok::core::par::filter",
+];
+
+/// The place up to its first `ELEM` step: the buffer's elements.
+fn elem_of(p: &Place) -> Option<Place> {
+    let i = p.1.iter().position(|&s| s == ELEM)?;
+    Some((p.0, p.1[..=i].to_vec()))
+}
 
 /// A local and a field path into it.
 type Place = (LocalId, Vec<u32>);
@@ -208,17 +275,20 @@ impl Gone {
 
 /// An alias: `Same` places are one object; `In(a, b)` holds one inside
 /// the other (both go away together); `Into(a, b)`: `b` goes away with
-/// `a`, not the reverse.
+/// `a`, not the reverse; `Taken(a, b)`: `a` was taken out of the buffer
+/// elements `b`, so it may be what was stored there, but `b` no longer
+/// holds it (unless the buffer may hold an object twice).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Edge {
     Same(Place, Place),
     In(Place, Place),
     Into(Place, Place),
+    Taken(Place, Place),
 }
 
 impl Edge {
     const fn ends(&self) -> (&Place, &Place) {
-        let (Self::Same(a, b) | Self::In(a, b) | Self::Into(a, b)) = self;
+        let (Self::Same(a, b) | Self::In(a, b) | Self::Into(a, b) | Self::Taken(a, b)) = self;
         (a, b)
     }
 
@@ -274,6 +344,10 @@ struct St {
     /// Guard local -> the places holding what it protects.
     tied: BTreeMap<LocalId, BTreeMap<Place, (Span, Tie)>>,
     edges: Edges,
+    /// Buffers (their `ELEM` places) that may hold one object twice.
+    dup: BTreeSet<Place>,
+    /// Where values were stored into buffer elements (for messages).
+    stored: BTreeMap<Place, BTreeSet<Span>>,
 }
 
 /// An edge worth keeping: between two places, of followed depth.
@@ -293,6 +367,10 @@ fn join_st(mut a: St, b: St) -> St {
         }
     }
     a.edges.extend(b.edges);
+    a.dup.extend(b.dup);
+    for (p, sp) in b.stored {
+        a.stored.entry(p).or_default().extend(sp);
+    }
     a
 }
 
@@ -531,14 +609,196 @@ fn catches(p: &HirPattern, v: u32, ty: &HirTy) -> bool {
 /// `q` and every place aliased to it go away in `s`.
 fn mark_gone(s: &mut St, p: Place, why: Gone) {
     let first = p.clone();
-    let mut work = vec![p];
-    while let Some(q) = work.pop() {
+    // Each place with the buffer elements it must not reach: what was
+    // taken out of a buffer is not in it any more.
+    let mut work: Vec<(Place, Rc<Vec<Place>>)> = vec![(p, Rc::new(Vec::new()))];
+    while let Some((q, blocked)) = work.pop() {
         // What a guard gave out: its aliases share it.
         let why = match why {
             Gone::Guard(at, g, Tie::Taken) if q != first => Gone::Guard(at, g, Tie::Shared),
             w => w,
         };
         if q.1.len() > MAX_DEPTH || s.gone.keys().any(|g| within(&q, g)) {
+            continue;
+        }
+        let mut next: Vec<(Place, Rc<Vec<Place>>)> = step(s, &q)
+            .into_iter()
+            .map(|x| (x, blocked.clone()))
+            .collect();
+        for e in s.edges.of(q.0) {
+            let Edge::Taken(a, b) = e else { continue };
+            if !overlap(&q, a) {
+                continue;
+            }
+            if is_dup(s, b) {
+                next.push((b.clone(), blocked.clone()));
+                continue;
+            }
+            // What was stored into the buffer, not the buffer.
+            let elems = elem_aliases(s, b);
+            let mut bl = (*blocked).clone();
+            bl.extend(elems.iter().cloned());
+            let bl = Rc::new(bl);
+            for h in &elems {
+                for x in step(s, h) {
+                    if !elems.iter().any(|h| overlap(&x, h)) {
+                        next.push((x, bl.clone()));
+                    }
+                }
+            }
+        }
+        work.extend(
+            next.into_iter()
+                .filter(|(x, bl)| !bl.iter().any(|b| overlap(x, b))),
+        );
+        s.gone.retain(|g, _| !within(g, &q));
+        s.gone.insert(q, why);
+    }
+}
+
+/// The places that go away with `q` through one edge (not `Taken`).
+fn step(s: &St, q: &Place) -> Vec<Place> {
+    let mut out = Vec::new();
+    for e in s.edges.of(q.0) {
+        match e {
+            Edge::Same(a, b) => {
+                for (x, y) in [(a, b), (b, a)] {
+                    if within(q, y) {
+                        out.push(extend(x, &q.1[y.1.len()..]));
+                    } else if within(y, q) {
+                        out.push(x.clone());
+                    }
+                }
+            }
+            Edge::In(a, b) => {
+                if overlap(q, b) {
+                    out.push(a.clone());
+                }
+                if overlap(q, a) {
+                    out.push(b.clone());
+                }
+            }
+            Edge::Into(a, b) => {
+                if overlap(q, a) {
+                    out.push(b.clone());
+                }
+            }
+            Edge::Taken(..) => {}
+        }
+    }
+    out
+}
+
+/// The buffer elements `at` now hold the values flowing in `fl`
+/// (`check`: a store through a call; inside a collection's own methods
+/// elements move between slots of one buffer).
+fn hold_st(s: &mut St, at: &Place, fl: &[Flow], check: bool) {
+    if fl.is_empty() {
+        return;
+    }
+    if check {
+        let mut probe = St {
+            gone: BTreeMap::new(),
+            tied: BTreeMap::new(),
+            edges: s.edges.clone(),
+            dup: BTreeSet::new(),
+            stored: BTreeMap::new(),
+        };
+        mark_gone(&mut probe, at.clone(), Gone::To(Span::DUMMY, What::Mutex));
+        if fl
+            .iter()
+            .any(|(_, q)| probe.gone.keys().any(|g| overlap(g, q)))
+        {
+            s.dup.insert(at.clone());
+        }
+    }
+    for (k, q) in fl {
+        if within(q, at) {
+            continue;
+        }
+        let e = match k {
+            Fk::Is(sub) => Edge::Same(extend(at, sub), q.clone()),
+            Fk::Both | Fk::Holds => Edge::In(at.clone(), q.clone()),
+        };
+        if kept(&e) {
+            s.edges.insert(e);
+        }
+    }
+}
+
+/// The `ELEM` places of every alias of the buffer whose elements `b`
+/// is (`b` itself among them).
+fn elem_aliases(s: &St, b: &Place) -> Vec<Place> {
+    let Some(b) = elem_of(b) else {
+        return vec![b.clone()];
+    };
+    let holder = (b.0, b.1[..b.1.len() - 1].to_vec());
+    let mut out: Vec<Place> = same_reach(s, &holder)
+        .into_iter()
+        .filter(|(sub, _)| sub.is_empty())
+        .map(|(_, h)| extend(&h, &[ELEM]))
+        .collect();
+    if !out.contains(&b) {
+        out.push(b);
+    }
+    out
+}
+
+/// Summary `s`'s edges at a call (`map`: a root to the caller's place),
+/// and its stores into a buffer: (its elements, the stored value).
+/// `takes`: the value is an element taken out of argument 0's buffer.
+fn summary_edges(
+    s: &Summary,
+    map: &dyn Fn(&Root) -> Option<Place>,
+    takes: bool,
+) -> (Vec<Edge>, Vec<(Place, Place)>) {
+    let mut add: Vec<Edge> = Vec::new();
+    let mut stores: Vec<(Place, Place)> = Vec::new();
+    for edge in &s.edges {
+        let mapped = match edge {
+            SEdge::Same(x, y) if takes && (x.0 == RET_ROOT) != (y.0 == RET_ROOT) => {
+                let (ret, from) = if x.0 == RET_ROOT { (x, y) } else { (y, x) };
+                match (map(ret), map(from).and_then(|p| elem_of(&p))) {
+                    (Some(ret), Some(from)) => Some(Edge::Taken(ret, from)),
+                    _ => map(x).zip(map(y)).map(|(x, y)| Edge::Same(x, y)),
+                }
+            }
+            SEdge::Same(x, y) => map(x).zip(map(y)).map(|(x, y)| Edge::Same(x, y)),
+            SEdge::Into(x, y) => map(x).zip(map(y)).map(|(x, y)| Edge::Into(x, y)),
+            SEdge::Taken(x, y) => map(x).zip(map(y)).map(|(x, y)| Edge::Taken(x, y)),
+        };
+        let Some(mapped) = mapped.filter(|m| m.ends().0 != m.ends().1) else {
+            continue;
+        };
+        if let (SEdge::Same(rx, ry), Edge::Same(x, y)) = (edge, &mapped) {
+            if rx.0 != RET_ROOT && ry.0 != RET_ROOT && rx.0 != ry.0 {
+                match (elem_of(x), elem_of(y)) {
+                    (Some(at), _) => stores.push((at, y.clone())),
+                    (None, Some(at)) => stores.push((at, x.clone())),
+                    (None, None) => {}
+                }
+            }
+        }
+        add.push(mapped);
+    }
+    (add, stores)
+}
+
+/// The places aliased to `start`, not walking past the elements of a
+/// buffer outside `own` (those are returned apart): elements read out
+/// of one buffer are taken to be distinct objects unless that buffer
+/// may hold one twice.
+fn reach(s: &St, start: &Place, own: &[Place]) -> (Vec<Place>, Vec<Place>) {
+    let (mut inner, mut stops) = (Vec::new(), Vec::new());
+    let mut seen: HashSet<Place> = HashSet::new();
+    let mut work = vec![start.clone()];
+    while let Some(q) = work.pop() {
+        if q.1.len() > MAX_DEPTH || !seen.insert(q.clone()) {
+            continue;
+        }
+        let foreign = q.1.contains(&ELEM) && !own.iter().any(|h| within(&q, h));
+        if foreign && q != *start {
+            stops.push(q);
             continue;
         }
         for e in s.edges.of(q.0) {
@@ -560,16 +820,58 @@ fn mark_gone(s: &mut St, p: Place, why: Gone) {
                         work.push(b.clone());
                     }
                 }
-                Edge::Into(a, b) => {
+                Edge::Into(a, b) | Edge::Taken(a, b) => {
                     if overlap(&q, a) {
                         work.push(b.clone());
                     }
                 }
             }
         }
-        s.gone.retain(|g, _| !within(g, &q));
-        s.gone.insert(q, why);
+        inner.push(q);
     }
+    (inner, stops)
+}
+
+/// Storing `v` into the buffer elements `at` makes the buffer hold one
+/// object twice: `v` is already among them, or both come from the
+/// elements of one other buffer (elements are not told apart by index).
+/// `trusted`: a collection's own method, which moves elements between its
+/// buffers and copies each element of another buffer once: only a plain
+/// value (a parameter, a callback's result) stored twice counts.
+fn stores_twice(s: &St, at: &Place, v: &Place, trusted: bool) -> bool {
+    let own = elem_aliases(s, at);
+    let (a_in, a_stop) = reach(s, at, &own);
+    let (v_in, v_stop) = reach(s, v, &own);
+    // A call's argument slot is reused on each pass of a loop.
+    let moved = |p: &Place| p.1.contains(&ELEM) || (TEMP..TAG_KEY).contains(&p.0.0);
+    let inner = v_in.iter().any(|x| {
+        a_in.iter()
+            .any(|y| overlap(x, y) && !(trusted && (moved(x) || moved(y))))
+    });
+    inner
+        || v_stop
+            .iter()
+            .any(|x| a_stop.iter().any(|y| overlap(x, y)) && (!trusted || is_dup(s, x)))
+}
+
+/// The object at `h` holds a buffer that may hold one object twice.
+fn holds_twice(s: &St, h: &Place) -> bool {
+    same_reach(s, h).iter().any(|(sub, x)| {
+        sub.is_empty()
+            && s.dup.iter().any(|d| {
+                within(d, x)
+                    && d.1[x.1.len()..].iter().filter(|&&k| k == ELEM).count() == 1
+                    && d.1.last() == Some(&ELEM)
+            })
+    })
+}
+
+/// The buffer whose elements `b` is may hold one object twice.
+fn is_dup(s: &St, b: &Place) -> bool {
+    !s.dup.is_empty()
+        && elem_aliases(s, b)
+            .iter()
+            .any(|x| s.dup.iter().any(|d| within(x, d)))
 }
 
 /// The places that are `start ++ sub` itself, through `Same` edges.
@@ -604,6 +906,8 @@ enum SEdge {
     Same(Root, Root),
     /// The first going away takes the second along.
     Into(Root, Root),
+    /// The first was taken out of the buffer elements the second is.
+    Taken(Root, Root),
 }
 
 /// What a function does with its parameters, as its callers see it.
@@ -618,11 +922,29 @@ struct Summary {
     /// `gives` handed over on those exits. Empty: every exit hands over
     /// all of them.
     exits: BTreeMap<u32, BTreeSet<Root>>,
+    /// Buffer elements that may now hold one object twice.
+    dups: BTreeSet<Root>,
+    /// The call may hand something over (to a channel, a lock).
+    sends: bool,
+    /// Parameter parts the body uses.
+    uses: BTreeSet<Root>,
+    /// Buffer elements of parameters whose taken-out elements the call
+    /// hands over.
+    sent_from: BTreeSet<Root>,
+    /// Parts of `ref` parameters handed over and then given a new value on
+    /// every path that hands them over: the caller's variable is usable.
+    renews: BTreeSet<Root>,
 }
 
 impl Summary {
     fn is_empty(&self) -> bool {
-        self.gives.is_empty() && self.edges.is_empty() && self.ties.is_empty()
+        self.gives.is_empty()
+            && self.edges.is_empty()
+            && self.ties.is_empty()
+            && self.dups.is_empty()
+            && !self.sends
+            && self.uses.is_empty()
+            && self.renews.is_empty()
     }
 
     /// The same facts (which hand-off is named does not matter).
@@ -631,6 +953,11 @@ impl Summary {
             && self.edges == o.edges
             && self.ties == o.ties
             && self.exits == o.exits
+            && self.dups == o.dups
+            && self.sends == o.sends
+            && self.uses == o.uses
+            && self.sent_from == o.sent_from
+            && self.renews == o.renews
     }
 
     /// `exits`, with every exit kind spelled out.
@@ -658,16 +985,17 @@ impl Summary {
         self.gives
             .keys()
             .chain(self.edges.iter().flat_map(|e| {
-                let (SEdge::Same(a, b) | SEdge::Into(a, b)) = e;
+                let (SEdge::Same(a, b) | SEdge::Into(a, b) | SEdge::Taken(a, b)) = e;
                 [a, b]
             }))
             .chain(self.ties.iter().map(|(_, r)| r))
+            .chain(self.dups.iter())
     }
 
     /// Parameter `i` of `self` as parameter `map(i)` (`None`: dropped).
     fn remap(&self, map: &dyn Fn(u32) -> Option<u32>) -> Self {
         let root = |r: &Root| {
-            if r.0 == RET_ROOT {
+            if r.0 == RET_ROOT || r.0 == WORLD_ROOT {
                 Some(r.clone())
             } else {
                 map(r.0).map(|i| (i, r.1.clone()))
@@ -685,6 +1013,7 @@ impl Summary {
                 .filter_map(|e| match e {
                     SEdge::Same(a, b) => Some(SEdge::Same(root(a)?, root(b)?)),
                     SEdge::Into(a, b) => Some(SEdge::Into(root(a)?, root(b)?)),
+                    SEdge::Taken(a, b) => Some(SEdge::Taken(root(a)?, root(b)?)),
                 })
                 .collect(),
             ties: self
@@ -697,6 +1026,11 @@ impl Summary {
                 .iter()
                 .map(|(t, rs)| (*t, rs.iter().filter_map(root).collect()))
                 .collect(),
+            dups: self.dups.iter().filter_map(root).collect(),
+            sends: self.sends,
+            uses: self.uses.iter().filter_map(root).collect(),
+            sent_from: self.sent_from.iter().filter_map(root).collect(),
+            renews: self.renews.iter().filter_map(root).collect(),
         }
     }
 
@@ -710,6 +1044,12 @@ impl Summary {
         }
         self.edges.extend(o.edges.iter().cloned());
         self.ties.extend(o.ties.iter().cloned());
+        self.dups.extend(o.dups.iter().cloned());
+        self.sends |= o.sends;
+        self.uses.extend(o.uses.iter().cloned());
+        self.sent_from.extend(o.sent_from.iter().cloned());
+        // A part renewed by every candidate.
+        self.renews = self.renews.intersection(&o.renews).cloned().collect();
         self.exits = exits;
         self.trim();
     }
@@ -717,10 +1057,10 @@ impl Summary {
     /// One line per fact, fields split by tabs (ROKHIR).
     fn encode(&self) -> String {
         let root = |r: &Root| {
-            let head = if r.0 == RET_ROOT {
-                "r".to_owned()
-            } else {
-                r.0.to_string()
+            let head = match r.0 {
+                RET_ROOT => "r".to_owned(),
+                WORLD_ROOT => "w".to_owned(),
+                i => i.to_string(),
             };
             std::iter::once(head)
                 .chain(r.1.iter().map(u32::to_string))
@@ -742,11 +1082,27 @@ impl Summary {
             let (k, a, b) = match e {
                 SEdge::Same(a, b) => ("s", a, b),
                 SEdge::Into(a, b) => ("i", a, b),
+                SEdge::Taken(a, b) => ("k", a, b),
             };
             out.push_str(&format!("{k}\t{}\t{}\n", root(a), root(b)));
         }
         for (g, r) in &self.ties {
             out.push_str(&format!("t\t{g}\t{}\n", root(r)));
+        }
+        for r in &self.dups {
+            out.push_str(&format!("d\t{}\n", root(r)));
+        }
+        if self.sends {
+            out.push_str("h\n");
+        }
+        for (k, set) in [
+            ("u", &self.uses),
+            ("f", &self.sent_from),
+            ("n", &self.renews),
+        ] {
+            for r in set {
+                out.push_str(&format!("{k}\t{}\n", root(r)));
+            }
         }
         for (t, rs) in &self.exits {
             let t = if *t == ANY {
@@ -768,10 +1124,10 @@ impl Summary {
         let root = |s: &str| -> Option<Root> {
             let mut it = s.split('.');
             let head = it.next()?;
-            let i = if head == "r" {
-                RET_ROOT
-            } else {
-                head.parse().ok()?
+            let i = match head {
+                "r" => RET_ROOT,
+                "w" => WORLD_ROOT,
+                _ => head.parse().ok()?,
             };
             Some((i, it.map(str::parse).collect::<Result<_, _>>().ok()?))
         };
@@ -795,6 +1151,22 @@ impl Summary {
                 }
                 ["i", a, b] => {
                     s.edges.insert(SEdge::Into(root(a)?, root(b)?));
+                }
+                ["k", a, b] => {
+                    s.edges.insert(SEdge::Taken(root(a)?, root(b)?));
+                }
+                ["d", r] => {
+                    s.dups.insert(root(r)?);
+                }
+                ["h"] => s.sends = true,
+                ["u", r] => {
+                    s.uses.insert(root(r)?);
+                }
+                ["f", r] => {
+                    s.sent_from.insert(root(r)?);
+                }
+                ["n", r] => {
+                    s.renews.insert(root(r)?);
                 }
                 ["t", g, r] => {
                     s.ties.insert((g.parse().ok()?, root(r)?));
@@ -883,6 +1255,13 @@ struct Checker<'a> {
     ops: HashMap<FunctionId, Op>,
     /// `TryAsyncFuture::poll` and its instances.
     polls: HashSet<FunctionId>,
+    /// `TAKES`, `PASSES` and `PAR` functions and their instances.
+    takes: HashSet<FunctionId>,
+    passes: HashSet<FunctionId>,
+    par: HashSet<FunctionId>,
+    literals: HashSet<FunctionId>,
+    clears: HashSet<FunctionId>,
+    copies: HashSet<FunctionId>,
     /// `TryAsyncFuture` and its instances.
     futures: HashSet<StructId>,
     sums: RefCell<HashMap<FunctionId, Rc<Summary>>>,
@@ -900,6 +1279,8 @@ struct Checker<'a> {
     /// written, and its type.
     direct: RefCell<HashMap<(u32, u32), (String, String)>>,
     unsafe_regions: RefCell<HashMap<u32, Vec<(u32, u32)>>>,
+    /// A hand-off call (its span start) -> its argument as written.
+    handed: RefCell<HashMap<(u32, u32), String>>,
 }
 
 impl Checker<'_> {
@@ -914,7 +1295,10 @@ impl Checker<'_> {
         if let Some(&v) = self.tracked_memo.borrow().get(t) {
             return v;
         }
-        let v = !super::bounds::has_param(self.ctx, t) && !self.ctx.has_trait(t, self.sync);
+        // A buffer is shared by the views of it (`Slice`), whatever its
+        // elements.
+        let v = !super::bounds::has_param(self.ctx, t)
+            && (matches!(t, HirTy::GcBuf(_)) || !self.ctx.has_trait(t, self.sync));
         self.tracked_memo.borrow_mut().insert(t.clone(), v);
         v
     }
@@ -1061,12 +1445,32 @@ pub(super) fn check(
     };
     let mut ops = HashMap::new();
     let mut polls = HashSet::new();
+    let (mut takes, mut passes, mut par) = (HashSet::new(), HashSet::new(), HashSet::new());
+    let mut literals = HashSet::new();
+    let (mut clears, mut copies) = (HashSet::new(), HashSet::new());
     for f in &all {
         if let Some(op) = op_of(&f.name, guard(f)) {
             ops.insert(f.id, op);
         }
         if is_fn(&f.name, POLL) {
             polls.insert(f.id);
+        }
+        // `xs += ys` (`AddAssign<List<T>>`): both sides the same list type.
+        if f.name.contains("_add_assign") && f.params.len() == 2 && f.params[0].ty == f.params[1].ty
+        {
+            copies.insert(f.id);
+        }
+        for (set, names) in [
+            (&mut takes, TAKES),
+            (&mut passes, PASSES),
+            (&mut par, PAR),
+            (&mut literals, LITERALS),
+            (&mut clears, CLEARS),
+            (&mut copies, COPIES),
+        ] {
+            if names.iter().any(|n| is_fn(&f.name, n)) {
+                set.insert(f.id);
+            }
         }
     }
     #[allow(clippy::cast_possible_truncation)]
@@ -1102,6 +1506,12 @@ pub(super) fn check(
         fns: all.iter().map(|f| (f.id, *f)).collect(),
         ops,
         polls,
+        takes,
+        passes,
+        par,
+        literals,
+        clears,
+        copies,
         futures,
         sums: RefCell::new(sums),
         parent: parents(&all),
@@ -1112,6 +1522,7 @@ pub(super) fn check(
         owners: RefCell::default(),
         direct: RefCell::default(),
         unsafe_regions: RefCell::default(),
+        handed: RefCell::default(),
     };
     let mut c = c;
     c.cands = candidates(&c, &all, stored);
@@ -1343,6 +1754,11 @@ fn walk(c: &Checker<'_>, f: &HirFunction) -> WalkOut {
         calls: Vec::new(),
         scopes: Vec::new(),
         returning: false,
+        sends: false,
+        uses: BTreeSet::new(),
+        sent_from: BTreeSet::new(),
+        renewed: BTreeSet::new(),
+        not_renewed: BTreeSet::new(),
         deps: HashSet::new(),
         diags: Vec::new(),
     };
@@ -1375,6 +1791,7 @@ fn walk(c: &Checker<'_>, f: &HirFunction) -> WalkOut {
     if let (Some(t), false) = (&body.trailing, w.cur.is_empty()) {
         w.store(&(RET, Vec::new()), t, false);
     }
+    w.note_renews();
     w.exit_with(Some(&RET_TAG));
     let s = w.summarize();
     ((s, w.deps), w.diags)
@@ -1417,6 +1834,14 @@ struct Walk<'c, 'h> {
     scopes: Vec<usize>,
     /// Walking a `return`'s value.
     returning: bool,
+    /// This body may hand something over.
+    sends: bool,
+    /// Summary facts gathered on the way (`Summary::uses` / `sent_from`),
+    /// and `ref` parameter parts renewed / not renewed at a return.
+    uses: BTreeSet<Root>,
+    sent_from: BTreeSet<Root>,
+    renewed: BTreeSet<Root>,
+    not_renewed: BTreeSet<Root>,
     /// The summaries this walk read.
     deps: HashSet<FunctionId>,
     diags: Vec<RokDiagnostic>,
@@ -1538,7 +1963,11 @@ impl<'h> Walk<'_, 'h> {
     }
 
     /// A use of place `p`, written `e` (`None`: the whole local `p.0`).
+    #[allow(clippy::many_single_char_names)]
     fn use_place(&mut self, p: &Place, ty: &HirTy, written: Option<&HirExpr>, at: Span) {
+        if let Some(i) = self.param_index(p.0).filter(|_| p.1.len() <= MAX_DEPTH) {
+            self.uses.insert((i, p.1.clone()));
+        }
         let Some((gp, g)) = self.cur.0.iter().find_map(|(_, st)| {
             st.gone
                 .iter()
@@ -1556,13 +1985,121 @@ impl<'h> Walk<'_, 'h> {
         {
             return;
         }
-        let origin = g.origin();
-        if !self.reported.insert((gp, origin.file, origin.start)) {
+        // What was handed over is still among `p`'s elements.
+        let in_elems = gp.0 == p.0 && gp.1.len() > p.1.len() && gp.1[p.1.len()..].contains(&ELEM);
+        if in_elems && self.holder_only() {
             return;
         }
-        let x = written.map_or_else(|| self.name(p.0), |e| self.show(e));
-        let d = self.diagnostic(&x, g, written, at);
+        let origin = g.origin();
+        if !self
+            .reported
+            .insert((gp.clone(), origin.file, origin.start))
+        {
+            return;
+        }
+        let mut x = written.map_or_else(|| self.name(p.0), |e| self.show(e));
+        // Only a field of it went: name the field (`b.buf`).
+        if gp.0 == p.0 && gp.1.len() > p.1.len() && !gp.1.contains(&ELEM) {
+            if let Some(f) = self.field_path(p, &gp.1[p.1.len()..]) {
+                x = format!("{x}{f}");
+            }
+        }
+        let mut d = self.diagnostic(&x, g, written, at);
+        // What was handed over, as written there (`rows[0]`).
+        let handed = self
+            .c
+            .handed
+            .borrow()
+            .get(&(origin.file, origin.start))
+            .cloned()
+            .unwrap_or_else(|| "a value".to_owned());
+        let elem = elem_of(&gp);
+        let twice = in_elems
+            && elem
+                .as_ref()
+                .is_some_and(|el| self.cur.0.iter().any(|(_, st)| is_dup(st, el)));
+        if twice {
+            let el = elem.unwrap_or_else(|| gp.clone());
+            let mut lines: BTreeSet<u32> = BTreeSet::new();
+            for (_, st) in &self.cur.0 {
+                for a in elem_aliases(st, &el) {
+                    for (p, sp) in &st.stored {
+                        if within(p, &a) || within(&a, p) {
+                            lines.extend(sp.iter().filter(|x| x.file == at.file).map(|x| x.line));
+                        }
+                    }
+                }
+            }
+            let at_lines = match lines.iter().take(2).collect::<Vec<_>>()[..] {
+                [a, b] => format!(" (stored at lines {a} and {b})"),
+                [a] => format!(" (stored at line {a})"),
+                _ => String::new(),
+            };
+            let given = match g {
+                Gone::To(site, _) => self
+                    .c
+                    .direct
+                    .borrow()
+                    .get(&(site.file, site.start))
+                    .map(|(n, _)| n.clone()),
+                _ => None,
+            }
+            .unwrap_or_else(|| "the value".to_owned());
+            let line = self.line(origin, at);
+            d.message = format!(
+                "`{x}` may hold one object twice{at_lines}, and one of them was handed to another \
+                 owner at {line}"
+            );
+            d.notes = vec![format!(
+                "help: store separate values (`.clone()` what you store), or hand over \
+                 `{given}.clone()` (stdlib 2.13.9)"
+            )];
+        } else if in_elems {
+            let line = self.line(origin, at);
+            d.message = format!(
+                "`{x}` still holds {handed}, which was handed to another owner at {line} (as \
+                 an element, or a value one shares)"
+            );
+            let take = self.take_out(p, &x);
+            d.notes = vec![format!(
+                "help: take it out of `{x}` first ({take}) and hand that over, or hand over \
+                 `{}.clone()` (stdlib 2.13.9)",
+                handed.trim_matches('`')
+            )];
+        }
         self.diags.push(d);
+    }
+
+    /// The innermost call is a collection method that neither reads nor
+    /// returns its elements (`len`, `push`, `clear`): a use of the
+    /// collection whose elements were handed over is fine there.
+    fn holder_only(&self) -> bool {
+        const SAFE: &[&str] = &[
+            "rok::core::collections::list::List__len",
+            "rok::core::collections::list::List__is_empty",
+            "rok::core::collections::list::List__capacity",
+            "rok::core::collections::list::List__clear",
+            "rok::core::collections::list::List__truncate",
+            "rok::core::collections::list::List__reserve",
+            "rok::core::collections::list::List__shrink_to_fit",
+            "rok::core::collections::list::List__push",
+            "rok::core::collections::list::List__insert",
+            "rok::core::collections::deque::Deque__len",
+            "rok::core::collections::deque::Deque__is_empty",
+            "rok::core::collections::deque::Deque__clear",
+            "rok::core::collections::deque::Deque__push_back",
+            "rok::core::collections::deque::Deque__push_front",
+            "rok::core::collections::dict::Dict__len",
+            "rok::core::collections::dict::Dict__is_empty",
+            "rok::core::collections::dict::Dict__clear",
+        ];
+        let Some(HirExprKind::Call { callee, .. }) = self.calls.last().map(|c| &c.kind) else {
+            return false;
+        };
+        self.c
+            .fns
+            .get(callee)
+            .is_some_and(|f| SAFE.iter().any(|n| is_fn(&f.name, n)))
     }
 
     fn hidden(&self, l: LocalId) -> bool {
@@ -1940,6 +2477,7 @@ impl<'h> Walk<'_, 'h> {
                     Edge::Same(a, b) => Edge::Same(swap(a), swap(b)),
                     Edge::In(a, b) => Edge::In(swap(a), swap(b)),
                     Edge::Into(a, b) => Edge::Into(swap(a), swap(b)),
+                    Edge::Taken(a, b) => Edge::Taken(swap(a), swap(b)),
                 };
                 edges.insert(e);
             }
@@ -1959,8 +2497,8 @@ impl<'h> Walk<'_, 'h> {
                 let (to_u, from_u, same) = match e {
                     Edge::Same(..) => (true, true, true),
                     Edge::In(..) => (true, true, false),
-                    // `Into(a, b)`: a ⇒ b.
-                    Edge::Into(..) => (!fwd, fwd, false),
+                    // `Into(a, b)`: a ⇒ b; a taken element as one.
+                    Edge::Into(..) | Edge::Taken(..) => (!fwd, fwd, false),
                 };
                 ends.push((u.clone(), x.clone(), to_u, from_u, same));
             }
@@ -1997,7 +2535,16 @@ impl<'h> Walk<'_, 'h> {
 
     /// What `e`'s value carries, of the places this walk knows.
     fn flows(&self, e: &HirExpr, out: &mut Vec<Flow>) {
-        if !self.c.tracked(&e.ty) {
+        if self.c.tracked(&e.ty) {
+            self.flows_any(e, out);
+        }
+    }
+
+    /// `flows`, also for a `Sync` value whose field is followed (a list's
+    /// head holding its buffer).
+    fn flows_any(&self, e: &HirExpr, out: &mut Vec<Flow>) {
+        if self.shared_read(e) {
+            out.push((Fk::Is(Vec::new()), (WORLD, Vec::new())));
             return;
         }
         if let Some(p) = place(e) {
@@ -2053,7 +2600,7 @@ impl<'h> Walk<'_, 'h> {
                     *i
                 };
                 let mut v = Vec::new();
-                self.flows(target, &mut v);
+                self.flows_any(target, &mut v);
                 for (k, q) in v {
                     match k {
                         Fk::Is(s) if s.is_empty() => out.push((Fk::Is(s), extend(&q, &[i]))),
@@ -2066,7 +2613,12 @@ impl<'h> Walk<'_, 'h> {
             HirExprKind::SumWrap { value: Some(x), .. } | HirExprKind::Cast { operand: x, .. } => {
                 self.flows(x, out);
             }
-            HirExprKind::ClosureValue { env: x, .. } => as_kind(self, x, &Fk::Both, out),
+            // A capture, or an element of a fixed array: held by it.
+            // A closure's captures are fields of its value.
+            HirExprKind::ClosureValue { env: x, .. } => self.flows(x, out),
+            HirExprKind::ArrayIndex { array: x, .. } => {
+                as_kind(self, x, &Fk::Both, out);
+            }
             HirExprKind::ArrayInit { elements: xs, .. }
             | HirExprKind::EnumVariantInit { args: xs, .. } => {
                 xs.iter().for_each(|x| as_kind(self, x, &Fk::Both, out));
@@ -2083,6 +2635,12 @@ impl<'h> Walk<'_, 'h> {
                 }
             }
             HirExprKind::Match { arms, .. } => arms.iter().for_each(|a| self.flows(&a.body, out)),
+            // An element of the buffer: what was stored into it.
+            HirExprKind::BufGet { buf, .. } => {
+                let mut hs = Vec::new();
+                self.holders(buf, &mut hs);
+                out.extend(hs.iter().map(|h| (Fk::Is(Vec::new()), extend(h, &[ELEM]))));
+            }
             HirExprKind::Call { .. }
             | HirExprKind::CallIndirect { .. }
             | HirExprKind::CallClosure { .. }
@@ -2095,6 +2653,45 @@ impl<'h> Walk<'_, 'h> {
         }
     }
 
+    /// `e` reads a value that is not `Sync` out of a `Sync` object (an
+    /// `unsafe impl Sync` type): other threads may reach it too.
+    fn shared_read(&self, e: &HirExpr) -> bool {
+        // These `Sync` types hand a value over (a channel, a task's
+        // result, a `Handoff`, a lock's guard): what comes out is the
+        // receiver's alone.
+        const OWNERS: &[&str] = &[
+            "rok::core::channel::",
+            "rok::core::marker::",
+            "rok::core::par::",
+            "rok::core::sync::",
+            "rok::core::task::",
+        ];
+        if OWNERS.iter().any(|m| self.f.name.starts_with(m)) {
+            return false;
+        }
+        match &e.kind {
+            HirExprKind::FieldRead { target: t, .. }
+            | HirExprKind::TupleField { target: t, .. }
+            | HirExprKind::BufGet { buf: t, .. }
+            | HirExprKind::ArrayIndex { array: t, .. } => {
+                let shared = !matches!(t.ty, HirTy::Unknown | HirTy::Any)
+                    && !super::bounds::has_param(self.c.ctx, &t.ty)
+                    && !self.c.tracked(&t.ty);
+                // A buffer is followed whatever its elements; a `Sync` struct
+                // holding one is not shared state.
+                let buf = matches!(e.ty, HirTy::GcBuf(_));
+                (shared && !buf && self.c.tracked(&e.ty)) || self.shared_read(t)
+            }
+            HirExprKind::SumWrap { value: Some(x), .. } | HirExprKind::Cast { operand: x, .. } => {
+                self.shared_read(x)
+            }
+            HirExprKind::Block(b) if b.stmts.is_empty() => {
+                b.trailing.as_ref().is_some_and(|t| self.shared_read(t))
+            }
+            _ => false,
+        }
+    }
+
     fn block_flows(&self, b: &HirBlock, out: &mut Vec<Flow>) {
         if let Some(t) = &b.trailing {
             self.flows(t, out);
@@ -2104,6 +2701,9 @@ impl<'h> Walk<'_, 'h> {
     /// `p` now holds `e`'s value (`part`: a part of it).
     fn store(&mut self, p: &Place, e: &HirExpr, part: bool) {
         self.assign(p);
+        if let HirExprKind::ArrayInit { elements, .. } = &e.kind {
+            self.array_dup(p, elements);
+        }
         let mut fl = Vec::new();
         self.flows(e, &mut fl);
         for s in self.cur.states() {
@@ -2481,7 +3081,9 @@ impl<'h> Walk<'_, 'h> {
                     self.expr_to(e, &RET_TAG);
                     self.returning = false;
                     self.store(&(RET, Vec::new()), e, false);
+                    self.escapes_guard(e);
                 }
+                self.note_renews();
                 self.exit_with(Some(&RET_TAG));
             }
             HirStmt::Panic(e) => {
@@ -2530,16 +3132,15 @@ impl<'h> Walk<'_, 'h> {
         }
     }
 
-    /// The buffer at `c` now holds `v`: `v` goes away with it.
+    /// The buffer at `c` now holds `v` among its elements: they share it
+    /// both ways. Storing what it may hold already makes it hold an
+    /// object twice.
     fn hold(&mut self, c: &Place, v: &HirExpr) {
         let mut fl = Vec::new();
         self.flows(v, &mut fl);
+        let at = extend(c, &[ELEM]);
         for s in self.cur.states() {
-            for (_, q) in &fl {
-                if q != c {
-                    s.edges.insert(Edge::Into(c.clone(), q.clone()));
-                }
-            }
+            hold_st(s, &at, &fl, false);
         }
     }
 
@@ -2663,7 +3264,38 @@ impl<'h> Walk<'_, 'h> {
                     return self.op(op, args, e.span);
                 }
                 let args: Vec<&HirExpr> = args.iter().collect();
+                if self.c.par.contains(callee) {
+                    self.par_items(*callee, args.first().copied(), e.span);
+                }
+                if self.c.passes.contains(callee) {
+                    let mut fl = Vec::new();
+                    if let Some(a) = args.first() {
+                        self.flows(a, &mut fl);
+                    }
+                    self.results.insert(addr(e), fl);
+                }
+                let takes = self.c.takes.contains(callee);
+                let literal = self.c.literals.contains(callee);
+                // Only a direct call says the callee itself hands something
+                // over (a call through a function value may reach any
+                // function of its type).
+                if let Some(s) = self.c.summary(*callee).filter(|s| s.sends) {
+                    self.sends = true;
+                    let name = self.c.fns.get(callee).map(|f| shown_fn(self.c, f));
+                    self.aliased_args(&s, &args, e, name.as_deref());
+                }
+                if self.c.copies.contains(callee) {
+                    self.copy_dup(&args);
+                }
                 if let Some(s) = self.callee(*callee) {
+                    let s = if literal {
+                        Rc::new(Summary {
+                            dups: BTreeSet::new(),
+                            ..(*s).clone()
+                        })
+                    } else {
+                        s
+                    };
                     if !s.gives.is_empty() {
                         if let Some(f) = self.c.fns.get(callee) {
                             let n = shown_fn(self.c, f);
@@ -2673,10 +3305,21 @@ impl<'h> Walk<'_, 'h> {
                                 .insert((e.span.file, e.span.start), n);
                         }
                     }
-                    self.apply(&s, &args, e, true);
+                    self.apply(&s, &args, e, true, takes);
+                    if literal {
+                        self.literal_dup(&s, e);
+                    }
                 }
                 if self.c.polls.contains(callee) {
                     self.polled(e, args.first().copied());
+                }
+                if self.c.par.contains(callee) {
+                    self.par_result(*callee, &args, e);
+                }
+                if self.c.clears.contains(callee) {
+                    if let Some(p) = args.first().and_then(|a| place(a)) {
+                        self.cleared(&p);
+                    }
                 }
             }
             HirExprKind::CallIndirect { callee, args, .. } => {
@@ -2689,7 +3332,7 @@ impl<'h> Walk<'_, 'h> {
                     _ => self.indirect(args),
                 };
                 if let Some(s) = s {
-                    self.apply(&s, &all, e, true);
+                    self.apply(&s, &all, e, true, false);
                 }
             }
             HirExprKind::CallClosure { closure, args, .. } => {
@@ -2700,13 +3343,13 @@ impl<'h> Walk<'_, 'h> {
                     _ => self.indirect(args),
                 };
                 if let Some(s) = s {
-                    self.apply(&s, &all, e, true);
+                    self.apply(&s, &all, e, true, false);
                 }
             }
             HirExprKind::CoroNew { body_fn, args } => {
                 let args: Vec<&HirExpr> = args.iter().collect();
                 if let Some(s) = self.callee(*body_fn) {
-                    self.apply(&s, &args, e, false);
+                    self.apply(&s, &args, e, false, false);
                 }
                 // The frame holds the arguments until it runs.
                 let mut v = Vec::new();
@@ -2726,6 +3369,525 @@ impl<'h> Walk<'_, 'h> {
             }
             _ => {}
         }
+    }
+
+    /// An array literal two of whose elements are one object holds it
+    /// twice (`p ++ [ELEM]` in `dup`).
+    fn array_dup(&mut self, p: &Place, elements: &[HirExpr]) {
+        let fls: Vec<Vec<Place>> = elements
+            .iter()
+            .map(|x| {
+                let mut fl = Vec::new();
+                self.flows(x, &mut fl);
+                fl.into_iter().map(|(_, q)| q).collect()
+            })
+            .collect();
+        if fls.iter().filter(|f| !f.is_empty()).count() < 2 {
+            return;
+        }
+        for st in self.cur.states() {
+            let walks: Vec<(Vec<Place>, Vec<Place>)> = fls
+                .iter()
+                .map(|f| {
+                    let (mut inner, mut stops) = (Vec::new(), Vec::new());
+                    for q in f {
+                        let (x, y) = reach(st, q, &[]);
+                        inner.extend(x);
+                        stops.extend(y);
+                    }
+                    (inner, stops)
+                })
+                .collect();
+            let mut twice = false;
+            for (i, (ai, ao)) in walks.iter().enumerate() {
+                for (bi, bo) in &walks[i + 1..] {
+                    // Two reads of one buffer may be one element.
+                    twice |= ai.iter().any(|x| bi.iter().any(|y| overlap(x, y)))
+                        || ao.iter().any(|x| bo.iter().any(|y| overlap(x, y)));
+                }
+            }
+            if twice {
+                st.dup.insert(extend(p, &[ELEM]));
+            }
+        }
+    }
+
+    /// A call that hands something over must not get one object through
+    /// two arguments (`f(tx, a, a)`, `h.go(tx, h.items)`): it may hand one
+    /// over and keep using the other.
+    /// Handing over `qs`, taken out of a parameter's buffer: the call
+    /// hands over that buffer's elements (`Summary::sent_from`).
+    fn note_sent_from(&mut self, qs: &[Place]) {
+        let mut found = Vec::new();
+        for (_, st) in &self.cur.0 {
+            let near: Vec<Place> = qs
+                .iter()
+                .flat_map(|q| {
+                    let (mut inner, _) = reach(st, q, &[]);
+                    inner.push(q.clone());
+                    inner
+                })
+                .collect();
+            for q in &near {
+                for e in st.edges.of(q.0) {
+                    let Edge::Taken(a, b) = e else { continue };
+                    if !overlap(q, a) {
+                        continue;
+                    }
+                    for (sub, x) in same_reach(st, b) {
+                        if let (true, Some(i)) = (sub.is_empty(), self.param_index(x.0)) {
+                            found.push((i, x.1.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        self.sent_from.extend(found);
+    }
+
+    /// How to take an element out of the collection at `p` (named `x`).
+    fn take_out(&self, p: &Place, x: &str) -> String {
+        let base = match self.place_ty(p) {
+            Some(HirTy::Struct(id)) => {
+                let structs = self.c.env.defs.structs.borrow();
+                structs.get(id.0 as usize).map(|s| {
+                    let n = s.name.split("__").next().unwrap_or_default();
+                    n.split('<')
+                        .next()
+                        .unwrap_or_default()
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+            }
+            _ => None,
+        };
+        match base.as_deref() {
+            Some("Deque") => format!("`{x}.pop_front()`, `{x}.pop_back()`"),
+            Some("Dict" | "OrderedDict") => format!("`{x}.remove(key)`"),
+            Some("BinaryHeap") => format!("`{x}.pop()`"),
+            _ => format!("`{x}.remove(i)`, `{x}.pop()`"),
+        }
+    }
+
+    /// `.f.g` for the field steps `rest` below place `p`.
+    fn field_path(&self, p: &Place, rest: &[u32]) -> Option<String> {
+        let mut t = self.place_ty(p)?;
+        let mut out = String::new();
+        for &k in rest {
+            if k & TUPLE != 0 {
+                out.push_str(&format!(".{}", k & !TUPLE));
+                let HirTy::Tuple(ts) = t else { return None };
+                t = ts.get((k & !TUPLE) as usize)?.clone();
+                continue;
+            }
+            let HirTy::Struct(id) = t else { return None };
+            let structs = self.c.env.defs.structs.borrow();
+            let f = structs.get(id.0 as usize)?.fields.get(k as usize)?;
+            out.push_str(&format!(".{}", f.name));
+            t = f.ty.clone();
+        }
+        Some(out)
+    }
+
+    /// The index of the parameter whose local is `l`.
+    fn param_index(&self, l: LocalId) -> Option<u32> {
+        #[allow(clippy::cast_possible_truncation)]
+        self.f
+            .params
+            .iter()
+            .position(|p| p.local == l)
+            .map(|i| i as u32)
+    }
+
+    /// Callee facts about parameters that are, at this call, parts of this
+    /// function's own parameters (`uses`, `sent_from`).
+    fn lift_params(&mut self, s: &Summary, args: &[&HirExpr]) {
+        let lift = |w: &Self, set: &BTreeSet<Root>| -> Vec<Root> {
+            set.iter()
+                .filter_map(|(j, sub)| {
+                    let q = place(args.get(*j as usize)?)?;
+                    let path = [&q.1[..], &sub[..]].concat();
+                    // Recursion through a field would grow the path forever.
+                    (path.len() <= MAX_DEPTH).then_some(())?;
+                    Some((w.param_index(q.0)?, path))
+                })
+                .collect()
+        };
+        let (u, f) = (lift(self, &s.uses), lift(self, &s.sent_from));
+        self.uses.extend(u);
+        self.sent_from.extend(f);
+    }
+
+    /// At a return: which parts of `ref` parameters handed over on this
+    /// path were given a new value (the caller's variable gets it back).
+    fn note_renews(&mut self) {
+        let refs: Vec<(u32, LocalId)> = self
+            .f
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.by_ref)
+            .map(|(i, p)| {
+                #[allow(clippy::cast_possible_truncation)]
+                (i as u32, p.local)
+            })
+            .collect();
+        for (i, l) in refs {
+            let sh = shadow(i as usize);
+            for (_, st) in &self.cur.0 {
+                for g in st.gone.keys().filter(|g| g.0 == sh) {
+                    let mine = (l, g.1.clone());
+                    if st.gone.keys().any(|x| overlap(x, &mine)) {
+                        self.not_renewed.insert((i, g.1.clone()));
+                    } else {
+                        self.renewed.insert((i, g.1.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A call that hands something over must not get, through another
+    /// argument, an object it hands over and then uses (`f(tx, a, a)`,
+    /// `h.go(tx, h.items)` when `go` uses `self.items`). Distinct elements
+    /// of one collection are taken to be distinct.
+    fn aliased_args(&mut self, s: &Summary, args: &[&HirExpr], call: &HirExpr, name: Option<&str>) {
+        if self.c.in_unsafe(call.span) {
+            return;
+        }
+        let at = |w: &Self, k: usize, sub: &[u32]| -> Vec<Place> {
+            let Some(arg) = args.get(k) else {
+                return Vec::new();
+            };
+            let mut fl = Vec::new();
+            w.flows(arg, &mut fl);
+            fl.into_iter().map(|(_, q)| extend(&q, sub)).collect()
+        };
+        let handed: Vec<&Root> = s
+            .gives
+            .keys()
+            .chain(s.sent_from.iter())
+            .filter(|r| r.0 != RET_ROOT && r.0 != WORLD_ROOT)
+            .collect();
+        let mut hit: Option<(usize, usize)> = None;
+        for (hi, hsub) in handed {
+            let hs = at(self, *hi as usize, hsub);
+            for (ui, usub) in s.uses.iter().filter(|(u, _)| u != hi) {
+                let us = at(self, *ui as usize, usub);
+                // Either side reaches the other; the elements of a
+                // collection are reached as its element place.
+                let shared = self.cur.0.iter().any(|(_, st)| {
+                    hs.iter().any(|h| {
+                        let (inner, _) = reach(st, h, &[]);
+                        let hs_all = if elem_of(h).is_some() {
+                            elem_aliases(st, h)
+                        } else {
+                            vec![h.clone()]
+                        };
+                        us.iter().any(|u| {
+                            let (u_in, _) = reach(st, u, &[]);
+                            inner.iter().any(|x| overlap(x, u))
+                                || u_in.iter().any(|x| hs_all.iter().any(|y| overlap(x, y)))
+                                || (elem_of(h).is_some() && {
+                                    // A taken element: anything stored there.
+                                    let mut probe = St {
+                                        gone: BTreeMap::new(),
+                                        tied: BTreeMap::new(),
+                                        edges: st.edges.clone(),
+                                        dup: BTreeSet::new(),
+                                        stored: BTreeMap::new(),
+                                    };
+                                    mark_gone(
+                                        &mut probe,
+                                        u.clone(),
+                                        Gone::To(Span::DUMMY, What::Mutex),
+                                    );
+                                    probe
+                                        .gone
+                                        .keys()
+                                        .any(|x| hs_all.iter().any(|y| overlap(x, y)))
+                                })
+                        })
+                    })
+                });
+                if shared {
+                    hit = Some((*hi as usize, *ui as usize));
+                }
+            }
+        }
+        let Some((given, used)) = hit else { return };
+        let show = |w: &Self, k: usize| {
+            w.c.src(args[k].span)
+                .filter(|t| t.len() <= 30 && !t.contains('\n'))
+                .map_or_else(|| format!("argument {}", k + 1), |t| format!("`{t}`"))
+        };
+        let (a, b) = (show(self, given), show(self, used));
+        let callee = name.map_or_else(|| "the call".to_owned(), |n| format!("`{n}`"));
+        let head = if a == b {
+            format!(
+                "{a} is passed twice to {callee}, which hands one over and keeps using the other"
+            )
+        } else {
+            format!(
+                "{a} and {b} share an object, and {callee} hands over the one and keeps using \
+                 the other"
+            )
+        };
+        self.diags.push(
+            RokDiagnostic::error(ErrorKind::Handoff, call.span, head).with_note(
+                "help: pass separate values (`.clone()` one of them) (stdlib 2.13.9)".to_owned(),
+            ),
+        );
+    }
+
+    /// `par::filter`'s result holds items of argument 0; `par::map`'s
+    /// does when the function may return its argument.
+    fn par_result(&mut self, callee: FunctionId, args: &[&HirExpr], e: &HirExpr) {
+        let Some(f) = self.c.fns.get(&callee) else {
+            return;
+        };
+        if !self.c.tracked(&e.ty) {
+            return;
+        }
+        let filter = is_fn(&f.name, "rok::core::par::filter");
+        let map = is_fn(&f.name, "rok::core::par::map");
+        if !filter && !map {
+            return;
+        }
+        if map {
+            let returns_arg = match args.get(1).map(|a| &a.kind) {
+                Some(HirExprKind::ClosureValue { fn_id, .. }) => {
+                    self.callee(*fn_id).is_some_and(|s| {
+                        s.edges.iter().any(|e| {
+                            let (SEdge::Same(a, b) | SEdge::Into(a, b) | SEdge::Taken(a, b)) = e;
+                            (a.0 == RET_ROOT && b.0 == 1) || (b.0 == RET_ROOT && a.0 == 1)
+                        })
+                    })
+                }
+                Some(HirExprKind::FnRef(id)) => self.callee(*id).is_some_and(|s| {
+                    s.edges.iter().any(|e| {
+                        let (SEdge::Same(a, b) | SEdge::Into(a, b) | SEdge::Taken(a, b)) = e;
+                        (a.0 == RET_ROOT && b.0 == 0) || (b.0 == RET_ROOT && a.0 == 0)
+                    })
+                }),
+                _ => true,
+            };
+            if !returns_arg {
+                return;
+            }
+        }
+        let Some(items) = args.first() else { return };
+        let mut fl = Vec::new();
+        self.flows(items, &mut fl);
+        if fl.is_empty() {
+            return;
+        }
+        let key = addr(e);
+        let t = if let Some((_, q)) = self.results.get(&key).and_then(|v| v.first()) {
+            q.clone()
+        } else {
+            let t = (self.temp(key, RET_ROOT, &e.ty), Vec::new());
+            self.assign(&t);
+            self.results
+                .insert(key, vec![(Fk::Is(Vec::new()), t.clone())]);
+            t
+        };
+        let at = extend(&t, &[0, ELEM]);
+        for st in self.cur.states() {
+            for (_, q) in &fl {
+                st.edges
+                    .insert(Edge::Same(at.clone(), extend(q, &[0, ELEM])));
+            }
+        }
+    }
+
+    /// `dst.extend(src)`: `dst` holds an object twice if it already
+    /// holds one of `src`'s, or `src` is `dst`.
+    fn copy_dup(&mut self, args: &[&HirExpr]) {
+        let (Some(dst), Some(src)) = (args.first().and_then(|a| place(a)), args.get(1)) else {
+            return;
+        };
+        let mut fl = Vec::new();
+        self.flows(src, &mut fl);
+        for st in self.cur.states() {
+            let mut probe = St {
+                gone: BTreeMap::new(),
+                tied: BTreeMap::new(),
+                edges: st.edges.clone(),
+                dup: BTreeSet::new(),
+                stored: BTreeMap::new(),
+            };
+            for (_, q) in &fl {
+                mark_gone(&mut probe, q.clone(), Gone::To(Span::DUMMY, What::Mutex));
+            }
+            let held = probe
+                .gone
+                .keys()
+                .any(|g| within(g, &dst) && g.1[dst.1.len()..].contains(&ELEM));
+            if held || fl.iter().any(|(_, q)| overlap(q, &dst)) {
+                st.dup.insert(extend(&dst, &[0, ELEM]));
+            }
+        }
+    }
+
+    /// Every element of the buffer at `p` was dropped (`clear`): what
+    /// was handed over or stored there is no longer in it.
+    fn cleared(&mut self, p: &Place) {
+        for st in self.cur.states() {
+            let aliases: Vec<Place> = same_reach(st, p)
+                .into_iter()
+                .filter(|(sub, _)| sub.is_empty())
+                .map(|(_, a)| a)
+                .collect();
+            let inside = |q: &Place| {
+                aliases
+                    .iter()
+                    .any(|a| within(q, a) && q.1[a.1.len()..].contains(&ELEM))
+            };
+            st.gone.retain(|g, _| !inside(g));
+            st.dup.retain(|d| !inside(d));
+            let locals: BTreeSet<LocalId> = aliases.iter().map(|a| a.0).collect();
+            for l in locals {
+                for e in st.edges.take_of(l) {
+                    let (a, b) = e.ends();
+                    if !inside(a) && !inside(b) {
+                        st.edges.insert(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A collection literal built from an array that holds one object
+    /// twice holds it twice too.
+    fn literal_dup(&mut self, s: &Summary, e: &HirExpr) {
+        let key = addr(e);
+        let Some(&ret) = self.temps.get(&(key, RET_ROOT)) else {
+            return;
+        };
+        let elems: BTreeSet<Place> = s
+            .edges
+            .iter()
+            .flat_map(|e| {
+                let (SEdge::Same(a, b) | SEdge::Into(a, b) | SEdge::Taken(a, b)) = e;
+                [a, b]
+            })
+            .filter(|r| r.0 == RET_ROOT)
+            .filter_map(|r| elem_of(&(ret, r.1.clone())))
+            .collect();
+        let args: Vec<LocalId> = (0..8)
+            .filter_map(|i| self.temps.get(&(key, i)).copied())
+            .collect();
+        for st in self.cur.states() {
+            let mut probe = St {
+                gone: BTreeMap::new(),
+                tied: BTreeMap::new(),
+                edges: st.edges.clone(),
+                dup: BTreeSet::new(),
+                stored: BTreeMap::new(),
+            };
+            for a in &args {
+                mark_gone(
+                    &mut probe,
+                    (*a, Vec::new()),
+                    Gone::To(Span::DUMMY, What::Mutex),
+                );
+            }
+            let twice = probe.gone.keys().any(|g| st.dup.iter().any(|d| d.0 == g.0));
+            if twice {
+                st.dup.extend(elems.iter().cloned());
+            }
+        }
+    }
+
+    /// `par::for_each` / `map` / `filter` give each item of `iter` to a
+    /// worker: two items must not share an object that is not `Sync`.
+    fn par_items(&mut self, callee: FunctionId, iter: Option<&HirExpr>, at: Span) {
+        let (Some(f), Some(iter)) = (self.c.fns.get(&callee), iter) else {
+            return;
+        };
+        let item = match f.params.get(1).map(|p| &p.ty) {
+            Some(HirTy::Fn(ps, ..)) => ps.first().cloned(),
+            _ => None,
+        };
+        if !item.is_some_and(|t| self.c.tracked(&t)) || self.c.in_unsafe(at) {
+            return;
+        }
+        let shown = if place(iter).is_some() {
+            format!("`{}`", self.show(iter))
+        } else {
+            "the items".to_owned()
+        };
+        let name = format!("par::{}", shown_fn(self.c, f));
+        if !self.is_collection(&iter.ty) {
+            self.diags.push(
+                RokDiagnostic::error(
+                    ErrorKind::Handoff,
+                    iter.span,
+                    format!(
+                        "`{name}` needs items it can tell apart: {shown} may give it one object \
+                         twice, and two workers would change it at once"
+                    ),
+                )
+                .with_note(
+                    "help: collect the items into a `List` first: `.collect::<List<_>>()` \
+                     (stdlib 2.13.9)"
+                        .to_owned(),
+                ),
+            );
+            return;
+        }
+        let mut hs = Vec::new();
+        self.holders(iter, &mut hs);
+        let dup = self
+            .cur
+            .0
+            .iter()
+            .any(|(_, s)| hs.iter().any(|h| holds_twice(s, h)));
+        if dup {
+            self.diags.push(
+                RokDiagnostic::error(
+                    ErrorKind::Handoff,
+                    iter.span,
+                    format!(
+                        "{shown} may hold one object twice, and `{name}` would give it to two \
+                         workers at once"
+                    ),
+                )
+                .with_note(
+                    "help: give each item its own value (`.clone()` the shared one before \
+                     storing it), or run the loop on one thread (stdlib 2.13.9)"
+                        .to_owned(),
+                ),
+            );
+        }
+    }
+
+    /// A collection type of the standard library, or an array.
+    fn is_collection(&self, t: &HirTy) -> bool {
+        const NAMES: &[&str] = &[
+            "List",
+            "Deque",
+            "Dict",
+            "Set",
+            "OrderedDict",
+            "OrderedSet",
+            "BinaryHeap",
+        ];
+        let id = match t {
+            HirTy::Array(..) => return true,
+            HirTy::Struct(id) => id,
+            _ => return false,
+        };
+        let structs = self.c.env.defs.structs.borrow();
+        structs.get(id.0 as usize).is_some_and(|s| {
+            let base = s.name.split("__").next().unwrap_or_default();
+            let base = base.split('<').next().unwrap_or_default();
+            base.starts_with("rok::core::collections::")
+                && NAMES.contains(&base.rsplit("::").next().unwrap_or_default())
+        })
     }
 
     fn callee(&mut self, id: FunctionId) -> Option<Rc<Summary>> {
@@ -2765,7 +3927,8 @@ impl<'h> Walk<'_, 'h> {
 
     /// Run summary `s` at call `e` with these arguments (`ret`: its
     /// value is the function's return value).
-    fn apply(&mut self, s: &Summary, args: &[&HirExpr], e: &HirExpr, ret: bool) {
+    fn apply(&mut self, s: &Summary, args: &[&HirExpr], e: &HirExpr, ret: bool, takes: bool) {
+        self.lift_params(s, args);
         let key = addr(e);
         let used: BTreeSet<u32> = s.roots().map(|r| r.0).collect();
         // Each parameter's object: a local holding the argument.
@@ -2787,17 +3950,34 @@ impl<'h> Walk<'_, 'h> {
                 .insert(key, vec![(Fk::Is(Vec::new()), t.clone())]);
             slot.insert(RET_ROOT, t);
         }
+        if used.contains(&WORLD_ROOT) {
+            slot.insert(WORLD_ROOT, (WORLD, Vec::new()));
+        }
         let map = |r: &Root| slot.get(&r.0).map(|p| extend(p, &r.1));
-        for edge in &s.edges {
-            let e = match edge {
-                SEdge::Same(a, b) => map(a).zip(map(b)).map(|(a, b)| Edge::Same(a, b)),
-                SEdge::Into(a, b) => map(a).zip(map(b)).map(|(a, b)| Edge::Into(a, b)),
-            };
-            if let Some(e) = e.filter(|e| e.ends().0 != e.ends().1) {
-                for st in self.cur.states() {
-                    st.edges.insert(e.clone());
+        let (add, stores) = summary_edges(s, &map, takes);
+        let trusted = TRUSTED.iter().any(|m| self.f.name.starts_with(m));
+        for st in self.cur.states() {
+            let mut dup = Vec::new();
+            for (at, v) in &stores {
+                if st.dup.contains(at) || dup.contains(at) {
+                    continue;
+                }
+                // A copy from a buffer that may hold one object twice.
+                let from_dup = elem_of(v).is_some() && is_dup(st, v);
+                if from_dup || stores_twice(st, at, v, trusted) {
+                    dup.push(at.clone());
                 }
             }
+            st.dup.extend(dup);
+            for (at, _) in &stores {
+                st.stored.entry(at.clone()).or_default().insert(e.span);
+            }
+            for edge in &add {
+                if kept(edge) {
+                    st.edges.insert(edge.clone());
+                }
+            }
+            st.dup.extend(s.dups.iter().filter_map(&map));
         }
         for (g, r) in &s.ties {
             let guard = args
@@ -2822,6 +4002,7 @@ impl<'h> Walk<'_, 'h> {
             for (_, p, why) in given {
                 self.mark_gone(p, why);
             }
+            self.renew(s, args, &slot);
             return;
         };
         let none = BTreeSet::new();
@@ -2843,6 +4024,37 @@ impl<'h> Walk<'_, 'h> {
         }
         out.norm();
         self.cur = out;
+        self.renew(s, args, &slot);
+    }
+
+    /// A `ref` parameter part the callee handed over and then replaced:
+    /// the argument gets the new value back, its other aliases stay gone.
+    fn renew(&mut self, s: &Summary, args: &[&HirExpr], slot: &HashMap<u32, Place>) {
+        for (i, sub) in &s.renews {
+            let mut ps: Vec<Place> = slot.get(i).map(|t| extend(t, sub)).into_iter().collect();
+            if let Some(q) = args.get(*i as usize).and_then(|a| place(a)) {
+                ps.push(extend(&q, sub));
+            }
+            // The value copied back out to the caller (`ref`): part of the
+            // call's value.
+            if let Some(ret) = slot.get(&RET_ROOT) {
+                for e in &s.edges {
+                    let SEdge::Same(x, y) = e else { continue };
+                    for (r, q) in [(x, y), (y, x)] {
+                        if r.0 == RET_ROOT && q.0 == *i && q.1.is_empty() {
+                            ps.push(extend(ret, &[&r.1[..], &sub[..]].concat()));
+                        }
+                    }
+                }
+            }
+            let mut cur = std::mem::take(&mut self.cur);
+            for (_, st) in &mut cur.0 {
+                for q in &ps {
+                    self.regain(st, q);
+                }
+            }
+            self.cur = cur;
+        }
     }
 
     /// Where the tag of call `e`'s value goes.
@@ -2894,6 +4106,7 @@ impl<'h> Walk<'_, 'h> {
         let guard = args.first().and_then(place).map(|p| p.0);
         match op {
             Op::Handoff(i, what) => {
+                self.sends |= what != What::Handoff;
                 if let Some(a) = args.get(i).filter(|a| place(a).is_some()) {
                     let shown = self.show(a);
                     self.c
@@ -2901,7 +4114,23 @@ impl<'h> Walk<'_, 'h> {
                         .borrow_mut()
                         .insert((at.file, at.start), (shown, a.ty.stable_key()));
                 }
-                for q in carried(self, i) {
+                if let Some(t) = args
+                    .get(i)
+                    .and_then(|a| self.c.src(a.span))
+                    .filter(|t| t.len() <= 40 && !t.contains('\n'))
+                {
+                    self.c
+                        .handed
+                        .borrow_mut()
+                        .insert((at.file, at.start), format!("`{t}`"));
+                }
+                let qs = carried(self, i);
+                self.note_sent_from(&qs);
+                if what != What::Handoff && !self.c.in_unsafe(at) {
+                    self.shared_handoff(&qs, args.get(i), what);
+                    self.guarded_handoff(&qs, args.get(i), what);
+                }
+                for q in qs {
                     self.mark_gone(q, Gone::To(at, what));
                 }
             }
@@ -2933,6 +4162,205 @@ impl<'h> Walk<'_, 'h> {
             }
             Op::Get => {}
         }
+    }
+
+    /// Handing over what a lock still guards (`tx.send(g.get())` inside
+    /// `using`) shares it with the lock's other users.
+    fn guarded_handoff(&mut self, qs: &[Place], arg: Option<&HirExpr>, what: What) {
+        let Some(arg) = arg else { return };
+        let mut hit: Option<(LocalId, Span)> = self.got_from(arg).map(|g| (g, arg.span));
+        for (_, s) in &self.cur.0 {
+            for (g, tied) in &s.tied {
+                let mut probe = St {
+                    gone: BTreeMap::new(),
+                    tied: BTreeMap::new(),
+                    edges: s.edges.clone(),
+                    dup: BTreeSet::new(),
+                    stored: BTreeMap::new(),
+                };
+                for q in tied.keys() {
+                    mark_gone(&mut probe, q.clone(), Gone::To(Span::DUMMY, What::Mutex));
+                }
+                if qs.iter().any(|q| probe.gone.keys().any(|x| overlap(x, q))) {
+                    hit = tied.values().next().map(|(sp, _)| (*g, *sp));
+                }
+            }
+        }
+        let Some((g, site)) = hit else { return };
+        let gname = self.name(g);
+        let ty = if self.guard_what(g) == What::RwLock {
+            "RwLock"
+        } else {
+            "Mutex"
+        };
+        let text = self
+            .c
+            .src(arg.span)
+            .filter(|t| t.len() <= 40 && !t.contains('\n'))
+            .map_or_else(|| "this value".to_owned(), |t| format!("`{t}`"));
+        let to = if what == What::Channel {
+            "sent through a channel"
+        } else {
+            "moved into a lock"
+        };
+        self.diags.push(
+            RokDiagnostic::error(
+                ErrorKind::Handoff,
+                arg.span,
+                format!("{text} can't be {to}: the `{ty}` behind `{gname}` still holds it"),
+            )
+            .with_secondary(site, "taken out of the lock here")
+            .with_note(format!(
+                "help: hand over a separate copy (`{}.clone()`), or take it out of the lock first \
+                 (`{gname}.set(..)` a new value) (stdlib 2.13.9)",
+                self.c.src(arg.span).unwrap_or("value")
+            )),
+        );
+    }
+
+    /// A `return` inside a `using` block hands out what the lock protects:
+    /// the block's end releases the lock before the caller uses it.
+    fn escapes_guard(&mut self, e: &HirExpr) {
+        let at = e.span;
+        let params: HashSet<LocalId> = self.f.params.iter().map(|p| p.local).collect();
+        // A variable's use reports it; a compiler temporary's does not.
+        let temp = place(e).is_none_or(|p| self.hidden(p.0));
+        let mut hit: Option<(LocalId, Span)> = None;
+        for (_, s) in &self.cur.0 {
+            // Taken out of the lock into a compiler temporary, which the
+            // block's end released (`return g.get()` inside `using`).
+            for (q, why) in &s.gone {
+                if let (true, true, Gone::Guard(site, g, _)) = (temp, q.0 == RET, why) {
+                    hit = Some((*g, *site));
+                }
+            }
+            for (g, tied) in &s.tied {
+                if params.contains(g) {
+                    continue;
+                }
+                let mut probe = St {
+                    gone: BTreeMap::new(),
+                    tied: BTreeMap::new(),
+                    edges: s.edges.clone(),
+                    dup: BTreeSet::new(),
+                    stored: BTreeMap::new(),
+                };
+                for q in tied.keys() {
+                    mark_gone(&mut probe, q.clone(), Gone::To(Span::DUMMY, What::Mutex));
+                }
+                if probe.gone.keys().any(|q| q.0 == RET) {
+                    let site = tied.values().map(|(sp, _)| *sp).next().unwrap_or(at);
+                    hit = Some((*g, site));
+                }
+            }
+        }
+        let Some((g, site)) = hit else { return };
+        if !self
+            .reported
+            .insert(((RET, Vec::new()), site.file, site.start))
+        {
+            return;
+        }
+        let gname = self.name(g);
+        let ty = if self.guard_what(g) == What::RwLock {
+            "RwLock"
+        } else {
+            "Mutex"
+        };
+        let clone_trait = self.c.env.names.lang_item("clone_trait");
+        let cloneable = clone_trait.is_empty() || self.c.ctx.has_trait(&e.ty, clone_trait);
+        // A copy of what is returned (an element, not the whole list).
+        let copy = self
+            .c
+            .src(at)
+            .map(|t| {
+                t.trim_start_matches("return")
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+            })
+            .filter(|t| !t.is_empty())
+            .or_else(|| self.c.src(site))
+            .filter(|t| t.len() <= 40 && !t.contains('\n'))
+            .map_or_else(
+                || "a separate copy (`.clone()`)".to_owned(),
+                |t| format!("`{t}.clone()`"),
+            );
+        let copy = if cloneable {
+            copy
+        } else {
+            "a value built before it was shared (keep one outside the lock, and give the lock \
+             its own)"
+                .to_owned()
+        };
+        self.diags.push(
+            RokDiagnostic::error(
+                ErrorKind::Handoff,
+                at,
+                format!(
+                    "this returns a value out of the `{ty}`, and `{gname}`'s `using` block \
+                     releases the lock before the caller uses it"
+                ),
+            )
+            .with_secondary(site, "taken out of the lock here")
+            .with_note(format!(
+                "help: the lock stops protecting it; return {copy}, or do the work inside the \
+                 `using` block (stdlib 2.13.9)"
+            )),
+        );
+    }
+
+    /// Handing over a value other threads may reach without this hand-off
+    /// (a thread-local's value, a field of a `Sync` object) is an error.
+    fn shared_handoff(&mut self, qs: &[Place], arg: Option<&HirExpr>, what: What) {
+        let Some(arg) = arg else { return };
+        let shared = self.cur.0.iter().any(|(_, s)| {
+            let mut probe = St {
+                gone: BTreeMap::new(),
+                tied: BTreeMap::new(),
+                edges: s.edges.clone(),
+                dup: s.dup.clone(),
+                stored: BTreeMap::new(),
+            };
+            for q in qs {
+                mark_gone(&mut probe, q.clone(), Gone::To(Span::DUMMY, What::Mutex));
+            }
+            probe.gone.keys().any(|g| g.0 == WORLD)
+        });
+        if !shared {
+            return;
+        }
+        let text = self
+            .c
+            .src(arg.span)
+            .filter(|t| t.len() <= 40 && !t.contains('\n'))
+            .map_or_else(|| "this value".to_owned(), |t| format!("`{t}`"));
+        let to = match what {
+            What::Channel => "sent through a channel",
+            _ => "moved into a lock",
+        };
+        // The object it is read out of: a call's receiver (`TL.get()`).
+        let from = match &arg.kind {
+            HirExprKind::Call { args, .. } => args.first().and_then(|a| self.c.src(a.span)),
+            HirExprKind::FieldRead { target, .. } => self.c.src(target.span),
+            _ => None,
+        }
+        .filter(|t| t.len() <= 30 && !t.contains('\n'))
+        .map_or_else(String::new, |t| format!(" `{t}`"));
+        self.diags.push(
+            RokDiagnostic::error(
+                ErrorKind::Handoff,
+                arg.span,
+                format!(
+                    "{text} can't be {to}: other code reaches it through{from} (a thread-local \
+                     or a `Sync` object), so it would be used from two threads"
+                ),
+            )
+            .with_note(format!(
+                "help: hand over a separate copy: `{}.clone()` (stdlib 2.13.9)",
+                self.c.src(arg.span).unwrap_or("value")
+            )),
+        );
     }
 
     /// What `exit` has handed over of the parameters.
@@ -2979,7 +4407,17 @@ impl<'h> Walk<'_, 'h> {
 
     /// The walk's exit state as its callers see it.
     fn summarize(&self) -> Summary {
-        let mut s = Summary::default();
+        let mut s = Summary {
+            sends: self.sends,
+            uses: self.uses.clone(),
+            sent_from: self.sent_from.clone(),
+            renews: self
+                .renewed
+                .difference(&self.not_renewed)
+                .cloned()
+                .collect(),
+            ..Summary::default()
+        };
         let Some(exit) = self.exits.values().cloned().reduce(join_st) else {
             return s;
         };
@@ -2996,12 +4434,33 @@ impl<'h> Walk<'_, 'h> {
         let root_of = |l: LocalId| -> Option<u32> {
             if l == RET {
                 Some(RET_ROOT)
+            } else if l == WORLD {
+                Some(WORLD_ROOT)
             } else if (SHADOW..TEMP).contains(&l.0) {
                 Some(l.0 - SHADOW)
             } else {
                 None
             }
         };
+        let to_roots = |p: &Place| -> Vec<Root> {
+            same_reach(exit, p)
+                .into_iter()
+                .filter(|(sub, _)| sub.is_empty())
+                .filter_map(|(_, x)| Some((root_of(x.0)?, x.1)))
+                .collect()
+        };
+        for e in exit.edges.0.values().flatten() {
+            if let Edge::Taken(a, b) = e {
+                for ra in to_roots(a) {
+                    for rb in to_roots(b) {
+                        s.edges.insert(SEdge::Taken(ra.clone(), rb));
+                    }
+                }
+            }
+        }
+        for d in &exit.dup {
+            s.dups.extend(to_roots(d));
+        }
         let mut roots: Vec<(u32, Place)> = self
             .f
             .params
@@ -3016,6 +4475,7 @@ impl<'h> Walk<'_, 'h> {
         if self.c.tracked(&self.f.ret_ty) {
             roots.push((RET_ROOT, (RET, Vec::new())));
         }
+        roots.push((WORLD_ROOT, (WORLD, Vec::new())));
         for (r, start) in &roots {
             let same = same_reach(exit, start);
             for (sub, q) in &same {
@@ -3031,6 +4491,8 @@ impl<'h> Walk<'_, 'h> {
                 gone: BTreeMap::new(),
                 tied: BTreeMap::new(),
                 edges: exit.edges.clone(),
+                dup: exit.dup.clone(),
+                stored: BTreeMap::new(),
             };
             mark_gone(
                 &mut probe,
@@ -3056,6 +4518,8 @@ impl<'h> Walk<'_, 'h> {
                 gone: BTreeMap::new(),
                 tied: BTreeMap::new(),
                 edges: exit.edges.clone(),
+                dup: exit.dup.clone(),
+                stored: BTreeMap::new(),
             };
             for q in tied.keys() {
                 mark_gone(&mut probe, q.clone(), Gone::To(Span::DUMMY, What::Mutex));

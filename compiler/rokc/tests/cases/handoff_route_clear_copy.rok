@@ -1,0 +1,17 @@
+// needs: threads
+// expect-error: `q2` still holds `x`, which was handed to another owner
+// spec: std 213-marker §2.13.9
+// clear() re-arms one list's elements; a copy made earlier still holds them.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| { if let l: List<i32> = rx.recv() { for i in 0..200000 { l.push(i); } } 0 });
+    let q: List<List<i32>> = [[]];
+    let q2: List<List<i32>> = [];
+    q2.extend(q);
+    for x in q { try! tx.send(x); }
+    q.clear();
+    for i in 0..200000 { q2[0].push(i); }
+    let _ = try! t.join();
+    println(f"len {q2[0].len()}");
+}

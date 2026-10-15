@@ -1,0 +1,22 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// sent 3
+// now 1
+// got 4
+
+// spec: std 213-marker §2.13.9
+// Send every item, then report how many were sent and reuse the list.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let s: usize = 0; while let b: List<i32> = rx.recv() { s += b.len(); } s });
+    let items: List<List<i32>> = [[1], [2, 3], [4]];
+    for it in items { try! tx.send(it); }
+    println(f"sent {items.len()}");
+    items.clear();
+    items.push([9]);
+    println(f"now {items[0].len()}");
+    tx.close();
+    println(f"got {try! c.join()}");
+}

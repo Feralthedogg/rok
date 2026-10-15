@@ -1,0 +1,23 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 6
+
+// spec: std 213-marker §2.13.9
+// A pipeline stage: receive, transform, forward.
+use rok::std::thread;
+fn main() {
+    let (a_tx, a_rx) = channel::<List<i32>>();
+    let (b_tx, b_rx) = channel::<List<i32>>();
+    let stage = thread::spawn(|| {
+        while let xs: List<i32> = a_rx.recv() { xs.push(0); try! b_tx.send(xs); }
+        b_tx.close();
+        0
+    });
+    for i in 0..3 { try! a_tx.send([i]); }
+    a_tx.close();
+    let n: usize = 0;
+    while let ys: List<i32> = b_rx.recv() { n += ys.len(); }
+    let _ = try! stage.join();
+    println(f"{n}");
+}

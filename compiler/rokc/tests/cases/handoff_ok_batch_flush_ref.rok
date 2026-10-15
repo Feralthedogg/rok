@@ -1,0 +1,33 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 3 10 0
+
+// spec: std 213-marker §2.13.9
+// The flush helper takes `ref self`: its `self.buf = []` after the send
+// reaches the caller, so the batcher is usable again. (With a plain
+// `self` the caller keeps the sent list: that is an error.)
+// Batch builder with a flush helper that returns the next empty batch.
+use rok::std::thread;
+struct Batcher { buf: List<i32>; max: usize; sent: i32; }
+impl Batcher {
+    fn add(ref self, tx: Sender<List<i32>>, x: i32) {
+        self.buf.push(x);
+        if self.buf.len() >= self.max { self.flush(tx); }
+    }
+    fn flush(ref self, tx: Sender<List<i32>>) {
+        if self.buf.is_empty() { return; }
+        try! tx.send(self.buf);
+        self.buf = [];
+        self.sent += 1;
+    }
+}
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; for b in rx.iter() { n += b.len(); } n });
+    let b = Batcher { buf: [], max: 4, sent: 0 };
+    for i in 0..10 { b.add(tx, i); }
+    b.flush(tx);
+    tx.close();
+    println(f"{b.sent} {try! c.join()} {b.buf.len()}");
+}

@@ -1,0 +1,27 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 1 2 1 2
+
+// spec: std 213-marker §2.13.9
+// A helper given a list and an unrelated label list, and one given two
+// halves of a split.
+use rok::std::thread;
+fn send_labeled(tx: Sender<List<i32>>, labels: List<str>, xs: List<i32>) {
+    labels.push("sent");
+    try! tx.send(xs);
+}
+fn send_first(tx: Sender<List<i32>>, a: List<i32>, b: List<i32>) -> usize {
+    try! tx.send(a);
+    b.len()
+}
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let labels: List<str> = [];
+    send_labeled(tx, labels, [1, 2]);
+    let pair: (List<i32>, List<i32>) = ([1], [2, 3]);
+    let n = send_first(tx, pair.0, pair.1);
+    let rows: List<List<i32>> = [[1], [2]];
+    let m = send_first(tx, rows[0], rows[1]);
+    println(f"{labels.len()} {n} {m} {(rx.recv() ?? []).len()}");
+}

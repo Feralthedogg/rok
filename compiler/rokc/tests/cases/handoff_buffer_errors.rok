@@ -1,0 +1,97 @@
+// needs: threads
+// spec: std 213-marker §2.13.9
+// A collection's elements share what was stored into it and what is read
+// out of it: handing over either side leaves the other unusable.
+
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let (tt, tr) = channel::<List<List<i32>>>();
+    read_before(tt);
+    sent_element(tx);
+    stored_then_sent(tx);
+    each_sent(tx);
+    popped_twice(tx);
+    dict_value();
+    cast_back(tx);
+    literal_twice(tx);
+    let _ = rx.recv();
+    let _ = tr.recv();
+}
+
+fn read_before(tx: Sender<List<List<i32>>>) {
+    let xs: List<i32> = [];
+    let outer: List<List<i32>> = [xs];
+    let inner = outer[0];
+    try! tx.send(outer);
+    inner.push(1);
+}
+
+fn sent_element(tx: Sender<List<i32>>) {
+    let outer: List<List<i32>> = [[1], [2]];
+    try! tx.send(outer[0]);
+    outer[1].push(1);
+}
+
+fn stored_then_sent(tx: Sender<List<i32>>) {
+    let xs: List<i32> = [];
+    let all: List<List<i32>> = [];
+    all.push(xs);
+    try! tx.send(xs);
+    all[0].push(1);
+}
+
+fn each_sent(tx: Sender<List<i32>>) {
+    let outer: List<List<i32>> = [[1], [2]];
+    for l in outer {
+        try! tx.send(l);
+    }
+    outer[0].push(3);
+}
+
+fn popped_twice(tx: Sender<List<i32>>) {
+    let xs: List<i32> = [];
+    let q: List<List<i32>> = [];
+    q.push(xs);
+    q.push(xs);
+    if let e: List<i32> = q.pop() {
+        try! tx.send(e);
+    }
+    q[0].push(1);
+}
+
+fn dict_value() {
+    let (tx, rx) = channel::<Dict<str, List<i32>>>();
+    let d: Dict<str, List<i32>> = Dict::new();
+    d.insert("a", [1]);
+    let v = d["a"];
+    try! tx.send(d);
+    v.push(2);
+    let _ = rx.recv();
+}
+
+fn cast_back(tx: Sender<List<i32>>) {
+    let xs: List<i32> = [];
+    let a: any = xs;
+    try! tx.send(xs);
+    if let ys: List<i32> = rok::core::reflect::cast::<List<i32>>(a) {
+        ys.push(1);
+    }
+}
+
+fn literal_twice(tx: Sender<List<i32>>) {
+    let a: List<i32> = [1];
+    let q: List<List<i32>> = [a, a];
+    if let e: List<i32> = q.pop() {
+        try! tx.send(e);
+    }
+    q[0].push(9);
+}
+
+// expect-error: handoff_buffer_errors.rok:26:5: `inner` shares `outer`, which was sent through a channel at line 25
+// expect-error: handoff_buffer_errors.rok:32:5: `outer` still holds `outer[0]`, which was handed to another owner at line 31 (as an element, or a value one shares)
+// expect-error: handoff_buffer_errors.rok:40:5: `all` still holds `xs`, which was handed to another owner at line 39 (as an element, or a value one shares)
+// expect-error: handoff_buffer_errors.rok:48:5: `outer` still holds `l`, which was handed to another owner at line 46 (as an element, or a value one shares)
+// expect-error: handoff_buffer_errors.rok:59:5: `q` may hold one object twice (stored at lines 54 and 55), and one of them was handed to another owner at line 57
+// expect-error: handoff_buffer_errors.rok:68:5: `v` shares `d`, which was sent through a channel at line 67
+// expect-error: handoff_buffer_errors.rok:77:9: `ys` shares `xs`, which was sent through a channel at line 75
+// expect-error: handoff_buffer_errors.rok:87:5: `q` may hold one object twice, and one of them was handed to another owner at line 85

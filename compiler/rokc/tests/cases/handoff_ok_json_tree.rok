@@ -1,0 +1,38 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 21 20
+
+// spec: std 213-marker §2.13.9
+// A JSON-like tree: each top-level child goes to its own worker.
+use rok::std::thread;
+enum J { Num(f64), Arr(List<J>), Obj(Dict<str, J>) }
+fn size(j: J) -> usize {
+    match j {
+        J::Num(_) => 1,
+        J::Arr(xs) => { let n: usize = 1; for x in xs { n += size(x); } n }
+        J::Obj(d) => { let n: usize = 1; for (_k, v) in d { n += size(v); } n }
+    }
+}
+fn main() {
+    let kids: List<J> = [];
+    for i in 0..4 {
+        let d: Dict<str, J> = Dict::new();
+        d.insert("v", J::Num(i as f64));
+        d.insert("xs", J::Arr([J::Num(1.0), J::Num(2.0)]));
+        kids.push(J::Obj(d));
+    }
+    let root = J::Arr(kids);
+    let total_before = size(root);
+    let (tx, rx) = channel::<J>();
+    let (rt, rr) = channel::<usize>();
+    let w = thread::spawn(|| { while let j: J = rx.recv() { try! rt.send(size(j)); } 0 });
+    if let J::Arr(children) = root {
+        while let c: J = children.pop() { try! tx.send(c); }
+    }
+    tx.close();
+    let s: usize = 0;
+    for _ in 0..4 { s += rr.recv() ?? 0; }
+    let _ = try! w.join();
+    println(f"{total_before} {s}");
+}

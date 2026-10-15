@@ -1,0 +1,17 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// of 3 sent 2
+
+// spec: std 213-marker §2.13.9
+// Pick some rows into a new list and send it; the source list is then dropped.
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<List<i32>>>();
+    let c = thread::spawn(|| { if let r: List<List<i32>> = rx.recv() { r.len() } else { 0 as usize } });
+    let rows: List<List<i32>> = [[1, 2], [3], [4, 5, 6]];
+    let big: List<List<i32>> = [];
+    for r in rows { if r.len() > 1 { big.push(r); } }
+    try! tx.send(big);
+    println(f"of {rows.len()} sent {try! c.join()}");
+}

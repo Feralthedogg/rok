@@ -2034,6 +2034,10 @@ static int run_cell(const char *obj, size_t n) {
     return 1;
 }
 
+// rokc waits for the host before removing the session directory, and
+// a running host.exe could not delete itself anyway.
+static void remove_session(void) {}
+
 int main(void) {
     const DWORD std_input = (DWORD)-10;
     ctl = GetStdHandle(std_input);

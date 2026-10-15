@@ -1,0 +1,19 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 2 3
+
+// spec: std 213-marker §2.13.9
+// Records with list fields, sent one by one with `for`.
+use rok::std::thread;
+struct Rec { name: str; tags: List<str>; }
+fn main() {
+    let (tx, rx) = channel::<Rec>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: Rec = rx.recv() { n += r.tags.len(); } n });
+    let recs: List<Rec> = [Rec { name: "a", tags: ["x"] }, Rec { name: "b", tags: ["y", "z"] }];
+    let names: List<str> = [];
+    for r in recs { names.push(r.name); }
+    for r in recs { try! tx.send(r); }
+    tx.close();
+    println(f"{names.len()} {try! c.join()}");
+}

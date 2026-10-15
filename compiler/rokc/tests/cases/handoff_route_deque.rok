@@ -1,0 +1,14 @@
+// needs: threads
+// expect-error: `q` may hold one object twice
+// spec: std 213-marker §2.13.9
+use rok::std::thread;
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| { if let l: List<i32> = rx.recv() { for i in 0..200000 { l.push(i); } } 0 });
+    let q: Deque<List<i32>> = Deque::new();
+    let a: List<i32> = [];
+    q.push_back(a);
+    q.push_front(a);
+    if let e: List<i32> = q.pop_front() { try! tx.send(e); }
+    if let f: List<i32> = q.pop_back() { for i in 0..200000 { f.push(i); } let _ = try! t.join(); println(f"len {f.len()}"); }
+}

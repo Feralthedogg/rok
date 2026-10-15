@@ -487,7 +487,7 @@ impl Gen<'_> {
                 let user = format!("{}::{name}", self.base);
                 let table = table.rsplit("::").next().unwrap_or_default().to_owned();
                 format!(
-                    "pub type {name} = {user};\npub(pkg) static {table}: {W}::Table<{user}> = {W}::Table::new();\n"
+                    "pub type {name} = {user};\npub(pkg) static {table}: {W}::Table<{user}> = unsafe {{ {W}::Table::new() }};\n"
                 )
             }
             TypeKind::Resource => {

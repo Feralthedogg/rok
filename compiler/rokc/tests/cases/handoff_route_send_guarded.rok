@@ -1,0 +1,14 @@
+// needs: threads
+// expect-error: `g.get()` can't be sent through a channel: the `Mutex` behind `g` still holds it
+// spec: std 213-marker §2.13.9
+// Send the guarded value out while the Mutex still holds it.
+use rok::std::thread;
+static M: Mutex<List<i32>> = Mutex::new([]);
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| { if let l: List<i32> = rx.recv() { for i in 0..200000 { l.push(i); } } 0 });
+    using g = M.lock() { try! tx.send(g.get()); }
+    for i in 0..200000 { using g = M.lock() { g.get().push(i); } }
+    let _ = try! t.join();
+    using g = M.lock() { println(f"len {g.get().len()}"); }
+}

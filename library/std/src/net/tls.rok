@@ -472,7 +472,9 @@ impl TicketStore {
                 if found is none && s.id[0:s.id.len()] == id && s.issued.elapsed().as_secs() < TICKET_LIFETIME as i64 { found = s; }
             }
         }
-        found
+        // A stored session is never changed, so readers may share it
+        // outside the lock.
+        unsafe { found }
     }
 
     /// Remove the session with ticket `id`: whether it was there (so

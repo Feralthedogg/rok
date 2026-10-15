@@ -1,0 +1,29 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 8 152
+
+// spec: std 213-marker §2.13.9
+// Fan out: each frontier node's neighbor list goes to a worker.
+use rok::std::thread;
+fn nbrs(n: i32) -> List<i32> { [n * 2, n * 2 + 1] }
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let (rt, rr) = channel::<i32>();
+    let w = thread::spawn(|| { while let l: List<i32> = rx.recv() { let s = 0; for x in l { s += x; } try! rt.send(s); } 0 });
+    let frontier: Deque<i32> = Deque::new();
+    frontier.push_back(1);
+    let sent = 0;
+    while let n: i32 = frontier.pop_front() {
+        if n > 8 { continue; }
+        let ns = nbrs(n);
+        for x in ns { frontier.push_back(x); }
+        try! tx.send(ns);
+        sent += 1;
+    }
+    tx.close();
+    let s = 0;
+    for _ in 0..sent { s += rr.recv() ?? 0; }
+    let _ = try! w.join();
+    println(f"{sent} {s}");
+}

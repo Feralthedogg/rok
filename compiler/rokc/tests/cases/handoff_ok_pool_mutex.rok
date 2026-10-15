@@ -1,0 +1,33 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 10 10
+
+// spec: std 213-marker §2.13.9
+// Worker pool over a shared Mutex queue; each job is popped under the lock.
+use rok::std::thread;
+struct Job { id: i32; data: List<i32>; }
+static QUEUE: Mutex<List<Job>> = Mutex::new([]);
+static DONE: Mutex<List<List<i32>>> = Mutex::new([]);
+fn worker() -> i32 {
+    let n = 0;
+    loop {
+        let job: Job | none = none;
+        using g = QUEUE.lock() { job = g.get().pop(); }
+        if let j: Job = job {
+            j.data.push(j.id);
+            using d = DONE.lock() { d.get().push(j.data); }
+            n += 1;
+        } else { break; }
+    }
+    n
+}
+fn main() {
+    using g = QUEUE.lock() { for i in 0..10 { g.get().push(Job { id: i, data: [] }); } }
+    let a = thread::spawn(|| worker());
+    let b = thread::spawn(|| worker());
+    let n = try! a.join() + try! b.join();
+    let k: usize = 0;
+    using d = DONE.lock() { k = d.get().len(); }
+    println(f"{n} {k}");
+}

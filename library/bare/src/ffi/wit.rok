@@ -177,7 +177,9 @@ pub struct Table<T> {
 unsafe impl<T> Sync for Table<T> {}
 
 impl<T> Table<T> {
-    pub fn new() -> Table<T> { Table { slots: List::new(), free: List::new() } }
+    /// The caller guarantees one thread at a time uses the table (the
+    /// bindings make one per component instance).
+    pub unsafe fn new() -> Table<T> { Table { slots: List::new(), free: List::new() } }
 
     pub fn insert(self, v: T) -> i32 {
         match self.free.pop() {

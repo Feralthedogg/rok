@@ -1,0 +1,19 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 2 got 1
+
+// spec: std 213-marker §2.13.9
+// Rows made by a helper in a loop; one popped and sent; the rest used.
+use rok::std::thread;
+fn row(i: i32) -> List<i32> { [i] }
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = thread::spawn(|| { let n: usize = 0; while let r: List<i32> = rx.recv() { n += r.len(); } n });
+    let q: List<List<i32>> = [];
+    for i in 0..3 { q.push(row(i)); }
+    if let e: List<i32> = q.pop() { try! tx.send(e); }
+    q[0].push(1);
+    tx.close();
+    println(f"{q[0].len()} got {try! c.join()}");
+}

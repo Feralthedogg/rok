@@ -1524,6 +1524,19 @@ fn rokc_leaves_no_temporaries() {
     assert!(!out.status.success());
     assert_eq!(leftovers(&tmp), Vec::<String>::new());
 
+    // A REPL whose stdout lost its reader exits without running drops,
+    // its host still alive: the host ends before the session goes.
+    let mut child = rokc(&["repl"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    drop(child.stdin.take().unwrap().write_all(b"1 + 2\n"));
+    child.wait().unwrap();
+    assert_eq!(leftovers(&tmp), Vec::<String>::new());
+
     // rokc killed while a cell runs: its host ends too, and nothing stays.
     let mark = root.join("started");
     let cell = format!(

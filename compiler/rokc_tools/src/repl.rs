@@ -204,7 +204,69 @@ impl Job {
             ) != 0
                 && AssignProcessToJobObject(job.0, child.as_raw_handle()) != 0
         };
-        ok.then_some(job)
+        if !ok {
+            return None;
+        }
+        JOBS.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(job.0 as usize);
+        rokc_core::tmp::on_release(end_jobs);
+        Some(job)
+    }
+}
+
+/// Live jobs, for an exit that skips drops: the session directory can
+/// only go once its host.exe has ended.
+#[cfg(windows)]
+static JOBS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(windows)]
+fn end_jobs() {
+    type Handle = *mut std::ffi::c_void;
+    unsafe extern "system" {
+        fn TerminateJobObject(job: Handle, code: u32) -> i32;
+        fn QueryInformationJobObject(
+            job: Handle,
+            class: i32,
+            info: *mut u8,
+            len: u32,
+            ret: *mut u32,
+        ) -> i32;
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Accounting {
+        times: [i64; 4],
+        page_faults: u32,
+        total_processes: u32,
+        active_processes: u32,
+        terminated_processes: u32,
+    }
+    const BASIC_ACCOUNTING_INFORMATION: i32 = 1;
+    let Ok(jobs) = JOBS.try_lock() else { return };
+    for &j in jobs.iter() {
+        let job = j as Handle;
+        // SAFETY: a job handle that is ours until `Job::drop`, which also
+        // takes it out of `JOBS`.
+        unsafe { TerminateJobObject(job, 1) };
+        for _ in 0..200 {
+            let mut a = Accounting::default();
+            // SAFETY: `a` has the layout of
+            // JOBOBJECT_BASIC_ACCOUNTING_INFORMATION.
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    job,
+                    BASIC_ACCOUNTING_INFORMATION,
+                    (&raw mut a).cast(),
+                    std::mem::size_of::<Accounting>() as u32,
+                    std::ptr::null_mut(),
+                ) != 0
+            };
+            if !ok || a.active_processes == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }
 
@@ -214,6 +276,9 @@ impl Drop for Job {
         unsafe extern "system" {
             fn CloseHandle(h: *mut std::ffi::c_void) -> i32;
         }
+        JOBS.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|&j| j != self.0 as usize);
         // SAFETY: the job handle is ours.
         unsafe { CloseHandle(self.0) };
     }

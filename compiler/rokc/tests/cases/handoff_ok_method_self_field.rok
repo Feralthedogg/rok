@@ -1,0 +1,23 @@
+// needs: threads
+// expect-exit: 0
+// expect-stdout:
+// 2 2
+
+// spec: std 213-marker §2.13.9
+// A method given one of self's fields while it works on another field.
+use rok::std::thread;
+struct Conn { out: List<i32>; log: List<str>; }
+impl Conn {
+    fn ship(self, tx: Sender<List<i32>>, part: List<i32>) {
+        self.log.push("ship");
+        try! tx.send(part);
+    }
+}
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    let c = Conn { out: [1, 2], log: [] };
+    c.ship(tx, c.out);
+    c.out = [];
+    c.log.push("done");
+    println(f"{c.log.len()} {(rx.recv() ?? []).len()}");
+}

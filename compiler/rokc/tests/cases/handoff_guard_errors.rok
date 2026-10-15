@@ -82,3 +82,6 @@ fn block_value(m: Mutex<List<i32>>) -> i64 {
     items.sort();
     items.len() as i64
 }
+
+// `return g.get()` inside the block hands the guarded value to the caller.
+// expect-error: handoff_guard_errors.rok:59:26: this returns a value out of the `Mutex`, and `g`'s `using` block releases the lock before the caller uses it
