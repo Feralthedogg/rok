@@ -227,6 +227,8 @@ fn runtime_decl(name: &str, target: &Target) -> Option<String> {
             format!("({})", codegen_params(name, pw)?.join(", "))
         }
         "rok_runtime_yield"
+        | "rok_nosp_enter"
+        | "rok_nosp_leave"
         | "rok_init_once"
         | "rok_runtime_init"
         | "rok_runtime_shutdown"
@@ -1728,6 +1730,9 @@ struct FnEmit<'a> {
     gc_types: Vec<Vec<u32>>,
     /// This function's shadow-stack frame, if it has one.
     gc_frame: Option<GcFrame>,
+    /// The frame of `poll_roots`, linked only on a back-edge poll's yield
+    /// path.
+    poll_frame: Option<GcFrame>,
     /// Where the frame links and a reentrant function polls
     /// (`plan_links`); `None`: at entry.
     links: Option<Links>,
@@ -1764,6 +1769,15 @@ struct FnEmit<'a> {
     root_cells: HashMap<u32, String>,
     /// Rooted locals whose own slot is the root (no root cell).
     root_slots: HashSet<u32>,
+    /// The locals a statement's collection or an entry poll sees; the rest
+    /// of `rooted` only a back-edge poll's (`emit_prelude`).
+    real_roots: Option<HashSet<LocalId>>,
+    /// The rest, where they have a root cell: writes skip the cell, which a
+    /// poll's yield path fills just for the yield (`poll_live`), in a
+    /// frame of their own (`poll_frame`).
+    poll_roots: HashSet<u32>,
+    /// Block id → its `poll_roots` live at its back-edge poll.
+    poll_live: HashMap<u32, Vec<LocalId>>,
     /// Where the frame-rooted locals die (their slots are cleared there),
     /// and each block's index in `f.blocks`.
     deaths: rokc_mir::Deaths,
@@ -2222,6 +2236,7 @@ impl<'a> FnEmit<'a> {
             needs: BTreeSet::new(),
             gc_types: Vec::new(),
             gc_frame: None,
+            poll_frame: None,
             links: None,
             gc_param_slots: HashMap::new(),
             next_check: 0,
@@ -2237,6 +2252,9 @@ impl<'a> FnEmit<'a> {
             rooted: None,
             root_cells: HashMap::new(),
             root_slots: HashSet::new(),
+            real_roots: None,
+            poll_roots: HashSet::new(),
+            poll_live: HashMap::new(),
             deaths: rokc_mir::Deaths::default(),
             block_pos: f
                 .blocks
@@ -2518,15 +2536,19 @@ impl<'a> FnEmit<'a> {
 
     /// Safepoint poll (804 §8.4.1, 809 §8.9.11): relaxed load of
     /// `rok_tls_yield_flag`, `rok_runtime_yield` when set; continues in a
-    /// fresh block.
-    fn emit_poll(&mut self) {
-        let n = self.emit_poll_split();
+    /// fresh block. `back`: the back-edge poll ending that block.
+    fn emit_poll(&mut self, back: Option<u32>) {
+        let n = self.emit_poll_split(back);
         let _ = writeln!(self.body, "    cf.br ^rok_run{n}\n  ^rok_run{n}:");
     }
 
     /// `emit_poll` with the yield block left open for the caller's
     /// terminator; returns `n` of the `^rok_run{n}` block to open after.
-    fn emit_poll_split(&mut self) -> u32 {
+    ///
+    /// A back-edge poll roots its `poll_live` locals and, where the frame
+    /// is not linked, links it on the yield path only: the loop pays for
+    /// neither.
+    fn emit_poll_split(&mut self, back: Option<u32>) -> u32 {
         self.needs.insert("rok_runtime_yield");
         let a = self.tls_addr(tls_abi::YIELD_FLAG);
         let n = self.next_check;
@@ -2539,9 +2561,62 @@ impl<'a> FnEmit<'a> {
     {set} = arith.cmpi ne, {flag}, {zero} : i8
     cf.cond_br {set}, ^rok_yield{n}, ^rok_run{n}
   ^rok_yield{n}:
-    llvm.call @rok_runtime_yield() {{tbaa = [#rok_tbaa_ref]}} : () -> ()
 "
         );
+        // Every poll root's cell is written here, dead ones null: nothing
+        // else touches them.
+        if let Some(b) = back.filter(|_| self.poll_frame.is_some()) {
+            let live = self.poll_live.get(&b).cloned().unwrap_or_default();
+            let mut ids: Vec<u32> = self.poll_roots.iter().copied().collect();
+            ids.sort_unstable();
+            for id in ids {
+                let l = LocalId(id);
+                let cell = self.root_cells[&id].clone();
+                if !live.contains(&l) {
+                    self.emit_zero(&cell, &self.local_ty(l), "#rok_tbaa_gcroot");
+                    continue;
+                }
+                let v = self.read_local(l);
+                let ty = mlir_type(&self.local_ty(l), self.target);
+                let _ = writeln!(
+                    self.body,
+                    "    llvm.store {v}, {cell} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
+                );
+            }
+        }
+        let link = back.is_some_and(|b| {
+            self.gc_frame.is_some() && self.links.as_ref().is_some_and(|l| !l.linked.contains(&b))
+        });
+        let push = back.is_some() && self.poll_frame.is_some();
+        let head = (link || push).then(|| {
+            let fr = self.gc_frame.as_ref().or(self.poll_frame.as_ref()).unwrap();
+            let (tls, h) = (fr.tls.clone(), self.fresh_value());
+            let _ = writeln!(
+                self.body,
+                "    {h} = llvm.load {tls} : !llvm.ptr -> !llvm.ptr"
+            );
+            (tls, h)
+        });
+        if link {
+            self.emit_link();
+        }
+        if push {
+            let p = self.fresh_value();
+            let fr = self.poll_frame.as_ref().unwrap();
+            let _ = write!(
+                self.body,
+                "    {p} = llvm.load {} : !llvm.ptr -> !llvm.ptr\n    llvm.store {p}, {} : !llvm.ptr, !llvm.ptr\n{}",
+                fr.tls, fr.prev, fr.link
+            );
+        }
+        self.body
+            .push_str("    llvm.call @rok_runtime_yield() {tbaa = [#rok_tbaa_ref]} : () -> ()\n");
+        if let Some((tls, h)) = head {
+            let _ = writeln!(
+                self.body,
+                "    llvm.store {h}, {tls} : !llvm.ptr, !llvm.ptr"
+            );
+        }
         n
     }
 
@@ -2682,7 +2757,8 @@ impl<'a> FnEmit<'a> {
                 |p, i| {
                     skip[p] != Some(i) && stmt_safepoint(&f.blocks[p].stmts[i], quiet, pkgs, target)
                 },
-                |b| self.back_edges.contains_key(&b),
+                // A back-edge poll links on its yield path only.
+                |_| false,
             );
         }
         // Where a lazy entry poll goes: before these statements, and at
@@ -2704,8 +2780,8 @@ impl<'a> FnEmit<'a> {
         }
         // GC-holding locals no collection sees while live (`live_across`)
         // need no root and may stay SSA values; with `__mlir_op` regions
-        // everything is rooted.
-        let rooted: Option<HashSet<LocalId>> = (!regions).then(|| {
+        // everything is rooted. `back`: back-edge polls count too.
+        let roots = |back: bool| {
             let (quiet, pkgs, target) = (&*self.quiet, self.pkgs, self.target);
             rokc_mir::live_across(
                 self.f,
@@ -2732,12 +2808,13 @@ impl<'a> FnEmit<'a> {
                         _ => true,
                     })
                 },
-                |b| self.back_edges.contains_key(&b.0) || poll_ends.contains(&b.0),
+                |b| back && self.back_edges.contains_key(&b.0) || poll_ends.contains(&b.0),
                 self.entry_poll && self.links.is_none(),
             )
-        });
-        self.rooted = rooted;
+        };
         if !regions {
+            self.real_roots = Some(roots(false));
+            self.rooted = Some(roots(true));
             let entry = self.f.blocks.first().map(|b| b.id.0);
             self.reentry = self.back_edges.values().flatten().copied().collect();
             self.reentry.retain(|h| Some(*h) != entry);
@@ -2839,7 +2916,11 @@ impl<'a> FnEmit<'a> {
                 self.body,
                 "    llvm.store {arg}, {slot} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
             );
-            if let Some(cell) = self.root_cells.get(&p.0) {
+            if let Some(cell) = self
+                .root_cells
+                .get(&p.0)
+                .filter(|_| !self.poll_roots.contains(&p.0))
+            {
                 let _ = writeln!(
                     self.body,
                     "    llvm.store {arg}, {cell} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
@@ -2850,7 +2931,7 @@ impl<'a> FnEmit<'a> {
         // cycle can re-enter (`reentrant_functions`) without a loop poll, and
         // only if a safepoint is reachable (recursion always reaches one).
         if self.entry_poll && self.links.is_none() && self.reaches_safepoint() {
-            self.emit_poll();
+            self.emit_poll(None);
         }
     }
 
@@ -2860,7 +2941,7 @@ impl<'a> FnEmit<'a> {
         if self.links.as_ref().and_then(|l| l.at.get(&b)) == Some(&i) {
             self.emit_link();
             if self.entry_poll {
-                self.emit_poll();
+                self.emit_poll(None);
             }
         }
     }
@@ -2878,10 +2959,18 @@ impl<'a> FnEmit<'a> {
         if self.back_edges.is_empty() && !self.reaches_safepoint() {
             return;
         }
-        let pw = self.pw;
         let one = self.fresh_value();
         let mut header = format!("    {one} = llvm.mlir.constant(1 : i32) : i32\n");
         let mut roots = Vec::new();
+        let mut polled = Vec::new();
+        let unassigned = match (&self.rooted, &self.real_roots) {
+            (Some(all), Some(real)) => rokc_mir::maybe_unassigned(
+                self.f,
+                |l| all.contains(&l) && !real.contains(&l),
+                |b| self.back_edges.contains_key(&b.0),
+            ),
+            _ => HashSet::new(),
+        };
         let mut rooted = HashSet::new();
         let addressed = rokc_mir::addressed(self.f);
         // `#[track_caller]`'s location is always a static literal.
@@ -2893,6 +2982,10 @@ impl<'a> FnEmit<'a> {
             }
             let id = local.id.0;
             let ty = mlir_type(&local.ty, self.target);
+            let poll_only = self
+                .real_roots
+                .as_ref()
+                .is_some_and(|r| !r.contains(&local.id));
             let slot = if self.is_block_param(local.id) {
                 let s = format!("%gp{id}");
                 let align = slot_align(&local.ty, self.target);
@@ -2900,6 +2993,8 @@ impl<'a> FnEmit<'a> {
                     header,
                     "    {s} = llvm.alloca {one} x {ty}{align} : (i32) -> !llvm.ptr"
                 );
+                // Rooted on every entry: on a yield path its SSA value
+                // might not dominate.
                 self.gc_param_slots.insert(id, s.clone());
                 s
             } else if let Some(slot) = self.slot_names[id as usize].clone() {
@@ -2916,6 +3011,9 @@ impl<'a> FnEmit<'a> {
                         "    {cell} = llvm.alloca {one} x {ty}{align} : (i32) -> !llvm.ptr"
                     );
                     self.root_cells.insert(id, cell.clone());
+                    if poll_only {
+                        self.poll_roots.insert(id);
+                    }
                     cell
                 } else {
                     self.root_slots.insert(id);
@@ -2925,12 +3023,32 @@ impl<'a> FnEmit<'a> {
                 continue; // unslotted: never holds a value across a call
             };
             rooted.insert(id);
-            let body = std::mem::take(&mut self.body);
-            self.emit_zero(&slot, &local.ty, "#rok_tbaa_gcroot");
-            header.push_str(&std::mem::replace(&mut self.body, body));
+            // A poll root's cell is written only on a yield path, from its
+            // own slot: one some path reaches a poll without assigning
+            // starts null, so a yield path never roots an undefined word.
+            let zero = if !self.poll_roots.contains(&id) {
+                Some((slot.clone(), "#rok_tbaa_gcroot"))
+            } else if unassigned.contains(&local.id) {
+                Some((
+                    self.slot_names[id as usize].clone().unwrap(),
+                    self.slot_tag(local.id),
+                ))
+            } else {
+                None
+            };
+            if let Some((zero, tag)) = zero {
+                let body = std::mem::take(&mut self.body);
+                self.emit_zero(&zero, &local.ty, tag);
+                header.push_str(&std::mem::replace(&mut self.body, body));
+            }
+            let into = if self.poll_roots.contains(&id) {
+                &mut polled
+            } else {
+                &mut roots
+            };
             for off in offsets {
                 if off == 0 {
-                    roots.push(slot.clone());
+                    into.push(slot.clone());
                     continue;
                 }
                 let a = self.fresh_value();
@@ -2938,12 +3056,36 @@ impl<'a> FnEmit<'a> {
                     header,
                     "    {a} = llvm.getelementptr {slot}[{off}] : (!llvm.ptr) -> !llvm.ptr, i8"
                 );
-                roots.push(a);
+                into.push(a);
             }
         }
-        if roots.is_empty() {
+        if roots.is_empty() && polled.is_empty() {
             return;
         }
+        if !roots.is_empty() {
+            self.gc_frame = Some(self.frame(&mut header, &one, &roots));
+        }
+        if !polled.is_empty() {
+            self.poll_frame = Some(self.frame(&mut header, &one, &polled));
+        }
+        self.body.push_str(&header);
+        let polled = &self.poll_roots;
+        self.poll_live = rokc_mir::live_out_of(
+            self.f,
+            |l| polled.contains(&l.0),
+            |b| self.back_edges.contains_key(&b.0),
+        );
+        self.deaths = rokc_mir::deaths(self.f, |l| {
+            rooted.contains(&l.0) && !self.poll_roots.contains(&l.0)
+        });
+        if self.links.is_none() {
+            self.emit_link();
+        }
+    }
+
+    /// A frame for `roots` (addresses of root words), set up in `header`.
+    fn frame(&mut self, header: &mut String, one: &str, roots: &[String]) -> GcFrame {
+        let pw = self.pw;
         let tls = self.tls_addr(tls_abi::SHADOW_STACK_TOP);
         let n = roots.len();
         let frame_ty = format!("!llvm.struct<(ptr, i{pw}, array<{n} x ptr>)>");
@@ -2966,15 +3108,10 @@ impl<'a> FnEmit<'a> {
             let _ = writeln!(link, "    llvm.store {r}, {a} : !llvm.ptr, !llvm.ptr");
         }
         let _ = writeln!(link, "    llvm.store {frame}, {tls} : !llvm.ptr, !llvm.ptr");
-        self.body.push_str(&header);
-        self.gc_frame = Some(GcFrame {
+        GcFrame {
             tls,
             prev: f0,
             link,
-        });
-        self.deaths = rokc_mir::deaths(self.f, |l| rooted.contains(&l.0));
-        if self.links.is_none() {
-            self.emit_link();
         }
     }
 
@@ -3087,7 +3224,11 @@ impl<'a> FnEmit<'a> {
             self.body,
             "    llvm.store {value}, {slot} {{tbaa = [{tag}]}} : {ty}, !llvm.ptr"
         );
-        if let Some(cell) = self.root_cells.get(&id.0) {
+        if let Some(cell) = self
+            .root_cells
+            .get(&id.0)
+            .filter(|_| !self.poll_roots.contains(&id.0))
+        {
             let _ = writeln!(
                 self.body,
                 "    llvm.store {value}, {cell} {{tbaa = [#rok_tbaa_gcroot]}} : {ty}, !llvm.ptr"
@@ -3589,6 +3730,8 @@ impl<'a> FnEmit<'a> {
             // Inside a region the root stays until the liveness clear
             // after the op.
             Statement::StorageDead(_) if !self.region_outer.is_empty() => {}
+            // A poll root's cell is null but on a yield path.
+            Statement::StorageDead(l) if self.poll_roots.contains(&l.0) => {}
             Statement::StorageDead(l) => {
                 // Only a frame-rooted slot matters; zero it (all its
                 // `GcRef` leaves become null).
@@ -4846,6 +4989,24 @@ impl<'a> FnEmit<'a> {
         if sig.runtime && self.emit_inline_runtime(dst, &sig.name, args) {
             return;
         }
+        // A debug rokc brackets a `#[no_safepoint]` call, so the runtime
+        // can tell if one ever waits for a collection (804 §8.4.8).
+        // A runtime function is quiet only by `#[no_safepoint]`.
+        let check = cfg!(debug_assertions) && sig.runtime && self.quiet.contains(&callee);
+        if check {
+            self.needs.insert("rok_nosp_enter");
+            self.needs.insert("rok_nosp_leave");
+            self.body
+                .push_str("    func.call @rok_nosp_enter() : () -> ()\n");
+        }
+        self.emit_call_inner(dst, sig, callee, args);
+        if check {
+            self.body
+                .push_str("    func.call @rok_nosp_leave() : () -> ()\n");
+        }
+    }
+
+    fn emit_call_inner(&mut self, dst: &str, sig: &FnSig, callee: FunctionId, args: &[Operand]) {
         if let Some(abi) = &sig.c {
             self.emit_c_call(
                 dst,
@@ -5722,13 +5883,13 @@ impl<'a> FnEmit<'a> {
         if polled {
             // The yield path takes its own copy of the terminator, into
             // the re-entry blocks.
-            let n = self.emit_poll_split();
+            let n = self.emit_poll_split(Some(b));
             self.edge_from = (b, true);
             self.emit_terminator_inner(t);
             self.edge_from = (b, false);
             let _ = writeln!(self.body, "  ^rok_run{n}:");
         } else if self.back_edges.contains_key(&b) {
-            self.emit_poll();
+            self.emit_poll(Some(b));
         }
         self.emit_terminator_inner(t);
     }

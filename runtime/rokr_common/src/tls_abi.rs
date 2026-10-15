@@ -34,6 +34,8 @@ pub const WORKER_ID: Slot = at(10, 0);
 pub const YIELD_FLAG: Slot = at(10, 8);
 pub const MUTATOR_STATE: Slot = at(10, 9);
 /// Implementation-defined slots (not 803's) follow the ABI part.
+/// Depth of the `#[no_safepoint]` calls a debug rokc brackets (`u8`).
+pub const NO_SAFEPOINT: Slot = at(10, 10);
 pub const TASK_LANE: Slot = at(10, 16);
 pub const STATIC_INITS: Slot = at(11, 16);
 pub const HELD_LOCKS: Slot = at(12, 16);

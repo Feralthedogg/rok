@@ -275,6 +275,11 @@ pub fn mutator_state() -> &'static AtomicU8 {
     unsafe { &*at(tls_abi::MUTATOR_STATE).cast::<AtomicU8>() }
 }
 
+/// This thread's depth of bracketed `#[no_safepoint]` calls.
+pub fn no_safepoint() -> *mut u8 {
+    at(tls_abi::NO_SAFEPOINT)
+}
+
 /// `rok_thread_init` slot values (803 §8.3.6). The TLAB starts empty
 /// (the first allocation refills it); the write barrier logs into its
 /// own remembered-set chunk, allocated by the first logged store.
@@ -299,6 +304,7 @@ pub fn thread_init() {
             at(s).cast::<usize>().write(0);
         }
         worker_id().write(new_worker_id());
+        no_safepoint().write(0);
     }
 }
 

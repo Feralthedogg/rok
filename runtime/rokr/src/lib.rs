@@ -168,6 +168,7 @@ core::arch::global_asm!(
 /// every live GC reference of the caller must be rooted.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> *mut u8 {
+    rokr_gc::world::may_stop(b"a #[no_safepoint] runtime call allocated");
     rokr_gc::alloc(size, align, type_id)
 }
 
@@ -342,6 +343,21 @@ pub extern "C" fn rok_native_resume(parked: u32) {
     if parked != 0 {
         rokr_gc::world::enter_native();
     }
+}
+
+/// Around a `#[no_safepoint]` call, from a debug rokc: such a call must
+/// never stop this thread (`world::may_stop`). No-ops in a release
+/// runtime.
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_nosp_enter() {
+    #[cfg(debug_assertions)]
+    rokr_gc::world::no_safepoint(1);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_nosp_leave() {
+    #[cfg(debug_assertions)]
+    rokr_gc::world::no_safepoint(-1);
 }
 
 /// Safepoint slow path (804 §8.4.3): park while another thread stops

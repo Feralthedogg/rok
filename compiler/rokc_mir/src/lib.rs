@@ -19,7 +19,10 @@ pub mod tls_abi;
 mod ty;
 mod version;
 
-pub use liveness::{Deaths, addressed, block_local, deaths, live_across, stmt_uses, term_uses};
+pub use liveness::{
+    Deaths, addressed, block_local, deaths, live_across, live_out_of, maybe_unassigned, stmt_uses,
+    term_uses,
+};
 pub use lower::lower;
 pub use part_store::{PartStore, part_stores};
 pub use print::print_mir;

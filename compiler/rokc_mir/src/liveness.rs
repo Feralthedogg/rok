@@ -384,6 +384,104 @@ pub fn live_across(
         .collect()
 }
 
+/// The locals `tracked` accepts that are live at the end of each block
+/// `at` accepts (a back-edge poll there), by block id.
+pub fn live_out_of(
+    f: &MirFunction,
+    tracked: impl Fn(LocalId) -> bool,
+    at: impl Fn(BlockId) -> bool,
+) -> HashMap<u32, Vec<LocalId>> {
+    let flow = Flow::new(f, tracked);
+    let n = flow.dense.ids.len();
+    let mut out = HashMap::new();
+    if n == 0 {
+        return out;
+    }
+    for (bi, b) in f.blocks.iter().enumerate().filter(|(_, b)| at(b.id)) {
+        let live = flow.live_out(bi, b);
+        let ls: Vec<LocalId> = (0..n)
+            .filter(|&i| live.has(i))
+            .map(|i| flow.dense.ids[i])
+            .collect();
+        out.insert(b.id.0, ls);
+    }
+    out
+}
+
+/// The locals `tracked` accepts that some path reaches the end of a block
+/// `at` accepts without assigning (parameters count as assigned).
+pub fn maybe_unassigned(
+    f: &MirFunction,
+    tracked: impl Fn(LocalId) -> bool,
+    at: impl Fn(BlockId) -> bool,
+) -> HashSet<LocalId> {
+    let flow = Flow::new(f, &tracked);
+    let n = flow.dense.ids.len();
+    let mut out = HashSet::new();
+    if n == 0 || f.blocks.is_empty() {
+        return out;
+    }
+    // Forward must-analysis: assigned on every path into the block.
+    let defs: Vec<Bits> = f
+        .blocks
+        .iter()
+        .zip(&flow.stmts)
+        .map(|(b, st)| {
+            let mut d = flow.dense.bits(&b.params);
+            for (_, def) in st {
+                if let Some(i) = def.and_then(|l| flow.dense.get(l)) {
+                    d.set(i);
+                }
+            }
+            d
+        })
+        .collect();
+    let mut preds = vec![Vec::new(); f.blocks.len()];
+    for (i, ss) in flow.succs.iter().enumerate() {
+        for &s in ss {
+            preds[s].push(i);
+        }
+    }
+    let mut full = Bits::new(n);
+    for i in 0..n {
+        full.set(i);
+    }
+    let mut entry = flow.dense.bits(&f.params);
+    entry.union(&defs[0]);
+    let mut assigned: Vec<Bits> = vec![full; f.blocks.len()];
+    assigned[0] = entry;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 1..f.blocks.len() {
+            let mut inn: Option<Bits> = None;
+            for &p in &preds[b] {
+                inn = Some(match inn {
+                    None => assigned[p].clone(),
+                    Some(mut x) => {
+                        for (w, o) in x.0.iter_mut().zip(&assigned[p].0) {
+                            *w &= o;
+                        }
+                        x
+                    }
+                });
+            }
+            let mut o = inn.unwrap_or_else(|| Bits::new(n));
+            o.union(&defs[b]);
+            if o != assigned[b] {
+                assigned[b] = o;
+                changed = true;
+            }
+        }
+    }
+    for (bi, _) in f.blocks.iter().enumerate().filter(|(_, b)| at(b.id)) {
+        for i in (0..n).filter(|&i| !assigned[bi].has(i)) {
+            out.insert(flow.dense.ids[i]);
+        }
+    }
+    out
+}
+
 /// Where each local `tracked` accepts dies in `f`.
 pub fn deaths(f: &MirFunction, tracked: impl Fn(LocalId) -> bool) -> Deaths {
     let mut out = Deaths {

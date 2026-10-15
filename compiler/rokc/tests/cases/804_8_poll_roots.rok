@@ -1,0 +1,129 @@
+// spec: lang 804-safepoint §8.4.8
+// needs: threads
+// gc-stress: 5
+// expect-exit: 0
+// expect-stdout:
+// scan 18318000 18318000
+// linked 1017547 1017547
+// words 40000 160000
+// gen 18318000
+// ok
+
+// Lists live only across a loop's back-edge poll are rooted on its
+// yield path alone; other threads collect (and move objects) while the
+// loops run.
+use rok::std::thread;
+
+fn rows(n: i64) -> List<List<i64>> {
+    let out: List<List<i64>> = [];
+    for i in 0..n {
+        let r: List<i64> = [];
+        for j in 0..90i64 { r.push(i * j % 7); }
+        out.push(r);
+    }
+    out
+}
+
+fn want(n: i64) -> i64 {
+    let t: i64 = 0;
+    for i in 0..n { for j in 0..90i64 { t += i * j % 7; } }
+    t
+}
+
+// No safepoint but the polls: `xs` and its rows are rooted only there.
+fn scan(xs: List<List<i64>>, rounds: i64) -> i64 {
+    let t: i64 = 0;
+    let k: i64 = 0;
+    while k != rounds {
+        let i: usize = 0;
+        while i < xs.len() {
+            let r = xs[i];
+            let j: usize = 0;
+            while j < r.len() { t += r[j]; j += 1; }
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+}
+
+// The frame is linked by the allocation in front of the loop.
+fn linked(rounds: i64) -> i64 {
+    let xs = rows(20);
+    let t: i64 = 0;
+    let k: i64 = 0;
+    while k != rounds {
+        let i: usize = 0;
+        while i < xs.len() { t += xs[i][(k % 90) as usize]; i += 1; }
+        k += 1;
+    }
+    t
+}
+
+fn linked_want(rounds: i64) -> i64 {
+    let xs = rows(20);
+    let t: i64 = 0;
+    for k in 0..rounds { for i in 0..20 { t += xs[i as usize][(k % 90) as usize]; } }
+    t
+}
+
+// An inlined scan, entered once per word.
+fn word(s: str, at: usize) -> usize {
+    let i = at;
+    while i < s.len() && s.byte(i) != 32u8 { i += 1; }
+    i
+}
+
+yield fn sums(xs: List<List<i64>>, rounds: i64) -> i64 {
+    for _ in 0..rounds {
+        let t: i64 = 0;
+        let i: usize = 0;
+        while i < xs.len() {
+            let j: usize = 0;
+            while j < xs[i].len() { t += xs[i][j]; j += 1; }
+            i += 1;
+        }
+        yield t;
+    }
+}
+
+fn churn(stop: Atomic<bool>) -> i64 {
+    let n: i64 = 0;
+    while !stop.load() {
+        let ys: List<str> = [];
+        for i in 0..40 { ys.push(f"{i}-{n}-padding-padding"); }
+        n += ys.len() as i64;
+    }
+    n
+}
+
+fn main() {
+    let stop = Atomic::new(false);
+    let ts: List<thread::JoinHandle<i64>> = [];
+    for _ in 0..2 {
+        ts.push(thread::spawn(|| churn(stop)));
+    }
+    let xs = rows(40);
+    println(f"scan {scan(xs, 2000)} {want(40) * 2000}");
+    println(f"linked {linked(20000)} {linked_want(20000)}");
+    let b = StrBuf::new();
+    for i in 0..40000 { b.push_str(if i % 2 == 0 { "abc " } else { "defg " }); }
+    let s = b.to_str();
+    let at: usize = 0;
+    let n: i64 = 0;
+    let total: usize = 0;
+    while at < s.len() {
+        let e = word(s, at);
+        total += e - at;
+        n += 1;
+        at = e + 1;
+    }
+    println(f"words {n} {total + n as usize - 20000}");
+    let g: i64 = 0;
+    for t in sums(rows(40), 2000) { g += t; }
+    println(f"gen {g}");
+    stop.store(true);
+    let made: i64 = 0;
+    for t in ts { made += try! t.join(); }
+    println(if made > 0 { "ok" } else { "no churn" });
+}

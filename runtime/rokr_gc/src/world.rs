@@ -226,6 +226,28 @@ fn raw_lock() {
     WORLD.lock.lock();
 }
 
+/// Into (`+1`) or out of (`-1`) a `#[no_safepoint]` call (debug builds).
+#[cfg(debug_assertions)]
+pub fn no_safepoint(step: i8) {
+    let d = tls::no_safepoint();
+    // SAFETY: this thread's own 1-byte slot.
+    unsafe { d.write(d.read().wrapping_add_signed(step)) };
+}
+
+/// Fail if a `#[no_safepoint]` call is about to stop this thread.
+///
+/// A thread stops for a collection only at a safepoint the compiler
+/// counts or at a back-edge poll (804 §8.4.8): the poll's yield path is
+/// the only place locals only polls see are rooted.
+pub fn may_stop(what: &[u8]) {
+    // SAFETY: this thread's own 1-byte slot.
+    #[cfg(debug_assertions)]
+    if unsafe { tls::no_safepoint().read() } != 0 {
+        rokr_common::fatal(what);
+    }
+    let _ = what;
+}
+
 /// Release the world lock.
 pub fn unlock() {
     WORLD.lock.unlock();
@@ -246,6 +268,7 @@ fn cooperate() {
     if !STOP.load(Ordering::Relaxed) {
         return;
     }
+    may_stop(b"a #[no_safepoint] runtime call waited for a collection");
     let state = tls::mutator_state();
     let prev = state.load(Ordering::Relaxed);
     state.store(MUTATOR_GC_COOPERATING, Ordering::Release);
@@ -279,6 +302,7 @@ pub fn lock() {
 
 /// `rok_runtime_yield` (804 §8.4.3): the slow path of a safepoint poll.
 pub fn safepoint() {
+    may_stop(b"a #[no_safepoint] runtime call reached a safepoint");
     if HALT.load(Ordering::Relaxed) {
         sys::park_forever();
     }
@@ -300,6 +324,7 @@ pub fn safepoint() {
 /// before reading the state and this writes the state before reading
 /// the flag (both `SeqCst`), so one side always sees the other.
 pub fn enter_native() {
+    may_stop(b"a #[no_safepoint] runtime call blocked");
     tls::mutator_state().store(MUTATOR_PARKED, Ordering::SeqCst);
     if tls::yield_flag().load(Ordering::SeqCst) != 0 {
         raw_lock();

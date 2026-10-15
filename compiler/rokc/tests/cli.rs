@@ -3965,6 +3965,57 @@ fn frames_link_only_on_paths_that_reach_a_safepoint() {
     assert_eq!(stores, 2, "{walk}");
 }
 
+/// A loop whose only safepoints are its polls roots its lists and links
+/// a frame on the polls' yield paths alone.
+// spec: §8.4.8
+#[test]
+fn poll_roots_link_only_on_the_yield_path() {
+    let Some(_env) = setup() else { return };
+    let dir = scratch("pollroots");
+    let pkg = dir.join("pollroots");
+    let src = "fn scan(xs: List<i64>, n: i64) -> i64 {\n\
+               \x20   let t: i64 = 0;\n\
+               \x20   let k: i64 = 0;\n\
+               \x20   while k != n {\n\
+               \x20       let i: usize = 0;\n\
+               \x20       while i < xs.len() { t += xs[i]; i += 1; }\n\
+               \x20       k += 1;\n\
+               \x20   }\n\
+               \x20   t\n\
+               }\n\
+               fn main() { println(f\"{scan([1, 2], 3)}\"); }\n";
+    put(pkg.join("src/main.rok"), src).unwrap();
+    assert_exit(&rokc(None, &pkg, &["-q", "emit", "--emit=mlir"]), 0);
+    let mlir = fs::read_to_string(pkg.join("target/debug/build/pollroots.mlir")).unwrap();
+    let start = mlir.find("__scan_(").expect("no scan");
+    let start = mlir[..start].rfind("func.func").unwrap();
+    let scan = &mlir[start..start + mlir[start..].find("\n  }").unwrap()];
+    let top = scan
+        .lines()
+        .find_map(|l| {
+            let (v, rest) = l.trim().split_once(" = ")?;
+            rest.starts_with("llvm.getelementptr inbounds")
+                .then_some(())
+                .filter(|()| rest.contains("[0] : (!llvm.ptr) -> !llvm.ptr, i8"))
+                .map(|()| v)
+        })
+        .expect("no shadow-stack top");
+    let (mut block, mut on_yield) = ("", 0);
+    for l in scan.lines().map(str::trim) {
+        if l.starts_with('^') {
+            block = l;
+            continue;
+        }
+        let rooting = l.starts_with("llvm.store")
+            && (l.contains(&format!(", {top} :")) || l.contains(", %rc"));
+        if rooting {
+            assert!(block.starts_with("^rok_yield"), "{l} in {block}:\n{scan}");
+            on_yield += 1;
+        }
+    }
+    assert!(on_yield > 0, "{scan}");
+}
+
 /// Every C symbol the runtime defines is `rok_`-prefixed.
 // spec: §8.5.8
 #[test]

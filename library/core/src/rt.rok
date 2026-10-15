@@ -196,7 +196,11 @@ extern "rok" {
 }
 
 // Neither allocates nor blocks: a call is no safepoint (804). The
-// compiler takes this block as the list.
+// compiler takes this block as the list. None may ever stop its thread
+// for a collection (no allocation, lock wait, poll or blocking call): a
+// back-edge poll's yield path is the only place the locals only polls
+// see are rooted (8.4.8). A debug rokc brackets each call so the runtime
+// checks this (`world::may_stop`).
 #[no_safepoint]
 extern "rok" {
     fn rok_cpu_count() -> usize;
