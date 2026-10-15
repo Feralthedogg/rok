@@ -1,0 +1,28 @@
+// spec: std 218 §2.18.3
+// expect-exit: 0
+// expect-stdout:
+// rounds: 300
+// sum: 300
+
+// A pool task the `block_on` thread happens to poll spawns locals that
+// never end (a connection's reader): they go to a pool worker, so
+// `block_on` still returns once its own tasks are done.
+use rok::core::task;
+
+let (tx, rx) = channel::<i32>();
+let sum = 0;
+for _ in 0..300 {
+    sum += task::block_on(async {
+        let t = task::spawn(async {
+            task::spawn_local(async {
+                await rx.recv_async();
+                0
+            });
+            1
+        });
+        await t
+    });
+}
+println(f"rounds: 300");
+println(f"sum: {sum}");
+tx.close();

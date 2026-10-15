@@ -746,10 +746,10 @@ task::block_on(async { (await t) + (await b) })
 static IN: Atomic<i64> = Atomic::new(0);
 static GO: Atomic<i64> = Atomic::new(0);
 let m = Mutex::new(5); let rw = RwLock::new(6); let once = Once::new();
-thread::spawn(|| { using g = m.lock() { using r = rw.read() { once.call_once(|| { IN.store(1); while GO.load() == 0 { thread::sleep(Duration::ms(5)); } }); } } });
-while IN.load() == 0 { thread::sleep(Duration::ms(5)); }
+let h = thread::spawn(|| { using g = m.lock() { using r = rw.read() { once.call_once(|| { IN.store(1); while GO.load() == 0 { thread::park(); } }); } } });
+while IN.load() == 0 { thread::sleep(Duration::ms(5)); } thread::sleep(Duration::ms(100));
 panic(\"holder gone\");
-GO.store(1);
+GO.store(1); h.thread().unpark();
 using g = m.lock() { g.get() }
 using w = rw.write() { w.get() }
 once.call_once(|| { println(\"ran again\"); });
@@ -757,8 +757,10 @@ once.call_once(|| { println(\"ran again\"); });
     let out = piped(ROKC, &["repl", "--rokr", &rokr], input);
     let stdout = text(&out.stdout);
     let stderr = text(&out.stderr);
-    // The holder sits in `call_once` with both locks until `GO`. Windows
-    // keeps that thread, which then lets them go; a fork host has none.
+    // The holder sits in `call_once` with both locks until `GO`, parked
+    // in one wait so a rollback finds it where the checkpoint did (a
+    // thread that ran since counts as gone). Windows keeps that thread,
+    // which then lets them go; a fork host has none.
     let again = if cfg!(windows) { "" } else { "ran again\n" };
     assert_eq!(
         stdout,

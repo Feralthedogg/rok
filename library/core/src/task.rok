@@ -1387,10 +1387,30 @@ pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> where F::Output: Send 
     }
 }
 
+/// Where a `spawn_local` from `w` lives: `w`, unless `w` is a guest
+/// polling a task that is not its own. A guest leaves once its own tasks
+/// are done, so `block_on` would wait for that task's locals too (a
+/// connection's reader and writer: forever); they go to a pool worker.
+fn local_home(w: Worker) -> Worker {
+    if !w.guest || w.pool.solo || w.pool.workers() == 0 {
+        return w;
+    }
+    unsafe {
+        if let t: TaskRef = w.running[0] {
+            if let h: Worker = t.home[0] {
+                if buf_same(h.locals, w.locals) { return w; }
+            }
+            return w.pool.home_for();
+        }
+    }
+    w
+}
+
 /// Run `fut` as a new task on this worker only (it need not be `Send`).
+/// From a task a `block_on` thread happens to poll, that is a pool worker.
 pub fn spawn_local<F: Future>(fut: F) -> Task<F::Output> {
     unsafe {
-        let w = current_worker();
+        let w = local_home(current_worker());
         let slot: GcBuf<F::Output> = buf_new(1);
         let t = new_task(poll_fn(fut, slot), w);
         Task { task: t, slot: slot }

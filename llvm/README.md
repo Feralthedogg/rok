@@ -110,10 +110,19 @@ llvm/train-pgo.sh rok-linux.profdata
 
 Against a profile of the host alone (bench/ at `-O2`, instructions),
 the merged one costs 0.1% on Linux and 0.5% on macOS, where the other
-host's alone costs 2.8% and 0.9%; the merged file is 3.6 MB.
-`train-pgo.sh` peaks at ~5 GB of scratch space and takes about 35
-minutes on a 10-core Apple Silicon machine (55 on a 16-thread x86_64
+host's alone costs 2.8% and 0.9%; the merged file is 4.1 MB.
+`train-pgo.sh` peaks at ~5 GB of scratch space and takes about 20
+minutes on a 12-core Apple Silicon machine (55 on a 16-thread x86_64
 laptop with `ROK_LLVM_JOBS=12`).
+
+A new Xcode clang changes the hashes of many functions: Apple clang 21
+(macOS 27) found 2,742 mismatches in the previous profile. The current
+one adds a macOS 27 run to the earlier Linux run (merged with
+`xcrun llvm-profdata merge --sparse`, no new Linux training): 417
+remain, in header inlines the run did not reach. On that machine rokc's
+`-O2` builds of `bench/` as objects take 3.49 s with it, 3.55 s with
+the stale profile and 3.75 s without PGO (−7%); the 298 cases training
+left out, as objects, 56.5 s, 57.4 s and 59.6 s (−5%).
 
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other

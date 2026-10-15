@@ -82,12 +82,15 @@ impl H {
 
 static M: Mutex<List<i32>> = Mutex::new([]);
 static U: Mutex<List<i32>> = Mutex::new([]);
+// Set once `put` has replaced `U`'s list: pushes before that would be dropped.
+static UPDATED: Atomic<i32> = Atomic::new(0);
 
 fn put(e: List<i32>, f: List<i32>) -> usize {
     unsafe {
         using g = U.lock() {
             g.update(|old: List<i32>| e);
         }
+        UPDATED.store(1);
         grow(f)
     }
 }
@@ -224,6 +227,7 @@ fn out_of_a_lock() {
 fn update_closure() {
     unsafe {
         let t = thread::spawn(|| {
+            while UPDATED.load() == 0 { thread::yield_now(); }
             for i in 0..N {
                 using g = U.lock() {
                     g.get().push(i);
