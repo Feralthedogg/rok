@@ -1,0 +1,19 @@
+// spec: std 213-marker §2.13.9
+// expect-error: type `any Bag` does not satisfy trait bound `rok::core::marker::Send` required by `rok::core::channel::channel` (an `any` crosses threads only when its bound has both `Send` and `Sync`, since copies share its box: give the trait `Sync` as a supertrait, or send the concrete type; stdlib 2.13.9)
+
+// Copies of an `any` share its box: one that holds a collection must not
+// cross threads.
+trait Bag: Send {
+    fn n(self) -> usize;
+}
+
+impl Bag for List<i32> {
+    fn n(self) -> usize { self.len() }
+}
+
+fn main() {
+    let (tx, rx) = channel::<any Bag>();
+    let a: List<i32> = [];
+    try! tx.send(a);
+    let _ = rx.recv();
+}

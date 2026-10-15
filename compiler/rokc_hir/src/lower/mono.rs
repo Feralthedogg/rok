@@ -597,10 +597,16 @@ fn check_call_bounds(
                 continue;
             }
             if !ctx.implements_trait(concrete, &want, 0) {
+                // An auto trait says which part lacks it, and what to do.
+                let why = if ctx.env.names.auto_traits.contains(want.path.as_str()) {
+                    ctx.auto_trait_cause(concrete, &want.path, 0)
+                } else {
+                    String::new()
+                };
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
-                        "type `{}` does not satisfy trait bound `{}` required by `{}`",
+                        "type `{}` does not satisfy trait bound `{}` required by `{}`{why}",
                         ctx.ty_name(concrete),
                         ctx.trait_name(&want),
                         fn_def.name

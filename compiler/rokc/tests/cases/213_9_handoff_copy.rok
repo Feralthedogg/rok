@@ -1,0 +1,294 @@
+// gc-stress: 5
+// expect-exit: 0
+// spec: std 213-marker §2.13.9 / std 217-channel §2.17.1 / std 216-sync §2.16.3
+// expect-stdout:
+// list [1, 2, 3] [1, 2, 3, 4]
+// pair [7, 8] [7, 8] [7]
+// cycle 2 2 1
+// enum [5, 6] [5]
+// sum [9, 10] [9]
+// tuple [1, 2] [1] 3
+// array [1, 2] [3, 4] [1] [3]
+// mutex [1, 2, 3, 100] [1, 2, 3]
+// set [1, 2] [1]
+// dict 2 [1, 2] 1 [1]
+// deque [3, 4] [3] 1
+// strbuf abcd ab
+// slice [9, 3] [1, 9, 3] [1, 2, 3]
+// shared 300 300 1
+// many 2000 0 2000
+// try_send [1, 2] [1]
+// send_async [5, 6] [5]
+// gcptr 2 1 true
+// bytes 20 104 108 5 49 53 45
+// array 300 300 0 1
+// update [1, 2] [1] [7, 8, 9]
+// chain 1000 499500 1000
+
+// A hand-off gives the new owner a copy of every collection the value
+// reaches, made once per collection; what the sender kept is left alone.
+// The uses after the hand-off are `unsafe` (spec 4.15.2): the static
+// check rejects them, and this is what runs when it is out of the way.
+use rok::bare::gc::GcPtr;
+
+struct Node {
+    name: str;
+    kids: List<Node>;
+}
+
+struct Pair {
+    a: List<i32>;
+    b: List<i32>;
+}
+
+enum Msg {
+    Data(List<i32>),
+    Stop,
+}
+
+fn main() {
+    unsafe {
+        let (tx, rx) = channel::<List<i32>>();
+        let xs: List<i32> = [1, 2, 3];
+        try! tx.send(xs);
+        let got = rx.recv() ?? [];
+        got.push(4);
+        println(f"list {xs:?} {got:?}");
+
+        // One list twice in the value stays one list in the copy.
+        let (tp, rp) = channel::<Pair>();
+        let l: List<i32> = [7];
+        try! tp.send(Pair { a: l, b: l });
+        if let p: Pair = rp.recv() {
+            p.a.push(8);
+            println(f"pair {p.a:?} {p.b:?} {l:?}");
+        }
+
+        // A node whose kids hold itself.
+        let (tn, rn) = channel::<Node>();
+        let root = Node { name: "root", kids: [] };
+        root.kids.push(root);
+        try! tn.send(root);
+        if let n: Node = rn.recv() {
+            n.kids.push(Node { name: "x", kids: [] });
+            println(f"cycle {n.kids.len()} {n.kids[0].kids.len()} {root.kids.len()}");
+        }
+
+        let (te, re) = channel::<Msg>();
+        let d: List<i32> = [5];
+        try! te.send(Msg::Data(d));
+        match re.recv() ?? Msg::Stop {
+            Msg::Data(v) => {
+                v.push(6);
+                println(f"enum {v:?} {d:?}");
+            }
+            Msg::Stop => println("stop"),
+        }
+
+        let (ts, rs) = channel::<List<i32> | none>();
+        let e: List<i32> = [9];
+        try! ts.send(e);
+        if let v: List<i32> = rs.recv() ?? none {
+            v.push(10);
+            println(f"sum {v:?} {e:?}");
+        }
+
+        let (tt, rt) = channel::<(List<i32>, i32)>();
+        let tl: List<i32> = [1];
+        try! tt.send((tl, 3));
+        if let (v, k): (List<i32>, i32) = rt.recv() {
+            v.push(2);
+            println(f"tuple {v:?} {tl:?} {k}");
+        }
+
+        let (ta, ra) = channel::<[List<i32>; 2]>();
+        let a0: List<i32> = [1];
+        let a1: List<i32> = [3];
+        try! ta.send([a0, a1]);
+        if let arr: [List<i32>; 2] = ra.recv() {
+            arr[0].push(2);
+            arr[1].push(4);
+            println(f"array {arr[0]:?} {arr[1]:?} {a0:?} {a1:?}");
+        }
+
+        // `Mutex::new` and a guard's `set` take copies too.
+        let m = Mutex::new(xs);
+        using g = m.lock() { g.get().push(100); }
+        using g = m.lock() { println(f"mutex {g.get():?} {xs:?}"); }
+        let s: List<i32> = [1];
+        using g = m.lock() {
+            g.set(s);
+            g.get().push(2);
+        }
+        using g = m.lock() { println(f"set {g.get():?} {s:?}"); }
+
+        let (td, rd) = channel::<Dict<str, List<i32>>>();
+        let dl: List<i32> = [1];
+        let dd: Dict<str, List<i32>> = Dict::new();
+        dd.insert("a", dl);
+        try! td.send(dd);
+        if let r: Dict<str, List<i32>> = rd.recv() {
+            r["a"].push(2);
+            r.insert("b", []);
+            println(f"dict {r.len()} {r["a"]:?} {dd.len()} {dl:?}");
+        }
+
+        let (tq, rq) = channel::<Deque<List<i32>>>();
+        let q: Deque<List<i32>> = Deque::new();
+        let ql: List<i32> = [3];
+        q.push_back(ql);
+        try! tq.send(q);
+        if let r: Deque<List<i32>> = rq.recv() {
+            if let f: List<i32> = r.pop_front() {
+                f.push(4);
+                println(f"deque {f:?} {ql:?} {q.len()}");
+            }
+        }
+
+        let (tb, rb) = channel::<StrBuf>();
+        let sb = StrBuf::new();
+        sb.push_str("ab");
+        try! tb.send(sb);
+        if let r: StrBuf = rb.recv() {
+            r.push_str("cd");
+            println(f"strbuf {r.to_str()} {sb.to_str()}");
+        }
+
+        // A view and the list it views stay one buffer in the copy.
+        let (tv, rv) = channel::<(List<i32>, Slice<i32>)>();
+        let base: List<i32> = [1, 2, 3];
+        try! tv.send((base, base[1:3]));
+        if let (bl, bs): (List<i32>, Slice<i32>) = rv.recv() {
+            bl[1] = 9;
+            println(f"slice {bs.to_list():?} {bl:?} {base:?}");
+        }
+
+        // A list reached many times is copied once.
+        let (tm, rm) = channel::<List<List<i32>>>();
+        let one: List<i32> = [1];
+        let all: List<List<i32>> = [];
+        for _ in 0..300 {
+            all.push(one);
+        }
+        try! tm.send(all);
+        if let r: List<List<i32>> = rm.recv() {
+            r[0].push(2);
+            let same = 0;
+            for x in r {
+                if x.len() == 2 {
+                    same += 1;
+                }
+            }
+            println(f"shared {r.len()} {same} {one.len()}");
+        }
+
+        // Many lists: the memo grows, collections run meanwhile.
+        let (tg, rg) = channel::<List<List<i32>>>();
+        let lists: List<List<i32>> = [];
+        for i in 0..2000 {
+            lists.push([i]);
+        }
+        try! tg.send(lists);
+        if let r: List<List<i32>> = rg.recv() {
+            let total = 0;
+            for x in r {
+                x.clear();
+                total += 1;
+            }
+            let kept: usize = 0;
+            for x in lists {
+                kept += x.len();
+            }
+            println(f"many {total} {r[0].len()} {kept}");
+        }
+
+        let (tr, rr) = channel_bounded::<List<i32>>(1);
+        let ts1: List<i32> = [1];
+        try! tr.try_send(ts1);
+        if let v: List<i32> = rr.recv() {
+            v.push(2);
+            println(f"try_send {v:?} {ts1:?}");
+        }
+
+        let (tf, rf) = channel::<List<i32>>();
+        let af: List<i32> = [5];
+        task::block_on(async {
+            try! await tf.send_async(af);
+            0
+        });
+        if let v: List<i32> = rf.recv() {
+            v.push(6);
+            println(f"send_async {v:?} {af:?}");
+        }
+
+        let (tw, rw) = channel::<(GcPtr<List<i32>>, GcPtr<List<i32>>)>();
+        let gp = GcPtr::new([1]);
+        try! tw.send((gp, gp));
+        if let (p, q): (GcPtr<List<i32>>, GcPtr<List<i32>>) = rw.recv() {
+            p.get().push(2);
+            println(f"gcptr {p.get().len()} {gp.get().len()} {p.same(q)}");
+        }
+
+        // A view of a `str`'s bytes has no object of its own: only the
+        // viewed bytes are copied (a literal, a substring, a whole string).
+        let (tu, ru) = channel::<Slice<u8>>();
+        let lit = "hello, literal bytes";
+        let rs2 = f"prefix-{12345}-and-the-rest-of-a-runtime-string";
+        try! tu.send(lit.as_bytes());
+        let b1 = ru.recv() ?? [0u8][0:1];
+        try! tu.send(rs2[7:12].as_bytes());
+        let b2 = ru.recv() ?? [0u8][0:1];
+        try! tu.send(rs2.as_bytes());
+        let b3 = ru.recv() ?? [0u8][0:1];
+        println(f"bytes {b1.len()} {b1[0]} {b1[2]} {b2.len()} {b2[0]} {b2[4]} {b3.len()}");
+
+        // An array of any length is walked; its one list stays one.
+        let (tz, rz) = channel::<[List<i32>; 300]>();
+        let one2: List<i32> = [];
+        let arr: [List<i32>; 300] = [one2; 300];
+        try! tz.send(arr);
+        if let r: [List<i32>; 300] = rz.recv() {
+            r[0].push(1);
+            let same = 0;
+            for i in 0..300 {
+                if r[i].len() == 1 {
+                    same += 1;
+                }
+            }
+            println(f"array 300 {same} {one2.len()} {r[299].len()}");
+        }
+
+        // `update` copies what the closure brings in, keeps what the lock
+        // holds.
+        let mu = Mutex::new([7]);
+        let foreign: List<i32> = [1];
+        using g = mu.lock() { g.update(|old: List<i32>| foreign); }
+        using g = mu.lock() { g.get().push(2); }
+        using g = mu.lock() { g.update(|old: List<i32>| old); }
+        let kept: List<i32> = [];
+        using g = mu.lock() { kept = g.get(); }
+        let mk = Mutex::new([7]);
+        using g = mk.lock() { g.update(|old: List<i32>| { old.push(8); old }); }
+        using g = mk.lock() { g.get().push(9); }
+        using g = mk.lock() { println(f"update {kept:?} {foreign:?} {g.get():?}"); }
+
+        // A chain: the walk is a work list, not one frame per level.
+        let (tc, rc) = channel::<List<Node>>();
+        let head: List<Node> = [];
+        for i in 0..1000 {
+            head = [Node { name: f"{i}", kids: head }];
+        }
+        try! tc.send(head);
+        if let l: List<Node> = rc.recv() {
+            let c = 0;
+            let sum = 0i64;
+            let cur = l;
+            while cur.len() > 0 {
+                sum += try! cur[0].name.parse::<i64>();
+                c += 1;
+                cur = cur[0].kids;
+            }
+            println(f"chain {c} {sum} {head.len() * 1000}");
+        }
+    }
+}

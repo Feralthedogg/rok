@@ -6616,6 +6616,8 @@ pub(super) enum Intrinsic {
     BufSet,
     BufSame,
     BufErase,
+    /// `rok.buf_cast`: the reference as a `GcBuf` of the expected type.
+    BufCast,
     PtrRead {
         volatile: bool,
     },
@@ -6636,6 +6638,19 @@ pub(super) enum Intrinsic {
     MethodTable,
     MlirOp,
     MlirAttr,
+    /// `rok.transfer`: a hand-off copy of the value (stdlib 2.13.9).
+    Transfer,
+    /// `rok.transfer_keep`: note every collection reached as its own copy.
+    TransferKeep,
+    /// `rok.transfer_needed`: whether `rok.transfer` copies anything.
+    TransferNeeded,
+    /// `rok.transfer_plain`: whether a type holds no GC reference.
+    TransferPlain,
+    /// `rok.transfer_flat`: one listed handle whose elements need no copy.
+    TransferFlat,
+    /// `rok.hand_over`: the value itself when `rok.transfer` would copy
+    /// nothing, else a call of `marker::hand_over_copy`.
+    HandOver,
 }
 
 impl Intrinsic {
@@ -6647,6 +6662,7 @@ impl Intrinsic {
             "buf_set" => Self::BufSet,
             "buf_same" => Self::BufSame,
             "buf_erase" => Self::BufErase,
+            "buf_cast" => Self::BufCast,
             "clone.copy" => Self::Convert,
             "ptr.read" => Self::PtrRead { volatile: false },
             "ptr.write" => Self::PtrWrite { volatile: false },
@@ -6660,6 +6676,12 @@ impl Intrinsic {
             "method_table" => Self::MethodTable,
             "mlir.op" => Self::MlirOp,
             "mlir.attr" => Self::MlirAttr,
+            "transfer" => Self::Transfer,
+            "transfer_keep" => Self::TransferKeep,
+            "transfer_needed" => Self::TransferNeeded,
+            "transfer_plain" => Self::TransferPlain,
+            "transfer_flat" => Self::TransferFlat,
+            "hand_over" => Self::HandOver,
             _ => {
                 if let Some(tys) = rest.strip_prefix("cast.") {
                     return (tys.split('.').count() == 2).then_some(Self::Convert);

@@ -57,7 +57,7 @@ impl Debug for SignalError {
 }
 impl Error for SignalError {}
 
-static SIGNAL_HANDLERS: Mutex<Dict<i32, fn() + Send>> = Mutex::new(Dict::new());
+static SIGNAL_HANDLERS: Mutex<Dict<i32, fn() + Send>> = unsafe { Mutex::new_unshared(Dict::new()) };
 
 /// Call `handler` (on the `rok-signal` thread) each time the process
 /// receives `sig`; a later `signal` for the same `sig` replaces it.

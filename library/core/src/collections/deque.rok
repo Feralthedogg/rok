@@ -3,6 +3,8 @@
 // a vacated slot is overwritten with a zeroed `T` so the deque does not
 // keep a popped value alive.
 
+use rok::core::marker::{Memo, Transfer, buf_is_null, copy_buf};
+
 pub struct Deque<T> {
     meta: GcBuf<usize>;
     data: GcBuf<GcBuf<T>>;
@@ -250,5 +252,49 @@ impl<T: Debug> Debug for Deque<T> {
             first = false;
         }
         try f.write_str("]")
+    }
+}
+
+/// A hand-off's copy (stdlib 2.13.9): the same ring; its slots go
+/// through `transfer` from the memo's queue. The memo keeps the copy in a
+/// box (a deque is three buffers).
+impl<T> Transfer for Deque<T> {
+    const fn transfer_copy(self, m: Memo) -> Deque<T> {
+        if buf_is_null(self.meta) {
+            return self;
+        }
+        unsafe {
+            if let got: GcBuf<Deque<T>> = m.find_at::<usize, Deque<T>>(self.meta, 0, 0, 0) {
+                return got[0];
+            }
+            let boxed: GcBuf<Deque<T>> = buf_new(1);
+            m.note_at::<usize, Deque<T>>(self.meta, 0, 0, 0, boxed);
+            let meta: GcBuf<usize> = buf_new(3);
+            meta[0] = self.meta[0];
+            meta[1] = self.meta[1];
+            meta[2] = self.meta[2];
+            let data: GcBuf<GcBuf<T>> = buf_new(1);
+            let zero: GcBuf<T> = buf_new(1);
+            let cap = self.meta[2];
+            data[0] = copy_buf(self.data[0], 0, cap, 1, cap, m);
+            let d = Deque { meta, data, zero };
+            boxed[0] = d;
+            d
+        }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> Deque<T> {
+        if buf_is_null(self.meta) {
+            return self;
+        }
+        unsafe {
+            if let _: GcBuf<Deque<T>> = m.find_at::<usize, Deque<T>>(self.meta, 0, 0, 0) {
+                return self;
+            }
+            let boxed: GcBuf<Deque<T>> = buf_new(1);
+            boxed[0] = self;
+            m.note_at::<usize, Deque<T>>(self.meta, 0, 0, 0, boxed);
+        }
+        self
     }
 }

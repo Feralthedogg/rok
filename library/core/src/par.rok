@@ -3,6 +3,8 @@
 // worker it runs on, from sync code with the caller as a guest worker.
 // Chunks are claimed from a shared counter by one job per worker.
 
+use rok::core::marker::hand_over;
+
 /// Run `job(c)` for every `c` in `0..chunks` across the workers (this
 /// thread included); returns once all have finished.
 fn run_chunks(chunks: usize, job: fn(usize) + Send) {
@@ -174,7 +176,7 @@ pub fn scope(f: fn(Scope)) {
 
 fn run_scope(f: fn(Scope)) {
     let tasks: List<ScopeTask> = [];
-    let s = Scope { tasks: Mutex::new(tasks), cancelled: Atomic::new(false) };
+    let s = Scope { tasks: unsafe { Mutex::new_unshared(tasks) }, cancelled: Atomic::new(false) };
     f(s);
     drain(s);
 }
@@ -225,7 +227,7 @@ impl Scope {
                 handle: task::fork_job(|| {
                     if !cancelled.load() {
                         let result = cell.get();
-                        result[0] = f();
+                        result[0] = hand_over::<T>(f());
                     }
                 }),
                 joined: Once::new(),
@@ -267,7 +269,7 @@ pub fn try_scope<E: Send>(f: fn(TryScope<E>) throws (E)) throws (E) {
         task::in_pool(|| {
             let tasks: List<ScopeTask> = [];
             let s = TryScope {
-                scope: Scope { tasks: Mutex::new(tasks), cancelled: Atomic::new(false) },
+                scope: Scope { tasks: unsafe { Mutex::new_unshared(tasks) }, cancelled: Atomic::new(false) },
                 err: Handoff::new(err),
                 failed: failed,
             };
@@ -315,12 +317,13 @@ impl<E: Send> TryScope<E> {
             let h = self.scope.spawn(|| {
                 status.store(0);
                 let (out, own) = cells.get();
-                out[0] = try f() catch e {
-                    own[0] = e;
+                let v = try f() catch e {
+                    own[0] = hand_over::<E>(e);
                     status.store(1);
                     me.fail(e);
                     return;
                 };
+                out[0] = hand_over::<T>(v);
             });
             TryScopeHandle { inner: h, out: out, own: own, status: status, scope: self }
         }

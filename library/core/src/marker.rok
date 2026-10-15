@@ -2,6 +2,9 @@
 // compiler-driven semantics. Slots follow stdlib spec 0.4 (6.4.8).
 // The comparison / hashing traits live in `cmp.rok`.
 
+use rok::bare::gc::{GcPtr, Pinnable};
+use rok::core::collections::raw::{buf_cast, buf_erase};
+
 /// The type of the `none` literal (stdlib 2.13.8): the compiler's
 /// built-in `none`, here under its library name.
 pub type NoneSentinel = none;
@@ -172,3 +175,253 @@ impl<T> Handoff<T> {
 
 unsafe impl<T: Send> Send for Handoff<T> {}
 unsafe impl<T: Send> Sync for Handoff<T> {}
+
+// A hand-off (`Mutex::new`, `RwLock::new`, a guard's `set` / `update`, a
+// channel send, a task's or thread's result) gives the new owner a copy
+// of every collection the value reaches (stdlib 2.13.9): a handle the
+// sender kept, however it got it, then names an object no other thread
+// uses. `Sync` parts and types with `unsafe impl Send` stay shared.
+//
+// The walk is flat: a collection's copy takes its elements as they are
+// and queues its buffer on the memo; the queue is drained after, so
+// nesting depth costs no stack.
+
+extern "rok" {
+    fn rok_xfer_memo() -> GcBuf<u8>;
+    /// The copy of `orig` viewed as `(a, b, c)`, or `orig` when none.
+    fn rok_xfer_find(memo: GcBuf<u8>, orig: GcBuf<u8>, a: usize, b: usize, c: usize) -> GcBuf<u8>;
+    fn rok_xfer_note(memo: GcBuf<u8>, orig: GcBuf<u8>, a: usize, b: usize, c: usize, copy: GcBuf<u8>);
+    fn rok_xfer_null(buf: GcBuf<u8>) -> bool;
+    fn rok_xfer_slots(buf: GcBuf<u8>, size: usize) -> usize;
+}
+
+/// A copied buffer whose first `n` elements still name the originals'
+/// parts: `fix` passes each through `transfer`.
+struct Work {
+    buf: GcBuf<u8>;
+    n: usize;
+    fix: fn(GcBuf<u8>, usize, Memo);
+}
+
+/// The copies one hand-off made, by original object, and the copied
+/// buffers left to fix. `none` for one collection whose elements need no
+/// copy: nothing can be reached twice.
+pub struct Memo {
+    obj: GcBuf<u8> | none;
+    work: List<Work> | none;
+}
+
+impl Memo {
+    /// The copy of `orig` noted earlier in this hand-off.
+    pub(pkg) const fn find<T>(self, orig: GcBuf<T>) -> GcBuf<T> | none {
+        self.find_at::<T, T>(orig, 0, 0, 0)
+    }
+
+    pub(pkg) const fn note<T>(self, orig: GcBuf<T>, copy: GcBuf<T>) {
+        self.note_at::<T, T>(orig, 0, 0, 0, copy);
+    }
+
+    /// `find` for `orig` viewed as `(a, b, c)` (a slice's range), the copy
+    /// kept in an object of another type (a box holding the handle).
+    pub(pkg) const fn find_at<T, U>(self, orig: GcBuf<T>, a: usize, b: usize, c: usize) -> GcBuf<U> | none {
+        if let m: GcBuf<u8> = self.obj {
+            let o = buf_erase(orig);
+            let got = unsafe { rok_xfer_find(m, o, a, b, c) };
+            if buf_same(got, o) {
+                return none;
+            }
+            let copy: GcBuf<U> = unsafe { buf_cast(got) };
+            return copy;
+        }
+        none
+    }
+
+    pub(pkg) const fn note_at<T, U>(self, orig: GcBuf<T>, a: usize, b: usize, c: usize, copy: GcBuf<U>) {
+        if let m: GcBuf<u8> = self.obj {
+            unsafe { rok_xfer_note(m, buf_erase(orig), a, b, c, buf_erase(copy)) };
+        }
+    }
+
+    /// `orig` is kept, not copied (what a guard already holds).
+    pub(pkg) const fn keep<T>(self, orig: GcBuf<T>) {
+        if let _: GcBuf<T> = self.find(orig) {
+            return;
+        }
+        self.note(orig, orig);
+    }
+
+    /// Elements `0..n` of the copied `buf` go through `transfer` later.
+    pub(pkg) const fn later<T>(self, buf: GcBuf<T>, n: usize) {
+        if transfer_needed::<T>() && n > 0 {
+            if let w: List<Work> = self.work {
+                w.push(Work { buf: buf_erase(buf), n, fix: fix_slots::<T> });
+            }
+        }
+    }
+}
+
+fn fix_slots<T>(b: GcBuf<u8>, n: usize, m: Memo) {
+    unsafe {
+        let buf: GcBuf<T> = buf_cast(b);
+        for i in 0..n {
+            buf[i] = transfer::<T>(buf[i], m);
+        }
+    }
+}
+
+/// The elements GC object `buf` holds (with the rounding past the
+/// last). `buf` must be an object of its own: a `Slice`'s `whole`.
+pub(pkg) const unsafe fn buf_slots<T>(buf: GcBuf<T>) -> usize {
+    unsafe { rok_xfer_slots(buf_erase(buf), size_of::<T>()) }
+}
+
+/// Whether `b` is the zero handle of a zeroed value (a vacated slot).
+pub(pkg) const fn buf_is_null<T>(b: GcBuf<T>) -> bool {
+    unsafe { rok_xfer_null(buf_erase(b)) }
+}
+
+/// How a standard handle copies itself for a hand-off: `transfer_copy`
+/// makes the copy (its elements queued on the memo), `transfer_keep`
+/// notes the handle as its own copy. Only the compiler's list of
+/// standard types is called; other impls are ignored.
+pub trait Transfer {
+    fn transfer_copy(self, m: Memo) -> Self;
+    fn transfer_keep(self, m: Memo) -> Self;
+}
+
+/// `x` with every collection it reaches copied, one level: the copies'
+/// elements are queued on `m`.
+#[intrinsic("rok.transfer")]
+pub(pkg) fn transfer<T>(x: T, m: Memo) -> T;
+
+/// Note every collection `x` reaches by value as its own copy.
+#[intrinsic("rok.transfer_keep")]
+pub(pkg) fn transfer_keep<T>(x: T, m: Memo) -> T;
+
+/// Whether `transfer::<T>` copies anything (a constant).
+#[intrinsic("rok.transfer_needed")]
+pub(pkg) fn transfer_needed<T>() -> bool;
+
+/// Whether a `T` holds no GC reference, so its bytes copy as they are (a
+/// constant).
+#[intrinsic("rok.transfer_plain")]
+pub(pkg) fn transfer_plain<T>() -> bool;
+
+/// Whether a `T` is one standard handle whose elements need no copy (a
+/// constant): its copy needs no memo.
+#[intrinsic("rok.transfer_flat")]
+pub(pkg) fn transfer_flat<T>() -> bool;
+
+/// What a hand-off gives the new owner: `x` with a copy of every
+/// collection it reaches (`x` itself, with no call, when there are none).
+#[intrinsic("rok.hand_over")]
+pub fn hand_over<T>(x: T) -> T;
+
+/// `hand_over` of `x` into a slot that holds `kept`: what `kept` reaches
+/// by value is not copied (a guard's `update`).
+#[intrinsic("rok.hand_over")]
+pub(pkg) fn hand_over_into<T>(kept: T, x: T) -> T;
+
+/// `hand_over` for a `T` that has collections to copy.
+pub(pkg) const fn hand_over_copy<T>(x: T) -> T {
+    if transfer_flat::<T>() {
+        let one = Memo { obj: none, work: none };
+        return transfer::<T>(x, one);
+    }
+    // A local: `transfer` names its memo once per collection.
+    let w: List<Work> = [];
+    let m = Memo { obj: unsafe { rok_xfer_memo() }, work: w };
+    let y = transfer::<T>(x, m);
+    drain(m);
+    y
+}
+
+pub(pkg) const fn hand_over_into_copy<T>(kept: T, x: T) -> T {
+    let w: List<Work> = [];
+    let m = Memo { obj: unsafe { rok_xfer_memo() }, work: w };
+    let _ = transfer_keep::<T>(kept, m);
+    let y = transfer::<T>(x, m);
+    drain(m);
+    y
+}
+
+const fn drain(m: Memo) {
+    if let q: List<Work> = m.work {
+        while let w: Work = q.pop() {
+            (w.fix)(w.buf, w.n, m);
+        }
+    }
+}
+
+/// A new buffer of `slots` elements holding `n` elements of `buf` from
+/// `from` (`stride` apart), the rest zero; queued for `transfer`.
+pub(pkg) const fn copy_buf<T>(buf: GcBuf<T>, from: usize, n: usize, stride: isize, slots: usize, m: Memo) -> GcBuf<T> {
+    unsafe {
+        let copy: GcBuf<T> = buf_new(slots);
+        if transfer_plain::<T>() && stride == 1 {
+            let size = size_of::<T>();
+            rok_buf_copy(buf_erase(copy), 0, buf_erase(buf), from * size, n * size);
+        } else {
+            for i in 0..n {
+                copy[i] = buf[((from as isize) + (i as isize) * stride) as usize];
+            }
+        }
+        m.later(copy, n);
+        copy
+    }
+}
+
+/// A list's buffer or a view's whole buffer: one copy per hand-off, so a
+/// list and every view of its buffer keep sharing it. `n` elements are
+/// in use, `slots` the copy's size (at least what the views reach).
+pub(pkg) const fn copy_shared<T>(buf: GcBuf<T>, n: usize, slots: usize, m: Memo) -> GcBuf<T> {
+    if let got: GcBuf<T> = m.find(buf) {
+        return got;
+    }
+    let copy = copy_buf(buf, 0, n, 1, slots, m);
+    m.note(buf, copy);
+    copy
+}
+
+// `GcPtr` (`rok::bare::gc`) shares its object like `List`.
+impl<T> Transfer for GcPtr<T> {
+    fn transfer_copy(self, m: Memo) -> GcPtr<T> {
+        if let o: GcBuf<u8> = self.gc_object() {
+            if buf_is_null(o) {
+                return self;
+            }
+            unsafe {
+                if let got: GcBuf<GcPtr<T>> = m.find_at::<u8, GcPtr<T>>(o, 0, 0, 0) {
+                    return got[0];
+                }
+                let boxed: GcBuf<GcPtr<T>> = buf_new(1);
+                m.note_at::<u8, GcPtr<T>>(o, 0, 0, 0, boxed);
+                let p = GcPtr::new(self.get());
+                boxed[0] = p;
+                if let c: GcBuf<u8> = p.gc_object() {
+                    let slot: GcBuf<T> = buf_cast(c);
+                    m.later(slot, 1);
+                }
+                return p;
+            }
+        }
+        self
+    }
+
+    fn transfer_keep(self, m: Memo) -> GcPtr<T> {
+        if let o: GcBuf<u8> = self.gc_object() {
+            if buf_is_null(o) {
+                return self;
+            }
+            unsafe {
+                if let _: GcBuf<GcPtr<T>> = m.find_at::<u8, GcPtr<T>>(o, 0, 0, 0) {
+                    return self;
+                }
+                let boxed: GcBuf<GcPtr<T>> = buf_new(1);
+                boxed[0] = self;
+                m.note_at::<u8, GcPtr<T>>(o, 0, 0, 0, boxed);
+            }
+        }
+        self
+    }
+}

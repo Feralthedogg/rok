@@ -788,6 +788,7 @@ codec_enum!(Intrinsic {
     BufSet,
     BufSame,
     BufErase,
+    BufCast,
     PtrRead { volatile },
     PtrWrite { volatile },
     SizeOf,
@@ -799,4 +800,10 @@ codec_enum!(Intrinsic {
     MethodTable,
     MlirOp,
     MlirAttr,
+    Transfer,
+    TransferNeeded,
+    HandOver,
+    TransferKeep,
+    TransferPlain,
+    TransferFlat,
 });

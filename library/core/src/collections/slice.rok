@@ -8,11 +8,17 @@
 // later element writes but not a regrowth, which moves the list to a new
 // buffer; a view of an array or `StrBuf` views a copy.
 
+use rok::core::marker::{Memo, Transfer, buf_is_null, buf_slots, copy_buf, copy_shared};
+
 pub struct Slice<T> {
     pub(pkg) buf: GcBuf<T>;
     pub(pkg) start: usize;
     pub(pkg) len: usize;
     pub(pkg) stride: isize;
+    /// `buf` is a GC object of its own (a list's buffer, an array's
+    /// copy), not a `str`'s bytes or raw parts: a hand-off may copy it
+    /// whole.
+    pub(pkg) whole: bool;
 }
 
 // Shares its buffer like `List` (stdlib 2.13.9).
@@ -21,7 +27,7 @@ impl<T> !Sync for Slice<T> {}
 /// A contiguous view of `buf[r]` (`r` clamped to the length `n`).
 pub(pkg) const fn view_of<T>(buf: GcBuf<T>, r: Range<usize>, n: usize) -> Slice<T> {
     let r = clamp_range(r, n);
-    Slice { buf: buf, start: r.start, len: r.end - r.start, stride: 1 }
+    Slice { buf: buf, start: r.start, len: r.end - r.start, stride: 1, whole: true }
 }
 
 impl<T> Slice<T> {
@@ -68,7 +74,7 @@ impl<T> Slice<T> {
         let m = if k < 0 { -k } else { k };
         let n = (self.len + (m as usize) - 1) / (m as usize);
         let first = if k < 0 && self.len > 0 { self.at(self.len - 1) } else { self.start };
-        Slice { buf: self.buf, start: first, len: n, stride: self.stride * k }
+        Slice { buf: self.buf, start: first, len: n, stride: self.stride * k, whole: self.whole }
     }
 
     pub const fn iter(self) -> SliceIter<T> {
@@ -88,7 +94,7 @@ impl<T> Slice<T> {
     /// The view `raw_parts` takes apart: `len` elements of `buf` from
     /// `start`.
     pub const unsafe fn from_raw_parts(buf: GcBuf<T>, start: usize, len: usize) -> Slice<T> {
-        Slice { buf: buf, start: start, len: len, stride: 1 }
+        Slice { buf: buf, start: start, len: len, stride: 1, whole: false }
     }
 
     /// A new list holding the viewed elements.
@@ -170,7 +176,7 @@ impl<T> Sliceable<Range<usize>> for Slice<T> {
     const fn slice(self, r: Range<usize>) -> Slice<T> {
         let r = clamp_range(r, self.len);
         let first = if r.start < self.len { self.at(r.start) } else { self.start };
-        Slice { buf: self.buf, start: first, len: r.end - r.start, stride: self.stride }
+        Slice { buf: self.buf, start: first, len: r.end - r.start, stride: self.stride, whole: self.whole }
     }
 }
 
@@ -192,7 +198,7 @@ impl<T, const N: usize> Sliceable<Range<usize>> for [T; N] {
             for i in r.start..r.end {
                 buf[i - r.start] = self[i];
             }
-            Slice { buf: buf, start: 0, len: r.end - r.start, stride: 1 }
+            Slice { buf: buf, start: 0, len: r.end - r.start, stride: 1, whole: true }
         }
     }
 }
@@ -272,5 +278,56 @@ impl<T: Debug> Debug for Slice<T> {
             try Debug::fmt(self[i], ref f);
         }
         try f.write_str("]")
+    }
+}
+
+/// A hand-off's copy (stdlib 2.13.9): a view of a whole buffer views
+/// that buffer's one copy, which every other view of it and its list
+/// share. Any other view (a `str`'s bytes) copies only its elements into
+/// a buffer of their own; its buffer word is never read as an object, so
+/// the memo keys it with the range.
+impl<T> Transfer for Slice<T> {
+    const fn transfer_copy(self, m: Memo) -> Slice<T> {
+        if buf_is_null(self.buf) {
+            return self;
+        }
+        if self.whole {
+            let slots = unsafe { buf_slots(self.buf) };
+            let buf = copy_shared(self.buf, slots, slots, m);
+            return Slice { buf, start: self.start, len: self.len, stride: self.stride, whole: true };
+        }
+        let stride = self.stride as usize;
+        unsafe {
+            if let got: GcBuf<Slice<T>> = m.find_at::<T, Slice<T>>(self.buf, self.start, self.len, stride) {
+                return got[0];
+            }
+            let boxed: GcBuf<Slice<T>> = buf_new(1);
+            m.note_at::<T, Slice<T>>(self.buf, self.start, self.len, stride, boxed);
+            let slots = if self.len == 0 { 1 } else { self.len };
+            let buf = copy_buf(self.buf, self.start, self.len, self.stride, slots, m);
+            let s = Slice { buf, start: 0usize, len: self.len, stride: 1isize, whole: true };
+            boxed[0] = s;
+            s
+        }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> Slice<T> {
+        if buf_is_null(self.buf) {
+            return self;
+        }
+        if self.whole {
+            m.keep(self.buf);
+            return self;
+        }
+        let stride = self.stride as usize;
+        unsafe {
+            if let _: GcBuf<Slice<T>> = m.find_at::<T, Slice<T>>(self.buf, self.start, self.len, stride) {
+                return self;
+            }
+            let boxed: GcBuf<Slice<T>> = buf_new(1);
+            boxed[0] = self;
+            m.note_at::<T, Slice<T>>(self.buf, self.start, self.len, stride, boxed);
+        }
+        self
     }
 }

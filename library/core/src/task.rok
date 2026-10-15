@@ -54,6 +54,7 @@ pub mod time;
 use rok::core::task::time::{Duration, Instant};
 use rok::core::future::{Context, Future, Poll, TryAsyncFuture, Waker};
 use rok::core::collections::raw::{GcBuf, buf_new, buf_same};
+use rok::core::marker::hand_over;
 use rok::core::sync::{Atomic, Mutex, Once};
 use rok::core::rt::{atomic_add, atomic_cas, atomic_load, atomic_xchg, key};
 
@@ -161,7 +162,7 @@ fn finish(t: TaskRef) {
         using g = t.joiners.lock() {
             atomic_xchg(t.state, 0, DONE, SeqCst);
             ws = g.get();
-            g.set(List::new());
+            g.set_unshared(List::new());
         }
         // The finished future (its frame) is no longer reachable from here.
         t.poll[0] = |ctx: Context| -> bool { true };
@@ -191,7 +192,7 @@ struct Queue {
 }
 
 const fn queue_new() -> Queue {
-    Queue { items: Mutex::new(Deque::new()), len: Atomic::new(0usize) }
+    Queue { items: unsafe { Mutex::new_unshared(Deque::new()) }, len: Atomic::new(0usize) }
 }
 
 fn push(q: Queue, t: TaskRef) {
@@ -372,7 +373,7 @@ impl Pool {
             let pool = Pool {
                 workers: List::new(),
                 injector: queue_new(),
-                timers: Mutex::new(BinaryHeap::by(|a: Timer, b: Timer| a.at < b.at)),
+                timers: unsafe { Mutex::new_unshared(BinaryHeap::by(|a: Timer, b: Timer| a.at < b.at)) },
                 dead: buf_new(1),
                 signal: buf_new(5),
                 no_up: buf_new(0),
@@ -1012,7 +1013,7 @@ fn new_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
         let t = TaskRef {
             state: state,
             poll: p,
-            joiners: Mutex::new(List::<Waker>::new()),
+            joiners: unsafe { Mutex::new_unshared(List::<Waker>::new()) },
             parked: List::new(),
             home: home,
             id: NEXT_TASK_ID.fetch_add(1),
@@ -1035,7 +1036,7 @@ const fn poll_fn<F: Future>(fut: F, slot: GcBuf<F::Output>) -> fn(Context) -> bo
             let r = f.poll(ref c);
             cell[0] = f;
             if let Poll::Ready(v) = r {
-                slot[0] = v;
+                slot[0] = hand_over::<F::Output>(v);
                 return true;
             }
             false
@@ -1085,13 +1086,13 @@ pub fn block_on_try<T, E>(fut: TryAsyncFuture<T, E>) throws (E) -> T {
             let f = cell[0];
             let c = ctx;
             let r = try f.poll(ref c) catch e {
-                err[0] = e;
+                err[0] = hand_over::<E>(e);
                 failed[0] = true;
                 return true;
             };
             cell[0] = f;
             if let Poll::Ready(v) = r {
-                out[0] = v;
+                out[0] = hand_over::<T>(v);
                 return true;
             }
             false
@@ -1519,7 +1520,7 @@ const fn proxy_task(parent: Waker) -> TaskRef {
         TaskRef {
             state: state,
             poll: p,
-            joiners: Mutex::new(List::<Waker>::new()),
+            joiners: unsafe { Mutex::new_unshared(List::<Waker>::new()) },
             parked: List::new(),
             home: parent.task.home,
             id: 0,
@@ -1997,7 +1998,7 @@ pub fn spawn_blocking<T: Send>(f: fn() -> T + Send) -> Blocking<T> {
         // before any wake (its first poll) still finds the thread there.
         let job: fn() -> (fn() + Send) + Send = || -> (fn() + Send) {
             let slot = cell.get();
-            slot[0] = f();
+            slot[0] = hand_over::<T>(f());
             || {
                 let w: Waker | none = none;
                 using g = waiter.lock() {

@@ -1,0 +1,41 @@
+// expect-exit: 0
+// spec: std 213-marker §2.13.9 / refs-lang §4.13
+// expect-stdout:
+// 1 2 1 2
+
+// A hand-off in a value built at compile time (a field default, a
+// `static`, a `const fn`) copies nothing: nothing else reaches it.
+struct Pool {
+    name: str = "p";
+    conns: Mutex<Dict<str, i64>> = Mutex::new(Dict::<str, i64>::new());
+    seen: Mutex<List<i64>> = Mutex::new([]);
+}
+
+static STATE: Mutex<List<i32>> = Mutex::new([]);
+
+const fn mk() -> Mutex<Dict<str, i64>> {
+    Mutex::new(Dict::new())
+}
+
+struct S {
+    m: Mutex<List<i32>> = Mutex::new([1, 2]);
+    n: i32 = 0;
+}
+
+fn main() {
+    let p = Pool {};
+    using g = p.conns.lock() { g.get()["a"] = 1; }
+    let n1 = 0usize;
+    using g = p.conns.lock() { n1 = g.get().len(); }
+    using g = STATE.lock() { g.get().push(1); }
+    let m = mk();
+    using g = m.lock() { g.get()["a"] = 1; }
+    let s = S {};
+    let n2 = 0usize;
+    using g = s.m.lock() { n2 = g.get().len(); }
+    let n3 = 0usize;
+    using g = STATE.lock() { n3 = g.get().len(); }
+    let n4 = 0usize;
+    using g = m.lock() { n4 = g.get().len() + 1; }
+    println(f"{n1} {n2} {n3} {n4}");
+}

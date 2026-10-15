@@ -748,6 +748,15 @@ impl<'b> Interp<'b> {
             Callee::Refused(why) => return Err(Stop::Runtime(span, why)),
             Callee::Poisoned => return Err(Stop::Poisoned),
         };
+        // A hand-off's copy (stdlib 2.13.9) of a value built at compile
+        // time: nothing else reaches it, so it is the value itself.
+        let base = func.name.split("__").next().unwrap_or(&func.name);
+        if std && base == "rok::core::marker::hand_over_copy" && args.len() == 1 {
+            return Ok(args.into_iter().next().expect("one argument"));
+        }
+        if std && base == "rok::core::marker::hand_over_into_copy" && args.len() == 2 {
+            return Ok(args.into_iter().nth(1).expect("two arguments"));
+        }
         let Some(body) = &func.body else {
             return Err(Stop::Runtime(
                 span,

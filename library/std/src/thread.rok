@@ -13,6 +13,7 @@
 use rok::std::io::{IoError, IoErrorKind};
 use rok::std::time::Duration;
 use rok::core::future::IntoFuture;
+use rok::core::marker::hand_over;
 use rok::core::task::Blocking;
 
 /// Identifies a thread for its lifetime (its runtime worker id).
@@ -48,7 +49,7 @@ const fn new_rec(id: u64, name: str | none) -> Rec {
     Rec { id: id, name: name, park: Atomic::new(0), locals: Dict::new() }
 }
 
-static THREADS: Mutex<Dict<u64, Rec>> = Mutex::new(Dict::new());
+static THREADS: Mutex<Dict<u64, Rec>> = unsafe { Mutex::new_unshared(Dict::new()) };
 
 /// The calling thread's record, made on first use.
 fn this_rec() -> Rec {
@@ -191,7 +192,7 @@ impl Builder {
                     unsafe { rok_thread_set_name(n) };
                 }
                 let result = cell.get();
-                result[0] = f();
+                result[0] = hand_over::<T>(f());
                 using g = THREADS.lock() { g.get().remove(id); }
             };
             let h = unsafe { rok_thread_spawn(run, self.stack_size ?? 0usize, id) };

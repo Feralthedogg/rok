@@ -1,0 +1,47 @@
+// needs: threads
+// gc-stress: 5
+// expect-exit: 0
+// spec: std 213-marker §2.13.9 / std 209-collections §2.9.7
+// expect-stdout:
+// list 30 a 30 b 30 a-again 30 lens 4 4
+// views first 30 30 6
+// bytes kept 5 49 6 112
+
+// Views and the list they view stay one buffer in the copy, in either
+// order; a view of a `str`'s bytes copies just those bytes.
+use rok::std::thread;
+
+fn main() {
+    let l: List<i64> = [1, 2, 3, 4, 5, 6];
+    let a = l[0:4];
+    let b = l[2:6];
+    let (tx, rx) = channel::<(List<i64>, Slice<i64>, Slice<i64>, Slice<i64>)>();
+    let t = thread::spawn(|| {
+        if let v: (List<i64>, Slice<i64>, Slice<i64>, Slice<i64>) = rx.recv() {
+            let (ll, sa, sb, sa2) = v;
+            ll[2] = 30;
+            return f"list {ll[2]} a {sa[2]} b {sb[0]} a-again {sa2[2]} lens {sa.len()} {sb.len()}";
+        }
+        "none"
+    });
+    try! tx.send((l, a, b, a));
+    println(try! t.join());
+
+    // The views come before the list they view.
+    let (tv, rv) = channel::<(Slice<i64>, Slice<i64>, List<i64>)>();
+    let k: List<i64> = [1, 2, 3, 4, 5, 6];
+    try! tv.send((k[2:4], k[1:3], k));
+    if let w: (Slice<i64>, Slice<i64>, List<i64>) = rv.recv() {
+        let (x, y, kk) = w;
+        kk[2] = 30;
+        println(f"views first {x[0]} {y[1]} {kk.len()}");
+    }
+
+    let (ts, rs) = channel::<(Slice<u8>, Slice<u8>)>();
+    let s = f"prefix-{12345}-and";
+    try! ts.send((s[7:12].as_bytes(), s.as_bytes()));
+    if let v: (Slice<u8>, Slice<u8>) = rs.recv() {
+        let (sub, whole) = v;
+        println(f"bytes kept {sub.len()} {sub[0]} {sub.len() + 1} {whole[0]}");
+    }
+}

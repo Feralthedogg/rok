@@ -1,0 +1,36 @@
+// expect-exit: 0
+// spec: std 213-marker §2.13.9
+// expect-stdout:
+// 100000 4999950000
+
+// A hand-off of a chain 100000 deep: the copy walks a work list, so its
+// depth costs no stack.
+use rok::std::thread;
+
+struct Node {
+    v: i64;
+    next: List<Node>;
+}
+
+fn main() {
+    let head: List<Node> = [];
+    for i in 0..100000i64 {
+        head = [Node { v: i, next: head }];
+    }
+    let (tx, rx) = channel::<List<Node>>();
+    let t = thread::spawn(|| {
+        let s = 0i64;
+        let c = 0i64;
+        if let l: List<Node> = rx.recv() {
+            let cur = l;
+            while cur.len() > 0 {
+                s += cur[0].v;
+                c += 1;
+                cur = cur[0].next;
+            }
+        }
+        f"{c} {s}"
+    });
+    try! tx.send(head);
+    println(try! t.join());
+}

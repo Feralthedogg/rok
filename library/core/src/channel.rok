@@ -10,6 +10,7 @@
 // itself in a wait word (`rx` / `tx`) and looks at the queue again before
 // sleeping on it; a push / pop wakes only when someone is counted.
 
+use rok::core::marker::hand_over;
 use rok::core::rt::{atomic_add, atomic_cas, atomic_load, atomic_sub, atomic_xchg, key};
 
 /// What `send` hands back when this sender was closed.
@@ -387,6 +388,7 @@ impl<T> Sender<T> {
         if !self.is_open() {
             throw SendError::Closed(value);
         }
+        let value = hand_over::<T>(value);
         let ch = self.ch;
         let pos = ch.push(value);
         while pos == FULL {
@@ -422,7 +424,7 @@ impl<T> Sender<T> {
                 throw TrySendError::Full(value);
             }
         }
-        if ch.push(value) == FULL {
+        if ch.push(hand_over::<T>(value)) == FULL {
             throw TrySendError::Full(value);
         }
         ch.wake_receiver();
@@ -432,7 +434,7 @@ impl<T> Sender<T> {
     /// suspends the task (not the thread) while a bounded channel is
     /// full, and on a rendezvous channel until the value is received.
     pub const fn send_async(self, value: T) -> SendFuture<T> {
-        SendFuture { tx: self, value: value, pushed: false, ticket: 0, counted: false }
+        SendFuture { tx: self, value: value, handed: false, pushed: false, ticket: 0, counted: false }
     }
 
     /// Close this sender; later `send`s on it throw `Closed`.
@@ -566,6 +568,8 @@ impl<T> rok::core::stream::Stream for Receiver<T> {
 pub struct SendFuture<T> {
     tx: Sender<T>;
     value: T;
+    /// `value` is the hand-off's copy (made at the first push).
+    handed: bool;
     pushed: bool;
     ticket: usize;
     /// Counted in the channel's suspended senders.
@@ -598,6 +602,10 @@ impl<T> SendFuture<T> {
             if !self.tx.is_open() {
                 self.uncount();
                 throw SendError::Closed(self.value);
+            }
+            if !self.handed {
+                self.value = hand_over::<T>(self.value);
+                self.handed = true;
             }
             let pos = ch.push(self.value);
             if pos == FULL {

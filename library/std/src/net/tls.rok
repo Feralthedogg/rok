@@ -351,7 +351,7 @@ pub struct SessionCache {
 }
 
 impl SessionCache {
-    pub const fn new() -> SessionCache { SessionCache { m: Mutex::new([]) } }
+    pub const fn new() -> SessionCache { SessionCache { m: unsafe { Mutex::new_unshared([]) } } }
 
     /// Tickets held.
     pub fn len(self) -> usize {
@@ -445,7 +445,7 @@ pub struct TicketStore {
 }
 
 impl TicketStore {
-    pub const fn new() -> TicketStore { TicketStore { m: Mutex::new([]) } }
+    pub const fn new() -> TicketStore { TicketStore { m: unsafe { Mutex::new_unshared([]) } } }
 
     /// Sessions held.
     pub fn len(self) -> usize {

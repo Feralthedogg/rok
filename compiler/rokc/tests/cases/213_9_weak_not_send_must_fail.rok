@@ -1,0 +1,13 @@
+// spec: std 213-marker §2.13.9 / std 106-gc-pin §1.6.9
+// expect-error: type `Weak<List<i32>>` does not satisfy trait bound `rok::core::marker::Send` required by `rok::core::channel::channel` (a hand-off cannot copy what a `Weak` names, so it stays with its thread: send the `GcPtr`; stdlib 2.13.9)
+
+// A hand-off cannot copy what a weak reference names: it stays with its
+// thread.
+use rok::bare::gc::{GcPtr, Weak};
+
+fn main() {
+    let p = GcPtr::new([1]);
+    let (tx, rx) = channel::<Weak<List<i32>>>();
+    try! tx.send(Weak::new(p));
+    let _ = rx.recv();
+}

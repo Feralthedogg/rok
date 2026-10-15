@@ -5,6 +5,8 @@
 // bytes, so slicing, `lines`, `split*`, `trim*` and `strip_*` copy
 // nothing. `StrBuf` is the growable buffer.
 
+use rok::core::marker::{Memo, Transfer, buf_is_null};
+
 impl str {
     pub const fn new() -> str { "" }
 
@@ -55,7 +57,7 @@ impl str {
     /// The UTF-8 bytes as a read-only view of the string itself (no
     /// copy, O(1)).
     pub fn as_bytes(self) -> Slice<u8> {
-        Slice { buf: unsafe { rok_str_bytes_buf(self) }, start: 0, len: self.len(), stride: 1 }
+        Slice { buf: unsafe { rok_str_bytes_buf(self) }, start: 0, len: self.len(), stride: 1, whole: false }
     }
 
     /// The first byte's address, for FFI (`len()` bytes, no NUL
@@ -827,4 +829,32 @@ impl FromStr for char {
 impl FromStr for str {
     type Err = ParseError;
     const fn from_str(s: str) throws (ParseError) -> str { s }
+}
+
+/// A hand-off's copy (stdlib 2.13.9): a new head and byte buffer.
+impl Transfer for StrBuf {
+    const fn transfer_copy(self, m: Memo) -> StrBuf {
+        if buf_is_null(self.h) {
+            return self;
+        }
+        if let got: GcBuf<StrBufHead> = m.find(self.h) {
+            return StrBuf { h: got };
+        }
+        unsafe {
+            let s = self.h[0];
+            let h: GcBuf<StrBufHead> = buf_new(1);
+            m.note(self.h, h);
+            let bytes: GcBuf<u8> = buf_new(buf_len(s.cap, 1));
+            rok_buf_copy(bytes, 0, s.bytes, 0, s.len);
+            h[0] = StrBufHead { len: s.len, cap: s.cap, bytes };
+            StrBuf { h }
+        }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> StrBuf {
+        if !buf_is_null(self.h) {
+            m.keep(self.h);
+        }
+        self
+    }
 }

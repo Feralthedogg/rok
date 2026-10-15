@@ -8,6 +8,8 @@
 // insertion order (which `OrderedDict` relies on; for `Dict` the spec
 // leaves it unspecified).
 
+use rok::core::marker::{Memo, Transfer, buf_is_null, copy_buf};
+
 /// The dict's object. `keys` / `vals` have one more slot that stays
 /// zero: a hole's key and value are overwritten with it, so a removed
 /// entry keeps nothing alive. `meta` holds `cap` entry hashes (0: a
@@ -494,4 +496,41 @@ pub const fn dict_literal<K: Hash, V>(pairs: ...(K, V)) -> Dict<K, V> {
         d.insert(k, v);
     }
     return d;
+}
+
+/// A hand-off's copy (stdlib 2.13.9): the same table; keys and values go
+/// through `transfer` from the memo's queue (holes stay zero).
+impl<K, V> Transfer for Dict<K, V> {
+    const fn transfer_copy(self, m: Memo) -> Dict<K, V> {
+        if buf_is_null(self.h) {
+            return self;
+        }
+        if let got: GcBuf<DictHead<K, V>> = m.find(self.h) {
+            return Dict { h: got };
+        }
+        unsafe {
+            let s = self.h[0];
+            let h: GcBuf<DictHead<K, V>> = buf_new(1);
+            m.note(self.h, h);
+            let n = cap_add(s.cap, 1);
+            let index = cap_add(s.cap, s.slots);
+            h[0] = DictHead {
+                len: s.len,
+                n: s.n,
+                cap: s.cap,
+                slots: s.slots,
+                keys: copy_buf(s.keys, 0, s.n, 1, n, m),
+                vals: copy_buf(s.vals, 0, s.n, 1, n, m),
+                meta: copy_buf(s.meta, 0, index, 1, index, m),
+            };
+            Dict { h }
+        }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> Dict<K, V> {
+        if !buf_is_null(self.h) {
+            m.keep(self.h);
+        }
+        self
+    }
 }

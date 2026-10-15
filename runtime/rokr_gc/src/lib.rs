@@ -423,6 +423,14 @@ fn obj_size(obj: *mut u8) -> usize {
     unsafe { (*header(obj)).gc_word as usize }
 }
 
+/// Bytes after the header of the live object `obj`.
+///
+/// # Safety
+/// `obj` must be the start of a live GC object.
+pub unsafe fn payload_bytes(obj: *mut u8) -> usize {
+    obj_size(obj) - HEADER_SIZE
+}
+
 /// [`obj_size`] that also reads an evacuated object's (its copy's).
 fn moved_size(obj: *mut u8) -> usize {
     // SAFETY: an object header; a forwarded one's `gc_word` is its copy.

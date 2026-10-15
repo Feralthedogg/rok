@@ -88,6 +88,9 @@ pub struct Weak<T> {
 }
 
 impl<T> !Sync for Weak<T> {}
+// A hand-off cannot copy what a weak reference names (stdlib 2.13.9),
+// so it stays with its thread.
+impl<T> !Send for Weak<T> {}
 
 impl<T> Weak<T> {
     /// A weak reference to `target`'s object.

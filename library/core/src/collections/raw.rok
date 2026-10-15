@@ -17,6 +17,13 @@ pub(pkg) fn buf_erase<T>(buf: GcBuf<T>) -> GcBuf<u8> {
     buf_erase(buf)
 }
 
+/// `buf` as a buffer of the slot's element type (no check: the caller
+/// knows what the object holds).
+#[intrinsic("rok.buf_cast")]
+pub(pkg) unsafe fn buf_cast<T, U>(buf: GcBuf<T>) -> GcBuf<U> {
+    buf_cast(buf)
+}
+
 #[intrinsic("rok.size_of")]
 pub(pkg) fn size_of<T>() -> usize;
 

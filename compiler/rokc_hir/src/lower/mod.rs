@@ -3446,7 +3446,13 @@ impl<'a> LowerCtx<'a> {
             HirTy::Fn(_, _, b) => b.auto.iter().any(|k| {
                 k == key || (key == self.lang("sync_trait") && *k == self.lang("send_trait"))
             }),
-            HirTy::AnyTrait(b) => bound_covers(self, b, &TraitRef::plain(key)),
+            // As for a `+ Send` closure: copies of an `any` share its box, so
+            // crossing threads needs `Sync` too (no collection inside).
+            HirTy::AnyTrait(b) => {
+                bound_covers(self, b, &TraitRef::plain(key))
+                    && (key != self.lang("send_trait")
+                        || bound_covers(self, b, &TraitRef::plain(self.lang("sync_trait"))))
+            }
             // Unresolved paths (`none`, type-param leftovers) and error
             // types count as having it: no cascade errors.
             HirTy::Prim(_)
@@ -3493,6 +3499,11 @@ impl<'a> LowerCtx<'a> {
                          array)"
                     );
                 }
+                if base == "rok::bare::gc::Weak" && key == self.lang("send_trait") {
+                    return " (a hand-off cannot copy what a `Weak` names, so it stays with its \
+                            thread: send the `GcPtr`; stdlib 2.13.9)"
+                        .to_owned();
+                }
                 if self.env.opts_out(base, key) {
                     return String::new();
                 }
@@ -3526,6 +3537,11 @@ impl<'a> LowerCtx<'a> {
                 .map(|t| step("a member".to_owned(), t))
                 .unwrap_or_default(),
             HirTy::Array(e, _) | HirTy::GcBuf(e) => step("an element".to_owned(), e),
+            HirTy::AnyTrait(_) if key == self.lang("send_trait") => " (an `any` crosses \
+                 threads only when its bound has both `Send` and `Sync`, since copies share \
+                 its box: give the trait `Sync` as a supertrait, or send the concrete type; \
+                 stdlib 2.13.9)"
+                .to_owned(),
             _ => String::new(),
         }
     }

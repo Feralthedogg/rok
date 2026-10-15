@@ -1,0 +1,272 @@
+// needs: threads
+// gc-stress: 5
+// expect-exit: 0
+// spec: std 213-marker §2.13.9 / std 217-channel §2.17.1
+// expect-stdout:
+// same object twice 20000
+// element and argument 20000
+// self field and argument 20000
+// stored then sent 20000
+// collect of one object 20000
+// copy by collect 20000
+// dict key 20000
+// strbuf 20000
+// out of a lock 20000
+// update closure 20000
+// array of 300 20000
+
+// Routes that give one list to two threads, run the way they would if
+// the static check (E202) missed them: each sends a list and keeps a
+// handle to it. The receiver works on a copy, so both sides count to
+// N on their own. `unsafe` turns the check off (spec 4.15.2).
+use rok::std::thread;
+
+const N: i32 = 20000;
+
+/// A thread that pushes N items into the list it receives.
+fn grower() -> (Sender<List<i32>>, thread::JoinHandle<usize>) {
+    let (tx, rx) = channel::<List<i32>>();
+    let t = thread::spawn(|| {
+        if let l: List<i32> = rx.recv() {
+            for i in 0..N {
+                l.push(i);
+            }
+            return l.len();
+        }
+        0usize
+    });
+    (tx, t)
+}
+
+fn grow(l: List<i32>) -> usize {
+    for i in 0..N {
+        l.push(i);
+    }
+    l.len()
+}
+
+/// Both sides' counts: equal (N each) when they had separate lists.
+fn report(what: str, n: usize, t: thread::JoinHandle<usize>) {
+    let m = try! t.join();
+    println(f"{what} {if n == m { n } else { 0 }}");
+}
+
+fn race(tx: Sender<List<i32>>, e: List<i32>, f: List<i32>) -> usize {
+    unsafe {
+        try! tx.send(e);
+        grow(f)
+    }
+}
+
+fn race_elem(tx: Sender<List<i32>>, q: List<List<i32>>, f: List<i32>) -> usize {
+    unsafe {
+        if let e: List<i32> = q.pop() {
+            try! tx.send(e);
+        }
+        grow(f)
+    }
+}
+
+struct H {
+    items: List<i32>;
+}
+
+impl H {
+    fn go(self, tx: Sender<List<i32>>, l: List<i32>) -> usize {
+        unsafe {
+            try! tx.send(l);
+            grow(self.items)
+        }
+    }
+}
+
+static M: Mutex<List<i32>> = Mutex::new([]);
+static U: Mutex<List<i32>> = Mutex::new([]);
+
+fn put(e: List<i32>, f: List<i32>) -> usize {
+    unsafe {
+        using g = U.lock() {
+            g.update(|old: List<i32>| e);
+        }
+        grow(f)
+    }
+}
+
+fn race_array(tx: Sender<[List<i32>; 300]>, e: [List<i32>; 300], f: List<i32>) -> usize {
+    unsafe {
+        try! tx.send(e);
+        grow(f)
+    }
+}
+
+fn same_object_twice() {
+    let (tx, t) = grower();
+    let a: List<i32> = [];
+    unsafe {
+        report("same object twice", race(tx, a, a), t);
+    }
+}
+
+fn element_and_argument() {
+    let (tx, t) = grower();
+    let b: List<i32> = [];
+    unsafe {
+        report("element and argument", race_elem(tx, [b], b), t);
+    }
+}
+
+fn self_field_and_argument() {
+    let (tx, t) = grower();
+    let h = H { items: [] };
+    unsafe {
+        report("self field and argument", h.go(tx, h.items), t);
+    }
+}
+
+fn stored_then_sent() {
+    unsafe {
+        let (tx, t) = grower();
+        let all: List<List<i32>> = [[]];
+        for x in all {
+            try! tx.send(x);
+        }
+        all.push([]);
+        report("stored then sent", grow(all[0]), t);
+    }
+}
+
+fn collect_of_one_object() {
+    unsafe {
+        let (tx, t) = grower();
+        let c: List<i32> = [];
+        let q: List<List<i32>> = (0..2).map(|_i: i32| c).collect::<List<List<i32>>>();
+        if let e: List<i32> = q.pop() {
+            try! tx.send(e);
+        }
+        let n = if let f: List<i32> = q.pop() { grow(f) } else { 0usize };
+        report("collect of one object", n, t);
+    }
+}
+
+fn copy_by_collect() {
+    unsafe {
+        let (tx, t) = grower();
+        let src: List<List<i32>> = [[]];
+        let copy = src.iter().collect::<List<List<i32>>>();
+        if let e: List<i32> = copy.pop() {
+            try! tx.send(e);
+        }
+        report("copy by collect", grow(src[0]), t);
+    }
+}
+
+// The dict still holds the key it sent: lookups read its own.
+fn dict_key() {
+    unsafe {
+        let (tx, t) = grower();
+        let d: Dict<List<i32>, i32> = Dict::new();
+        let k: List<i32> = [];
+        d.insert(k, 1);
+        try! tx.send(k);
+        let hits = 0usize;
+        for _ in 0..N {
+            if d.contains_key([]) {
+                hits += 1;
+            }
+        }
+        report("dict key", hits, t);
+    }
+}
+
+fn strbuf() {
+    unsafe {
+        let (tx, rx) = channel::<StrBuf>();
+        let t = thread::spawn(|| {
+            if let b: StrBuf = rx.recv() {
+                for _ in 0..N {
+                    b.push_str("x");
+                }
+                return b.len();
+            }
+            0usize
+        });
+        let s = StrBuf::new();
+        let bufs: List<StrBuf> = [s];
+        try! tx.send(s);
+        for _ in 0..N {
+            bufs[0].push_str("y");
+        }
+        report("strbuf", bufs[0].len(), t);
+    }
+}
+
+// Sent out of the lock: lockers and the receiver each have one.
+fn out_of_a_lock() {
+    unsafe {
+        let (tx, t) = grower();
+        using g = M.lock() {
+            try! tx.send(g.get());
+        }
+        for i in 0..N {
+            using g = M.lock() {
+                g.get().push(i);
+            }
+        }
+        let n = 0usize;
+        using g = M.lock() {
+            n = g.get().len();
+        }
+        report("out of a lock", n, t);
+    }
+}
+
+// `update`'s closure brings a list in: the lock keeps a copy.
+fn update_closure() {
+    unsafe {
+        let t = thread::spawn(|| {
+            for i in 0..N {
+                using g = U.lock() {
+                    g.get().push(i);
+                }
+            }
+            0usize
+        });
+        let a: List<i32> = [];
+        let n = put(a, a);
+        let _ = try! t.join();
+        let m = 0usize;
+        using g = U.lock() {
+            m = g.get().len();
+        }
+        println(f"update closure {if n == N as usize && m == N as usize { n } else { 0 }}");
+    }
+}
+
+// An array longer than any unrolled copy is walked too.
+fn array_of_300() {
+    unsafe {
+        let (tx, rx) = channel::<[List<i32>; 300]>();
+        let t = thread::spawn(|| {
+            if let l: [List<i32>; 300] = rx.recv() {
+                return grow(l[299]);
+            }
+            0usize
+        });
+        let a: List<i32> = [];
+        report("array of 300", race_array(tx, [a; 300], a), t);
+    }
+}
+
+fn main() {
+    same_object_twice();
+    element_and_argument();
+    self_field_and_argument();
+    stored_then_sent();
+    collect_of_one_object();
+    copy_by_collect();
+    dict_key();
+    strbuf();
+    out_of_a_lock();
+    update_closure();
+    array_of_300();
+}

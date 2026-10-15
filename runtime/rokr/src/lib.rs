@@ -82,6 +82,7 @@ mod unicode;
 mod unicode_tables;
 #[cfg(any(windows, test))]
 mod winargs;
+mod xfer;
 pub use str::RokStr;
 
 // rokc links the runtime's import libraries; the unit-test executable

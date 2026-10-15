@@ -4,6 +4,8 @@
 // slot past the capacity that is never written: a zero `T` that vacated
 // slots are overwritten with, so the list keeps no removed value alive.
 
+use rok::core::marker::{Memo, Transfer, buf_is_null, copy_shared};
+
 pub struct List<T> {
     h: GcBuf<ListHead<T>>;
 }
@@ -598,5 +600,34 @@ impl<T> AddAssign<List<T>> for List<T> {
         for x in rhs {
             self.push(x);
         }
+    }
+}
+
+/// A hand-off's copy (stdlib 2.13.9): a new head and buffer; the
+/// elements go through `transfer` from the memo's queue.
+impl<T> Transfer for List<T> {
+    const fn transfer_copy(self, m: Memo) -> List<T> {
+        if buf_is_null(self.h) {
+            return self;
+        }
+        if let got: GcBuf<ListHead<T>> = m.find(self.h) {
+            return List { h: got };
+        }
+        unsafe {
+            let s = self.h[0];
+            let h: GcBuf<ListHead<T>> = buf_new(1);
+            m.note(self.h, h);
+            let buf = copy_shared(s.buf, s.len, cap_add(s.cap, 1), m);
+            h[0] = ListHead { len: s.len, cap: s.cap, buf };
+            List { h }
+        }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> List<T> {
+        if !buf_is_null(self.h) {
+            m.keep(self.h);
+            unsafe { m.keep(self.h[0].buf) };
+        }
+        self
     }
 }
