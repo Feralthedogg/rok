@@ -1,0 +1,33 @@
+// spec: §3.14.8 §4.16.4
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/try_force_shows_error.rok:31:13:
+// expect-stderr: try! failed: no such key `port`
+// expect-stderr:   raised at tests/cases/try_force_shows_error.rok:31:18
+// expect-stdout: 8
+
+// A failed `try!` shows which error it got and where it was raised.
+#[derive(Debug)]
+struct Missing { key: str }
+
+impl Display for Missing {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"no such key `{self.key}`") }
+}
+
+impl Error for Missing {}
+
+fn get(k: str) throws (Missing | i32) -> i32 {
+    if k == "n" {
+        throw 8;
+    }
+    if k == "port" {
+        throw Missing { key: k };
+    }
+    1
+}
+
+fn main() {
+    let a = try? get("n");
+    println(f"{a ?? 8}");
+    let b = try! get("port");
+    println(f"{b}");
+}

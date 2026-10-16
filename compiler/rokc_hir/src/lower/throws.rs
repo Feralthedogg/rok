@@ -1167,7 +1167,11 @@ pub(super) fn lower_try(
         (TryKind::Optional, None) if expected != HirTy::Unit => HirTy::Unknown,
         _ => expected.clone(),
     };
-    catch_all_frame(ctx);
+    if kind == TryKind::Force {
+        main_frame(ctx);
+    } else {
+        catch_all_frame(ctx);
+    }
     ctx.try_depth += 1;
     let since = ctx.env.sink.diagnostics.borrow().len();
     let body = lower_expected(ctx, operand, inner_expected);
@@ -1187,21 +1191,9 @@ pub(super) fn lower_try(
         if !frame.hit {
             return body;
         }
-        let panic = hook_call(
-            ctx,
-            "rok_panic_at",
-            "try! failed: the expression threw an error",
-            span,
-        );
+        let report = force_report(ctx, &frame, span);
         let ty = body.ty.clone();
-        return shell(
-            ctx,
-            &frame,
-            body,
-            ty,
-            (vec![HirStmt::Panic(panic)], None),
-            span,
-        );
+        return shell(ctx, &frame, body, ty, (report, None), span);
     }
     // `try?` in statement position just drops the error; elsewhere a
     // `()` operand gives `() | none` (spec 3.14.3).
@@ -1256,27 +1248,93 @@ pub(super) fn uncaught_in_main(
             label: None,
         };
     };
-    let which = frame
-        .arms
-        .as_ref()
-        .map(|a| a.1)
-        .expect("main frame parks errors");
     let site = hir_local(
         frame.site.expect("main frame records sites"),
         &HirTy::Prim(PrimTy::Str),
         span,
     );
-    let mut report = Vec::new();
-    for (k, (ety, local)) in frame.errs.iter().enumerate() {
-        let msg = describe_err(ctx, hir_local(*local, ety, span), span);
-        let call = HirStmt::Panic(HirExpr {
+    let report = per_error(ctx, &frame, span, |_, msg| {
+        HirStmt::Panic(HirExpr {
             kind: HirExprKind::Call {
                 callee: sig.id,
                 args: vec![msg, site.clone()],
             },
             ty: HirTy::Unit,
             span,
-        });
+        })
+    });
+    let valued = ty != HirTy::Unit;
+    let wrapped = shell(ctx, &frame, body, ty, (report, None), span);
+    // A unit / diverging body stays a statement: falling off the end of
+    // an `i32` main is not a unit return.
+    let (stmts, trailing) = if valued {
+        (Vec::new(), Some(wrapped))
+    } else {
+        (vec![HirStmt::Expr(wrapped)], None)
+    };
+    HirBlock {
+        stmts,
+        trailing,
+        label: None,
+    }
+}
+
+/// A failed `try!`'s panic (spec 3.14.8): the error as an uncaught one
+/// prints (4.16.4) and where it was thrown; the panic's own position is
+/// the `try!`.
+fn force_report(
+    ctx: &mut LowerCtx<'_>,
+    frame: &CatchFrame,
+    span: rokc_diagnostic::Span,
+) -> Vec<HirStmt> {
+    let site = hir_local(
+        frame.site.expect("try! frame records sites"),
+        &HirTy::Prim(PrimTy::Str),
+        span,
+    );
+    per_error(ctx, frame, span, |ctx, msg| {
+        let text = concat_strs(
+            ctx,
+            &[
+                Piece::Text("try! failed: "),
+                Piece::Value(msg),
+                Piece::Text("\\n  raised at "),
+                Piece::Value(site.clone()),
+            ],
+            span,
+        );
+        let call = hook_call(ctx, "rok_panic_at", "", span);
+        let HirExprKind::Call { callee, .. } = call.kind else {
+            return HirStmt::Panic(call);
+        };
+        HirStmt::Panic(HirExpr {
+            kind: HirExprKind::Call {
+                callee,
+                args: vec![text],
+            },
+            ty: HirTy::Unit,
+            span,
+        })
+    })
+}
+
+/// `if #which == 0 { report(describe(#err0)) } ... report(describe(#errN))`
+/// over the errors `frame` parked.
+fn per_error(
+    ctx: &mut LowerCtx<'_>,
+    frame: &CatchFrame,
+    span: rokc_diagnostic::Span,
+    mut report_one: impl FnMut(&mut LowerCtx<'_>, HirExpr) -> HirStmt,
+) -> Vec<HirStmt> {
+    let which = frame
+        .arms
+        .as_ref()
+        .map(|a| a.1)
+        .expect("frame parks errors");
+    let mut report = Vec::new();
+    for (k, (ety, local)) in frame.errs.iter().enumerate() {
+        let msg = describe_err(ctx, hir_local(*local, ety, span), span);
+        let call = report_one(ctx, msg);
         if k + 1 == frame.errs.len() {
             report.push(call);
             break;
@@ -1306,20 +1364,7 @@ pub(super) fn uncaught_in_main(
             span,
         }));
     }
-    let valued = ty != HirTy::Unit;
-    let wrapped = shell(ctx, &frame, body, ty, (report, None), span);
-    // A unit / diverging body stays a statement: falling off the end of
-    // an `i32` main is not a unit return.
-    let (stmts, trailing) = if valued {
-        (Vec::new(), Some(wrapped))
-    } else {
-        (vec![HirStmt::Expr(wrapped)], None)
-    };
-    HirBlock {
-        stmts,
-        trailing,
-        label: None,
-    }
+    report
 }
 
 /// Push the frame of a throwing `main`'s body: it takes every error and
@@ -1380,6 +1425,61 @@ fn describe_err(ctx: &mut LowerCtx<'_>, err: HirExpr, span: rokc_diagnostic::Spa
     HirExpr {
         kind: HirExprKind::Const(ConstVal::Str(ctx.ty_name(&err.ty))),
         ty: HirTy::Prim(PrimTy::Str),
+        span,
+    }
+}
+
+/// A piece of [`concat_strs`]: literal text as an f-string writes it, or
+/// a `str` value.
+enum Piece<'a> {
+    Text(&'a str),
+    Value(HirExpr),
+}
+
+/// `{ let #s0 = v0; ...; f"text{#s0}..." }`.
+fn concat_strs(
+    ctx: &mut LowerCtx<'_>,
+    pieces: &[Piece<'_>],
+    span: rokc_diagnostic::Span,
+) -> HirExpr {
+    ctx.push_scope();
+    let mut stmts = Vec::new();
+    let mut parts = Vec::new();
+    for p in pieces {
+        match p {
+            Piece::Text(t) => parts.push(rokc_ast::FStringPart::Lit((*t).to_owned())),
+            Piece::Value(v) => {
+                let name = format!("#s{}", ctx.locals.len());
+                let local = ctx.declare(Some(name.clone()), HirTy::Prim(PrimTy::Str));
+                stmts.push(HirStmt::Let {
+                    local,
+                    init: v.clone(),
+                });
+                parts.push(rokc_ast::FStringPart::Hole {
+                    expr: Expr {
+                        kind: ExprKind::Path(AstPath {
+                            segments: vec![rokc_ast::PathSegment {
+                                name,
+                                generics: Vec::new(),
+                            }],
+                            span,
+                        }),
+                        span,
+                    },
+                    spec: Vec::new(),
+                });
+            }
+        }
+    }
+    let text = super::fstring::lower_fstring(ctx, &parts, span);
+    ctx.pop_scope();
+    HirExpr {
+        ty: HirTy::Prim(PrimTy::Str),
+        kind: HirExprKind::Block(Box::new(HirBlock {
+            stmts,
+            trailing: Some(text),
+            label: None,
+        })),
         span,
     }
 }

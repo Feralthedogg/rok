@@ -1,0 +1,19 @@
+// spec: §2.13.9
+// expect-error: type `Node` does not satisfy trait bound `rok::core::marker::Sync` required by `need` because field `f` has type `fn() -> i32`
+// forbid-error: because field `next` has type
+
+// The note names the part that is not `Sync`, not the type's way back
+// to itself through `next`.
+use rok::core::collections::raw::GcBuf;
+
+struct Node {
+    next: GcBuf<Node | none>;
+    f: fn() -> i32;
+}
+
+fn need<T: Sync>(x: T) {}
+
+fn main() {
+    let n: Node | none = none;
+    if let v: Node = n { need(v); }
+}

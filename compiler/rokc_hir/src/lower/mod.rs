@@ -3477,14 +3477,36 @@ impl<'a> LowerCtx<'a> {
     /// Why `ty` lacks `key`: the path to the component that opts out, to
     /// follow "`T` is not `Sync`".
     fn auto_trait_cause(&self, ty: &HirTy, key: &str, depth: u32) -> String {
+        self.cause_on(ty, key, depth, &[])
+    }
+
+    /// `auto_trait_cause` below the types `path` already went through: a
+    /// type that contains itself is said once, not followed round again.
+    fn cause_on(&self, ty: &HirTy, key: &str, depth: u32, path: &[HirTy]) -> String {
         let tr = leaf_name(key);
         let lacks = |t: &HirTy| !self.auto_trait(t, key, 0, &mut AutoSeen::default());
+        let mut below = path.to_vec();
+        below.push(ty.clone());
         let step = |what: String, t: &HirTy| {
+            let name = self.ty_name(t);
+            if below.contains(t) {
+                return format!(
+                    " because {what} has type `{name}`, and so on: `{name}` contains itself"
+                );
+            }
             format!(
-                " because {what} has type `{}`{}",
-                self.ty_name(t),
-                self.auto_trait_cause(t, key, depth + 1)
+                " because {what} has type `{name}`{}",
+                self.cause_on(t, key, depth + 1, &below)
             )
+        };
+        // Of two causes, the one that reaches the opting-out part beats one
+        // that only comes round to a type already on the path.
+        let not_round = |a: String, b: String| {
+            if a.ends_with("contains itself") && !b.ends_with("contains itself") {
+                b
+            } else {
+                a
+            }
         };
         if depth > 8 {
             return String::new();
@@ -3518,23 +3540,26 @@ impl<'a> LowerCtx<'a> {
                 }
                 def.fields
                     .iter()
-                    .find(|f| lacks(&f.ty))
+                    .filter(|f| lacks(&f.ty))
                     .map(|f| step(format!("field `{}`", f.name), &f.ty))
+                    .reduce(not_round)
                     .unwrap_or_default()
             }
             HirTy::Enum(id) => self
                 .enum_def(*id)
                 .variants
                 .iter()
-                .find_map(|v| {
+                .filter_map(|v| {
                     let t = v.payload_ty.as_ref().filter(|t| lacks(t))?;
                     Some(step(format!("variant `{}`", v.name), t))
                 })
+                .reduce(not_round)
                 .unwrap_or_default(),
             HirTy::Tuple(ts) | HirTy::Sum(ts) => ts
                 .iter()
-                .find(|t| lacks(t))
+                .filter(|t| lacks(t))
                 .map(|t| step("a member".to_owned(), t))
+                .reduce(not_round)
                 .unwrap_or_default(),
             HirTy::Array(e, _) | HirTy::GcBuf(e) => step("an element".to_owned(), e),
             HirTy::AnyTrait(_) if key == self.lang("send_trait") => " (an `any` crosses \
