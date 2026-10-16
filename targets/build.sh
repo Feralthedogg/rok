@@ -29,8 +29,12 @@
 # Needs rustup with llvm-tools, curl, make, python3, bash, clang (CC
 # overrides; wasm32-wasi's profile runtime needs one with the
 # WebAssembly target) and the pinned LLVM's ld.lld (ROK_LLVM_PREFIX,
-# else llvm/build.sh's).
+# else llvm/build.sh's). Windows images name the first two
+# mingw32-make and python.
 set -eu
+
+make=$(command -v make || command -v mingw32-make || echo make)
+python=$(command -v python3 || command -v python || echo python3)
 
 TARGETS="x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu
 aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl
@@ -233,7 +237,7 @@ profile() {
 			rm -rf "$work"
 			mkdir -p "$work"
 			tar -xzf "$cache/musl-$MUSL.tar.gz" -C "$work"
-			make -s -C "$work/musl-$MUSL" ARCH="$arch" prefix= DESTDIR="$inc" install-headers
+			"$make" -s -C "$work/musl-$MUSL" ARCH="$arch" prefix= DESTDIR="$inc" install-headers
 			rm -rf "$work"
 		fi
 		flags="--target=$t -nostdlibinc -isystem $inc/include $unix"
@@ -382,7 +386,7 @@ for t in ${*:-$TARGETS}; do
 		work=$dir/stub
 		mkdir -p "$work"
 		for lib in c m; do
-			python3 "$here/glibc_stubs.py" "$root/lib/$multi/lib$lib.so.6" "$work/$lib.s" "$work/$lib.map"
+			"$python" "$here/glibc_stubs.py" "$root/lib/$multi/lib$lib.so.6" "$work/$lib.s" "$work/$lib.map"
 			"$cc" --target="$(clang_target "$t")" -c "$work/$lib.s" -o "$work/$lib.o"
 			"$lld" -shared -soname "lib$lib.so.6" --version-script "$work/$lib.map" -o "$dir/lib$lib.so" "$work/$lib.o"
 		done

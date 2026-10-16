@@ -5,7 +5,8 @@ name: ci
 #   main     push to main, merge queue: linux-x64, linux-arm64,
 #            windows-x64, -O0
 #   nightly  schedule, manual run: every host at -O0 and -O2, cross
-#            targets, wasm, bindgen; a manual run's inputs pick a subset
+#            targets, wasm, bindgen, dist; a manual run's inputs pick a
+#            subset
 on:
   push:
     paths-ignore: ["**/*.md"]
@@ -20,7 +21,7 @@ on:
         description: "Hosts: all, or some of linux-x64 linux-arm64 macos-arm64 macos-x64 windows-x64 windows-arm64"
         default: all
       jobs:
-        description: "Jobs after the prefixes: all, or some of gate cross wasm bindgen (none: prefixes only)"
+        description: "Jobs after the prefixes: all, or some of gate cross wasm bindgen dist (none: prefixes only)"
         default: all
       filter:
         description: "ROK_TEST_FILTER: the integration cases to run (empty: all)"
@@ -55,6 +56,7 @@ jobs:
       hosts: ${{ steps.plan.outputs.hosts }}
       prefixes: ${{ steps.plan.outputs.prefixes }}
       bindgen: ${{ steps.plan.outputs.bindgen }}
+      dist: ${{ steps.plan.outputs.dist }}
       runners: ${{ steps.plan.outputs.runners }}
       opts: ${{ steps.plan.outputs.opts }}
       cross: ${{ steps.plan.outputs.cross }}
@@ -100,7 +102,7 @@ jobs:
           nightly)
             hosts=${IN_HOSTS:-all} jobs=${IN_JOBS:-all} opts='["-O0", "-O2"]' filter=$IN_FILTER
             [ "$hosts" = all ] && hosts=$(echo "$all" | jq -r '.[].name')
-            [ "$jobs" = all ] && jobs="gate cross wasm bindgen"
+            [ "$jobs" = all ] && jobs="gate cross wasm bindgen dist"
             ;;
           esac
           picked=$(echo "$all" | jq -c --arg h "$hosts" '[.[] | select(.name | IN($h | splits("[\\s,]+")))]')
@@ -110,10 +112,11 @@ jobs:
           *" cross "*) cross=$(echo "$cross" | jq -c --argjson p "$picked" '[.[] | select(.host | IN($p[].name))]') ;;
           *) cross='[]' ;;
           esac
-          bindgen='[]'
-          case " $jobs " in *" bindgen "*) bindgen=$(echo "$picked" | jq -c '[.[] | select(.name == "linux-x64") | .name]') ;; esac
-          prefixes=$(jq -cn --argjson p "$picked" --argjson c "$cross" --argjson b "$bindgen" \
-            '[($p[] | select(.gate) | .name), ($c[].host | sub("windows-arm64"; "windows-x64")), $b[]] | unique')
+          bindgen='[]' dist='[]'
+          case " $jobs " in *" bindgen "*) bindgen=$(echo "$picked" | jq -c '[.[] | select(.name | IN("linux-x64", "windows-x64")) | .name]') ;; esac
+          case " $jobs " in *" dist "*) dist=$(echo "$picked" | jq -c '[.[] | select(.name == "windows-x64") | .name]') ;; esac
+          prefixes=$(jq -cn --argjson p "$picked" --argjson c "$cross" --argjson b "$bindgen" --argjson d "$dist" \
+            '[($p[] | select(.gate) | .name), ($c[].host | sub("windows-arm64"; "windows-x64")), $b[], $d[]] | unique')
           sh_linux=false sh_windows=false
           if [ "$FORK" != true ]; then
             [ "$LINUX_RUNNER" = self-hosted ] && sh_linux=true
@@ -127,6 +130,7 @@ jobs:
             echo "hosts=$gate"
             echo "prefixes=$prefixes"
             echo "bindgen=$bindgen"
+            echo "dist=$dist"
             echo "runners=$runners"
             echo "opts=$opts"
             echo "cross=$cross"
@@ -311,38 +315,67 @@ jobs:
         run: rustup toolchain install && rustc -vV && node --version && clang --print-targets | grep wasm32
       - run: targets/test-wasm.sh ${{ matrix.target }}
 
-  # rokc bindgen against the pinned libclang (llvm/build-libclang.sh,
-  # ~20 min), nightly on linux-x64 only. Its prefix has its own cache key
-  # (the script's hash), apart from the LLVM prefix; on a self-hosted
-  # runner it stays in ~/.cache/rok.
+  # rokc bindgen against the pinned libclang (.github/actions/libclang-prefix),
+  # nightly on linux-x64 and windows-x64.
   bindgen:
     needs: [plan, llvm]
     if: ${{ !cancelled() && needs.plan.outputs.bindgen != '[]' }}
-    runs-on: ${{ fromJSON(needs.plan.outputs.runners)['linux-x64'] }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.plan.outputs.bindgen) }}
+    name: bindgen (${{ matrix.host }})
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)[matrix.host] }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/llvm-prefix
-      - id: where
-        run: |
-          echo "prefix=$HOME/.cache/rok/libclang-$(sed -n 's/^VERSION=//p' llvm/build-libclang.sh)" >>"$GITHUB_OUTPUT"
-      - id: cache
-        if: runner.environment == 'github-hosted'
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.where.outputs.prefix }}
-          key: libclang-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('llvm/build-libclang.sh') }}
-      # A no-op when the prefix is there.
-      - name: llvm/build-libclang.sh
-        run: llvm/build-libclang.sh "${{ steps.where.outputs.prefix }}"
-      - if: runner.environment == 'github-hosted' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.where.outputs.prefix }}
-          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: ./.github/actions/libclang-prefix
       - name: toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustc -vV
-      - name: host C library
+      - name: host C library (Linux)
+        if: runner.os == 'Linux'
         run: |
           targets/build.sh "$(rustc -vV | sed -n 's/^host: //p')"
       - run: ROK_REQUIRE_LLVM=1 ROK_REQUIRE_LIBCLANG=1 cargo test --test cli -- bindgen
+
+  # The release archive (dist.sh) and its install (install.ps1
+  # -NoModifyPath into a scratch ROK_HOME), nightly on windows-x64: a
+  # program, and a package's build / run / test, with nothing but the
+  # installed toolchain on PATH.
+  dist:
+    needs: [plan, llvm]
+    if: ${{ !cancelled() && needs.plan.outputs.dist != '[]' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        host: ${{ fromJSON(needs.plan.outputs.dist) }}
+    name: dist (${{ matrix.host }})
+    runs-on: ${{ fromJSON(needs.plan.outputs.runners)[matrix.host] }}
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+      - uses: ./.github/actions/libclang-prefix
+      - name: toolchain (rust-toolchain.toml)
+        run: rustup toolchain install && rustc -vV
+      - name: dist.sh
+        run: ./dist.sh --out "$RUNNER_TEMP/dist"
+      - name: install.ps1, then rok alone
+        shell: pwsh
+        run: |
+          $env:ROK_HOME = "$env:RUNNER_TEMP\rok-home"
+          $zip = Get-ChildItem "$env:RUNNER_TEMP\dist" -Filter 'rok-*-x86_64-pc-windows-msvc.zip' | Select-Object -First 1
+          & ./install.ps1 -Archive $zip.FullName -NoModifyPath
+          $env:PATH = "$env:ROK_HOME\bin;$env:SystemRoot\System32"
+          function Must { rok.exe @args; if ($LASTEXITCODE) { throw "rok $args failed" } }
+          Set-Location $env:RUNNER_TEMP
+          Set-Content hello.rok 'fn main() { println("hello"); }'
+          $out = rok.exe run hello.rok
+          if ($LASTEXITCODE -or $out -ne 'hello') { throw "rok run hello.rok: $out" }
+          Must new --lib --bin demo
+          Set-Location demo
+          Must build
+          Must run
+          Must build --release
+          Must test

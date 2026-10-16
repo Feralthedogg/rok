@@ -50,7 +50,7 @@ runs:
         ROOT: ${{ inputs.root }}
         ARCH: ${{ inputs.arch }}
         ENVIRONMENT: ${{ runner.environment }}
-        HASH: ${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root), format('{0}llvm/patches/*.patch', inputs.root)) }}
+        HASH: ${{ runner.os == 'Windows' && hashFiles(format('{0}llvm/build.ps1', inputs.root), format('{0}llvm/rok-msvc.profdata.tar.xz', inputs.root), format('{0}.github/actions/llvm-prefix/action.yml', inputs.root)) || hashFiles(format('{0}llvm/build.sh', inputs.root), format('{0}llvm/rok.profdata.xz', inputs.root), format('{0}llvm/patches/*.patch', inputs.root)) }}
       run: |
         v=$(sed -n 's/^VERSION=//p' "${ROOT}llvm/build.sh")
         arch=${ARCH:-$RUNNER_ARCH}
@@ -115,12 +115,42 @@ runs:
           exit 1
         fi
 
+    # llvm/rok-msvc.profdata.tar.xz is read by clang-cl 22+ only (cl
+    # reads no clang profile): the pinned release's clang-cl and resource
+    # headers, nothing installed. Its version is in this file, hence in
+    # the Windows cache key.
+    - name: clang-cl (Windows)
+      id: clang
+      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $v = '22.1.8'
+        $n, $sha = switch ($env:RUNNER_ARCH) {
+          'X64' { "clang+llvm-$v-x86_64-pc-windows-msvc", 'd96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234' }
+          'ARM64' { "clang+llvm-$v-aarch64-pc-windows-msvc", 'de718c58ebbc5f61d58c17b90457fcf42983bc2c4a4aba3e010d108713bfd7f1' }
+        }
+        $tar = "$env:RUNNER_TEMP\$n.tar.xz"
+        Invoke-WebRequest -UseBasicParsing -OutFile $tar `
+          "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/$n.tar.xz"
+        if ((Get-FileHash -Algorithm SHA256 $tar).Hash.ToLower() -ne $sha) { throw "checksum mismatch for $tar" }
+        & "$env:SystemRoot\System32\tar.exe" -xf $tar -C $env:RUNNER_TEMP "$n/bin/clang-cl.exe" "$n/lib/clang"
+        if ($LASTEXITCODE) { throw "cannot unpack $tar" }
+        Remove-Item $tar
+        "cl=$env:RUNNER_TEMP\$n\bin\clang-cl.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
     - name: Build (Windows)
       if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os == 'Windows'
       shell: pwsh
       env:
         ROOT: ${{ inputs.root }}
-      run: '& "${env:ROOT}llvm/build.ps1" $env:ROK_LLVM_PREFIX'
+        CC: ${{ steps.clang.outputs.cl }}
+        CXX: ${{ steps.clang.outputs.cl }}
+      run: |
+        & "${env:ROOT}llvm/build.ps1" $env:ROK_LLVM_PREFIX *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\llvm-build.log"
+        if (Select-String -Quiet -Path "$env:RUNNER_TEMP\llvm-build.log" -Pattern 'without PGO') {
+          Write-Output '::error::the LLVM prefix was built without llvm/rok-msvc.profdata.tar.xz'
+          exit 1
+        }
 
     # What rokc_llvm's build.rs does not read: shared libraries, the
     # object libraries, opt-viewer; on Windows also bin/, where lld is five

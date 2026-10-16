@@ -31,9 +31,13 @@ ROK_LLVM_INSTRUMENT=1 "$root/llvm/build.sh" "$work/llvm"
 # -fprofile-generate at the link pulls in the profile runtime. With an
 # explicit --target, RUSTFLAGS reach rokc but not the build scripts,
 # whose link (GNU ld) would put the runtime after libc.
+# Linux links with clang (CC): gcc's -fprofile-generate is gcov, not the
+# runtime clang instrumented LLVM for.
 host=$(rustc -vV | sed -n 's/^host: //p')
+flags="-Clink-arg=-fprofile-generate"
+[ "$(uname -s)" = Darwin ] || flags="$flags -Clinker=${CC:-clang}"
 (cd "$root" && ROK_LLVM_PREFIX=$work/llvm CARGO_TARGET_DIR=$work/target \
-	RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-Clink-arg=-fprofile-generate" \
+	RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$flags" \
 	cargo build --release -q --target "$host" -p rokc -p rokr)
 rokc=$work/target/$host/release/rokc
 # A Linux host links against the C library targets/build.sh made.

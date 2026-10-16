@@ -1,0 +1,52 @@
+name: libclang-prefix
+description: >
+  The pinned libclang of llvm/build-libclang.sh (Windows:
+  llvm/build-libclang.ps1), named by ROK_LIBCLANG_PREFIX: restored from
+  the actions cache on a GitHub-hosted runner, else built (~20 min) and
+  saved under a key of the script's hash, apart from the LLVM prefix. On
+  a self-hosted runner it stays in the default cache directory. Run after
+  llvm-prefix (Windows: its MSVC environment).
+
+outputs:
+  prefix:
+    value: ${{ steps.where.outputs.prefix }}
+
+runs:
+  using: composite
+  steps:
+    - id: where
+      shell: bash
+      run: |
+        v=$(sed -n 's/^VERSION=//p' llvm/build-libclang.sh)
+        if [ "$RUNNER_OS" = Windows ]; then
+          p="$LOCALAPPDATA\\rok\\libclang-$v"
+        else
+          p=$HOME/.cache/rok/libclang-$v
+        fi
+        echo "prefix=$p" >>"$GITHUB_OUTPUT"
+        echo "ROK_LIBCLANG_PREFIX=$p" >>"$GITHUB_ENV"
+
+    - id: cache
+      if: runner.environment == 'github-hosted'
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.where.outputs.prefix }}
+        key: libclang-${{ runner.os }}-${{ runner.arch }}-${{ runner.os == 'Windows' && hashFiles('llvm/build-libclang.ps1') || hashFiles('llvm/build-libclang.sh') }}
+
+    # A no-op when the prefix is there.
+    - name: Build (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: llvm/build-libclang.sh "${{ steps.where.outputs.prefix }}"
+
+    - name: Build (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: '& llvm/build-libclang.ps1 "${{ steps.where.outputs.prefix }}"'
+
+    - name: Save
+      if: runner.environment == 'github-hosted' && steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.where.outputs.prefix }}
+        key: ${{ steps.cache.outputs.cache-primary-key }}

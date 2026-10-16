@@ -9,10 +9,10 @@ same branch and event cancels the older one.
 |---|---|---|
 | push to a branch but `main`, pull request | linux-x64 | `check`, `corpus` at `-O0` |
 | push to `main`, merge queue (`merge_group`) | linux-x64, linux-arm64, windows-x64 | `check`, `corpus` at `-O0` |
-| nightly (`schedule`, 03:17 UTC), manual run | every host | `check`, `corpus` at `-O0` and `-O2`, `cross-link`, `cross`, `wasm`, `bindgen` |
+| nightly (`schedule`, 03:17 UTC), manual run | every host | `check`, `corpus` at `-O0` and `-O2`, `cross-link`, `cross`, `wasm`, `bindgen`, `dist` |
 
 A manual run (`workflow_dispatch`) takes `hosts` (all, or some of `linux-x64 linux-arm64 macos-arm64 macos-x64
-windows-x64 windows-arm64`), `jobs` (all, or some of `gate cross wasm bindgen`; `none`: prefixes only) and `filter`
+windows-x64 windows-arm64`), `jobs` (all, or some of `gate cross wasm bindgen dist`; `none`: prefixes only) and `filter`
 (`ROK_TEST_FILTER`: the integration cases to run; the differential suites always run). Hosts: `ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64, `macos-26`
 arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 (cross only).
 
@@ -24,8 +24,10 @@ arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 
   host; an entry made on a branch serves that branch only, so the first push to `main` builds every host
   once). On a private repository's standard runners a build took 0.5 h (macOS arm64), 2.2 h (macOS x86_64,
   Linux aarch64), 4.5 h (Linux x86_64) and 6.0 h (Windows: at the 6 h job limit). Linux needs clang 19+ to
-  read `rok.profdata.xz`; a build without PGO fails. Windows builds with `cl`, which reads no clang profile,
-  so its prefix has no PGO (`rok-msvc.profdata.tar.xz` needs clang-cl; llvm/README.md).
+  read `rok.profdata.xz`; a build without PGO fails. Windows builds with the pinned release's clang-cl
+  (22.1.8: `clang-cl.exe` and its resource headers, ~140 MB, unpacked into the runner's temp directory; its
+  version is part of the cache key), which reads `rok-msvc.profdata.tar.xz`; a build without PGO fails there
+  too (`cl` reads no clang profile; llvm/README.md).
 - `check`, per host: fmt, clippy, every test but the two corpora (`-- --exact --skip end_to_end_cases --skip
   differential`), `rokc fmt --check library`, and the compiler / runtime crate isolation check; every step
   runs even after one fails. On Linux after `targets/build.sh <host>`.
@@ -40,11 +42,18 @@ arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 
   `aarch64-pc-windows-msvc` on windows-arm64, whose rokc is the x64 build under emulation with the x64
   prefix.
 - `wasm` (linux-x64), per wasm32 target: `targets/test-wasm.sh <target>`, with the image's node and clang.
-- `bindgen` (linux-x64, nightly and manual runs only): `llvm/build-libclang.sh` (libclang and clang's
-  resource headers, ~40 MB) under its own cache key (`libclang-<os>-<arch>-<hash of the script>`), apart from
-  the LLVM prefix, whose key and contents it does not touch; built only when the script changes (on a
-  self-hosted runner kept in `~/.cache/rok`). Then the `rokc bindgen` tests (`cargo test --test cli --
-  bindgen`) with `ROK_REQUIRE_LIBCLANG=1`. Elsewhere those tests skip with a notice when no libclang is built.
+- `bindgen` (linux-x64 and windows-x64, nightly and manual runs only): libclang and clang's resource
+  headers (~40 MB, `.github/actions/libclang-prefix`: `llvm/build-libclang.sh`, Windows
+  `llvm/build-libclang.ps1`) under their own cache key (`libclang-<os>-<arch>-<hash of the script>`), apart
+  from the LLVM prefix, whose key and contents they do not touch; built only when the script changes (on a
+  self-hosted runner kept in the default cache directory). Then the `rokc bindgen` tests (`cargo test --test
+  cli -- bindgen`) with `ROK_REQUIRE_LIBCLANG=1`. Elsewhere those tests skip with a notice when no libclang
+  is built.
+- `dist` (windows-x64, nightly and manual runs only): `./dist.sh` (Git Bash with the MSVC environment of
+  `llvm-prefix`, the LLVM and libclang prefixes above; `targets/build.sh` falls back to the image's `python`
+  / `mingw32-make`), then `install.ps1 -NoModifyPath` into a scratch `ROK_HOME` and, with only
+  its `bin\` on PATH, `rok run` of a file and a `rok new --lib --bin` package's build / run / `--release`
+  build / test.
 
 ## Self-hosted runners
 
@@ -64,7 +73,7 @@ GitHub's.
 - Prerequisites: Linux: rustup, clang-19, curl, xz, make, python3, cmake and ninja (`llvm/build.sh`), and for
   the cross targets `libc6-i386 libc6-armhf-cross qemu-user-binfmt`, node 18+ for wasm. Windows: rustup,
   Git for Windows (bash), Visual Studio or its Build Tools with `VC.Tools.x86.x64` (the MSVC environment comes from
-  `vswhere`), clang (`targets/build.sh`), cmake and ninja (`llvm/build.ps1`).
+  `vswhere`), clang (`targets/build.sh`), cmake and ninja (`llvm/build.ps1`), python3 and make for `dist`.
 - Security: a self-hosted runner runs whatever a workflow gives it. Pull requests from forks never get one:
   the plan job forces GitHub-hosted runners when `github.event.pull_request.head.repo.full_name !=
   github.repository`, and today no pull request job runs on Windows. On a public repository also keep

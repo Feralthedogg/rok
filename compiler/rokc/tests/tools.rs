@@ -1015,34 +1015,62 @@ fn check_reads_stdin() {
 }
 
 /// How rokc ended once its stdout (`out`) or stderr lost its reader
-/// before `input` reached its stdin.
-fn closed_output(args: &[&str], out: bool, input: &str) -> std::process::ExitStatus {
+/// before `input` reached its stdin, and what it wrote to the other one
+/// (for a failure's message).
+fn closed_output(args: &[&str], out: bool, input: &str) -> Closed {
     let mut child = Command::new(ROKC)
         .args(args)
         .env("ROK_HOME", workspace())
         .stdin(Stdio::piped())
-        .stdout(if out { Stdio::piped() } else { Stdio::null() })
-        .stderr(if out { Stdio::null() } else { Stdio::piped() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    drop(child.stdout.take());
-    drop(child.stderr.take());
+    let kept = if out {
+        drop(child.stdout.take());
+        child.stderr.take().map(read_all)
+    } else {
+        drop(child.stderr.take());
+        child.stdout.take().map(read_all)
+    };
     // rokc may be gone before it read everything.
     drop(child.stdin.take().unwrap().write_all(input.as_bytes()));
-    child.wait().unwrap()
+    let status = child.wait().unwrap();
+    let other = kept.map(|t| t.join().unwrap()).unwrap_or_default();
+    Closed { status, other }
+}
+
+/// `closed_output`'s result; shown as the status and the other stream.
+struct Closed {
+    status: std::process::ExitStatus,
+    other: String,
+}
+
+impl std::fmt::Display for Closed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}, other stream: {:?}", self.status, self.other)
+    }
+}
+
+fn read_all(mut r: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = r.read_to_string(&mut s);
+        s
+    })
 }
 
 /// Whether `status` is how a program ends writing to a closed pipe:
 /// killed by SIGPIPE (Windows: std drops the writes, and these `check`s
 /// end with their errors' exit 1), not a panic or abort.
-fn ended_by_closed_pipe(status: std::process::ExitStatus) -> bool {
+fn ended_by_closed_pipe(c: &Closed) -> bool {
     #[cfg(unix)]
     {
-        std::os::unix::process::ExitStatusExt::signal(&status) == Some(13)
+        std::os::unix::process::ExitStatusExt::signal(&c.status) == Some(13)
     }
     #[cfg(not(unix))]
     {
-        status.code() == Some(1)
+        c.status.code() == Some(1)
     }
 }
 
@@ -1053,9 +1081,9 @@ fn ended_by_closed_pipe(status: std::process::ExitStatus) -> bool {
 fn closed_output_ends_rokc_quietly() {
     let errors = "let x: i32 = true;\n".repeat(2000);
     let st = closed_output(&["check", "-"], false, &errors);
-    assert!(ended_by_closed_pipe(st), "check, stderr closed: {st}");
+    assert!(ended_by_closed_pipe(&st), "check, stderr closed: {st}");
     let st = closed_output(&["--message-format=json", "check", "-"], true, &errors);
-    assert!(ended_by_closed_pipe(st), "check json, stdout closed: {st}");
+    assert!(ended_by_closed_pipe(&st), "check json, stdout closed: {st}");
 }
 
 #[test]
@@ -1075,9 +1103,9 @@ fn repl_closed_output_ends_quietly() {
     let rokr = env.rokr.display().to_string();
     let args = ["repl", "--rokr", &rokr];
     let st = closed_output(&args, false, "let a = 1; let b: str = 2;\n");
-    assert!(ended_by_closed_pipe(st), "stderr closed: {st}");
+    assert!(ended_by_closed_pipe(&st), "stderr closed: {st}");
     let st = closed_output(&args, true, "1 + 2\n");
-    assert!(ended_by_closed_pipe(st), "stdout closed: {st}");
+    assert!(ended_by_closed_pipe(&st), "stdout closed: {st}");
 }
 
 /// Errors in a cell point into its text.

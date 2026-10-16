@@ -49,6 +49,8 @@ case $(uname -s) in
       exit 1
     }
     PATH=$(cygpath -u "${VCToolsInstallDir}bin/Host$VSCMD_ARG_HOST_ARCH/$VSCMD_ARG_TGT_ARCH"):$PATH
+    # GNU tar reads `C:\..` as a remote host (CI's $RUNNER_TEMP is one).
+    out=$(cygpath -u "$out")
     ;;
   *)
     exe="" rt=librokr.a ext=tar.gz build_llvm=./llvm/build.sh build_libclang=./llvm/build-libclang.sh

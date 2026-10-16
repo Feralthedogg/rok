@@ -116,13 +116,20 @@ minutes on a 12-core Apple Silicon machine (55 on a 16-thread x86_64
 laptop with `ROK_LLVM_JOBS=12`).
 
 A new Xcode clang changes the hashes of many functions: Apple clang 21
-(macOS 27) found 2,742 mismatches in the previous profile. The current
-one adds a macOS 27 run to the earlier Linux run (merged with
-`xcrun llvm-profdata merge --sparse`, no new Linux training): 417
-remain, in header inlines the run did not reach. On that machine rokc's
-`-O2` builds of `bench/` as objects take 3.49 s with it, 3.55 s with
-the stale profile and 3.75 s without PGO (−7%); the 298 cases training
-left out, as objects, 56.5 s, 57.4 s and 59.6 s (−5%).
+(macOS 27) found 2,742 mismatches in the profile before it. The current
+one merges a macOS 27 run and an Ubuntu 26.04 x86_64 run (clang 21),
+with `xcrun llvm-profdata merge --sparse`. Building LLVM with it, Apple
+clang still reports 430 hash mismatches and Ubuntu's clang 189:
+functions only the other host's run reached, whose control flow differs
+on this one. On a 12-core Apple Silicon machine rokc's `-O2` builds of
+`bench/` as objects take 3.49 s with the profile and 3.75 s without PGO
+(−7%); the 298 cases training left out, as objects, 56.5 s and 59.6 s
+(−5%). On an 8-core x86_64 VM (Ubuntu 26.04, both prefixes built by
+clang 21), 6.43 s and 7.15 s (−10%), 103.0 s and 114.2 s (−10%).
+
+On Ubuntu, training needs clang, `llvm-profdata` (package `llvm-21`,
+whose binary is `llvm-profdata-21`: put it on PATH as `llvm-profdata`)
+and the profile runtime (`libclang-rt-21-dev`); `CC=clang CXX=clang++`.
 
 `llvm\train-pgo.ps1` does the same on Windows with clang-cl and the
 llvm-profdata of its installation (the third as objects for the other
