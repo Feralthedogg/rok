@@ -1987,6 +1987,21 @@ fn extern_dependencies_are_top_level_names() {
         "{}",
         text(&out.stderr)
     );
+    // Nor can a package take a name code can't spell as its path.
+    let out = rokc(None, &dir, &["check", "app", "--extern", "pkg=greet"]);
+    assert_exit(&out, 2);
+    assert!(
+        text(&out.stderr).contains("`pkg` already names a package's own root (`pkg::`)"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = rokc(None, &dir, &["build", "greet", "--name", "match"]);
+    assert_exit(&out, 1);
+    assert!(
+        text(&out.stderr).contains("`match` is a keyword"),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 // spec: §5.7.14

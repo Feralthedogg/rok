@@ -866,8 +866,9 @@ fn discover_at(a: &Args, path: &str) -> Package {
     if let Some(n) = a.name.as_ref().filter(|_| !pkg.anonymous) {
         pkg.name.clone_from(n);
     }
-    // A library named like the standard library would mount into its paths.
-    if pkg.lib {
+    // Code names a library by its package name (an executable beside it
+    // too): that name must be one code can spell.
+    if pkg.lib || pkg.library.is_some() {
         if let Some(e) = rokc_core::reserved_package(&rokc_interface::code_name(&pkg.name)) {
             fail(&format!("{}: {e}", pkg.root.display()));
         }

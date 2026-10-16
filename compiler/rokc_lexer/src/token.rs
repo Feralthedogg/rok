@@ -359,11 +359,7 @@ impl TokenKind {
 /// `type`, `any`, `in`, `where`, `throws`, `rethrows`, `catch`, `finally`,
 /// `const`, `static`, `extern`, `mut`, `union`, `pkg`, `sub`, `sup` and
 /// `rok` are contextual: identifiers to the lexer, keywords in place.
-pub const RESERVED: &[&str] = &[
-    "let", "fn", "if", "else", "match", "while", "loop", "for", "return", "break", "continue",
-    "try", "throw", "async", "await", "yield", "unsafe", "using", "struct", "enum", "trait",
-    "impl", "pub", "mod", "use", "as", "is", "ref", "true", "false", "none", "self", "Self",
-];
+pub const RESERVED: &[&str] = rokc_core::KEYWORDS;
 
 /// A keyword's spelling, for places where any keyword is a name (after
 /// `.`, field declarations, argument labels).

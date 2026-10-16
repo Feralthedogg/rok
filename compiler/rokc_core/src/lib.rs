@@ -164,16 +164,34 @@ pub fn home_of(exe: &Path) -> Option<PathBuf> {
 /// The standard library's package name.
 pub const STD_PKG: &str = "rok";
 
-/// Why `name` can't be a package name: it would mount into `rok::` beside
-/// the standard library.
+/// Reserved keywords (spec 1.5); the lexer's list.
+pub const KEYWORDS: &[&str] = &[
+    "let", "fn", "if", "else", "match", "while", "loop", "for", "return", "break", "continue",
+    "try", "throw", "async", "await", "yield", "unsafe", "using", "struct", "enum", "trait",
+    "impl", "pub", "mod", "use", "as", "is", "ref", "true", "false", "none", "self", "Self",
+];
+
+/// Why `name` (code name: `-` spelled `_`) can't be a package name: code
+/// could not name it, or it would mount into `rok::` beside the standard
+/// library.
 #[must_use]
 pub fn reserved_package(name: &str) -> Option<String> {
-    (name == STD_PKG).then(|| {
-        format!(
-            "`{name}` is reserved for the standard library; name the package something else, \
-             e.g. `{name}_util`"
-        )
-    })
+    let why = if name == STD_PKG {
+        "is reserved for the standard library".to_owned()
+    } else if name == "pkg" {
+        "already names a package's own root (`pkg::`), so code can't name a package called that"
+            .to_owned()
+    } else if name == "sup" {
+        "already names the parent module (`sup::`), so code can't name a package called that"
+            .to_owned()
+    } else if KEYWORDS.contains(&name) {
+        "is a keyword, so code can't name a package called that".to_owned()
+    } else {
+        return None;
+    };
+    Some(format!(
+        "`{name}` {why}; name the package something else, e.g. `{name}_util`"
+    ))
 }
 
 /// The entry of `cmd` in a usage text: its lines (`  cmd ...`, or

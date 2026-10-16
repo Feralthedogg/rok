@@ -3278,6 +3278,81 @@ fn install_stones() {
     );
 }
 
+/// Names code can't spell as a path are refused: `use pkg::add;` in an
+/// executable is its own root, never a library called `pkg`.
+// spec: §9.10.3 §5.5.7
+#[test]
+fn new_rejects_names_code_cannot_spell() {
+    let root = scratch("new-names");
+    let home = root.join("home");
+    for (name, why) in [
+        ("pkg", "`pkg` already names a package's own root (`pkg::`)"),
+        ("sup", "`sup` already names the parent module (`sup::`)"),
+        ("match", "`match` is a keyword"),
+        ("self", "`self` is a keyword"),
+    ] {
+        let out = rok(&home, &root, &["new", "--lib", "--bin", name]);
+        fails(&out, why);
+        assert!(text(&out.stderr).contains(&format!("e.g. `{name}_util`")));
+        assert!(!root.join(name).exists());
+    }
+    write(
+        &root.join("named-pkg/rok.rokon"),
+        "Package { name: \"pkg\", version: \"0.1.0\", deps: {} }\n",
+    );
+    write(&root.join("named-pkg/src/main.rok"), "println(\"hi\");\n");
+    fails(
+        &rok(&home, &root.join("named-pkg"), &["build"]),
+        "`pkg` already names a package's own root",
+    );
+}
+
+/// Every `rok new` template builds, runs and tests as written.
+// spec: §0.3.1 §9.10.2
+#[test]
+fn new_templates_build_run_and_test() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("new-templates");
+    let home = root.join("home");
+    for (args, name, runs) in [
+        (&["new"][..], "plain", "Hello, world!\n"),
+        (&["new", "--lib"][..], "onlylib", ""),
+        (&["new", "--lib", "--bin"][..], "my-calc", "2 + 2 = 4\n"),
+    ] {
+        let mut new = args.to_vec();
+        new.push(name);
+        ok(&rok(&home, &root, &new));
+        let dir = root.join(name);
+        ok(&rok(&home, &dir, &["build"]));
+        ok(&rok(&home, &dir, &["build", "--release"]));
+        if !runs.is_empty() {
+            assert_eq!(script_out(&home, &dir, &["run"]), runs, "{name}");
+        }
+        let tests = script_out(&home, &dir, &["test"]);
+        assert!(tests.contains("test result: ok"), "{name}: {tests}");
+    }
+    // The executable reaches its library's items and modules by the
+    // library's code name (`my-calc` → `my_calc`).
+    let calc = root.join("my-calc");
+    write(
+        &calc.join("src/lib.rok"),
+        "pub mod ops;\n\npub fn add(a: i32, b: i32) -> i32 {\n    return a + b;\n}\n\n\
+         pub struct Pair {\n    pub a: i32;\n    pub b: i32;\n}\n",
+    );
+    write(
+        &calc.join("src/ops.rok"),
+        "pub fn mul(a: i32, b: i32) -> i32 {\n    return a * b;\n}\n",
+    );
+    write(
+        &calc.join("src/main.rok"),
+        "use my_calc::{Pair, add};\nuse my_calc::ops::mul;\n\n\
+         let p = Pair { a: 3, b: 4 };\nprintln(f\"{add(p.a, p.b)} {mul(p.a, p.b)} {my_calc::ops::mul(2, 5)}\");\n",
+    );
+    assert_eq!(script_out(&home, &calc, &["run"]), "7 12 10\n");
+}
+
 /// A package with `src/lib.rok` and `src/main.rok` (spec 0.3.1): `rok new
 /// --lib --bin` makes one, a dependent gets its library, `rok install`
 /// installs its executable (`--lib`: its library), and `rok publish`
