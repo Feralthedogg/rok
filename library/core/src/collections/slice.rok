@@ -330,4 +330,13 @@ impl<T> Transfer for Slice<T> {
         }
         self
     }
+
+    /// Its range of the buffer, read only: slices of one list may share
+    /// it. Any other view (a `str`'s bytes) holds no collection.
+    const fn transfer_visit(self, m: Memo) -> Slice<T> {
+        if !buf_is_null(self.buf) && self.whole {
+            m.visit_span(self.buf, self.start, self.len, self.stride);
+        }
+        self
+    }
 }

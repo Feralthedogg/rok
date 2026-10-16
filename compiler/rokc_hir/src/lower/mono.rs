@@ -609,7 +609,12 @@ fn check_call_bounds(
                         "type `{}` does not satisfy trait bound `{}` required by `{}`{why}",
                         ctx.ty_name(concrete),
                         ctx.trait_name(&want),
-                        fn_def.name
+                        // `task::spawn` lowered to its plain twin is `spawn`.
+                        if fn_def.name == "rok::core::task::spawn_plain" {
+                            "rok::core::task::spawn"
+                        } else {
+                            fn_def.name.as_str()
+                        }
                     ),
                 );
             }

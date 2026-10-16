@@ -76,7 +76,7 @@ fn update_gives(m: Mutex<List<i32>>) -> i64 {
 }
 
 // The `using` block's value is what `get` returned.
-// expect-error: handoff_guard_errors.rok:82:5: `items` came out of the `Mutex` at line 81, and `g`'s `using` block released the lock
+// expect-error: handoff_guard_errors.rok:81:17: the value of `g`'s `using` block is what the `Mutex` protects, and the block releases the lock before it is used
 fn block_value(m: Mutex<List<i32>>) -> i64 {
     let items = using g = m.lock() { g.get() };
     items.sort();

@@ -1,0 +1,84 @@
+// needs: threads
+// gc-stress: 5
+// spec: std 219-par §2.19.1 / std 213-marker §2.13.9
+// Items that reach one collection run one at a time; distinct items still
+// run in parallel and change their own collections in place.
+// expect-exit: 0
+// expect-stderr: warning: par::for_each at tests/cases/219_par_shared_items.rok:29:5: two items reach one collection or future, so they run one at a time on this thread; give each item its own copy, or share read-only data through `Frozen` (stdlib 2.19.1)
+// expect-stderr: warning: par::map at tests/cases/219_par_shared_items.rok:37:17: two items reach one collection or future, so they run one at a time on this thread; give each item its own copy, or share read-only data through `Frozen` (stdlib 2.19.1)
+// expect-stderr: warning: par::filter at tests/cases/219_par_shared_items.rok:53:16: two items reach one collection or future, so they run one at a time on this thread; give each item its own copy, or share read-only data through `Frozen` (stdlib 2.19.1)
+// expect-stderr: warning: par::for_each at tests/cases/219_par_shared_items.rok:69:5: two items reach one collection or future, so they run one at a time on this thread; give each item its own copy, or share read-only data through `Frozen` (stdlib 2.19.1)
+// expect-stderr: warning: par::map at tests/cases/219_par_shared_items.rok:82:13: two items reach one collection or future, so they run one at a time on this thread; give each item its own copy, or share read-only data through `Frozen` (stdlib 2.19.1)
+// expect-stdout:
+// nested 40000
+// dup 2 4000
+// sorted true
+// filter 2
+// slices 499500
+// overlap 5 1001
+// own twice 2
+// many 18
+
+struct Job { items: List<i32>; id: i32; }
+
+fn main() {
+    let c: List<i32> = [];
+    let a: List<List<i32>> = [c];
+    let b: List<List<i32>> = [c];
+    let items: List<List<List<i32>>> = [a, b];
+    par::for_each(items, |it: List<List<i32>>| { for i in 0..20000 { it[0].push(i); } });
+    println(f"nested {c.len()}");
+
+    let ys: List<i32> = [];
+    let jobs: List<Job> = [];
+    unsafe {
+        jobs.push(Job { items: ys, id: 1 });
+        jobs.push(Job { items: ys, id: 2 });
+        let n = par::map(jobs, |j: Job| { for i in 0..2000 { j.items.push(i); } j.id });
+        println(f"dup {n.len()} {ys.len()}");
+    }
+
+    let rows: List<List<i32>> = [];
+    for r in 0..64 {
+        let row: List<i32> = [];
+        for i in 0..200 { row.push((i * 7919 + r) % 200); }
+        rows.push(row);
+    }
+    par::for_each(rows, |r: List<i32>| { r.sort(); });
+    let ok = true;
+    for r in rows { for i in 1..r.len() { if r[i - 1] > r[i] { ok = false; } } }
+    println(f"sorted {ok}");
+
+    let d: List<i32> = [];
+    let kept = par::filter([[d], [d], [[1]]], |l: List<List<i32>>| { l[0].push(1); l.len() == 1 && l[0].len() > 1 });
+    println(f"filter {kept.len()}");
+
+    // Slices only read: items may share a list through them, but not
+    // with an item holding the list itself.
+    let big: List<i64> = [];
+    for i in 0..1000 { big.push(i as i64); }
+    let parts: List<Slice<i64>> = [];
+    for k in 0..4usize { parts.push(big[k * 250:(k + 1) * 250]); }
+    let sums = par::map(parts, |p: Slice<i64>| { let t: i64 = 0; for x in p { t += x; } t });
+    let tot: i64 = 0;
+    for x in sums { tot += x; }
+    println(f"slices {tot}");
+    let over = par::map([big[0:10], big[5:15]], |p: Slice<i64>| p[5]);
+    let empty: List<i64> = [];
+    let both: List<(Slice<i64>, List<i64>)> = [(big[0:10], empty), (big[20:30], big)];
+    par::for_each(both, |p: (Slice<i64>, List<i64>)| { p.1.push(p.0[0]); });
+    println(f"overlap {over[1] - over[0]} {big.len()}");
+
+    // One item reaching one list twice is still its own.
+    let own: List<i32> = [];
+    let twice = par::map([[own, own], [[1]]], |l: List<List<i32>>| { l[0].push(1); l.len() });
+    println(f"own twice {twice.len()}");
+
+    // Past a few lists per item, a later item sharing one is still seen.
+    let shared: List<i32> = [];
+    let many: List<List<i32>> = [];
+    for _ in 0..16 { many.push([]); }
+    many.push(shared);
+    let n = par::map([many, [shared]], |l: List<List<i32>>| { l[l.len() - 1].push(1); l.len() });
+    println(f"many {n[0] + n[1]}");
+}

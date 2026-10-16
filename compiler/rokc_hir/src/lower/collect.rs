@@ -6642,6 +6642,9 @@ pub(super) enum Intrinsic {
     Transfer,
     /// `rok.transfer_keep`: note every collection reached as its own copy.
     TransferKeep,
+    /// `rok.transfer_visit`: note every collection reached for the memo's
+    /// current owner (`par`'s distinct items).
+    TransferVisit,
     /// `rok.transfer_needed`: whether `rok.transfer` copies anything.
     TransferNeeded,
     /// `rok.transfer_plain`: whether a type holds no GC reference.
@@ -6678,6 +6681,7 @@ impl Intrinsic {
             "mlir.attr" => Self::MlirAttr,
             "transfer" => Self::Transfer,
             "transfer_keep" => Self::TransferKeep,
+            "transfer_visit" => Self::TransferVisit,
             "transfer_needed" => Self::TransferNeeded,
             "transfer_plain" => Self::TransferPlain,
             "transfer_flat" => Self::TransferFlat,

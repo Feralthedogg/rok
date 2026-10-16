@@ -54,7 +54,7 @@ pub mod time;
 use rok::core::task::time::{Duration, Instant};
 use rok::core::future::{Context, Future, Poll, TryAsyncFuture, Waker};
 use rok::core::collections::raw::{GcBuf, buf_new, buf_same};
-use rok::core::marker::hand_over;
+use rok::core::marker::{Memo, Transfer, hand_over};
 use rok::core::sync::{Atomic, Mutex, Once};
 use rok::core::rt::{atomic_add, atomic_cas, atomic_load, atomic_xchg, key};
 
@@ -70,10 +70,12 @@ const DONE: i32 = 4;
 
 /// A task as the executor sees it (what a `Waker` holds).
 pub struct TaskRef {
-    /// `[state, cancelled, timed, proxy, unwinding, local]` (`timed`: it
-    /// has added a timer; `proxy`: a `select` stand-in, see `up`;
-    /// `unwinding`: a cancellation point saw the cancel; `local`: a
-    /// `spawn_local` task, counted in its home's `locals`).
+    /// `[state, cancelled, timed, proxy, unwinding, local, handed]`
+    /// (`timed`: it has added a timer; `proxy`: a `select` stand-in, see
+    /// `up`; `unwinding`: a cancellation point saw the cancel; `local`: a
+    /// `spawn_local` task, counted in its home's `locals`; `handed`: its
+    /// `Task` went through a hand-off or a `par` item, so it may have
+    /// joiners on other threads).
     state: GcBuf<i32>;
     /// One poll of the task's future; `true` once it is done.
     poll: GcBuf<fn(Context) -> bool>;
@@ -1019,7 +1021,7 @@ fn make_task(poll: fn(Context) -> bool, local: Worker | none) -> TaskRef {
     unsafe {
         let pool = executor();
         let home = pool.no_home;
-        let state: GcBuf<i32> = buf_new(6);
+        let state: GcBuf<i32> = buf_new(7);
         state[0] = SCHEDULED;
         if let w: Worker = local {
             home = buf_new(1);
@@ -1312,9 +1314,42 @@ impl<T> Future for Task<T> {
             if no_result(self.task) {
                 panic("awaited a cancelled task (use `try await t.join()`)");
             }
-            Poll::Ready(self.slot[0])
+            Poll::Ready(task_result(self))
         }
     }
+}
+
+/// A finished task's result for one joiner: a copy of its own once the
+/// `Task` was handed on, as copies of it may each await it on other
+/// threads; else the result itself (one thread's copies share it).
+fn task_result<T>(t: Task<T>) -> T {
+    unsafe {
+        if atomic_load(t.task.state, 6, SeqCst) != 0 {
+            return hand_over::<T>(t.slot[0]);
+        }
+        t.slot[0]
+    }
+}
+
+// A hand-off of a `Task` (`Frozen::get`, a channel, a lock) or a `par`
+// item holding one marks it: its joiners then copy the result.
+impl<T> Transfer for Task<T> {
+    const fn transfer_copy(self, m: Memo) -> Task<T> {
+        handed(self)
+    }
+
+    const fn transfer_keep(self, m: Memo) -> Task<T> {
+        handed(self)
+    }
+
+    const fn transfer_visit(self, m: Memo) -> Task<T> {
+        handed(self)
+    }
+}
+
+const fn handed<T>(t: Task<T>) -> Task<T> {
+    unsafe { atomic_xchg(t.task.state, 6, 1, SeqCst) };
+    t
 }
 
 /// `Task::join`.
@@ -1331,7 +1366,7 @@ impl<T> Join<T> {
             if no_result(self.task.task) {
                 throw CancellationError {};
             }
-            Poll::Ready(self.task.slot[0])
+            Poll::Ready(task_result(self.task))
         }
     }
 }
@@ -1398,8 +1433,25 @@ impl Error for CancellationError {}
 
 /// Run `fut` as a new task on any worker, concurrently with the
 /// spawner (2.18.1). Needs a running executor (inside `async fn main` /
-/// `block_on`).
+/// `block_on`). The task gets its own copy of every collection `fut`
+/// holds, what its coroutine captured included (2.13.9): the spawner
+/// keeps the originals.
+#[track_caller]
 pub fn spawn<F: Future + Send>(fut: F) -> Task<F::Output> where F::Output: Send {
+    unsafe {
+        current_worker();
+        let slot: GcBuf<F::Output> = buf_new(1);
+        let t = new_task(poll_fn(hand_over::<F>(fut), slot), none);
+        Task { task: t, slot: slot }
+    }
+}
+
+/// `spawn` of a future made right at the call that captures nothing a
+/// hand-off copies (no collection, future or `[ref x]` cell): no other
+/// handle has its frame and there is nothing to copy (`rokc_hir` picks
+/// it for `task::spawn(async { .. })` and `task::spawn(f(..))`).
+#[track_caller]
+pub(pkg) fn spawn_plain<F: Future + Send>(fut: F) -> Task<F::Output> where F::Output: Send {
     unsafe {
         current_worker();
         let slot: GcBuf<F::Output> = buf_new(1);
@@ -1485,7 +1537,7 @@ impl<T> Future for Race<T> {
         unsafe {
             for t in self.tasks {
                 if join_later(t.task, ctx.waker) {
-                    return Poll::Ready(t.slot[0]);
+                    return Poll::Ready(task_result(t));
                 }
             }
             Poll::Pending
@@ -1574,7 +1626,7 @@ impl<F: Future> SelectFuture<F> {
 /// go to `parent` until it is done.
 const fn proxy_task(parent: Waker) -> TaskRef {
     unsafe {
-        let state: GcBuf<i32> = buf_new(6);
+        let state: GcBuf<i32> = buf_new(7);
         state[3] = 1;
         state[5] = parent.task.state[5];
         let p: GcBuf<fn(Context) -> bool> = buf_new(1);
@@ -1683,7 +1735,7 @@ impl<T> Timeout<T> {
     pub fn poll(ref self, ref ctx: Context) throws (TimeoutError) -> Poll<T> {
         unsafe {
             if join_later(self.task.task, ctx.waker) {
-                return Poll::Ready(self.task.slot[0]);
+                return Poll::Ready(task_result(self.task));
             }
             if now_ns() >= self.deadline {
                 throw TimeoutError {};
@@ -2331,7 +2383,7 @@ impl<T> Future for Blocking<T> {
                 }
             }
             if done {
-                return Poll::Ready(self.slot[0]);
+                return Poll::Ready(hand_over::<T>(self.slot[0]));
             }
             Poll::Pending
         }

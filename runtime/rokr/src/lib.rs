@@ -21,6 +21,7 @@ use rokr_common::object_header::HEADER_ALIGN;
 use rokr_common::{fatal, tls};
 
 mod bignum;
+mod coro;
 mod deque;
 mod fmt;
 mod fmt_spec;
@@ -625,6 +626,35 @@ pub extern "C" fn rok_panic_at(msg: RokStr, at: RokStr) -> ! {
     panic_at(msg.bytes(), Some(at.bytes()))
 }
 
+/// `par` ran a call's items one at a time because two reach one collection
+/// (stdlib 2.19.1): a warning, once per call site (`at` is a static string,
+/// told apart by address; past 64 sites every one warns).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_par_sequential(what: RokStr, at: RokStr) {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static SEEN: [AtomicUsize; 64] = [const { AtomicUsize::new(0) }; 64];
+    let key = at.bytes().as_ptr() as usize;
+    for s in &SEEN {
+        match s.compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(k) if k == key => return,
+            Err(_) => {}
+        }
+    }
+    rokr_common::write_all(
+        2,
+        &[
+            b"warning: ",
+            what.bytes(),
+            b" at ",
+            at.bytes(),
+            b": two items reach one collection or future, so they run one at a time on this thread; \
+              give each item its own copy, or share read-only data through `Frozen` \
+              (stdlib 2.19.1)\n",
+        ],
+    );
+}
+
 /// `rok::core::panic::oom()` (stdlib 2.14.5 `oom_fn`): out of memory,
 /// exit 101. Runtime allocation failures take the same path.
 #[unsafe(no_mangle)]
@@ -733,56 +763,6 @@ pub unsafe extern "C" fn rok_realloc_raw(
 pub unsafe extern "C" fn rok_free(ptr: *mut u8) {
     // SAFETY: caller contract; freeing null is a no-op.
     unsafe { rokr_common::sys::free_aligned(ptr) };
-}
-
-// Typed load/store through raw pointers.
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `i32` read.
-#[unsafe(no_mangle)]
-pub const unsafe extern "C" fn rok_load_i32(ptr: *const i32) -> i32 {
-    // SAFETY: caller contract.
-    unsafe { *ptr }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `i32` write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_store_i32(ptr: *mut i32, val: i32) {
-    // SAFETY: caller contract.
-    unsafe { *ptr = val }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `i64` read.
-#[unsafe(no_mangle)]
-pub const unsafe extern "C" fn rok_load_i64(ptr: *const i64) -> i64 {
-    // SAFETY: caller contract.
-    unsafe { *ptr }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `i64` write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_store_i64(ptr: *mut i64, val: i64) {
-    // SAFETY: caller contract.
-    unsafe { *ptr = val }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `f64` read.
-#[unsafe(no_mangle)]
-pub const unsafe extern "C" fn rok_load_f64(ptr: *const f64) -> f64 {
-    // SAFETY: caller contract.
-    unsafe { *ptr }
-}
-
-/// # Safety
-/// `ptr` must be valid and aligned for an `f64` write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rok_store_f64(ptr: *mut f64, val: f64) {
-    // SAFETY: caller contract.
-    unsafe { *ptr = val }
 }
 
 #[cfg(test)]

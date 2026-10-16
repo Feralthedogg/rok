@@ -4782,9 +4782,10 @@ fn drop_glue(
 }
 
 /// The standard handle types a hand-off copies through their
-/// `Transfer::transfer_copy` (stdlib 2.13.9). Other types are copied part
-/// by part, or kept when `Sync` or `unsafe impl Send` (they manage their
-/// own sharing: `Task`, files, sockets).
+/// `Transfer::transfer_copy` (stdlib 2.13.9); a coroutine future's copies
+/// what its frame captured. Other types are copied part by part, or kept
+/// when `Sync` or `unsafe impl Send` (they manage their own sharing:
+/// `Task`, files, sockets).
 const TRANSFER_TYPES: &[&str] = &[
     "rok::core::collections::list::List",
     "rok::core::collections::dict::Dict",
@@ -4792,6 +4793,10 @@ const TRANSFER_TYPES: &[&str] = &[
     "rok::core::collections::slice::Slice",
     "rok::core::str::StrBuf",
     "rok::bare::gc::GcPtr",
+    "rok::core::future::AsyncFuture",
+    "rok::core::future::TryAsyncFuture",
+    // Not copied: marked as handed on (its joiners copy the result).
+    "rok::core::task::Task",
 ];
 
 fn transfer_type(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
@@ -4806,7 +4811,7 @@ fn transfer_type(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
 /// Does a hand-off of a `ty` copy anything: does it hold, by value, a
 /// handle `TRANSFER_TYPES` lists outside `Sync` and `unsafe impl Send`
 /// parts?
-fn transfer_needs(ctx: &LowerCtx<'_>, ty: &HirTy, depth: u32) -> bool {
+pub(super) fn transfer_needs(ctx: &LowerCtx<'_>, ty: &HirTy, depth: u32) -> bool {
     if depth > DROP_GLUE_DEPTH {
         return false;
     }
@@ -4961,10 +4966,10 @@ fn lower_transfer(
     };
     let x = lower_expected(ctx, x, t.clone());
     let x = coerce(ctx, &t, x, &|| format!("the value of `{name}`"));
-    let method = if op == Intrinsic::TransferKeep {
-        "transfer_keep"
-    } else {
-        "transfer_copy"
+    let method = match op {
+        Intrinsic::TransferKeep => "transfer_keep",
+        Intrinsic::TransferVisit => "transfer_visit",
+        _ => "transfer_copy",
     };
     transfer_glue(ctx, x, memo, method, span, 0)
 }
@@ -7718,6 +7723,58 @@ pub(super) fn lower_call(
     }
 }
 
+const SPAWN: &str = "rok::core::task::spawn";
+const SPAWN_PLAIN: &str = "rok::core::task::spawn_plain";
+
+/// `task::spawn(e)`'s `e` makes the future right there (an `async` block,
+/// an `async fn` call) and captures nothing a hand-off copies (a
+/// collection, a future, a `[ref x]` cell): no other handle has its frame,
+/// so `spawn_plain` hands nothing over (stdlib 2.18.1).
+fn plain_fresh_future(ctx: &LowerCtx<'_>, args: &[CallArg]) -> bool {
+    let [CallArg::Positional(e)] = args else {
+        return false;
+    };
+    let plain = |t: &HirTy| *t != HirTy::Unknown && !transfer_needs(ctx, t, 0);
+    match &e.kind {
+        ExprKind::AsyncBlock(_) => crate::walk::free_names(&[], e).iter().all(|n| {
+            ctx.lookup(n)
+                .is_none_or(|l| !ctx.is_boxed(l) && plain(&ctx.var_ty(l)))
+        }),
+        ExprKind::Call { callee, .. } => {
+            let ExprKind::Path(p) = &callee.kind else {
+                return false;
+            };
+            let [s] = p.segments.as_slice() else {
+                return false;
+            };
+            if ctx.lookup(&s.name).is_some() {
+                return false;
+            }
+            let Some(key) = ctx.resolve_fn_name(&[s.name.as_str()]) else {
+                return false;
+            };
+            let Some(sig) = ctx.env.sig(&key) else {
+                return false;
+            };
+            let coro = ctx.env.decls.get(sig.id.0 as usize).is_some_and(|d| {
+                d.def()
+                    .attrs
+                    .iter()
+                    .any(|a| a.path.first().map(String::as_str) == Some(rokc_ast::CORO_FN_ATTR))
+            });
+            coro && sig.param_tys.iter().all(plain)
+        }
+        _ => false,
+    }
+}
+
+/// `spawn_plain` for a `task::spawn` call that may skip the hand-off.
+fn plain_spawn<'a>(ctx: &LowerCtx<'a>, full: &str, args: &[CallArg]) -> Option<&'a FnDef> {
+    (full == SPAWN && plain_fresh_future(ctx, args))
+        .then(|| ctx.env.generic_fn(SPAWN_PLAIN))
+        .flatten()
+}
+
 /// A call of path `p`, not a local.
 fn lower_path_call(
     ctx: &mut LowerCtx<'_>,
@@ -7768,7 +7825,9 @@ fn lower_path_call(
         if !bind_explicit_generics(ctx, generic_def, explicit, &full) {
             return poison(span);
         }
-        return call_generic(ctx, generic_def, None, None, args, &full, span);
+        // Named as written in its errors.
+        let def = plain_spawn(ctx, &full, args).unwrap_or(generic_def);
+        return call_generic(ctx, def, None, None, args, &full, span);
     }
 
     // `Box::get(b)` / `Box::new(v)` — generic-impl method by path.
@@ -9195,6 +9254,7 @@ fn lower_intrinsic(
         Intrinsic::MlirOp => lower_mlir_op(ctx, targs, args, span),
         Intrinsic::Transfer
         | Intrinsic::TransferKeep
+        | Intrinsic::TransferVisit
         | Intrinsic::TransferNeeded
         | Intrinsic::TransferPlain
         | Intrinsic::TransferFlat

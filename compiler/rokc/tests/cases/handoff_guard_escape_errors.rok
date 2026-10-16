@@ -1,0 +1,75 @@
+// spec: std 213-marker §2.13.9 / std 216-sync §2.16.3
+// A guard and what it protects stay inside its `using` block: no copy of
+// the guard, no `yield` of the value, no block value taken out.
+use rok::core::sync::MutexGuard;
+
+static M: Mutex<List<List<i32>>> = Mutex::new([[]]);
+
+yield fn rows() -> List<i32> {
+    using g = M.lock() { yield g.get()[0]; }
+}
+
+fn grow(x: List<i32>) { x.push(1); }
+
+fn stash(keep: List<MutexGuard<List<List<i32>>>>, g: MutexGuard<List<List<i32>>>) { keep.push(g); }
+
+fn main() {
+    for r in rows() { r.push(1); }
+    grow(using g = M.lock() { g.get()[0] });
+
+    let keep: List<MutexGuard<List<List<i32>>>> = [];
+    using g = M.lock() { keep.push(g); }
+    keep[0].get()[0].push(2);
+
+    let fs: List<fn() -> List<i32>> = [];
+    using g = M.lock() { fs.push(|| g.get()[0]); }
+    fs[0]().push(3);
+
+    let kept: List<MutexGuard<List<List<i32>>>> = [];
+    using g = M.lock() { stash(kept, g); }
+    kept[0].get()[0].push(4);
+
+    using g = M.lock() {
+        using h = g { h.get()[0].push(5); }
+        g.get()[0].push(6);
+    }
+}
+
+async fn later(x: List<i32>) -> usize { x.push(7); x.len() }
+
+yield fn one(x: List<i32>) -> List<i32> { yield x; }
+
+// A coroutine made from the guarded value inside the block, run after it.
+fn frames() {
+    let fut = later([]);
+    using g = M.lock() { fut = later(g.get()[0]); }
+    let _ = task::block_on(fut);
+    let it = one([]);
+    using g = M.lock() { it = one(g.get()[0]); }
+    for x in it { x.push(8); }
+}
+
+async fn hold(g: MutexGuard<List<List<i32>>>) -> usize { g.get()[0].len() }
+
+// A coroutine holding the guard itself, run after the block.
+fn guard_frames() {
+    let f = hold_none();
+    using g = M.lock() { f = hold(g); }
+    let _ = task::block_on(f);
+    let b: AsyncFuture<usize> = async { 0usize };
+    using g = M.lock() { b = async { g.get()[0].len() }; }
+    let _ = task::block_on(b);
+}
+
+async fn hold_none() -> usize { 0 }
+
+// expect-error: handoff_guard_escape_errors.rok:9:32: this yields a value out of the `Mutex`, and `g`'s `using` block releases the lock while the caller may still use it
+// expect-error: handoff_guard_escape_errors.rok:18:10: the value of `g`'s `using` block is what the `Mutex` protects, and the block releases the lock before it is used
+// expect-error: handoff_guard_escape_errors.rok:22:5: `keep` holds a copy of the guard `g`, whose `using` block released the lock at line 21
+// expect-error: handoff_guard_escape_errors.rok:26:5: `fs` holds a copy of the guard `g`, whose `using` block released the lock at line 25
+// expect-error: handoff_guard_escape_errors.rok:30:5: `kept` holds a copy of the guard `g`, whose `using` block released the lock at line 29
+// expect-error: handoff_guard_escape_errors.rok:34:9: `g` is the guard `h`, and `h`'s `using` block released the lock at line 33
+// expect-error: handoff_guard_escape_errors.rok:46:28: `fut` shares the value the `Mutex` protects (`g.get()`) at line 45, and `g`'s `using` block released the lock
+// expect-error: handoff_guard_escape_errors.rok:49:14: `it` shares the value the `Mutex` protects (`g.get()`) at line 48, and `g`'s `using` block released the lock
+// expect-error: handoff_guard_escape_errors.rok:58:28: `f` holds a copy of the guard `g`, whose `using` block released the lock at line 57
+// expect-error: handoff_guard_escape_errors.rok:61:28: `b` holds a copy of the guard `g`, whose `using` block released the lock at line 60

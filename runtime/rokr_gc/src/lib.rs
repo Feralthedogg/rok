@@ -1743,6 +1743,22 @@ fn for_each_ref(o: *mut u8, lo: usize, hi: usize, mut f: impl FnMut(usize, u32))
     }
 }
 
+/// Whether every reference slot of GC object `obj` is null (a
+/// coroutine frame that holds nothing to copy).
+///
+/// # Safety
+/// `obj` must be a live GC object.
+pub unsafe fn refs_all_null(obj: *mut u8) -> bool {
+    let mut none = true;
+    for_each_ref(obj, 0, usize::MAX, |off, _| {
+        // SAFETY: a reference slot inside the live `obj`.
+        if none && load_word(unsafe { obj.add(off) }) != 0 {
+            none = false;
+        }
+    });
+    none
+}
+
 /// [`for_each_ref`] over the `entries` of table `t` at byte offset `at`.
 #[inline]
 #[allow(clippy::cast_ptr_alignment)] // the tag is 4-aligned

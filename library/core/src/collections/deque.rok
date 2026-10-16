@@ -297,4 +297,11 @@ impl<T> Transfer for Deque<T> {
         }
         self
     }
+
+    const fn transfer_visit(self, m: Memo) -> Deque<T> {
+        if !buf_is_null(self.meta) && m.visit(self.meta) {
+            unsafe { m.later_visit(self.data[0], self.meta[2]) };
+        }
+        self
+    }
 }

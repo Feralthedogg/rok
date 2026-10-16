@@ -3,7 +3,7 @@
 // worker it runs on, from sync code with the caller as a guest worker.
 // Chunks are claimed from a shared counter by one job per worker.
 
-use rok::core::marker::hand_over;
+use rok::core::marker::{distinct, hand_over};
 
 /// Run `job(c)` for every `c` in `0..chunks` across the workers (this
 /// thread included); returns once all have finished.
@@ -57,8 +57,18 @@ const fn collect_items<I: IntoIterator>(iter: I) -> List<I::Item> {
 }
 
 /// Call `f` on every item, in parallel (order unspecified).
+#[track_caller]
 pub fn for_each<I: IntoIterator<Item = T>, T: Send>(iter: I, f: fn(T) + Send + Sync) {
     let items: List<T> = collect_items(iter);
+    // Two items reaching one collection would race in two workers: they
+    // run one at a time instead.
+    if !distinct(items) {
+        unsafe { rok_par_sequential("par::for_each") };
+        for x in items {
+            f(x);
+        }
+        return;
+    }
     let n = items.len();
     let (chunks, size) = chunking(n);
     // Workers only read `items`, and only until `run_chunks` returns.
@@ -72,10 +82,19 @@ pub fn for_each<I: IntoIterator<Item = T>, T: Send>(iter: I, f: fn(T) + Send + S
 }
 
 /// `f` of every item, in the items' order.
+#[track_caller]
 pub fn map<I: IntoIterator<Item = T>, T: Send, U: Send>(iter: I, f: fn(T) -> U + Send + Sync) -> List<U> {
     unsafe {
         let items: List<T> = collect_items(iter);
         let n = items.len();
+        if !distinct(items) {
+            rok_par_sequential("par::map");
+            let one: List<U> = List::with_capacity(n);
+            for x in items {
+                one.push(f(x));
+            }
+            return one;
+        }
         let out: GcBuf<U> = buf_new(n);
         let (chunks, size) = chunking(n);
         // Each chunk writes its own slots of `out`; all done before the read.
@@ -120,9 +139,20 @@ pub fn reduce<T: Send + Sync>(iter: List<T>, init: T, f: fn(T, T) -> T + Send + 
 }
 
 /// The items `pred` accepts, in order.
+#[track_caller]
 pub fn filter<T: Send>(iter: List<T>, pred: fn(T) -> bool + Send + Sync) -> List<T> {
     unsafe {
         let n = iter.len();
+        if !distinct(iter) {
+            rok_par_sequential("par::filter");
+            let one: List<T> = [];
+            for x in iter {
+                if pred(x) {
+                    one.push(x);
+                }
+            }
+            return one;
+        }
         let keep: GcBuf<bool> = buf_new(n);
         let (chunks, size) = chunking(n);
         let shared = Handoff::new(iter);

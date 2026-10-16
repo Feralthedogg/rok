@@ -188,6 +188,14 @@ unsafe impl<T: Send> Sync for Handoff<T> {}
 
 extern "rok" {
     fn rok_xfer_memo() -> GcBuf<u8>;
+    fn rok_xfer_memo_for(n: usize) -> GcBuf<u8>;
+    fn rok_visit_begin() -> u32;
+    fn rok_visit_end(epoch: u32);
+    /// A visit's state: the header way, or the exact way (a memo).
+    fn rok_visit_new(epoch: u32) -> GcBuf<u8>;
+    fn rok_visit_exact(memo: GcBuf<u8>) -> GcBuf<u8>;
+    fn rok_visit_reach(v: GcBuf<u8>, obj: GcBuf<u8>, how: u32) -> usize;
+    fn rok_visit_done(v: GcBuf<u8>) -> bool;
     /// The copy of `orig` viewed as `(a, b, c)`, or `orig` when none.
     fn rok_xfer_find(memo: GcBuf<u8>, orig: GcBuf<u8>, a: usize, b: usize, c: usize) -> GcBuf<u8>;
     fn rok_xfer_note(memo: GcBuf<u8>, orig: GcBuf<u8>, a: usize, b: usize, c: usize, copy: GcBuf<u8>);
@@ -205,13 +213,35 @@ struct Work {
 
 /// The copies one hand-off made, by original object, and the copied
 /// buffers left to fix. `none` for one collection whose elements need no
-/// copy: nothing can be reached twice.
+/// copy: nothing can be reached twice. A visit (`distinct`) notes what
+/// each item reaches in `vis` instead.
 pub struct Memo {
     obj: GcBuf<u8> | none;
     work: List<Work> | none;
+    vis: GcBuf<u8> | none;
 }
 
+// What `rok_visit_reach` answers (rokr `xfer`).
+const NEW: usize = 0;
+const AGAIN: usize = 1;
+const HOW_SLICE: u32 = 1;
+
 impl Memo {
+    /// A memo for work this one cannot hold (it has none: the hand-off
+    /// of one handle of plain elements), drained with `finish`; else none.
+    pub(pkg) fn own(self) -> Memo | none {
+        if let _: GcBuf<u8> = self.obj {
+            return none;
+        }
+        let w: List<Work> = [];
+        Memo { obj: unsafe { rok_xfer_memo() }, work: w, vis: none }
+    }
+
+    /// Fix up what `own`'s memo queued.
+    pub(pkg) fn finish(self) {
+        drain(self);
+    }
+
     /// The copy of `orig` noted earlier in this hand-off.
     pub(pkg) const fn find<T>(self, orig: GcBuf<T>) -> GcBuf<T> | none {
         self.find_at::<T, T>(orig, 0, 0, 0)
@@ -258,6 +288,88 @@ impl Memo {
             }
         }
     }
+
+    /// A visit reaches `orig` whole: whether its elements are to be
+    /// visited too.
+    pub(pkg) const fn visit<T>(self, orig: GcBuf<T>) -> bool {
+        if let v: GcBuf<u8> = self.vis {
+            let r = unsafe { rok_visit_reach(v, buf_erase(orig), 0) };
+            return r == NEW || r == AGAIN;
+        }
+        true
+    }
+
+    /// A visit reaches slots `start + i * stride` (`i < len`) of `buf`
+    /// through a slice, and through them their elements.
+    pub(pkg) const fn visit_span<T>(self, buf: GcBuf<T>, start: usize, len: usize, stride: isize) {
+        if let v: GcBuf<u8> = self.vis {
+            let o = buf_erase(buf);
+            if len == 0 {
+                return;
+            }
+            let r = unsafe { rok_visit_reach(v, o, HOW_SLICE) };
+            if r != NEW && r != AGAIN {
+                return;
+            }
+            if transfer_needed::<T>() {
+                for i in 0..len {
+                    let at = ((start as isize) + (i as isize) * stride) as usize;
+                    let _ = transfer_visit::<T>(unsafe { buf[at] }, self);
+                }
+            }
+        }
+    }
+
+    /// Elements `0..n` of `buf` are visited later.
+    pub(pkg) const fn later_visit<T>(self, buf: GcBuf<T>, n: usize) {
+        if transfer_needed::<T>() && n > 0 {
+            if let w: List<Work> = self.work {
+                w.push(Work { buf: buf_erase(buf), n, fix: visit_slots::<T> });
+            }
+        }
+    }
+}
+
+fn visit_slots<T>(b: GcBuf<u8>, n: usize, m: Memo) {
+    unsafe {
+        let buf: GcBuf<T> = buf_cast(b);
+        for i in 0..n {
+            let _ = transfer_visit::<T>(buf[i], m);
+        }
+    }
+}
+
+/// Whether no collection is reached from two of `items` (2.19.1): `par`
+/// gives each item to a worker. Each collection an item reaches is
+/// stamped for that item (rokr `xfer`), elements followed only where they
+/// hold collections. Slices only read: items may share a list through
+/// them, not with one that holds the list itself. A clash found by stamps
+/// is confirmed by the exact memo.
+pub(pkg) fn distinct<T>(items: List<T>) -> bool {
+    if !transfer_needed::<T>() || items.len() < 2 {
+        return true;
+    }
+    unsafe {
+        let e = rok_visit_begin();
+        let ok = visit_items(items, rok_visit_new(e));
+        rok_visit_end(e);
+        ok || visit_items(items, rok_visit_exact(rok_xfer_memo_for(items.len())))
+    }
+}
+
+fn visit_items<T>(items: List<T>, v: GcBuf<u8>) -> bool {
+    let w: List<Work> = [];
+    let m = Memo { obj: none, work: w, vis: v };
+    unsafe {
+        for x in items {
+            let _ = transfer_visit::<T>(x, m);
+            drain(m);
+            if rok_visit_done(v) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn fix_slots<T>(b: GcBuf<u8>, n: usize, m: Memo) {
@@ -287,6 +399,9 @@ pub(pkg) const fn buf_is_null<T>(b: GcBuf<T>) -> bool {
 pub trait Transfer {
     fn transfer_copy(self, m: Memo) -> Self;
     fn transfer_keep(self, m: Memo) -> Self;
+    /// Note the handle for the memo's owner (`Memo::visit`), its
+    /// elements queued.
+    fn transfer_visit(self, m: Memo) -> Self;
 }
 
 /// `x` with every collection it reaches copied, one level: the copies'
@@ -297,6 +412,11 @@ pub(pkg) fn transfer<T>(x: T, m: Memo) -> T;
 /// Note every collection `x` reaches by value as its own copy.
 #[intrinsic("rok.transfer_keep")]
 pub(pkg) fn transfer_keep<T>(x: T, m: Memo) -> T;
+
+/// Note every collection `x` reaches by value for `m`'s owner, one level:
+/// the elements are queued on `m`.
+#[intrinsic("rok.transfer_visit")]
+pub(pkg) fn transfer_visit<T>(x: T, m: Memo) -> T;
 
 /// Whether `transfer::<T>` copies anything (a constant).
 #[intrinsic("rok.transfer_needed")]
@@ -323,22 +443,24 @@ pub fn hand_over<T>(x: T) -> T;
 pub(pkg) fn hand_over_into<T>(kept: T, x: T) -> T;
 
 /// `hand_over` for a `T` that has collections to copy.
+#[track_caller]
 pub(pkg) const fn hand_over_copy<T>(x: T) -> T {
     if transfer_flat::<T>() {
-        let one = Memo { obj: none, work: none };
+        let one = Memo { obj: none, work: none, vis: none };
         return transfer::<T>(x, one);
     }
     // A local: `transfer` names its memo once per collection.
     let w: List<Work> = [];
-    let m = Memo { obj: unsafe { rok_xfer_memo() }, work: w };
+    let m = Memo { obj: unsafe { rok_xfer_memo() }, work: w, vis: none };
     let y = transfer::<T>(x, m);
     drain(m);
     y
 }
 
+#[track_caller]
 pub(pkg) const fn hand_over_into_copy<T>(kept: T, x: T) -> T {
     let w: List<Work> = [];
-    let m = Memo { obj: unsafe { rok_xfer_memo() }, work: w };
+    let m = Memo { obj: unsafe { rok_xfer_memo() }, work: w, vis: none };
     let _ = transfer_keep::<T>(kept, m);
     let y = transfer::<T>(x, m);
     drain(m);
@@ -420,6 +542,16 @@ impl<T> Transfer for GcPtr<T> {
                 let boxed: GcBuf<GcPtr<T>> = buf_new(1);
                 boxed[0] = self;
                 m.note_at::<u8, GcPtr<T>>(o, 0, 0, 0, boxed);
+            }
+        }
+        self
+    }
+
+    fn transfer_visit(self, m: Memo) -> GcPtr<T> {
+        if let o: GcBuf<u8> = self.gc_object() {
+            if !buf_is_null(o) && m.visit(o) {
+                let slot: GcBuf<T> = unsafe { buf_cast(o) };
+                m.later_visit(slot, 1);
             }
         }
         self

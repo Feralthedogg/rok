@@ -1,0 +1,23 @@
+// spec: §4.6.9 std §2.13.9 / std §2.18.1
+// expect-exit: 0
+// expect-stdout:
+// 2 1
+
+// An `async` block captures by copying the handle; `task::spawn` gives
+// the task its own copy of the list, which the task owns from then on
+// (the spawner's use of it is an error, `handoff_route_task_spawn_arg`).
+// A list made inside a task is the task's (`async_spawn_capture_local`).
+async fn grow(xs: List<i32>) -> usize {
+    xs.push(1);
+    xs.len()
+}
+
+async fn main() {
+    let xs: List<i32> = [0];
+    let t = task::spawn(async { xs.push(1); xs.len() });
+    let u = task::spawn(async {
+        let mine: List<i32> = [];
+        await grow(mine)
+    });
+    println(f"{await t} {await u}");
+}

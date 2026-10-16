@@ -3611,9 +3611,20 @@ impl<'a> LowerCtx<'a> {
                 .iter()
                 .find(|k| !self.auto_trait(&f.ty, k, 0, &mut AutoSeen::default()))?;
             let name = self.locals.get(local.0 as usize)?.name.clone()?;
+            let ty = self.ty_name(&f.ty);
+            let guard = ["MutexGuard<", "RwLockReadGuard<", "RwLockWriteGuard<"]
+                .iter()
+                .any(|g| ty.starts_with(g));
+            let read = if guard {
+                format!(
+                    "; a guard stays with its `using` block: read it first (`let v = \
+                     {name}.get();`) and capture `v`"
+                )
+            } else {
+                String::new()
+            };
             Some(format!(
-                "the closure captures `{name}` (type `{}`), which is not `{}`{}",
-                self.ty_name(&f.ty),
+                "the closure captures `{name}` (type `{ty}`), which is not `{}`{}{read}",
                 leaf_name(key),
                 self.auto_trait_cause(&f.ty, key, 0)
             ))

@@ -7,7 +7,8 @@
 //!                          4=LARGE, 5=IMMORTAL (unused); 6=UNLOGGED, 7=CARDED
 //!                          are this runtime's write-barrier bits,
 //!                          8=NOMOVE, 9=NOEVAC its evacuation bits,
-//!                          12=WIPE: zeroed when freed)
+//!                          12=WIPE: zeroed when freed; 13..=31 a `par`
+//!                          visit's, `VISIT_*`)
 //!   8  : `gc_word`   u64 (forwarding pointer or LOS payload size)
 //!   16 : payload     ...
 
@@ -57,6 +58,17 @@ pub const FLAG_SCANNED: u32 = 1 << 11;
 /// A secret buffer (`rok_gc_secret_new`, a LOS object): the sweep that
 /// frees it zeroes its payload first. Implementation bit; permanent.
 pub const FLAG_WIPE: u32 = 1 << 12;
+
+/// A `par` visit's (rokr `xfer`, stdlib 2.19.1): the epoch of the last
+/// visit that reached the object. The collector keeps these bits.
+pub const VISIT_STAMP_SHIFT: u32 = 13;
+pub const VISIT_STAMP: u32 = 0xffff << VISIT_STAMP_SHIFT;
+/// Reached by more than one item, each through slices.
+pub const VISIT_OTHERS: u32 = 1 << 29;
+/// Reached only through slices so far.
+pub const VISIT_SLICED: u32 = 1 << 30;
+/// Reached by the item being visited.
+pub const VISIT_CUR: u32 = 1 << 31;
 
 pub const HEADER_SIZE: usize = crate::gc_abi::HEADER_SIZE as usize;
 pub const HEADER_ALIGN: usize = 8;

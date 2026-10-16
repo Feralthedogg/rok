@@ -1,0 +1,32 @@
+// spec: std 216-sync §2.16.3
+// Copies of two guards used inside both blocks (picked by a branch) are
+// fine; only a copy used after its own block is an error.
+// expect-exit: 0
+// expect-stdout:
+// 5 15
+
+fn move_one(a: Mutex<i64>, b: Mutex<i64>, back: bool) {
+    using x = a.lock() {
+        using y = b.lock() {
+            let (src, dst) = if back { (y, x) } else { (x, y) };
+            src.set(src.get() - 1);
+            dst.set(dst.get() + 1);
+        }
+    }
+}
+
+fn main() {
+    let a = Mutex::new(10i64);
+    let b = Mutex::new(10i64);
+    for i in 0..3 { move_one(a, b, false); }
+    move_one(a, b, false);
+    move_one(a, b, true);
+    move_one(a, b, true);
+    move_one(a, b, false);
+    move_one(a, b, false);
+    move_one(a, b, false);
+    let (na, nb) = (0i64, 0i64);
+    using g = a.lock() { na = g.get(); }
+    using g = b.lock() { nb = g.get(); }
+    println(f"{na} {nb}");
+}

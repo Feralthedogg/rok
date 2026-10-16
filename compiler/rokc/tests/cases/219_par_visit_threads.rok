@@ -1,0 +1,35 @@
+// needs: threads
+// gc-stress: 5
+// spec: std 219-par §2.19.1
+// par calls on several threads at once, each over its own items: the
+// visit's tables live across collections (few and many objects an item).
+// expect-exit: 0
+// expect-stdout: 108360
+use rok::std::thread;
+
+fn mk(k: i32) -> List<List<i32>> {
+    let o: List<List<i32>> = [];
+    for j in 0..k { o.push([j]); }
+    o
+}
+
+fn round(k: i32) -> usize {
+    let items: List<List<List<i32>>> = [];
+    for _a in 0..6 { items.push(mk(k)); }
+    par::for_each(items, |o: List<List<i32>>| { for i in 0..300 { for l in o { l.push(i); } } });
+    items[0][0].len()
+}
+
+fn run() -> usize {
+    let s: usize = 0;
+    for _r in 0..60 { s += round(2) + round(12); }
+    s
+}
+
+fn main() {
+    let ts: List<thread::JoinHandle<usize>> = [];
+    for _k in 0..3 { ts.push(thread::spawn(|| run())); }
+    let b: usize = 0;
+    for t in ts { b += try! t.join(); }
+    println(f"{b}");
+}

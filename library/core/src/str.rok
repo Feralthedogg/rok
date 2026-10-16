@@ -857,4 +857,11 @@ impl Transfer for StrBuf {
         }
         self
     }
+
+    const fn transfer_visit(self, m: Memo) -> StrBuf {
+        if !buf_is_null(self.h) {
+            let _ = m.visit(self.h);
+        }
+        self
+    }
 }

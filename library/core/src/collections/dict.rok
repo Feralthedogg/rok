@@ -533,4 +533,15 @@ impl<K, V> Transfer for Dict<K, V> {
         }
         self
     }
+
+    const fn transfer_visit(self, m: Memo) -> Dict<K, V> {
+        if !buf_is_null(self.h) && m.visit(self.h) {
+            unsafe {
+                let s = self.h[0];
+                m.later_visit(s.keys, s.n);
+                m.later_visit(s.vals, s.n);
+            }
+        }
+        self
+    }
 }

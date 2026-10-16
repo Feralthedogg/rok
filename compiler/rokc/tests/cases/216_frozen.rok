@@ -1,0 +1,39 @@
+// needs: threads
+// gc-stress: 5
+// spec: std 216-sync §2.16.4b
+// A `Frozen` value is read by every thread without a lock: each `get` is
+// the reader's own copy, and `Sync` parts stay shared.
+// expect-exit: 0
+// expect-stdout:
+// 24000 2 4000 3
+
+use rok::std::thread;
+
+struct Cfg { names: List<str>; limits: Dict<str, i32>; hits: Mutex<i32>; }
+
+static CFG: Frozen<List<i32>> = Frozen::new([1, 2, 3]);
+
+fn main() {
+    let c = Frozen::new(Cfg { names: ["a", "b"], limits: {"x": 1}, hits: Mutex::new(0) });
+    let ts: List<thread::JoinHandle<i32>> = [];
+    for _ in 0..4 {
+        ts.push(thread::spawn(|| {
+            let total = 0;
+            for _ in 0..1000 {
+                let mine = c.get();
+                mine.names.push("mine");
+                total += mine.names.len() as i32 + CFG.get().len() as i32;
+                using g = mine.hits.lock() { g.set(g.get() + 1); }
+            }
+            total
+        }));
+    }
+    let sum = 0;
+    for t in ts { sum += try! t.join(); }
+    let base = c.get();
+    let hits = 0;
+    using g = base.hits.lock() { hits = g.get(); }
+    let first = CFG.get();
+    first.push(4);
+    println(f"{sum} {base.names.len()} {hits} {CFG.get().len()}");
+}

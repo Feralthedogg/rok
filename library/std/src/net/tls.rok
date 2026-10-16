@@ -92,10 +92,16 @@ pub struct Certificate {
     pub(pkg) info: CertInfo;
 }
 
+// Never changed once parsed, and its accessors give copies: threads may
+// share one, and a hand-off or `Frozen::get` of a config does not copy
+// its certificates.
+unsafe impl Sync for Certificate {}
+
 impl Certificate {
     pub fn from_der(der: List<u8> | Slice<u8>) throws (TlsError) -> Certificate {
+        // Own the bytes: `info` views them, and a caller's list may change.
         let d: List<u8> = match der {
-            l: List<u8> => l,
+            l: List<u8> => l.clone(),
             s: Slice<u8> => s.to_list(),
         };
         Certificate { der: d, info: try x509::parse(d[0:d.len()]) }
@@ -109,10 +115,10 @@ impl Certificate {
     }
 
     /// The DER encoding.
-    pub const fn der(self) -> List<u8> { self.der }
+    pub const fn der(self) -> List<u8> { self.der.clone() }
 
     /// The subjectAltName DNS names.
-    pub const fn dns_names(self) -> List<str> { self.info.dns_names }
+    pub const fn dns_names(self) -> List<str> { self.info.dns_names.clone() }
 
     /// The validity period, Unix seconds.
     pub const fn not_before(self) -> i64 { self.info.not_before }
@@ -405,7 +411,7 @@ fn bytes_copy(b: List<u8> | none) -> List<u8> | none {
 fn certs_copy(cs: List<Certificate>) -> List<Certificate> {
     let out: List<Certificate> = [];
     for c in cs {
-        out.push(try! Certificate::from_der(c.der.clone()));
+        out.push(try! Certificate::from_der(c.der));
     }
     out
 }

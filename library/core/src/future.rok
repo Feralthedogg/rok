@@ -5,6 +5,9 @@
 // `e` has no `poll` — until `Ready`, suspending the coroutine with
 // `Pending` in between (refs-lang 4.12, `rokc_hir::lower::coro`).
 
+use rok::core::collections::raw::{GcBuf, buf_erase, buf_new};
+use rok::core::marker::{Memo, Transfer, transfer};
+
 pub enum Poll<T> {
     Ready(T),
     Pending,
@@ -43,6 +46,11 @@ impl Waker {
 /// What a `poll` gets from the executor (2.20.2).
 pub struct Context {
     pub(pkg) waker: Waker;
+    /// A hand-off's poll (`Transfer` of a coroutine future, `pdata`): a
+    /// coroutine that has not started takes copies of what it captured,
+    /// one that has reports it, and neither runs any of its body.
+    pub(pkg) prime: bool = false;
+    pub(pkg) pdata: GcBuf<Prime> | none = none;
 }
 
 impl Context {
@@ -52,6 +60,120 @@ impl Context {
 
     pub const fn waker(self) -> Waker {
         self.waker
+    }
+}
+
+/// A hand-off's poll of one coroutine frame: the hand-off's memo, and what
+/// the frame answers (`COPIED`, `STARTED`, `CELL`; none: it finished).
+pub(pkg) struct Prime {
+    m: Memo;
+    reply: u8;
+}
+
+// Lives for one poll, on one thread.
+unsafe impl Send for Prime {}
+
+const COPIED: u8 = 1;
+const STARTED: u8 = 2;
+const CELL: u8 = 3;
+
+/// A frame that has not started, on a hand-off's poll: its captures,
+/// copied through the hand-off's memo (one copy of an object they share,
+/// with what else the hand-off copies). `cells`: it has a `[ref x]`
+/// capture, which no copy may have.
+#[track_caller]
+pub(pkg) const fn prime_frame<T>(captures: T, ctx: Context, cells: bool) -> T {
+    if let p: GcBuf<Prime> = ctx.pdata {
+        unsafe {
+            if cells {
+                p[0].reply = CELL;
+                return captures;
+            }
+            p[0].reply = COPIED;
+            return transfer::<T>(captures, p[0].m);
+        }
+    }
+    captures
+}
+
+/// A frame parked at an `await`, on a hand-off's poll.
+pub(pkg) const fn prime_started<T>(x: T, ctx: Context) -> T {
+    if let p: GcBuf<Prime> = ctx.pdata {
+        unsafe { p[0].reply = STARTED };
+    }
+    x
+}
+
+extern "rok" {
+    /// The env of the `fn` value `cell[0]` (a coroutine's frame).
+    fn rok_fn_env(cell: GcBuf<u8>) -> GcBuf<u8>;
+    fn rok_fn_set_env(cell: GcBuf<u8>, env: GcBuf<u8>);
+    /// The payload words of `obj`, and the copy of `src` (type and words)
+    /// into a fresh word buffer of that many.
+    fn rok_obj_words(obj: GcBuf<u8>) -> usize;
+    fn rok_obj_copy(dst: GcBuf<usize>, src: GcBuf<u8>);
+    /// Coroutine frame `frame` has not started and holds no reference.
+    fn rok_frame_plain(frame: GcBuf<u8>) -> bool;
+}
+
+/// A hand-off of coroutine future `resume` (2.13.9): a frame of its own
+/// for the new owner, which takes copies of what it captured. Two owners
+/// never run one frame. Only a frame that has not started can be handed
+/// over: a started one holds what it made and read so far, as it is.
+#[track_caller]
+const fn hand_frame<S>(resume: S, m: Memo, poll: fn(S, Context) -> bool) -> S {
+    unsafe {
+        let cell: GcBuf<S> = buf_new(1);
+        cell[0] = resume;
+        let frame = rok_fn_env(buf_erase(cell));
+        if let got: GcBuf<u8> = m.find(frame) {
+            rok_fn_set_env(buf_erase(cell), got);
+            return cell[0];
+        }
+        // Not started, and no reference in it (no captures, or plain
+        // ones): its words are all there is to copy.
+        let plain = rok_frame_plain(frame);
+        let words: GcBuf<usize> = buf_new(rok_obj_words(frame));
+        // The allocation may have moved the frame: read it again.
+        frame = rok_fn_env(buf_erase(cell));
+        rok_obj_copy(words, frame);
+        let copy = buf_erase(words);
+        m.note(frame, copy);
+        rok_fn_set_env(buf_erase(cell), copy);
+        if plain {
+            return cell[0];
+        }
+        // The captures go through one memo for the whole hand-off: what
+        // they share stays shared.
+        let own = m.own();
+        let p: GcBuf<Prime> = buf_new(1);
+        p[0] = Prime { m: own ?? m, reply: 0 };
+        let w: GcBuf<Waker> = buf_new(1);
+        let done = poll(cell[0], Context { waker: w[0], prime: true, pdata: p });
+        if let o: Memo = own {
+            o.finish();
+        }
+        let r = p[0].reply;
+        if r == STARTED {
+            panic("a future that has started running cannot go to another task or thread: hand it over before anything polls it, or call the async fn again for a new one");
+        }
+        if r == CELL {
+            panic("a future with a `[ref x]` capture cannot go to another task or thread: the code that made it shares the cell; capture a value, or share it through a `Mutex`");
+        }
+        if r != COPIED || done {
+            panic("a future that has finished or was cancelled (a `select` loser) cannot go to another task or thread: call the async fn again for a new future");
+        }
+        cell[0]
+    }
+}
+
+/// A `par` visit of coroutine future `resume`: its frame is one object,
+/// and two items holding it would run it on two workers.
+const fn visit_frame<S>(resume: S, m: Memo) {
+    unsafe {
+        let cell: GcBuf<S> = buf_new(1);
+        cell[0] = resume;
+        let _ = m.visit(rok_fn_env(buf_erase(cell)));
     }
 }
 
@@ -87,7 +209,7 @@ pub struct AsyncFuture<T> {
 
 // `Send` follows the output (and error) type; `task::spawn` checks the
 // frame's captures and locals held across `await` separately
-// (`rokc_hir::lower::send_check`).
+// (`rokc_hir::lower::send_check`), and copies the captures (`Transfer`).
 unsafe impl<T: Send> Send for AsyncFuture<T> {}
 unsafe impl<T: Send, E: Send> Send for TryAsyncFuture<T, E> {}
 
@@ -95,6 +217,23 @@ impl<T> Future for AsyncFuture<T> {
     type Output = T;
     const fn poll(ref self, ref ctx: Context) -> Poll<T> {
         (self.resume)(ctx)
+    }
+}
+
+// A hand-off (`task::spawn`, a channel send) gives the frame copies of
+// what it captured: the sender keeps the originals (2.13.9).
+impl<T> Transfer for AsyncFuture<T> {
+    #[track_caller]
+    const fn transfer_copy(self, m: Memo) -> AsyncFuture<T> {
+        let poll = |f: fn(Context) -> Poll<T>, ctx: Context| -> bool { f(ctx) is Poll::Ready };
+        AsyncFuture { resume: hand_frame(self.resume, m, poll) }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> AsyncFuture<T> { self }
+
+    const fn transfer_visit(self, m: Memo) -> AsyncFuture<T> {
+        visit_frame(self.resume, m);
+        self
     }
 }
 
@@ -109,6 +248,24 @@ pub struct TryAsyncFuture<T, E> {
 impl<T, E> TryAsyncFuture<T, E> {
     pub const fn poll(ref self, ref ctx: Context) throws (E) -> Poll<T> {
         try (self.resume)(ctx)
+    }
+}
+
+impl<T, E> Transfer for TryAsyncFuture<T, E> {
+    #[track_caller]
+    const fn transfer_copy(self, m: Memo) -> TryAsyncFuture<T, E> {
+        let poll = |f: fn(Context) throws (E) -> Poll<T>, ctx: Context| -> bool {
+            let r = try f(ctx) catch _ { return true; };
+            r is Poll::Ready
+        };
+        TryAsyncFuture { resume: hand_frame(self.resume, m, poll) }
+    }
+
+    const fn transfer_keep(self, m: Memo) -> TryAsyncFuture<T, E> { self }
+
+    const fn transfer_visit(self, m: Memo) -> TryAsyncFuture<T, E> {
+        visit_frame(self.resume, m);
+        self
     }
 }
 

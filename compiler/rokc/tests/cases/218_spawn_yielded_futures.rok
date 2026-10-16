@@ -1,0 +1,20 @@
+// needs: threads
+// spec: std 218-task §2.18.1 / std 213-marker §2.13.9
+// Futures a generator yields, collected and spawned: each task gets its
+// own copy of the list both captured.
+// expect-exit: 0
+// expect-stdout:
+// 400000 0
+async fn grow(x: List<i32>) -> usize { for i in 0..200000 { x.push(i); } x.len() }
+yield fn two(x: List<i32>) -> AsyncFuture<usize> { yield grow(x); yield grow(x); }
+async fn amain() -> usize {
+    let a: List<i32> = [];
+    let fs = two(a).collect::<List<AsyncFuture<usize>>>();
+    let ts: List<Task<usize>> = [];
+    for f in fs { ts.push(task::spawn(f)); }
+    let s: usize = 0;
+    for t in ts { s += await t; }
+    println(f"{s} {a.len()}");
+    s
+}
+fn main() { let _ = task::block_on(amain()); }

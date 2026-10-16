@@ -806,4 +806,5 @@ codec_enum!(Intrinsic {
     TransferKeep,
     TransferPlain,
     TransferFlat,
+    TransferVisit,
 });

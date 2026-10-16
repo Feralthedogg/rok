@@ -7,10 +7,13 @@
 //!    across an `await` (`f(cell, await x)`), is not. "Held across" is read
 //!    off the HIR in evaluation order; loop bodies are walked twice.
 //! 2. A whole-program flow tracks which such coroutines each value may
-//!    hold: through locals, parameters, returns, fields, buffers a callee
-//!    stores into, captures, calls and other frames.
+//!    hold: through locals, parameters, returns and yields, fields, buffers
+//!    a callee stores into, captures, calls and other frames.
 //! 3. No argument of `task::spawn`, `thread::spawn`, `Builder::spawn`,
-//!    `Scope::spawn` or `task::spawn_blocking` may hold one.
+//!    `Scope::spawn`, `task::spawn_blocking` or `par` may hold one. A frame
+//!    whose captures are `Send` but not `Sync` may still be a task:
+//!    `task::spawn` hands the future over, and the frame takes copies of
+//!    them (`Context::prime`); a `[ref x]` cell stays shared.
 //!
 //! A type with no `fn` / closure value inside, or with an explicit
 //! `unsafe impl Send` (`Task<T>`: the future stays with its worker), holds
@@ -30,10 +33,15 @@ use crate::{HirBlock, HirExpr, HirExprKind, HirFunction, HirPattern, HirStmt, Hi
 /// Calls whose arguments must not hold a non-`Send` frame.
 const SINKS: &[&str] = &[
     "rok::core::task::spawn",
+    "rok::core::task::spawn_plain",
     "rok::core::task::spawn_blocking",
     "rok::std::thread::spawn",
     "rok::std::thread::Builder__spawn",
     "rok::core::par::Scope__spawn",
+    // Their items go to workers (a future among them is run there).
+    "rok::core::par::for_each",
+    "rok::core::par::map",
+    "rok::core::par::filter",
 ];
 
 /// The coroutine wrappers: their `Send` impl does not see the frame.
@@ -76,6 +84,9 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     // Frames that capture a `Send` but not `Sync` value: fine inside
     // one task, not as a task of their own (the spawner keeps its copy).
     let mut shared: HashMap<FunctionId, String> = HashMap::new();
+    // Frames with a `[ref x]` capture: never a task of their own
+    // (`task::spawn` copies the other captures).
+    let mut cells: HashMap<FunctionId, String> = HashMap::new();
     let mut held: HashMap<FunctionId, Vec<LocalId>> = HashMap::new();
     let mut ids: Vec<FunctionId> = all.keys().copied().collect();
     ids.sort();
@@ -84,12 +95,15 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         if !(f.is_async || f.is_generator) {
             continue;
         }
-        let (why, why_shared, h) = frame(&ctx, &send, sync.as_deref(), f);
+        let (why, why_shared, why_cell, h) = frame(&ctx, &send, sync.as_deref(), f);
         if let Some(w) = why {
             bad.insert(id, w);
         }
         if let Some(w) = why_shared {
             shared.insert(id, w);
+        }
+        if let Some(w) = why_cell {
+            cells.insert(id, w);
         }
         held.insert(id, h);
     }
@@ -126,13 +140,26 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     sinks.sort_by_key(|(span, _, _)| (span.file, span.start));
     let mut seen = HashSet::new();
     for (span, sink, items) in sinks {
-        let why = match items
+        // `task::spawn` copies what the future captured, but a cell stays
+        // shared; other sinks run the future with its captures as they are.
+        let spawn = sink == SINKS[0] || sink == SINKS[1];
+        let found = items
             .iter()
             .find(|i| matches!(i, Item::Bad(_)))
-            .or_else(|| items.iter().find(|i| matches!(i, Item::Shared(_))))
-        {
-            Some(Item::Bad(c)) => &bad[c],
-            Some(Item::Shared(c)) => &shared[c],
+            .or_else(|| {
+                items.iter().find(|i| match i {
+                    Item::Shared(c) => !spawn || cells.contains_key(c),
+                    _ => false,
+                })
+            });
+        let why = match found {
+            Some(Item::Bad(c)) => bad[c].clone(),
+            Some(Item::Shared(c)) if spawn => cells[c].clone(),
+            Some(Item::Shared(c)) if cells.contains_key(c) || !all[c].is_async => shared[c].clone(),
+            Some(Item::Shared(c)) => format!(
+                "{}; make each a task instead (`task::spawn` gives it its own copies)",
+                shared[c]
+            ),
             _ => continue,
         };
         if !seen.insert((span.file, span.start)) {
@@ -141,7 +168,7 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         ctx.emit_error_at(
             rokc_diagnostic::ErrorKind::Type,
             span,
-            if sink == SINKS[0] {
+            if spawn {
                 format!(
                     "`task::spawn` needs a `Send` future: {why}, and the task may resume on \
                      another worker (spec 2.18.1); use `task::spawn_local`"
@@ -158,14 +185,15 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
 }
 
 /// Why coroutine `f`'s own frame is not `Send` (`None`: it is), why it
-/// cannot be a task of its own (a capture is not `Sync`), and the locals
-/// its frame holds (captures and locals live across a suspend).
+/// cannot run with its captures as they are on another thread (one is not
+/// `Sync`), why not even with copies (a `[ref x]` cell), and the locals its
+/// frame holds (captures and locals live across a suspend).
 fn frame(
     ctx: &LowerCtx<'_>,
     send: &str,
     sync: Option<&str>,
     f: &HirFunction,
-) -> (Option<String>, Option<String>, Vec<LocalId>) {
+) -> (Option<String>, Option<String>, Option<String>, Vec<LocalId>) {
     let name = |l: LocalId| {
         f.locals
             .iter()
@@ -193,6 +221,7 @@ fn frame(
     let mut w = Walk {
         non_send_local: &|l| ty_of(l).is_some_and(non_send),
         non_sync_local: &|l| cell(l) || ty_of(l).is_some_and(non_sync),
+        cell_local: &|l| cell(l) || ty_of(l).is_some_and(|t| is_guard(ctx, t)),
         non_send_ty: &non_send,
         env_params: &env_params,
         declared: Vec::new(),
@@ -201,9 +230,10 @@ fn frame(
         suspends: 0,
         found: None,
         shared: None,
+        cell: None,
     };
     let Some(body) = f.body.as_ref() else {
-        return (None, None, Vec::new());
+        return (None, None, None, Vec::new());
     };
     w.block(body);
     let mut held: Vec<LocalId> = w.held.into_iter().collect();
@@ -232,13 +262,26 @@ fn frame(
             cause(Some(&t), send)
         ),
     });
+    let cell_why = |l: LocalId| {
+        format!(
+            "it has a `[ref {}]` capture, which the code that made it could change at the same \
+             time (spec 4.6.9)",
+            name(l)
+        )
+    };
+    let why_cell = w.cell.map(|l| {
+        if cell(l) {
+            return cell_why(l);
+        }
+        let n = name(l);
+        format!(
+            "it captures the guard `{n}`, which stays with its `using` block: read the value \
+             first (`let v = {n}.get();`) and capture `v`"
+        )
+    });
     let why_shared = w.shared.map(|l| {
         if cell(l) {
-            let n = name(l);
-            return format!(
-                "it has a `[ref {n}]` capture, which the code that made it could change at the \
-                 same time (spec 4.6.9)"
-            );
+            return cell_why(l);
         }
         format!(
             "it captures `{}: {}`, which is not `Sync`{} (the spawner keeps its copy, spec \
@@ -248,7 +291,16 @@ fn frame(
             sync.map(|k| cause(ty_of(l), k)).unwrap_or_default()
         )
     });
-    (why, why_shared, held)
+    (why, why_shared, why_cell, held)
+}
+
+/// A lock guard (good only inside its `using` block).
+fn is_guard(ctx: &LowerCtx<'_>, ty: &HirTy) -> bool {
+    let HirTy::Struct(id) = ty else { return false };
+    let name = ctx.struct_def(*id).name;
+    ["MutexGuard", "RwLockReadGuard", "RwLockWriteGuard"]
+        .iter()
+        .any(|g| name.starts_with(&format!("rok::core::sync::{g}")))
 }
 
 enum Found {
@@ -260,6 +312,7 @@ enum Found {
 struct Walk<'a> {
     non_send_local: &'a dyn Fn(LocalId) -> bool,
     non_sync_local: &'a dyn Fn(LocalId) -> bool,
+    cell_local: &'a dyn Fn(LocalId) -> bool,
     non_send_ty: &'a dyn Fn(&HirTy) -> bool,
     env_params: &'a HashSet<LocalId>,
     /// Locals declared so far.
@@ -275,6 +328,8 @@ struct Walk<'a> {
     found: Option<Found>,
     /// The first capture that is not `Sync`.
     shared: Option<LocalId>,
+    /// The first `[ref x]` capture.
+    cell: Option<LocalId>,
 }
 
 impl Walk<'_> {
@@ -289,6 +344,9 @@ impl Walk<'_> {
         }
         if from_env && self.shared.is_none() && (self.non_sync_local)(l) {
             self.shared = Some(l);
+        }
+        if from_env && self.cell.is_none() && (self.cell_local)(l) {
+            self.cell = Some(l);
         }
         self.declared.push(l);
     }
@@ -723,6 +781,13 @@ impl Flow<'_> {
             K::Local(l) => self.get(&Node::Local(self.cur, *l)),
             K::StaticRef(n) => self.get(&Node::Static(n.clone())),
             K::Block(b) => self.block(b),
+            // A step goes to the resumer like a return (futures a
+            // generator yields, then spawned).
+            K::Suspend { value, .. } => {
+                let v = self.expr(value);
+                self.add(Node::Ret(self.cur), &v);
+                Set::new()
+            }
             K::FnRef(id) => Set::from([Item::Code(*id)]),
             K::Call { callee, args } => {
                 let vals = self.exprs(args);
@@ -878,7 +943,7 @@ impl Flow<'_> {
                 s.extend(self.expr(value));
                 s
             }
-            // Scalars, raw memory, suspend points: their operands only.
+            // Scalars and raw memory: their operands only.
             K::PrimBinOp { .. }
             | K::PrimUnaryOp { .. }
             | K::BufNew { .. }
@@ -887,7 +952,6 @@ impl Flow<'_> {
             | K::RawWrite { .. }
             | K::BufAtomic { .. }
             | K::MlirOp { .. }
-            | K::Suspend { .. }
             | K::SumWrap { value: None, .. } => {
                 let mut kids = Vec::new();
                 each_child(e, &mut |c| kids.push(c));

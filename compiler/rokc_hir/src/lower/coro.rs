@@ -50,6 +50,8 @@ const BODY_LABEL: &str = "#coro";
 const CTX: &str = "#ctx";
 const CONTEXT: &str = "rok::core::future::Context";
 const POLL: &str = "rok::core::future::Poll";
+const PRIME_FRAME: &str = "rok::core::future::prime_frame";
+const PRIME_STARTED: &str = "rok::core::future::prime_started";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CoroKind {
@@ -126,6 +128,158 @@ fn poll_variant(ctx: &LowerCtx<'_>, poll: &HirTy, name: &str, args: Vec<HirExpr>
         ty: poll.clone(),
         span,
     }
+}
+
+/// `#name` as an AST path (a local the lowering declared).
+fn local_path(name: &str, span: rokc_diagnostic::Span) -> Expr {
+    Expr {
+        kind: ExprKind::Path(rokc_ast::Path {
+            segments: vec![rokc_ast::PathSegment {
+                name: name.to_owned(),
+                generics: Vec::new(),
+            }],
+            span,
+        }),
+        span,
+    }
+}
+
+/// What a hand-off's poll (`#ctx.prime`) of a frame that has not started
+/// does, before parking: the frame takes copies of the collections and
+/// futures it captured, which the sender still holds (stdlib 2.13.9),
+/// `(a, b) = prime_frame((a, b), #ctx, cells)`, through the hand-off's
+/// memo; `cells`: a `[ref x]` capture, which no copy may have.
+fn prime_captures(
+    c: &mut LowerCtx<'_>,
+    captures: &[(String, rokc_ir_common::LocalId, HirTy, bool)],
+    span: rokc_diagnostic::Span,
+) -> Vec<HirStmt> {
+    let Some(def) = c.env.generic_fn(PRIME_FRAME) else {
+        return Vec::new();
+    };
+    let copied: Vec<&String> = captures
+        .iter()
+        .filter(|(_, _, ty, by_ref)| !by_ref && super::expr::transfer_needs(c, ty, 0))
+        .map(|(name, ..)| name)
+        .collect();
+    let locals: Vec<_> = copied.iter().filter_map(|n| c.lookup(n)).collect();
+    if locals.len() != copied.len() {
+        return Vec::new();
+    }
+    let cells = captures.iter().any(|(.., by_ref)| *by_ref);
+    let tuple = Expr {
+        kind: ExprKind::Tuple(copied.iter().map(|n| local_path(n, span)).collect()),
+        span,
+    };
+    let flag = Expr {
+        kind: ExprKind::Literal(rokc_ast::Literal::Bool(cells)),
+        span,
+    };
+    let args = [
+        CallArg::Positional(tuple),
+        CallArg::Positional(local_path(CTX, span)),
+        CallArg::Positional(flag),
+    ];
+    let value = super::expr::call_generic(c, def, None, None, &args, PRIME_FRAME, span);
+    if locals.is_empty() {
+        return vec![HirStmt::Expr(value)];
+    }
+    let ty = value.ty.clone();
+    let all = c.declare(None, ty.clone());
+    let mut out = vec![HirStmt::Let {
+        local: all,
+        init: value,
+    }];
+    for (i, local) in locals.into_iter().enumerate() {
+        let field_ty = c.local_ty(local);
+        out.push(HirStmt::Assign {
+            local,
+            value: HirExpr {
+                kind: HirExprKind::TupleField {
+                    target: Box::new(hir_local(all, &ty, span)),
+                    index: u32::try_from(i).expect("capture index overflow"),
+                    field_ty: field_ty.clone(),
+                },
+                ty: field_ty,
+                span,
+            },
+        });
+    }
+    out
+}
+
+/// What a hand-off's poll of a frame parked at an `await` does: report
+/// that it started (`prime_started((), #ctx)`), so the hand-off fails.
+fn prime_started(c: &mut LowerCtx<'_>, span: rokc_diagnostic::Span) -> Vec<HirStmt> {
+    let Some(def) = c.env.generic_fn(PRIME_STARTED) else {
+        return Vec::new();
+    };
+    let unit = Expr {
+        kind: ExprKind::Tuple(Vec::new()),
+        span,
+    };
+    let args = [
+        CallArg::Positional(unit),
+        CallArg::Positional(local_path(CTX, span)),
+    ];
+    let call = super::expr::call_generic(c, def, None, None, &args, PRIME_STARTED, span);
+    vec![HirStmt::Expr(call)]
+}
+
+/// `#ctx.prime`: a hand-off's poll, which runs none of the body.
+fn primed(c: &LowerCtx<'_>, span: rokc_diagnostic::Span) -> Option<HirExpr> {
+    let cx = c.lookup(CTX)?;
+    let HirTy::Struct(sid) = c.local_ty(cx) else {
+        return None;
+    };
+    let index = c
+        .struct_def(sid)
+        .fields
+        .iter()
+        .position(|f| f.name == "prime")?;
+    let bool_ty = HirTy::Prim(PrimTy::Bool);
+    Some(HirExpr {
+        kind: HirExprKind::FieldRead {
+            target: Box::new(hir_local(cx, &HirTy::Struct(sid), span)),
+            struct_id: sid,
+            field_index: u32::try_from(index).expect("field index"),
+            field_ty: bool_ty.clone(),
+        },
+        ty: bool_ty,
+        span,
+    })
+}
+
+/// The `Pending` step of the future being lowered.
+fn pending_step(c: &LowerCtx<'_>) -> Option<HirExpr> {
+    let coro = c.coro.as_ref().filter(|k| !k.probe)?;
+    let poll = coro.step_ty(c, &c.fn_ret_ty);
+    Some(step(c, poll_variant(c, &poll, "Pending", Vec::new())))
+}
+
+/// `while #ctx.prime { first; suspend Pending }`: a future parks there
+/// through a hand-off's poll.
+fn parked(
+    c: &LowerCtx<'_>,
+    first: Vec<HirStmt>,
+    pending: HirExpr,
+    span: rokc_diagnostic::Span,
+) -> Option<HirExpr> {
+    let mut stmts = first;
+    stmts.push(HirStmt::Expr(suspend(pending, false, span)));
+    Some(HirExpr {
+        kind: HirExprKind::While {
+            label: None,
+            cond: Box::new(primed(c, span)?),
+            body: Box::new(HirBlock {
+                stmts,
+                trailing: None,
+                label: None,
+            }),
+        },
+        ty: HirTy::Unit,
+        span,
+    })
 }
 
 /// A step value, wrapped into the ok carrier when the body throws.
@@ -354,11 +508,22 @@ pub(super) fn poll_loop(
             body: block(
                 cancel_check(ctx, "cancel_requested", span)
                     .into_iter()
-                    .chain([HirStmt::Expr(if coro.probe {
-                        pending_step
+                    .chain(if coro.probe {
+                        vec![HirStmt::Expr(pending_step)]
                     } else {
-                        suspend(pending_step, false, span)
-                    })])
+                        // Past a hand-off's poll too, before polling again.
+                        let again = if coro.kind == CoroKind::Async {
+                            let first = prime_started(ctx, span);
+                            parked(ctx, first, pending_step.clone(), span)
+                        } else {
+                            None
+                        };
+                        [Some(suspend(pending_step, false, span)), again]
+                            .into_iter()
+                            .flatten()
+                            .map(HirStmt::Expr)
+                            .collect()
+                    })
                     .collect(),
             ),
         },
@@ -643,7 +808,16 @@ fn lower_coro_block<'a>(
 
     let body_id = rokc_ir_common::FunctionId(ctx.env.sink.next_id.get());
     ctx.env.sink.next_id.set(body_id.0 + 1);
-    let (mut c, params, prelude) = make_ctx(ctx, &val_ty, &throws, false);
+    let (mut c, params, mut prelude) = make_ctx(ctx, &val_ty, &throws, false);
+    if kind == CoroKind::Async {
+        let first = prime_captures(&mut c, &captures, span);
+        let pending = pending_step(&c);
+        prelude.extend(
+            pending
+                .and_then(|p| parked(&c, first, p, span))
+                .map(HirStmt::Expr),
+        );
+    }
     let out = c.fn_ret_ty.clone();
     let body_h = lower_expected(&mut c, &body_expr, out.clone());
     let body_h = if super::hir_expr_diverges(&body_h) || out == HirTy::Unit {

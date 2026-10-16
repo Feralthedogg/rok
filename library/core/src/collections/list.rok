@@ -630,4 +630,21 @@ impl<T> Transfer for List<T> {
         }
         self
     }
+
+    /// The buffer stands for the list (and every view of it); an empty
+    /// list without one, by its head.
+    const fn transfer_visit(self, m: Memo) -> List<T> {
+        if buf_is_null(self.h) {
+            return self;
+        }
+        unsafe {
+            let s = self.h[0];
+            if s.cap == 0 || buf_is_null(s.buf) {
+                let _ = m.visit(self.h);
+            } else if m.visit(s.buf) {
+                m.later_visit(s.buf, s.len);
+            }
+        }
+        self
+    }
 }

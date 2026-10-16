@@ -48,6 +48,10 @@ impl FnDef {
     }
 }
 
+/// Marker attribute of an `async fn` rewritten into a plain fn returning
+/// its coroutine (`rokc_driver::coro`): each call makes a fresh future.
+pub const CORO_FN_ATTR: &str = "#coro_fn";
+
 /// Marker attribute of an `extern "ABI" fn f(..) { .. }` definition
 /// (spec 5.9.10), its value the ABI string.
 pub const EXTERN_FN_ATTR: &str = "#extern_fn";

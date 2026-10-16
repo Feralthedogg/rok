@@ -1,0 +1,41 @@
+// spec: std 213-marker §2.13.9
+// A value made on each pass of a loop (a literal, a constructor call, a
+// `match` / `??` over an element taken out) is a new object every time.
+// expect-exit: 0
+// expect-stdout:
+// 9
+
+fn coalesce(jobs: List<List<i32>>, tx: Sender<List<i32>>) {
+    while jobs.len() > 0 {
+        let job = jobs.pop() ?? [];
+        try! tx.send(job);
+    }
+}
+
+fn constructed(jobs: List<List<i32>>, tx: Sender<List<i32>>) {
+    while jobs.len() > 0 {
+        let job = jobs.pop() ?? List::new();
+        try! tx.send(job);
+    }
+}
+
+fn matched(jobs: List<List<i32>>, tx: Sender<List<i32>>) {
+    while jobs.len() > 0 {
+        let o = jobs.pop();
+        let job: List<i32> = match o { v: List<i32> => v, none => List::new() };
+        try! tx.send(job);
+    }
+}
+
+fn main() {
+    let (tx, rx) = channel::<List<i32>>();
+    coalesce([[3, 1, 2], [9, 7]], tx);
+    constructed([[5]], tx);
+    matched([[4, 6], [8]], tx);
+    tx.close();
+    let n = 0usize;
+    while let l: List<i32> = rx.recv() {
+        n += l.len();
+    }
+    println(f"{n}");
+}

@@ -142,6 +142,14 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
     let (is_async, is_gen) = (f.is_async, f.is_generator);
     f.is_async = false;
     f.is_generator = false;
+    if is_async && !is_gen {
+        f.attrs.push(rokc_ast::Attribute {
+            path: vec![rokc_ast::CORO_FN_ATTR.to_owned()],
+            body: rokc_ast::AttrBody::Empty,
+            inner: false,
+            span,
+        });
+    }
     if is_main {
         // 4.16.5: the body is the executor's top-level task. The future's
         // type comes from the signature, so a non-throwing body still fits

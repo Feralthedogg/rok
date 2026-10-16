@@ -409,6 +409,10 @@ pub struct MutexGuard<T> {
     noted: bool;
 }
 
+// A copy of a guard outlives its `using` block unprotected: the hand-off
+// check follows guards like the collections they hand out (2.13.9).
+impl<T> !Sync for MutexGuard<T> {}
+
 impl<T> MutexGuard<T> {
     /// The protected value (a copy of the handle for GC types).
     pub const fn get(self) -> T {
@@ -574,6 +578,8 @@ pub struct RwLockReadGuard<T> {
     noted: bool;
 }
 
+impl<T> !Sync for RwLockReadGuard<T> {}
+
 impl<T> RwLockReadGuard<T> {
     pub const fn get(self) -> T {
         unsafe {
@@ -599,6 +605,8 @@ pub struct RwLockWriteGuard<T> {
     /// As `MutexGuard::noted`.
     noted: bool;
 }
+
+impl<T> !Sync for RwLockWriteGuard<T> {}
 
 impl<T> RwLockWriteGuard<T> {
     pub const fn get(self) -> T {
@@ -627,6 +635,34 @@ impl<T> Drop for RwLockWriteGuard<T> {
         atomic_xchg(self.lock.state, 0, 0, SeqCst);
         wake(self.lock.state);
         unpark_parked(self.lock.state);
+    }
+}
+
+/// A value made once and only read after (2.16.4b): any thread may read it
+/// without a lock. `new` keeps a copy of the value's collections that
+/// nothing else reaches, and `get` gives each reader its own copy, so no
+/// one can change what the others read. `Sync` parts (a `Mutex`, a cache
+/// that locks itself) stay shared.
+pub struct Frozen<T> {
+    value: GcBuf<T>;
+}
+
+unsafe impl<T: Send> Sync for Frozen<T> {}
+
+impl<T> Frozen<T> {
+    #[track_caller]
+    pub const fn new(value: T) -> Frozen<T> {
+        unsafe {
+            let v: GcBuf<T> = buf_new(1);
+            v[0] = hand_over::<T>(value);
+            Frozen { value: v }
+        }
+    }
+
+    /// A copy of the value: the reader's own to change.
+    #[track_caller]
+    pub fn get(self) -> T {
+        unsafe { hand_over::<T>(self.value[0]) }
     }
 }
 

@@ -384,6 +384,7 @@ impl<T> Sender<T> {
     /// Queue `value` (blocking while a bounded channel is full, and on a
     /// rendezvous channel until it is received). Throws it back if this
     /// sender was closed.
+    #[track_caller]
     pub fn send(self, value: T) throws (SendError<T>) {
         if !self.is_open() {
             throw SendError::Closed(value);
@@ -413,6 +414,7 @@ impl<T> Sender<T> {
 
     /// Queue `value` without blocking: `Full` if a bounded channel is
     /// full, or if no receiver is waiting on a rendezvous channel.
+    #[track_caller]
     pub fn try_send(self, value: T) throws (TrySendError<T>) {
         if !self.is_open() {
             throw TrySendError::Closed(value);
@@ -433,6 +435,7 @@ impl<T> Sender<T> {
     /// `try await tx.send_async(v)` inside async code: like `send`, but
     /// suspends the task (not the thread) while a bounded channel is
     /// full, and on a rendezvous channel until the value is received.
+    #[track_caller]
     pub const fn send_async(self, value: T) -> SendFuture<T> {
         SendFuture { tx: self, value: value, handed: false, pushed: false, ticket: 0, counted: false }
     }

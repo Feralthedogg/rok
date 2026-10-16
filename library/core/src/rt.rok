@@ -82,6 +82,9 @@ extern "rok" {
     // `str` argument.
     #[track_caller]
     fn rok_panic_at(msg: str) -> !;
+    // `par` ran a call's items one at a time: a warning once per call site.
+    #[track_caller]
+    fn rok_par_sequential(what: str);
     fn rok_oom() -> !;
     // The allocator's slow path codegen calls (8.5.1): a GC object.
     fn rok_gc_alloc_slow(size: usize, align: usize, type_id: u32) -> GcBuf<u8>;

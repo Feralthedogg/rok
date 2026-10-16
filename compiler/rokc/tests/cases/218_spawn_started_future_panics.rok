@@ -1,0 +1,33 @@
+// needs: threads
+// spec: std 218-task §2.18.1 / std 213-marker §2.13.9
+// A future something already polled holds what its body made and read so
+// far: it cannot go to a task, which would share that with its maker.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/218_spawn_started_future_panics.rok:31:13:
+// expect-stderr: a future that has started running cannot go to another task or thread: hand it over before anything polls it, or call the async fn again for a new one
+// expect-stdout:
+// polled
+
+struct Once { f: AsyncFuture<usize>; }
+
+impl Future for Once {
+    type Output = ();
+    fn poll(ref self, ref ctx: Context) -> Poll<()> {
+        let _ = self.f.poll(ref ctx);
+        Poll::Ready(())
+    }
+}
+
+async fn grow(xs: List<i32>) -> usize {
+    await task::yield_now();
+    xs.push(1);
+    xs.len()
+}
+
+async fn main() {
+    let f = grow([]);
+    await Once { f: f };
+    println("polled");
+    let t = task::spawn(f);
+    println(f"{await t}");
+}

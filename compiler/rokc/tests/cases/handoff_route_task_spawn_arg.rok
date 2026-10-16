@@ -1,15 +1,16 @@
 // needs: threads
-// expect-error: `task::spawn` needs a `Send` future: it captures `xs: List<i32>`, which is not `Sync`
-// spec: std 213-marker §2.13.9
-// An async fn's argument goes to a task on another worker.
+// expect-error: handoff_route_task_spawn_arg.rok:14:26: `a` was spawned as a task at line 13
+// expect-error: help: the task works on its own copy
+// spec: std 213-marker §2.13.9 / std 218-task §2.18.1
+// An async fn's argument goes to a task on another worker: the task owns
+// its copy, so the spawner's later use of the list is an error.
 async fn grow(xs: List<i32>) -> usize {
     for i in 0..200000 { xs.push(i); }
     xs.len()
 }
-fn main() {
+async fn main() {
     let a: List<i32> = [];
     let t = task::spawn(grow(a));
     for i in 0..200000 { a.push(i); }
-    let _ = task::block_on(t);
-    println(f"len {a.len()}");
+    println(f"{await t} len {a.len()}");
 }
