@@ -666,6 +666,35 @@ fn lint_and_doc_with_dependencies() {
     assert!(read(&app.join("target/doc/index.html")).contains("app/index.html"));
 }
 
+/// `rok build` lints against the prebuilt std, whose `using` cleanup is
+/// `File.drop__by_Drop`: that is a close, not a use that leaks.
+// spec: §6.2.9
+#[test]
+fn build_lints_using_through_prebuilt_std() {
+    if !llvm() {
+        return;
+    }
+    let root = scratch("usinglint");
+    let home = root.join("home");
+    let app = root.join("app");
+    write(&app.join("rok.rokon"), "Package {\n    name: \"app\",\n}\n");
+    write(
+        &app.join("src/main.rok"),
+        "use rok::std::fs::File;\n\n\
+         fn leaks(p: str) -> str {\n    let f = try! File::open(p);\n    try! f.read_to_str()\n}\n\n\
+         fn scoped(p: str) -> str {\n    using h = try! File::open(p) { try! h.read_to_str() }\n}\n\n\
+         fn main() {\n    println(leaks(\"rok.rokon\"));\n    println(scoped(\"rok.rokon\"));\n}\n",
+    );
+    let out = rok(&home, &app, &["build"]);
+    ok(&out);
+    let err = text(&out.stderr);
+    assert!(
+        err.contains("`f` holds a `File` that is never closed"),
+        "{err}"
+    );
+    assert!(!err.contains("`h` holds"), "{err}");
+}
+
 // spec: §6.2.9 §9.10.1 §9.10.3
 #[test]
 fn lints_from_and_files_in_a_package() {

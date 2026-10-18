@@ -1366,12 +1366,13 @@ impl<'h> Resources<'h> {
             "rok::std::process::Child",
         ];
         // Methods are named `Struct<id>__<method>`, a prebuilt library's
-        // `<type>.<method>`.
+        // `<type>.<method>`; a trait impl's add `__by_<Trait>`.
         let drops: HashSet<&str> = hir
             .functions
             .iter()
             .filter_map(|g| {
                 let n = g.name.as_str();
+                let n = n.split("__by_").next().unwrap_or(n);
                 n.strip_suffix(".drop").or_else(|| {
                     n.strip_suffix("__drop")
                         .map(|_| n.split("__").next().unwrap_or(n))
@@ -1398,7 +1399,9 @@ impl<'h> Resources<'h> {
 
     /// The method of resource type `ty` (HIR prefix `own`) `callee` is.
     fn method(&self, callee: rokc_ir_common::FunctionId, ty: &str, own: &str) -> Option<&'h str> {
+        // `using` calls `drop` through `Drop`: `<type>.drop__by_Drop`.
         let n = self.names.get(&callee)?;
+        let n = n.split("__by_").next().unwrap_or(n);
         n.strip_prefix(own)
             .filter(|m| m.starts_with("__") || m.starts_with('.'))
             .and_then(|m| m.rsplit("__").next())
