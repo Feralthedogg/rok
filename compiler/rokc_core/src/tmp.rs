@@ -195,6 +195,33 @@ pub fn sweep(dir: &Path, prefixes: &[&str], min_age: Duration) {
     }
 }
 
+/// Remove files under `dir` not changed for `age`, then directories that
+/// emptied and are that old themselves: a build that just made one (other
+/// processes share the cache) keeps it.
+pub fn evict(dir: &Path, age: Duration) -> bool {
+    let old = |m: std::io::Result<std::fs::Metadata>| {
+        m.and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > age))
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut empty = true;
+    for e in entries.flatten() {
+        let p = e.path();
+        let gone = match e.file_type() {
+            Ok(t) if t.is_dir() => {
+                let aged = old(e.metadata());
+                evict(&p, age) && aged && std::fs::remove_dir(&p).is_ok()
+            }
+            Ok(_) => old(e.metadata()) && std::fs::remove_file(&p).is_ok(),
+            Err(_) => false,
+        };
+        empty &= gone;
+    }
+    empty
+}
+
 /// The pid in `name` = `<prefix><digits>` followed by nothing, `-` or `.`.
 fn owner(name: &str, prefixes: &[&str]) -> Option<u32> {
     prefixes.iter().find_map(|p| {
@@ -329,5 +356,19 @@ mod tests {
         sweep(&dir, &["rokc-"], Duration::ZERO);
         assert!(!dead.exists());
         assert!(live.exists() && kept.exists());
+    }
+
+    #[test]
+    fn evict_keeps_a_directory_a_build_just_made() {
+        let dir = test_dir("evict");
+        let stale = dir.join("debug/old.o");
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, "").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let fresh = dir.join("scripts/0123");
+        std::fs::create_dir_all(&fresh).unwrap();
+        evict(&dir, Duration::from_millis(200));
+        assert!(fresh.exists(), "an empty directory made just now stays");
+        assert!(!stale.exists() && !dir.join("debug").exists());
     }
 }

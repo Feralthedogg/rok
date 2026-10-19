@@ -1139,34 +1139,13 @@ fn lone_target_dir() -> PathBuf {
     let due = std::fs::metadata(&stamp)
         .and_then(|m| m.modified())
         .map_or(true, |t| t.elapsed().map_or(true, |a| a > day));
-    if due && std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&stamp, "").is_ok() {
-        evict(&dir, 7 * day);
+    // Rewriting an empty file leaves its time on Windows: set it.
+    let stamped =
+        || std::fs::File::create(&stamp).and_then(|f| f.set_modified(std::time::SystemTime::now()));
+    if due && std::fs::create_dir_all(&dir).is_ok() && stamped().is_ok() {
+        rokc_core::tmp::evict(&dir, 7 * day);
     }
     dir
-}
-
-/// Remove files under `dir` older than `age`, then emptied directories.
-fn evict(dir: &Path, age: std::time::Duration) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    let mut empty = true;
-    for e in entries.flatten() {
-        let p = e.path();
-        let gone = match e.file_type() {
-            Ok(t) if t.is_dir() => evict(&p, age) && std::fs::remove_dir(&p).is_ok(),
-            Ok(_) => {
-                let old = e
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t.elapsed().is_ok_and(|a| a > age));
-                old && std::fs::remove_file(&p).is_ok()
-            }
-            Err(_) => false,
-        };
-        empty &= gone;
-    }
-    empty
 }
 
 /// The file name of executable `name` for the build's target.

@@ -149,7 +149,8 @@ if [ -z "$static" ]; then
   PATH=/usr/bin:/bin "$stage/bin/rokc$exe" bindgen "$stage/check.h" |
     grep -q 'pub fn check_len(s: CPtr<c_char>) -> usize;'
 fi
-rm -rf "$stage/check.h" "$stage/check.rok" "$stage/check$exe" "$stage/.check$exe.fp" "$stage/check.pdb" "$stage/lib/rok-cache"
+rm -rf "$stage/check.h" "$stage/check.rok" "$stage/check$exe" "$stage/.check$exe.fp" "$stage/check.pdb" \
+  "$stage/check$exe.dSYM" "$stage/lib/rok-cache"
 
 # The MLIR plugin development bundle (docs/mlir-plugins.md): rokc_llvm's
 # plugin tree for this build.

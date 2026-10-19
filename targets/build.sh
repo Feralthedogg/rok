@@ -27,7 +27,9 @@
 #       wasm32-unknown-unknown.
 #
 # Needs rustup with llvm-tools, curl, make, python3, bash, clang (CC
-# overrides; wasm32-wasi's profile runtime needs one with the
+# overrides; on an arm64 Mac without CC the non-Apple targets use the
+# pinned LLVM release's clang, downloaded into the cache, since Apple's
+# has no RISC-V target; wasm32-wasi's profile runtime needs one with the
 # WebAssembly target) and the pinned LLVM's ld.lld (ROK_LLVM_PREFIX,
 # else llvm/build.sh's). Windows images name the first two
 # mingw32-make and python.
@@ -95,7 +97,7 @@ MINGW* | MSYS* | CYGWIN*)
 	prefix=${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}
 	;;
 esac
-cc=${CC:-clang}
+host_cc=${CC:-clang}
 lld=$prefix/bin/ld.lld
 out=${CARGO_TARGET_DIR:-target}/lib/rok/targets
 host=$(rustc -vV | sed -n 's/^host: //p')
@@ -105,6 +107,8 @@ ar=$sysroot/lib/rustlib/$host/bin/llvm-ar
 LLVM=$(sed -n 's/^VERSION=//p' llvm/build.sh)
 LLVM_SHA256=$(sed -n 's/^SHA256=//p' llvm/build.sh)
 MINGW=$(sed -n 's/^COMMIT=//p' compiler/rokc_driver/windows/gen.sh)
+# LLVM-$LLVM-macOS-ARM64.tar.xz of the LLVM release.
+CLANG_MACOS_SHA256=f260f4f7c0d430828a81ae8a3826a1d63fc0963ec2459489308cc23b1f7eab4f
 
 # $1 downloaded from $2 into the cache, checked against SHA-256 $3.
 fetch() {
@@ -120,6 +124,29 @@ fetch() {
 		exit 1
 	fi
 }
+
+# macOS: Apple's clang has no RISC-V backend, so the non-Apple targets
+# use the pinned LLVM release's clang, unpacked once into the cache.
+other_cc=
+if [ "$(uname -s)" = Darwin ] && [ -z "${CC-}" ]; then
+	c=$cache/clang-$LLVM
+	if [ ! -x "$c/bin/clang" ]; then
+		[ "$(uname -m)" = arm64 ] || {
+			echo "no pinned clang for $(uname -m) macOS: set CC to a clang with every target" >&2
+			exit 1
+		}
+		n=LLVM-$LLVM-macOS-ARM64
+		fetch "$n.tar.xz" "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM/$n.tar.xz" \
+			"$CLANG_MACOS_SHA256"
+		rm -rf "$c.tmp"
+		mkdir -p "$c.tmp"
+		tar -xJf "$cache/$n.tar.xz" -C "$c.tmp" "$n/bin/clang" "$n/bin/clang-${LLVM%%.*}" "$n/lib/clang"
+		mv "$c.tmp/$n" "$c"
+		rmdir "$c.tmp"
+		rm -f "$cache/$n.tar.xz"
+	fi
+	other_cc=$c/bin/clang
+fi
 
 # wasm-component-ld into $1: the release matching the component model
 # (preview 3 async, fixed-size lists) of the wasmtime the tests run under
@@ -317,6 +344,8 @@ profile() {
 
 for t in ${*:-$TARGETS}; do
 	dir=$out/$t
+	cc=$host_cc
+	case $t in *-apple-*) ;; *) [ -z "$other_cc" ] || cc=$other_cc ;; esac
 	case $t in *-apple-*)
 		# The Mach-O runtime is localized by ld64 and the profile runtime
 		# built against the macOS SDK: a macOS host's job.

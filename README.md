@@ -22,7 +22,8 @@ guide are at [rok-lang.org](https://rok-lang.org).
   `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see
   `llvm/README.md`). Without it `rokc` builds `-O0` only (the native backend), linking with the system `cc`.
   `targets/build.sh` builds what `--target` links into `target/lib/rok/targets/` (rustup with llvm-tools, curl, make,
-  python3, bash, clang).
+  python3, bash, clang; Apple's clang has no RISC-V target, so on an arm64 Mac the non-Apple targets use the pinned
+  LLVM release's clang, downloaded once into `~/.cache/rok`).
   `rokc bindgen` loads libclang at run time (nothing else needs it): a toolchain ships it, a build from source
   uses `llvm/build-libclang.sh`'s (about 5 minutes on 10 cores; `llvm/README.md`).
 

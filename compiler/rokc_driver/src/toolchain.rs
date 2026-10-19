@@ -211,6 +211,10 @@ impl TempDir {
         name.push(".objs");
         let path = out.with_file_name(name);
         let _ = std::fs::remove_dir_all(&path);
+        // The parent may be a shared cache another process just trimmed.
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
         private_dir(&path).map_err(|e| err(format!("cannot create {}: {e}", path.display())))?;
         Ok(Self {
             path,

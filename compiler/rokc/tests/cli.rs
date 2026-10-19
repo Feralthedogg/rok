@@ -1314,6 +1314,48 @@ fn tests_in_private_modules_run() {
     assert!(text(&out.stderr).contains("`util::checks::h` is private"));
 }
 
+// The day's eviction of the shared lone-file cache runs inside a build:
+// it must not take the directory that build just made, and its stamp
+// must move (Windows keeps an empty file's time when it is rewritten).
+// spec: §9.2.16
+#[test]
+fn lone_file_survives_the_cache_eviction() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("anon_evict");
+    let tmp = dir.join("tmp");
+    let stamp = tmp.join("rokc-target/.evicted");
+    put(&stamp, "").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86_400);
+    fs::File::options()
+        .write(true)
+        .open(&stamp)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    put(dir.join("hello.rok"), "println(\"hi\");\n").unwrap();
+    for _ in 0..2 {
+        let out = Command::new(ROKC)
+            .current_dir(&dir)
+            .env("ROK_HOME", workspace())
+            .env("TMPDIR", &tmp)
+            .env("TMP", &tmp)
+            .env("TEMP", &tmp)
+            .args(["run", "hello.rok", "--rokr"])
+            .arg(&env.rokr)
+            .output()
+            .unwrap();
+        assert_exit(&out, 0);
+        assert_eq!(text(&out.stdout), "hi\n");
+    }
+    let age = fs::metadata(&stamp)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .elapsed()
+        .unwrap();
+    assert!(age.as_secs() < 3600, "stamp not renewed: {age:?}");
+}
+
 // spec: §9.1.1 §9.1.2 §9.2.2 §9.2.15
 #[test]
 fn lone_file_is_an_anonymous_package() {
