@@ -8,7 +8,8 @@ First release.
   `bench`, `bindgen`), package / build front-end `rok` (`rok.rokon` / `rok.lock`, path / git dependencies, stones,
   environments, toolchains), runtime `librokr.a`, standard library `core` / `std` / `bare`.
 - Install: rustup-style layout (`~/.rok/bin` proxies, `~/.rok/toolchains/<version>-<triple>/`), `install.sh` /
-  `install.ps1`, and `rok-<version>-<triple>.tar.gz` (Windows `.zip`) archives built by `dist.sh`.
+  `install.ps1`, and `rok-<version>-<triple>.tar.gz` (Windows `.zip`) archives built by `dist.sh`
+  (Linux: `dist-linux.sh`, in a Debian 11 container; they need glibc 2.34 or later).
 - `rok` / `rokc` / `rokls --version` print the version, commit, and date.
 - License `MIT OR Apache-2.0`.
 

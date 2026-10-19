@@ -16,7 +16,8 @@
 #   -gnu    crt objects, libc_nonshared.a, the empty libpthread.a etc. and
 #       stub libc.so / libm.so made by glibc_stubs.py from glibc 2.36
 #       (Debian 12; riscv64 from debian-ports; packages SHA-256 pinned).
-#       Executables need glibc >= 2.34 (32-bit runtimes use time64).
+#       Executables need glibc >= 2.34 (32-bit runtimes use time64): the
+#       stubs leave out newer symbol versions.
 #   wasm32  wasi-libc's crt objects and libc.a from the pinned Rust
 #       toolchain (wasip2 for wasm32-wasi, plus a pinned
 #       wasm-component-ld; wasip1-threads; wasip1 for the browser, plus

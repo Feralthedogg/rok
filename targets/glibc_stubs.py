@@ -9,7 +9,10 @@ defines each one (`.symver` binds it to its version; objects keep their
 size, aliases of one object share its storage) and the version script
 that declares the versions. Assembled and linked with `-shared`, it is
 an input lld links against as it would the real library. GLIBC_PRIVATE
-symbols are left out.
+symbols are left out, and so are versions above glibc 2.34 (what
+executables may need): a symbol whose default is newer binds to its
+previous version (x86_64's hypot@@GLIBC_2.35 to GLIBC_2.2.5), one that
+is new there is not defined.
 """
 
 import struct
@@ -70,9 +73,29 @@ def read(path):
     return syms, versions
 
 
+def number(ver):
+    """GLIBC_2.2.5 as (2, 2, 5); () for one without a number."""
+    tail = ver.removeprefix("GLIBC_")
+    return tuple(int(x) for x in tail.split(".")) if tail[:1].isdigit() else ()
+
+
+def cap(syms, versions, newest=(2, 34)):
+    syms = [s for s in syms if number(s[1]) <= newest]
+    versions = [v for v in versions if number(v) <= newest]
+    defaults = {s[0] for s in syms if s[2]}
+    best = {}
+    for i, s in enumerate(syms):
+        j = best.get(s[0])
+        if s[0] not in defaults and (j is None or number(s[1]) > number(syms[j][1])):
+            best[s[0]] = i
+    for i in best.values():
+        syms[i] = syms[i][:2] + (True,) + syms[i][3:]
+    return syms, versions
+
+
 def main():
     lib, out_s, out_map = sys.argv[1:]
-    syms, versions = read(lib)
+    syms, versions = cap(*read(lib))
     s = []
     storage = {}
     for i, (name, ver, default, bind, typ, value, size) in enumerate(syms):

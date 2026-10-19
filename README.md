@@ -62,7 +62,8 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-x86_64-p
 
 The toolchain (`rok`, `rokc`, `rokls`) is tested natively on macOS arm64 (macOS 26 and 27), Linux x86_64
 (NixOS, Ubuntu 24.04 and 26.04, Alpine), Linux aarch64 (Ubuntu 26.04) and Windows 11 x86_64. macOS x86_64 and
-Windows arm64 are untested as hosts.
+Windows arm64 are untested as hosts. The Linux archives (x86_64, aarch64) need glibc 2.34 or later, as the
+programs they build do: RHEL / Rocky / Alma 9, Ubuntu 22.04, Debian 12 and newer.
 
 `--target` covers 15 triples. The test corpus runs programs for Apple arm64 and x86_64 (Rosetta); Linux
 x86_64 and aarch64 (gnu and musl; aarch64 natively and under qemu-user), i686, armv7 (qemu-user) and riscv64 (a riscv64
@@ -121,7 +122,10 @@ sh install.sh --archive dist/rok-*.tar.gz
 ```
 
 During development use `target/debug/rok` / `rokc` directly (they find the repository's `library/`). On
-Windows, `dist.sh` runs from Git Bash inside a Developer PowerShell for VS.
+Windows, `dist.sh` runs from Git Bash inside a Developer PowerShell for VS. The Linux release archives come
+from `./dist-linux.sh` (same output; podman or docker), which runs `dist.sh` in a Debian 11 container so the
+toolchain runs on glibc 2.34 and later (RHEL 9, Ubuntu 22.04, Debian 12); `dist.sh` refuses a Linux build that
+needs a newer glibc.
 
 ### Checks
 

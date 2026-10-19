@@ -129,15 +129,62 @@ if [ -z "$static" ]; then
   cp -R "$lc/lib/clang" "$stage/lib/"
   echo "libclang: $(mb "$stage/lib/$libclang")"
 fi
+
+# Linux (glibc): what ships needs at most glibc 2.34, as the -gnu
+# targets' programs do. A newer build host's glibc leaks its symbol
+# versions into the binaries, and its headers (C23 __isoc23_*) into the
+# runtimes, which link against their target's stub libc (glibc 2.36).
+if [ "$(uname -s)" = Linux ] && [ -z "$static" ]; then
+  rustup component add llvm-tools >/dev/null
+  tools=$(rustc --print sysroot)/lib/rustlib/$triple/bin
+  readelf() { "$tools/llvm-readobj" --elf-output-style=GNU "$@"; }
+  # The lines of stdin whose last GLIBC_ version is above 2.34 (or none).
+  newer() {
+    awk '{ v = $NF; sub(/.*GLIBC_/, "", v); split(v, n, ".")
+      if (v !~ /^[0-9.]+$/ || n[1] > 2 || (n[1] == 2 && n[2] > 34)) print }'
+  }
+  bad=""
+  for f in "$stage"/bin/* "$stage/lib/$libclang"; do
+    vs=$(readelf -V "$f" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -u -t. -k2,2n -k3,3n)
+    echo "${f##*/}: $(echo "$vs" | tail -n 1)"
+    # Every one needs some version: none read is no check.
+    v=$(echo "${vs:-?}" | newer)
+    [ -z "$v" ] || bad="$bad${f#"$stage"/}: $(echo $v)\n"
+  done
+  # Runtime $1's undefined symbols as the stubs in $2 bind them (`@?`:
+  # they have none), but the linker's and ld.so's.
+  rt_check() {
+    v=$({
+      readelf --dyn-syms --wide "$2/libc.so" "$2/libm.so" |
+        awk '$8 ~ /@@/ { split($8, s, "@@"); print "D", s[1], s[2] }'
+      "$tools/llvm-nm" -P --defined-only "$2/libc_nonshared.a" | awk 'NF > 2 { print "D", $1, "GLIBC_2.0" }'
+      "$tools/llvm-nm" -P "$1" | awk '$2 == "U" && $1 !~ /^(_GLOBAL_OFFSET_TABLE_|_DYNAMIC|_+tls_get_addr)$/ { print "U", $1 }'
+    } | awk '$1 == "D" { v[$2] = $3; next } { print $2 "@" ($2 in v ? v[$2] : "?") }' | newer)
+    [ -z "$v" ] || bad="$bad${1#"$stage"/}: $(echo $v)\n"
+  }
+  for d in "$stage"/lib/rok/targets/*-linux-gnu*; do
+    rt_check "$d/$rt" "$d"
+    [ "${d##*/}" != "$triple" ] || rt_check "$stage/lib/$rt" "$d"
+  done
+  [ -z "$bad" ] || {
+    printf 'dist.sh: these need a glibc newer than 2.34:\n%b' "$bad" >&2
+    echo "dist.sh: build the Linux archives with ./dist-linux.sh (in a container with an old glibc)" >&2
+    exit 1
+  }
+fi
 cp install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE \
   compiler/rokc_driver/windows/COPYING.mingw-w64 "$stage/"
 
 # The toolchain runs from its new place, with no LLVM on PATH: its rokc
 # finds its library and builds with its own LLVM and lld.
+# Its programs need glibc 2.34: an older host (dist-linux.sh's) only
+# links them, and dist-linux.sh runs them on 2.34.
+run=1
+case $(getconf GNU_LIBC_VERSION 2>/dev/null) in "glibc 2."[0-9] | "glibc 2."[12][0-9] | "glibc 2.3"[0-3]) run="" ;; esac
 printf 'fn main() -> i32 {\n    println("ok");\n    0\n}\n' > "$stage/check.rok"
 for o in -O0 -O2; do
   PATH=/usr/bin:/bin "$stage/bin/rokc$exe" -q build "$stage/check.rok" $o -o "$stage/check$exe"
-  [ "$("$stage/check$exe")" = ok ]
+  [ -z "$run" ] || [ "$("$stage/check$exe")" = ok ]
   # Every shipped target links (it runs only where the machine can).
   for t in $(ls "$stage/lib/rok/targets"); do
     PATH=/usr/bin:/bin "$stage/bin/rokc$exe" -q build "$stage/check.rok" $o --target "$t" -o "$stage/check$exe"
