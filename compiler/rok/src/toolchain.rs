@@ -644,7 +644,11 @@ mod tests {
             .into_iter()
             .map(|(_, v)| v)
             .collect();
+        // A pin takes the newest match: the release over its candidate.
+        let pick = super::find(&home, "0.1")
+            .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()));
         let _ = std::fs::remove_dir_all(&home);
         assert_eq!(got, ["0.1.0-rc.1", "0.1.0", "0.9.0", "0.10.0"]);
+        assert_eq!(pick, Some(format!("0.1.0-{}", super::HOST)));
     }
 }

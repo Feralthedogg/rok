@@ -1200,6 +1200,40 @@ fn nested_fn_item_names() {
     }
 }
 
+/// A fresh future kept in a local nothing else names is spawned with no
+/// hand-off; one with a second handle still goes through the copy
+/// (stdlib 2.18.1).
+// spec: §2.18.1
+#[test]
+fn spawn_of_a_sole_local_future_skips_the_hand_off() {
+    let hir = |name: &str, body: &str| {
+        let dir = scratch(name);
+        put(
+            dir.join("src/main.rok"),
+            format!(
+                "async fn f(a: i32, b: i32) -> i32 {{ a + b }}\nasync fn main() {{\n{body}}}\n"
+            ),
+        )
+        .unwrap();
+        let out = rokc(None, &dir, &["emit", "--emit=hir", "-o", "h.txt"]);
+        assert_exit(&out, 0);
+        fs::read_to_string(dir.join("h.txt")).unwrap()
+    };
+    let copy = "fn rok::core::task::spawn__mono__";
+    let plain = "fn rok::core::task::spawn_plain__mono__";
+    let sole = hir(
+        "spawn_sole",
+        "    let ts: List<Task<i32>> = [];\n    for i in 0..3 { let g = f(i, 1); ts.push(task::spawn(g)); }\n    \
+         for t in ts { println(f\"{await t}\"); }\n",
+    );
+    assert!(sole.contains(plain) && !sole.contains(copy));
+    let aliased = hir(
+        "spawn_aliased",
+        "    let h = f(9, 1);\n    let k = h;\n    println(f\"{await task::spawn(k)}\");\n",
+    );
+    assert!(aliased.contains(copy) && !aliased.contains(plain));
+}
+
 // spec: §9.1.2 §9.2.13 §9.2.15 §6.2.5 §9.9.12
 #[test]
 fn lib_package_builds_archive_and_runs_tests() {

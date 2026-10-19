@@ -2755,6 +2755,13 @@ struct LowerCtx<'a> {
     /// (`expr::guard_sink`). Elsewhere a produced guard is never released
     /// and a read guard variable is moved.
     guard_sinks: std::collections::HashSet<usize>,
+    /// Names the function body binds once and names once after
+    /// (`sole_names`): a fresh future in one is its only handle.
+    sole_names: std::collections::HashSet<String>,
+    /// Locals holding a fresh future nothing else names
+    /// (`expr::plain_fresh_future`), with the loop depth they were made
+    /// at.
+    sole_fresh: HashMap<LocalId, usize>,
     /// Type parameter → its trait bounds and their supertraits (trait
     /// keys): `T::Item` resolves through them (`set_bounds`).
     ty_bounds: HashMap<String, Vec<String>>,
@@ -2911,6 +2918,8 @@ impl<'a> LowerCtx<'a> {
             unnarrowed: Vec::new(),
             guard_lets: Vec::new(),
             guard_sinks: std::collections::HashSet::new(),
+            sole_names: std::collections::HashSet::new(),
+            sole_fresh: HashMap::new(),
             ty_bounds: HashMap::new(),
             ty_bound_args: HashMap::new(),
             coro: None,

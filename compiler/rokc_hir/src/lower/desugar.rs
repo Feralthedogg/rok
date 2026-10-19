@@ -289,6 +289,7 @@ pub(super) fn closure_ctx<'a>(
     cl_ctx.local_uses.clone_from(&ctx.local_uses);
     cl_ctx.nested_fns.clone_from(&ctx.nested_fns);
     cl_ctx.ref_captured.clone_from(&ctx.ref_captured);
+    cl_ctx.sole_names.clone_from(&ctx.sole_names);
     cl_ctx.ty_bounds.clone_from(&ctx.ty_bounds);
     cl_ctx.ty_bound_args.clone_from(&ctx.ty_bound_args);
     cl_ctx.assoc_names.clone_from(&ctx.assoc_names);

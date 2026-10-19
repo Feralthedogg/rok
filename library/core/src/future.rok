@@ -6,7 +6,7 @@
 // `Pending` in between (refs-lang 4.12, `rokc_hir::lower::coro`).
 
 use rok::core::collections::raw::{GcBuf, buf_erase, buf_new};
-use rok::core::marker::{Memo, Transfer, transfer};
+use rok::core::marker::{HAND_CELL, HAND_FINISHED, HAND_STARTED, Memo, Transfer, transfer};
 
 pub enum Poll<T> {
     Ready(T),
@@ -154,15 +154,18 @@ const fn hand_frame<S>(resume: S, m: Memo, poll: fn(S, Context) -> bool) -> S {
             o.finish();
         }
         let r = p[0].reply;
-        if r == STARTED {
-            panic("a future that has started running cannot go to another task or thread: hand it over before anything polls it, or call the async fn again for a new one");
-        }
-        if r == CELL {
-            panic("a future with a `[ref x]` capture cannot go to another task or thread: the code that made it shares the cell; capture a value, or share it through a `Mutex`");
-        }
-        if r != COPIED || done {
-            panic("a future that has finished or was cancelled (a `select` loser) cannot go to another task or thread: call the async fn again for a new future");
-        }
+        let why = if r == STARTED {
+            HAND_STARTED
+        } else if r == CELL {
+            HAND_CELL
+        } else if r != COPIED || done {
+            HAND_FINISHED
+        } else {
+            return cell[0];
+        };
+        // Queued work reaches here through a `fn` value, which drops the
+        // caller's position: let `drain` report it.
+        m.fail(copy, why);
         cell[0]
     }
 }

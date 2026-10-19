@@ -87,6 +87,8 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     // Frames with a `[ref x]` capture: never a task of their own
     // (`task::spawn` copies the other captures).
     let mut cells: HashMap<FunctionId, String> = HashMap::new();
+    // Of those, frames whose capture is a lock guard.
+    let mut guards: HashSet<FunctionId> = HashSet::new();
     let mut held: HashMap<FunctionId, Vec<LocalId>> = HashMap::new();
     let mut ids: Vec<FunctionId> = all.keys().copied().collect();
     ids.sort();
@@ -102,8 +104,11 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         if let Some(w) = why_shared {
             shared.insert(id, w);
         }
-        if let Some(w) = why_cell {
+        if let Some((w, guard)) = why_cell {
             cells.insert(id, w);
+            if guard {
+                guards.insert(id);
+            }
         }
         held.insert(id, h);
     }
@@ -152,6 +157,8 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
                     _ => false,
                 })
             });
+        // A guard is wrong in any task, `spawn_local` too.
+        let guard = matches!(found, Some(Item::Shared(c)) if spawn && guards.contains(c));
         let why = match found {
             Some(Item::Bad(c)) => bad[c].clone(),
             Some(Item::Shared(c)) if spawn => cells[c].clone(),
@@ -168,7 +175,9 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
         ctx.emit_error_at(
             rokc_diagnostic::ErrorKind::Type,
             span,
-            if spawn {
+            if guard {
+                format!("`task::spawn` cannot take a guard: {why} (stdlib 2.16.3)")
+            } else if spawn {
                 format!(
                     "`task::spawn` needs a `Send` future: {why}, and the task may resume on \
                      another worker (spec 2.18.1); use `task::spawn_local`"
@@ -184,16 +193,19 @@ pub(super) fn check(env: &Env<'_>, functions: &[HirFunction]) {
     }
 }
 
+/// What [`frame`] finds; the third is `(why, the capture is a guard)`.
+type FrameWhy = (
+    Option<String>,
+    Option<String>,
+    Option<(String, bool)>,
+    Vec<LocalId>,
+);
+
 /// Why coroutine `f`'s own frame is not `Send` (`None`: it is), why it
 /// cannot run with its captures as they are on another thread (one is not
-/// `Sync`), why not even with copies (a `[ref x]` cell), and the locals its
-/// frame holds (captures and locals live across a suspend).
-fn frame(
-    ctx: &LowerCtx<'_>,
-    send: &str,
-    sync: Option<&str>,
-    f: &HirFunction,
-) -> (Option<String>, Option<String>, Option<String>, Vec<LocalId>) {
+/// `Sync`), why not even with copies (a `[ref x]` cell or a guard), and
+/// the locals its frame holds (captures and locals live across a suspend).
+fn frame(ctx: &LowerCtx<'_>, send: &str, sync: Option<&str>, f: &HirFunction) -> FrameWhy {
     let name = |l: LocalId| {
         f.locals
             .iter()
@@ -271,12 +283,15 @@ fn frame(
     };
     let why_cell = w.cell.map(|l| {
         if cell(l) {
-            return cell_why(l);
+            return (cell_why(l), false);
         }
         let n = name(l);
-        format!(
-            "it captures the guard `{n}`, which stays with its `using` block: read the value \
-             first (`let v = {n}.get();`) and capture `v`"
+        (
+            format!(
+                "it captures the guard `{n}`, which stays with its `using` block: read the \
+                 value first (`let v = {n}.get();`) and capture `v`"
+            ),
+            true,
         )
     });
     let why_shared = w.shared.map(|l| {

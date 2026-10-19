@@ -2171,6 +2171,11 @@ impl<'h> Walk<'_, 'h> {
         if let Gone::Via(site, _) = g {
             self.c.via_at.borrow_mut().insert((at.file, at.start), site);
         }
+        // A spawned future that captures a guard is an error at the spawn
+        // (send_check); the guard's release is no second error.
+        if matches!(g, Gone::To(_, What::Task)) && p.1.is_empty() && self.is_guard(p.0) {
+            return;
+        }
         let mut d = self.diagnostic(&x, g, written, at);
         // What was handed over, as written there (`rows[0]`).
         let handed = self

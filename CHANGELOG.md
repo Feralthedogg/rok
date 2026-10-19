@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0-rc.1 (unreleased)
+## 0.1.0 (unreleased)
 
-First release candidate.
+First release.
 
 - Compiler `rokc` (AOT via MLIR / LLVM 22, REPL, Jupyter kernel, language server, `fmt`, `lint`, `doc`, `test`,
   `bench`, `bindgen`), package / build front-end `rok` (`rok.rokon` / `rok.lock`, path / git dependencies, stones,
@@ -14,8 +14,19 @@ First release candidate.
 
 ### Language
 
-- Using a value after it was handed off (`Mutex::new`, `send`, `Handoff::new`, through calls) is a compile
-  error; the check follows conditions and call outcomes.
+- Using a value after it was handed off (`Mutex::new`, `send`, `task::spawn`, `Handoff::new`, through calls)
+  is a compile error; the check follows conditions, call outcomes, a collection's elements, copies and aliased
+  arguments, and each error says what to write instead.
+- A hand-off gives the receiver its own copy of every collection the value reaches (a list and its views keep
+  one buffer; values built at compile time are not copied), so a route the check misses cannot race. A
+  coroutine future gets a frame of its own; one that has started cannot be handed over.
+- A lock guard and its value stay inside their `using` block: returning, storing, yielding or capturing them
+  (closures and coroutines included) is an error.
+- `Frozen<T>` shares a value read-only between threads without `unsafe`; `get` gives each reader a copy and
+  keeps `Sync` parts shared.
+- `par` runs items that reach one collection or future one at a time, with a warning naming the call.
+- `Weak<T>` is not `Send`; `any Tr` crosses threads only when its bound has `Send + Sync`.
+- Every `await` of a `Task` that was handed on gets its own copy of the result.
 - Duplicate items point at both definitions; a tuple or unit struct's constructor shares the value namespace
   with functions, consts and statics. A named `use` and a local item of the same name are an error; a glob
   import gives way.
@@ -25,6 +36,7 @@ First release candidate.
 - Block-local items (`struct`, `enum`, `impl`, `use`, `const` in a block), including module glob `use`.
 - Statics and consts of `fn` type are callable. `Sync` rules for statics, `RwLock` and `[ref]` cells.
 - `#[cold]` keeps a function out of line.
+- A `try!` panic shows the error and where it was raised.
 
 ### Tools
 
@@ -32,14 +44,21 @@ First release candidate.
   `mod helper;` across script files; `import` gets an error naming `mod` / `use`.
 - Packages with both `src/lib.rok` and `src/main.rok`; `rok install <stone>` installs executables, keeps one
   installed at the same version and rebuilds with `--force`; `rok install <lib>` serves the REPL and Jupyter.
-- The package name `rok` is reserved for the standard library.
+- The package name `rok` is reserved for the standard library; names code can't write as a path (`pkg`,
+  `sup`, keywords) are refused with a suggestion. Every `rok new` template is tested end to end.
+- Temporary files and directories are removed on exit, error and panic; leftovers of killed processes are swept,
+  and a REPL host ends with its `rokc`.
 - Build profiles: debug info by default; release folds identical code and strips.
 - Lints in every compiling command; hints for habits from other languages.
 
 ### Platforms
 
-- Windows x86_64: the full test suite passes on a Windows host; libclang (`rokc bindgen`), a Windows PGO
-  profile, `dist.sh` and `install.ps1 -NoModifyPath`.
+- Verified natively: macOS arm64 (macOS 26 and 27 SDKs), Linux x86_64 and aarch64 (Ubuntu 26.04), Windows
+  x86_64 (Windows 11). Windows arm64 links but has not been run.
+- macOS 27: rokc's linker reads the new SDK's stubs (`arm64e.x1`).
+- Windows: libclang (`rokc bindgen`), a PGO profile for the clang-cl LLVM build, `dist.sh` and
+  `install.ps1 -NoModifyPath`; CI builds the prefix with clang-cl, runs `bindgen`, and a nightly job installs
+  the distribution and builds a package with it.
 - `riscv64gc-unknown-linux-gnu`, verified on a riscv64 kernel.
 
 ### Performance
@@ -47,5 +66,8 @@ First release candidate.
 - Bounds checks of counted loops over lists move in front of the loop; short loops and loop nests run without
   safepoint polls; a fixed-index element stays in a register.
 - Calls between rok functions pass the thread block as an argument; the GC frame links only on paths that reach
-  a safepoint.
-- rok / C instructions on the bench suite: nbody 1.43x, fannkuch 1.67x, spectral_norm 1.11x, throw_parse 1.85x.
+  a safepoint; locals that only a loop's poll sees are rooted on its yield path only.
+- `task::spawn` of a future made at the call, or kept in a local nothing else names, skips the hand-off.
+- PGO profiles retrained for macOS 27 and Linux: rokc's own `-O2` builds are 5–10% faster than without.
+- rok / C instructions on the bench suite: nbody 1.46x, fannkuch 1.64x, spectral_norm 1.11x, throw_parse 1.85x;
+  json_tokenizer 0.69x, word_count 0.89x, binary_trees 0.55x.

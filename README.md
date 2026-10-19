@@ -35,8 +35,8 @@ curl -fsSL https://rok-lang.org/install.sh | sh
 Or from a release archive:
 
 ```sh
-sh install.sh --archive rok-0.1.0-rc.1-aarch64-apple-darwin.tar.gz
-rok-0.1.0-rc.1-aarch64-apple-darwin/install.sh     # from inside an unpacked archive
+sh install.sh --archive rok-0.1.0-aarch64-apple-darwin.tar.gz
+rok-0.1.0-aarch64-apple-darwin/install.sh     # from inside an unpacked archive
 ```
 
 `install.sh` does not edit shell files; add `~/.rok/bin` to `PATH` as it says:
@@ -51,7 +51,7 @@ On Windows (PowerShell) the toolchain goes into `%USERPROFILE%\.rok` and its `bi
 
 ```powershell
 powershell -ExecutionPolicy Bypass -c "irm https://rok-lang.org/install.ps1 | iex"
-powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-rc.1-x86_64-pc-windows-msvc.zip
+powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-x86_64-pc-windows-msvc.zip
 ```
 
 `install.sh --version <v>` and `install.ps1 -Version <v>` pick a release; both check a download against its
@@ -59,11 +59,12 @@ powershell -ExecutionPolicy Bypass -File install.ps1 -Archive rok-0.1.0-rc.1-x86
 
 ## Platforms
 
-The toolchain (`rok`, `rokc`, `rokls`) is tested on macOS arm64, Linux x86_64 (NixOS, Ubuntu 24.04, Alpine)
-and Windows 11 x86_64. macOS x86_64 and aarch64 Linux and Windows are untested as hosts.
+The toolchain (`rok`, `rokc`, `rokls`) is tested natively on macOS arm64 (macOS 26 and 27), Linux x86_64
+(NixOS, Ubuntu 24.04 and 26.04, Alpine), Linux aarch64 (Ubuntu 26.04) and Windows 11 x86_64. macOS x86_64 and
+Windows arm64 are untested as hosts.
 
 `--target` covers 15 triples. The test corpus runs programs for Apple arm64 and x86_64 (Rosetta); Linux
-x86_64 and aarch64 (gnu and musl; aarch64 under qemu-user), i686, armv7 (qemu-user) and riscv64 (a riscv64
+x86_64 and aarch64 (gnu and musl; aarch64 natively and under qemu-user), i686, armv7 (qemu-user) and riscv64 (a riscv64
 kernel under qemu-system); Windows x86_64 and i686; and the three wasm32 targets (wasmtime, node).
 `aarch64-pc-windows-msvc` links but has not run.
 
@@ -91,9 +92,9 @@ $ROK_HOME/
 
 ```sh
 rok toolchain list
-rok toolchain install 0.1.0-rc.1 --from rok-0.1.0-rc.1-aarch64-apple-darwin.tar.gz   # directory, archive, or URL
+rok toolchain install 0.1.0 --from rok-0.1.0-aarch64-apple-darwin.tar.gz   # directory, archive, or URL
 rok toolchain default 0.1
-rok toolchain remove 0.1.0-rc.1-aarch64-apple-darwin
+rok toolchain remove 0.1.0-aarch64-apple-darwin
 rok toolchain update             # the newest release becomes the default (older ones stay installed)
 rok toolchain update 0.1.1       # a given release
 ```

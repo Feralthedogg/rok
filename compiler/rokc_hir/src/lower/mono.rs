@@ -1035,6 +1035,9 @@ fn lower_fn_with(
         .borrow_mut()
         .insert(id, (is_const, is_std));
     let mut ctx = LowerCtx::new(env, subst, self_ty, fn_def.span);
+    if let Some(body) = &fn_def.body {
+        ctx.sole_names = sole_names(body);
+    }
     if fn_def.attrs.iter().any(|a| a.path == ["track_caller"]) {
         let fixed_abi = fn_def
             .attrs
@@ -1809,4 +1812,32 @@ fn inferred_ret(env: &Env<'_>, id: FunctionId) -> Option<Option<HirTy>> {
         || super::incr::Lookup::InferredRet(id, r.clone()),
     );
     r
+}
+
+/// Names `body` binds exactly once and writes exactly once as a path
+/// after: a value in one has no other handle in this function (nested
+/// closures and blocks count too).
+fn sole_names(body: &rokc_ast::Block) -> std::collections::HashSet<String> {
+    #[derive(Default)]
+    struct Count {
+        binds: HashMap<String, u32>,
+        paths: HashMap<String, u32>,
+    }
+    impl crate::walk::AstVisitor for Count {
+        fn path(&mut self, p: &rokc_ast::Path) {
+            for seg in &p.segments {
+                *self.paths.entry(seg.name.clone()).or_default() += 1;
+            }
+        }
+        fn bind(&mut self, name: &str) {
+            *self.binds.entry(name.to_owned()).or_default() += 1;
+        }
+    }
+    let mut c = Count::default();
+    crate::walk::walk_block(&mut c, body);
+    c.binds
+        .into_iter()
+        .filter(|(n, b)| *b == 1 && c.paths.get(n) == Some(&1))
+        .map(|(n, _)| n)
+        .collect()
 }

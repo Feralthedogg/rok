@@ -238,8 +238,21 @@ impl Memo {
     }
 
     /// Fix up what `own`'s memo queued.
+    #[track_caller]
     pub(pkg) fn finish(self) {
         drain(self);
+    }
+
+    /// The hand-off cannot be done (`why`: a `HAND_*`): reported by the
+    /// `drain` that runs this memo's work, at the hand-off's caller; with
+    /// no work list, here. `buf` is any live object.
+    #[track_caller]
+    pub(pkg) const fn fail(self, buf: GcBuf<u8>, why: usize) {
+        if let w: List<Work> = self.work {
+            w.push(Work { buf, n: FAILED + why, fix: fix_slots::<u8> });
+            return;
+        }
+        hand_failed(why);
     }
 
     /// The copy of `orig` noted earlier in this hand-off.
@@ -467,12 +480,34 @@ pub(pkg) const fn hand_over_into_copy<T>(kept: T, x: T) -> T {
     y
 }
 
+#[track_caller]
 const fn drain(m: Memo) {
     if let q: List<Work> = m.work {
         while let w: Work = q.pop() {
+            if w.n >= FAILED {
+                hand_failed(w.n - FAILED);
+            }
             (w.fix)(w.buf, w.n, m);
         }
     }
+}
+
+// A `Work` whose `n` is at least this reports a hand-off that cannot be
+// done (`Memo::fail`); the rest is the reason.
+const FAILED: usize = 1usize << 62;
+pub(pkg) const HAND_STARTED: usize = 0;
+pub(pkg) const HAND_CELL: usize = 1;
+pub(pkg) const HAND_FINISHED: usize = 2;
+
+#[track_caller]
+const fn hand_failed(why: usize) -> ! {
+    if why == HAND_STARTED {
+        panic("a future that has started running cannot go to another task or thread: hand it over before anything polls it, or call the async fn again for a new one");
+    }
+    if why == HAND_CELL {
+        panic("a future with a `[ref x]` capture cannot go to another task or thread: the code that made it shares the cell; capture a value, or share it through a `Mutex`");
+    }
+    panic("a future that has finished or was cancelled (a `select` loser) cannot go to another task or thread: call the async fn again for a new future");
 }
 
 /// A new buffer of `slots` elements holding `n` elements of `buf` from

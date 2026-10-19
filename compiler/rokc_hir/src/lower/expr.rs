@@ -537,6 +537,7 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
             // The declared type (if any) is the init's expected type, so
             // literals and generic-enum leaves (`Box::None`) pick it up.
             let pre_ty = ty.as_ref().map(|t| ctx.resolve_ast_ty(t));
+            let ast_init = init;
             guard_sink(ctx, init);
             // `using (a, b) = (..)` drops the whole tuple.
             if let (true, ExprKind::Tuple(items)) = (name.starts_with("#using"), &init.kind) {
@@ -553,9 +554,13 @@ fn lower_stmt_inner(ctx: &mut LowerCtx<'_>, stmt: &Stmt) -> Option<HirStmt> {
                 (init.ty.clone(), init)
             };
             let ty = declared_ty.clone();
+            let fresh = ctx.sole_names.contains(name.as_str()) && fresh_future(ctx, ast_init);
             let s = ctx.declare_var(name, declared_ty, init, stmt.span);
             if let HirStmt::Let { local, .. } = s {
                 ctx.track_guard(local, &ty, stmt.span, name);
+                if fresh {
+                    ctx.sole_fresh.insert(local, ctx.breakables.len());
+                }
             }
             Some(s)
         }
@@ -7734,6 +7739,22 @@ fn plain_fresh_future(ctx: &LowerCtx<'_>, args: &[CallArg]) -> bool {
     let [CallArg::Positional(e)] = args else {
         return false;
     };
+    // A local such a future went into, named nowhere else, at the loop
+    // depth it was made at (another pass would hand the same one over).
+    if let ExprKind::Path(p) = &e.kind {
+        if let [s] = p.segments.as_slice() {
+            return ctx
+                .lookup(&s.name)
+                .and_then(|l| ctx.sole_fresh.get(&l))
+                .is_some_and(|&depth| depth == ctx.breakables.len());
+        }
+    }
+    fresh_future(ctx, e)
+}
+
+/// `e` makes a future right there that captures nothing a hand-off
+/// copies (see `plain_fresh_future`).
+fn fresh_future(ctx: &LowerCtx<'_>, e: &Expr) -> bool {
     let plain = |t: &HirTy| *t != HirTy::Unknown && !transfer_needs(ctx, t, 0);
     match &e.kind {
         ExprKind::AsyncBlock(_) => crate::walk::free_names(&[], e).iter().all(|n| {

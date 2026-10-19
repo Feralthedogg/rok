@@ -1,0 +1,33 @@
+// needs: threads
+// spec: std 218-task §2.18.1 / std 213-marker §2.13.9
+// A started future reached through a list's elements is found by the
+// queued copy work; the panic still names the send.
+// expect-exit: 101
+// expect-stderr: thread 'main' panicked at tests/cases/218_send_started_future_in_list_panics.rok:31:10:
+// expect-stderr: a future that has started running cannot go to another task or thread: hand it over before anything polls it, or call the async fn again for a new one
+// expect-stdout:
+
+struct Once { f: AsyncFuture<usize>; }
+
+impl Future for Once {
+    type Output = ();
+    fn poll(ref self, ref ctx: Context) -> Poll<()> {
+        let _ = self.f.poll(ref ctx);
+        Poll::Ready(())
+    }
+}
+
+async fn grow(xs: List<i32>) -> usize {
+    await task::yield_now();
+    xs.push(1);
+    xs.len()
+}
+
+async fn main() {
+    let g = grow([]);
+    await Once { f: g };
+    let (tx, rx) = channel::<List<AsyncFuture<usize>>>();
+    let t = task::spawn(async { if let fs: List<AsyncFuture<usize>> = rx.recv() { await fs[0] } else { 0 } });
+    try! tx.send([g]);
+    println(f"{await t}");
+}
