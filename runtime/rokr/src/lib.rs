@@ -442,6 +442,13 @@ pub extern "C" fn rok_time_now_ns() -> i64 {
     rokr_common::sys::monotonic_ns()
 }
 
+/// Total GC collections so far. A benchmark classifies a sample during
+/// which one ran as an outlier (spec 9.9.11).
+#[unsafe(no_mangle)]
+pub extern "C" fn rok_gc_collections() -> i64 {
+    rokr_gc::collections() as i64
+}
+
 /// Wall clock, nanoseconds since the Unix epoch (`SystemTime`, 3.3.3).
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_time_realtime_ns() -> i64 {

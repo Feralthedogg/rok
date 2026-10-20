@@ -846,6 +846,25 @@ fn compile_unit_in(
     // An entry file with neither `main` nor statements.
     let mut no_entry = false;
     if config.test || config.bench {
+        // Mount tests/ (a test build) or benches/ (a bench build) beside
+        // src/ as a synthetic root module (spec 0.3.5), so the #[test] /
+        // #[bench] functions there are collected too. A synthesized body
+        // declares `mod <file>;` for each top-level .rok, and the usual
+        // machinery resolves the folder form and submodules under it.
+        // tests/ and benches/ sit beside src/, at the package root (the
+        // parent of this entry file's src/ directory).
+        if let Some(pkg_root) = root_dir.parent().filter(|_| !config.anonymous) {
+            collect_extra_dir(
+                pkg_root,
+                config.bench,
+                &ext,
+                &metas[0],
+                &mut diags,
+                &mut all_items,
+                &mut all_uses,
+                files,
+            );
+        }
         // Top-level statements are the package's own entry: dropped.
         tests = harness::install(&mut all_items, &ext, &mut diags, config.bench);
         root_main = rokc_hir::RootMain::Harness;
@@ -1525,9 +1544,24 @@ fn mod_file(
         }
         None => (dir.join(format!("{name}.rok")), dir.join(name)),
     };
-    if !source_exists(&body) {
+    // A module's file is named after the module (spec 5.4.4); mod.rok is
+    // never a body file, so reject it even when reached through #[path].
+    if body.file_name().is_some_and(|n| n == "mod.rok") {
         return Err(err(format!(
-            "module `{name}` body not found at `{}`",
+            "rok has no `mod.rok`: name a module's file after the module \
+             (`{name}.rok`), with a `{name}/` folder beside it for its submodules (spec 5.4.4)"
+        )));
+    }
+    if !source_exists(&body) {
+        // A mod.rs habit puts the body in foo/mod.rok; point at foo.rok.
+        let stray = folder.join("mod.rok");
+        let hint = if source_exists(&stray) {
+            format!("; rename `{}` to `{}`", stray.display(), body.display())
+        } else {
+            String::new()
+        };
+        return Err(err(format!(
+            "module `{name}` body not found at `{}`{hint}",
             body.display()
         )));
     }
@@ -2408,6 +2442,58 @@ fn literal_tables(
     }
     user.rules.extend(lib.rules.iter().cloned());
     (std::sync::Arc::new(lib), std::sync::Arc::new(user))
+}
+
+/// Mount tests/ (or benches/) beside src/ as a synthetic root module
+/// (spec 0.3.5): a generated body declares `mod <file>;` for each
+/// top-level .rok, so the ordinary machinery resolves the folder form
+/// and the submodules under it, rooted at `tests` / `benches`.
+#[allow(clippy::too_many_arguments)] // mirrors collect_module_tree
+fn collect_extra_dir(
+    pkg_root: &Path,
+    bench: bool,
+    ext: &ExtOps,
+    metas: &MetaCtx,
+    diags: &mut Vec<RokDiagnostic>,
+    out: &mut Vec<ModItem>,
+    uses: &mut Vec<(String, rokc_core::Visibility, rokc_ast::UseTree)>,
+    files: &mut SourceMap,
+) {
+    let dirname = if bench { "benches" } else { "tests" };
+    let dir = pkg_root.join(dirname);
+    if !source_dir_exists(&dir) {
+        return;
+    }
+    let mut stems: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "rok"))
+        .filter_map(|e| e.path().file_stem()?.to_str().map(str::to_owned))
+        .collect();
+    stems.sort();
+    let mut body = String::new();
+    for s in &stems {
+        body.push_str("mod ");
+        body.push_str(s);
+        body.push_str(";\n");
+    }
+    if body.is_empty() {
+        return;
+    }
+    collect_module_tree(
+        &dir.join(format!("<{dirname}>")),
+        Some(&body),
+        Some(&dir),
+        &[dirname.to_owned()],
+        ext,
+        metas,
+        diags,
+        out,
+        uses,
+        None,
+        files,
+    );
 }
 
 /// Walk a package's module tree from `body_path`, flattening items into

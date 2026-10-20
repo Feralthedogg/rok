@@ -34,14 +34,22 @@ pub fn install(
         if !has_attr(&f.attrs, attr) {
             continue;
         }
-        if !f.params.is_empty() || !f.generics.params.is_empty() {
+        // A bench takes one `Bench` handle; a test takes nothing.
+        let params_ok = if bench {
+            f.params.len() == 1
+        } else {
+            f.params.is_empty()
+        };
+        if !params_ok || !f.generics.params.is_empty() {
+            let want = if bench {
+                "one `Bench` parameter and no generics"
+            } else {
+                "no parameters or generics"
+            };
             diags.push(RokDiagnostic::error(
                 ErrorKind::Type,
                 f.span,
-                format!(
-                    "`#[{attr}] fn {}` must take no parameters or generics",
-                    f.name
-                ),
+                format!("`#[{attr}] fn {}` must take {want}", f.name),
             ));
             continue;
         }
@@ -87,38 +95,30 @@ fn test_main(tests: &[(String, bool)]) -> String {
     src
 }
 
-/// `rokc bench`'s `main`, `argv` = `name iters samples`: `samples` rounds of
-/// `iters` calls, each printed as `#rokbench <ns>`.
+/// `rokc bench`'s `main`, `argv` = `name iters samples tty width`: builds
+/// the `Bench` handle and hands it to the named benchmark, which measures
+/// and reports itself (`rok::core::bench`).
 fn bench_main(benches: &[(String, bool)]) -> String {
     let mut src = String::from(
-        "extern \"C\" { fn rok_time_now_ns() -> i64; }\n\
-         fn main() {\n\
+        "fn main() {\n\
          \x20   let argv = rok::std::env::args();\n\
          \x20   let name = argv[1];\n\
          \x20   let iters: i64 = try! argv[2].parse();\n\
          \x20   let samples: i64 = try! argv[3].parse();\n\
-         \x20   let s = 0i64;\n\
-         \x20   while s < samples {\n\
-         \x20       let i = 0i64;\n\
-         \x20       let t0 = unsafe { rok_time_now_ns() };\n",
+         \x20   let tty = argv[4] == \"1\";\n\
+         \x20   let width: usize = try! argv[5].parse();\n\
+         \x20   let b = rok::core::bench::Bench::new(name, iters, samples, tty, width);\n",
     );
     for (k, (name, throws)) in benches.iter().enumerate() {
         let call = if *throws { "try! " } else { "" };
         let kw = if k == 0 { "if" } else { "else if" };
         src.push_str(&format!(
-            "        {kw} name == \"{name}\" {{ while i < iters {{ {call}{name}(); i += 1i64; }} }}\n"
+            "    {kw} name == \"{name}\" {{ {call}{name}(b); }}\n"
         ));
     }
     if !benches.is_empty() {
-        src.push_str("        else ");
+        src.push_str("    else ");
     }
-    src.push_str(
-        "{ panic(\"rokc bench: unknown bench name\"); }\n\
-         \x20       let t1 = unsafe { rok_time_now_ns() };\n\
-         \x20       println(f\"#rokbench {t1 - t0}\");\n\
-         \x20       s += 1i64;\n\
-         \x20   }\n\
-         }\n",
-    );
+    src.push_str("{ panic(\"rokc bench: unknown bench name\"); }\n}\n");
     src
 }

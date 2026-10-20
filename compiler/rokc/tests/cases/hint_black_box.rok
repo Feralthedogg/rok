@@ -1,0 +1,10 @@
+// spec: 009.09.11-benchmarks
+// expect-exit: 0
+// expect-stdout:
+// 42
+use rok::core::hint::black_box;
+
+fn main() {
+    let x = black_box(40i64) + black_box(2i64);
+    println(f"{black_box(x)}");
+}

@@ -1,0 +1,13 @@
+// rok::core::hint - hints the optimizer honors.
+
+use rok::bare::ptr::addr_of;
+
+/// An identity the optimizer cannot see through. Returns `x` unchanged,
+/// but will not fold away the computation that produced it, nor assume
+/// the result: `x` is routed through its own address with a volatile
+/// load. Benchmarks (spec 9.9.11) wrap the inputs and the result of a
+/// timed region with it so the work is actually performed.
+pub fn black_box<T>(x: T) -> T {
+    let v = x;
+    unsafe { addr_of(v).read_volatile() }
+}

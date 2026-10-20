@@ -1,0 +1,181 @@
+// rok::core::bench - the engine `rokc bench` drives (spec 9.9.11).
+//
+// A #[bench] fn takes a `Bench` and calls `iter` on the code to measure;
+// work set up outside `iter` is not timed. `iter` calibrates the call
+// count, warms up, samples, and reports median (+/- MAD) with Tukey
+// outlier detection and GC-aware sample classification. Statistics and
+// formatting live here; the driver only orchestrates the processes.
+
+use rok::core::cmp::Ordering;
+use rok::core::hint::black_box;
+
+extern "C" {
+    fn rok_time_now_ns() -> i64;
+    fn rok_gc_collections() -> i64;
+}
+
+// About 100 ms per sample: long enough that clock quantization and the
+// read overhead are negligible.
+const TARGET_NS: i64 = 100_000_000;
+
+pub struct Bench {
+    name: str;
+    iters: i64; // 0: calibrate
+    samples: i64;
+    tty: bool;
+    width: usize; // name-column width the driver computed
+    bytes: i64;   // throughput numerator per call, 0: none
+    items: i64;
+}
+
+impl Bench {
+    // The generated harness builds this from argv.
+    pub fn new(name: str, iters: i64, samples: i64, tty: bool, width: usize) -> Bench {
+        Bench {
+            name: name,
+            iters: iters,
+            samples: if samples > 0 { samples } else { 100i64 },
+            tty: tty,
+            width: width,
+            bytes: 0i64,
+            items: 0i64,
+        }
+    }
+
+    // Report throughput: `n` bytes processed per call.
+    pub fn bytes(ref self, n: i64) { self.bytes = n; }
+
+    // Report throughput: `n` items processed per call.
+    pub fn items(ref self, n: i64) { self.items = n; }
+
+    // Measure `f`. Calibrate (unless fixed), warm up, sample, report.
+    pub fn iter<T>(ref self, f: fn() -> T) {
+        let iters = if self.iters > 0 { self.iters } else { calibrate(f) };
+        run(f, iters); // warm-up, discarded
+
+        let times = List::<f64>::new();
+        let gc_out = 0i64;
+        let s = 0i64;
+        while s < self.samples {
+            let g0 = unsafe { rok_gc_collections() };
+            let dt = run(f, iters);
+            let g1 = unsafe { rok_gc_collections() };
+            times.push((dt as f64) / (iters as f64));
+            if g1 != g0 { gc_out += 1i64; }
+            s += 1i64;
+        }
+        report(self, times, gc_out);
+    }
+}
+
+// Run `f` `iters` times, discarding each black-boxed result; elapsed ns.
+fn run<T>(f: fn() -> T, iters: i64) -> i64 {
+    let t0 = unsafe { rok_time_now_ns() };
+    let i = 0i64;
+    while i < iters {
+        black_box(f());
+        i += 1i64;
+    }
+    let t1 = unsafe { rok_time_now_ns() };
+    t1 - t0
+}
+
+// Grow the call count until one run reaches the target.
+fn calibrate<T>(f: fn() -> T) -> i64 {
+    let iters = 1i64;
+    loop {
+        let dt = run(f, iters);
+        if dt >= TARGET_NS || iters >= 1_000_000_000i64 { return iters; }
+        let grow = if dt <= 0i64 { 1000i64 } else { (TARGET_NS / dt) + 1i64 };
+        iters = iters * (if grow < 2i64 { 2i64 } else { grow });
+    }
+}
+
+// Sorted-position value (p in 0.0 ..= 1.0) of an already-sorted list.
+fn quantile(sorted: List<f64>, p: f64) -> f64 {
+    let n = sorted.len();
+    if n == 0 { return 0.0f64; }
+    if n == 1 { return sorted[0]; }
+    let pos = p * ((n - 1) as f64);
+    let lo = pos as usize;
+    let frac = pos - (lo as f64);
+    if lo + 1 >= n { return sorted[n - 1]; }
+    sorted[lo] + (sorted[lo + 1] - sorted[lo]) * frac
+}
+
+fn fabs(x: f64) -> f64 { if x < 0.0f64 { -x } else { x } }
+
+// Compute stats and print the result line.
+fn report(b: Bench, times: List<f64>, gc_out: i64) {
+    times.sort_by(|a: f64, c: f64| {
+        if a < c { Ordering::Less } else if a > c { Ordering::Greater } else { Ordering::Equal }
+    });
+    let n = times.len();
+    let median = quantile(times, 0.5f64);
+    let q1 = quantile(times, 0.25f64);
+    let q3 = quantile(times, 0.75f64);
+    let iqr = q3 - q1;
+
+    // Tukey fences: outside [q1 - 1.5 iqr, q3 + 1.5 iqr] is an outlier.
+    let lo = q1 - 1.5f64 * iqr;
+    let hi = q3 + 1.5f64 * iqr;
+    let outliers = 0i64;
+    let i = 0usize;
+    while i < n {
+        if times[i] < lo || times[i] > hi { outliers += 1i64; }
+        i += 1usize;
+    }
+
+    // Median absolute deviation about the median.
+    let dev = List::<f64>::new();
+    let j = 0usize;
+    while j < n {
+        dev.push(fabs(times[j] - median));
+        j += 1usize;
+    }
+    dev.sort_by(|a: f64, c: f64| {
+        if a < c { Ordering::Less } else if a > c { Ordering::Greater } else { Ordering::Equal }
+    });
+    let mad = quantile(dev, 0.5f64);
+
+    if b.tty {
+        print_human(b, median, mad, outliers, gc_out);
+    } else {
+        print_machine(b, median, mad, outliers, gc_out, n as i64);
+    }
+}
+
+// Pick a time unit so the mantissa reads naturally.
+fn unit(ns: f64) -> (f64, str) {
+    if ns < 1000.0f64 { return (ns, "ns"); }
+    if ns < 1000000.0f64 { return (ns / 1000.0f64, "us"); }
+    if ns < 1000000000.0f64 { return (ns / 1000000.0f64, "ms"); }
+    (ns / 1000000000.0f64, "s")
+}
+
+fn pad_right(s: str, width: usize) -> str {
+    let out = s;
+    while out.len() < width { out = out + " "; }
+    out
+}
+
+fn print_human(b: Bench, median: f64, mad: f64, outliers: i64, gc_out: i64) {
+    let (mv, mu) = unit(median);
+    let (dv, du) = unit(mad);
+    let line = f"  {pad_right(b.name, b.width)}  {mv:>9.2} {mu} +/- {dv:.2} {du}";
+    if b.bytes > 0i64 {
+        let per_s = (b.bytes as f64) / (median / 1000000000.0f64);
+        line = line + f"   {per_s / 1048576.0f64:.0} MiB/s";
+    } else if b.items > 0i64 {
+        let per_s = (b.items as f64) / (median / 1000000000.0f64);
+        line = line + f"   {per_s / 1000000.0f64:.1} Melem/s";
+    }
+    if outliers > 0i64 || gc_out > 0i64 {
+        line = line + f"   [{outliers} outliers, {gc_out} gc]";
+    }
+    println(line);
+}
+
+fn print_machine(b: Bench, median: f64, mad: f64, outliers: i64, gc_out: i64, n: i64) {
+    println(f"#rokbench name={b.name} median_ns={median:.3} mad_ns={mad:.3} samples={n} outliers={outliers} gc={gc_out} bytes={b.bytes} items={b.items}");
+}

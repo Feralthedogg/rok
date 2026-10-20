@@ -7,6 +7,7 @@
 // there is no separate prelude module.
 
 pub mod array;
+pub mod bench;
 pub mod channel;
 pub mod cmp;
 pub mod collections;
@@ -15,6 +16,7 @@ pub mod crypto;
 pub mod error;
 pub mod fmt;
 pub mod future;
+pub mod hint;
 pub mod index;
 pub mod iter;
 pub mod marker;

@@ -1,0 +1,11 @@
+// spec: 005.04.6-mod-path
+// expect-error: has no `mod.rok`
+
+// #[path] may not name a mod.rok body; the file exists, so the error is
+// the ban itself, not a missing file.
+#[path("gen/mod.rok")]
+mod geom;
+
+fn main() {
+    println(f"{geom::seven()}");
+}

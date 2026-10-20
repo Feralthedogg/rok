@@ -1,0 +1,11 @@
+// spec: 005.04.4-package-root
+// expect-error: body not found
+// expect-error: rename
+
+// A Rust mod.rs habit: the body is in geom/mod.rok, but rok wants
+// geom.rok. The error points at the rename (only because mod.rok is here).
+mod geom;
+
+fn main() {
+    println(f"{geom::n()}");
+}

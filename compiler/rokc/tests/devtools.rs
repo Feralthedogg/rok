@@ -395,10 +395,12 @@ fn bench_times_each_bench() {
         "bench",
         &[(
             "lib.rok",
-            "pub fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\
-             #[bench]\nfn fib_10() { fib(10i64); }\n\
-             #[bench]\nfn other() { fib(2i64); }\n\
-             #[bench]\nfn boom() { panic(\"bad bench\"); }\n",
+            "use rok::core::bench::Bench;\n\
+             use rok::core::hint::black_box;\n\
+             pub fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } }\n\
+             #[bench]\nfn fib_10(b: Bench) { b.iter(|| black_box(fib(10i64))); }\n\
+             #[bench]\nfn other(b: Bench) { b.iter(|| black_box(fib(2i64))); }\n\
+             #[bench]\nfn boom(b: Bench) { b.iter(|| { panic(\"bad bench\"); }); }\n",
         )],
     );
     let rokr = env.rokr.display().to_string();
@@ -407,21 +409,60 @@ fn bench_times_each_bench() {
         args.extend_from_slice(extra);
         rokc(&dir, &args)
     };
+    // Captured output is not a terminal, so the library prints the
+    // stable machine line.
     let (out, _) = exit(&run(&["fib"]), 0);
-    assert!(out.contains("running 1 bench\n"), "{out}");
-    assert!(out.contains("bench fib_10 ... bench:"), "{out}");
-    assert!(out.contains(" ns/iter (+/- "), "{out}");
+    assert!(out.contains("benchmarking 1 bench\n"), "{out}");
+    assert!(out.contains("#rokbench name=fib_10 "), "{out}");
     assert!(
-        out.contains("bench result: ok. 1 measured; 0 failed; 2 filtered out"),
+        out.contains("bench result: ok. 1 run; 0 failed; 2 filtered out"),
         "{out}"
     );
 
-    let (out, _) = exit(&run(&[]), 1);
-    assert!(out.contains("bench boom   ... FAILED"), "{out}");
-    assert!(out.contains("bad bench"), "{out}");
-    assert!(out.contains("2 measured; 1 failed"), "{out}");
+    let (out, err) = exit(&run(&[]), 1);
+    assert!(out.contains("boom") && out.contains("FAILED"), "{out}");
+    assert!(err.contains("bad bench"), "{err}");
+    assert!(out.contains("2 run; 1 failed"), "{out}");
 
     // `#[bench]` functions are not part of a normal build.
     let (_, err) = exit(&rokc(&dir, &["check"]), 0);
     assert!(!err.contains("fib_10"), "{err}");
+}
+
+// spec: §0.3.5 §9.1.1 §9.1.2
+#[test]
+fn tests_and_benches_directories() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("dirs");
+    let write = |rel: &str, text: &str| {
+        let p = dir.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, text).unwrap();
+    };
+    write("src/lib.rok", "pub fn add(a: i64, b: i64) -> i64 { a + b }\n");
+    // tests/ and benches/ sit beside src/, reach the package through
+    // pkg::, and are collected only by `test` / `bench` (spec 0.3.5).
+    write(
+        "tests/basic.rok",
+        "use pkg::add;\n#[test]\nfn adds() { if add(40i64, 2i64) != 42i64 { panic(\"broke\"); } }\n",
+    );
+    write(
+        "benches/perf.rok",
+        "use pkg::add;\nuse rok::core::bench::Bench;\nuse rok::core::hint::black_box;\n\
+         #[bench]\nfn add_bench(b: Bench) { b.iter(|| black_box(add(40i64, 2i64))); }\n",
+    );
+    let rokr = env.rokr.display().to_string();
+
+    let (out, _) = exit(&rokc(&dir, &["test", "--rokr", &rokr]), 0);
+    assert!(out.contains("test tests::basic::adds ... ok"), "{out}");
+
+    let (out, _) = exit(
+        &rokc(&dir, &["bench", "--rokr", &rokr, "--iters", "3", "--samples", "2"]),
+        0,
+    );
+    assert!(out.contains("#rokbench name=benches::perf::add_bench "), "{out}");
+
+    // Neither directory is part of a normal build.
+    let (_, err) = exit(&rokc(&dir, &["check"]), 0);
+    assert!(!err.contains("adds") && !err.contains("add_bench"), "{err}");
 }
