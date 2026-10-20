@@ -14,7 +14,7 @@
 // -4 -0 1.5
 
 // Stdlib 2.2: `NonZero<T>` / `NonNan<F>` / `Finite<F>` / `Positive<T>`
-// — sizes of `W | none`, construction, `get`, the arithmetic table,
+// - sizes of `W | none`, construction, `get`, the arithmetic table,
 // comparison / hashing, `TryFrom` (`ZeroError`), `From` back, and the
 // wrappers as `Dict` keys / sorted.
 

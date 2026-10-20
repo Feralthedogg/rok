@@ -11,7 +11,7 @@
 // via passed fd
 // dgram
 
-// Stdlib 3.2.3: Unix domain sockets — socketpair, a bound listener and a
+// Stdlib 3.2.3: Unix domain sockets - socketpair, a bound listener and a
 // connecting client, SCM_RIGHTS fd passing, datagram pairs.
 use rok::std::net::{UnixListener, UnixStream, UnixDatagram};
 use rok::std::fs;

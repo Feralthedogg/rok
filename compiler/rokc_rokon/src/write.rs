@@ -78,7 +78,7 @@ fn parts(v: &Value) -> Option<(String, &'static str, Vec<Entry<'_>>, &'static st
             "}",
         ),
         // Named values only: `E::V { a: 1 }` whether read as that or as
-        // `E::V(a: 1)` — std rokon's `Value` keeps no form (spec 3.9.5).
+        // `E::V(a: 1)` - std rokon's `Value` keeps no form (spec 3.9.5).
         Kind::Variant {
             path,
             args,

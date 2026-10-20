@@ -301,7 +301,7 @@ fn collect_attr(
             ErrorKind::Meta,
             item_span,
             format!(
-                "lang slot `{slot}` is already bound to `{}` — cannot also bind to \
+                "lang slot `{slot}` is already bound to `{}` - cannot also bind to \
                      `{item_name}` (spec 6.4.6)",
                 prev.item_name
             ),

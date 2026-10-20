@@ -158,7 +158,7 @@ impl<'src> Lexer<'src> {
     }
 
     /// Spec 1.1: bidirectional formatting controls are rejected
-    /// anywhere — comments and strings included (`\u{..}` escapes only).
+    /// anywhere - comments and strings included (`\u{..}` escapes only).
     fn check_bidi(&mut self) {
         if self.src.is_ascii() {
             return;
@@ -551,7 +551,7 @@ impl<'src> Lexer<'src> {
             .cloned()
     }
 
-    /// A flag — a pair of regional indicators — may start an identifier
+    /// A flag - a pair of regional indicators - may start an identifier
     /// (`🇰🇷`); a lone indicator may not.
     fn at_flag(&self) -> bool {
         let ri = |c: char| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c);
@@ -642,7 +642,7 @@ impl<'src> Lexer<'src> {
                     self.advance(1);
                     self.eat_digit_seq(10, start);
                 } else if !after.is_some_and(|c| c == '.' || is_ident_start(c)) {
-                    // `1.` — `.` not followed by an identifier or `.`.
+                    // `1.` - `.` not followed by an identifier or `.`.
                     is_float = true;
                     self.advance(1);
                 }

@@ -445,7 +445,7 @@ fn spec_coverage_report() {
             }
             let mark = match kind {
                 Some(k) => k.split(':').next().unwrap(),
-                None if by.is_empty() => "—",
+                None if by.is_empty() => "-",
                 None => "✓",
             };
             let _ = writeln!(
@@ -454,7 +454,7 @@ fn spec_coverage_report() {
                 show(sid),
                 title.replace('|', "\\|"),
                 by.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
-                    + if by.len() > 4 { ", …" } else { "" }
+                    + if by.len() > 4 { ", ..." } else { "" }
             );
             json_secs.push(format!(
                 "{{\"id\":{},\"title\":{},\"non_normative\":{},\"cases\":[{}]}}",

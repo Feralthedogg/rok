@@ -1,4 +1,4 @@
-// expect-error: 15:25: conflicting implementations of trait `Area`: `impl<..> Area for T` and `impl<..> Area for T` overlap on `T` — bounds don't make impls disjoint
+// expect-error: 15:25: conflicting implementations of trait `Area`: `impl<..> Area for T` and `impl<..> Area for T` overlap on `T` - bounds don't make impls disjoint
 // expect-error: 20:18: conflicting implementations of trait `Name`: `impl<..> Name for T` and `impl<..> Name for Wrap<U>` overlap on `Wrap<U>`
 // expect-error: 24:26: method `get` is defined more than once for `Wrap<T>`
 
@@ -10,7 +10,7 @@ trait Area { fn area(self) -> i32; }
 trait Name { fn name(self) -> i32; }
 struct Wrap<T> { v: T; }
 
-// No type implements both `Shape` and `Color` — still an overlap.
+// No type implements both `Shape` and `Color` - still an overlap.
 impl<T: Shape> Area for T { fn area(self) -> i32 { return 1; } }
 impl<T: Color> Area for T { fn area(self) -> i32 { return 2; } }
 

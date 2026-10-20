@@ -1,4 +1,4 @@
-// rok::core::num — the primitive types' operator / comparison trait
+// rok::core::num - the primitive types' operator / comparison trait
 // impls (stdlib spec 2.1, 2.3.5, 2.5). They make `T: Add` / `T: Ord`
 // bounds accept primitives. Each method is `#[intrinsic("rok.OP.TYPE")]`
 // (stdlib spec 0.3): a primitive `a + b` and a by-name call (`x.add(y)`,
@@ -14,13 +14,13 @@ pub mod bigfloat;
 pub mod niche;
 pub mod assign;
 
-/// The additive identity — where `Iterator::sum` starts (an empty sum is
+/// The additive identity - where `Iterator::sum` starts (an empty sum is
 /// `0`).
 pub trait Zero {
     fn zero() -> Self;
 }
 
-/// The multiplicative identity — where `Iterator::product` starts.
+/// The multiplicative identity - where `Iterator::product` starts.
 pub trait One {
     fn one() -> Self;
 }
@@ -1434,7 +1434,7 @@ impl Sqrt for f32 {
     const fn sqrt(self) -> f32 { self.sqrt() }
 }
 
-// `%%` (2.3 `Modulo`): floored — the result takes the divisor's sign;
+// `%%` (2.3 `Modulo`): floored - the result takes the divisor's sign;
 // unsigned it is `%`.
 
 impl Modulo for i8 {

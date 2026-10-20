@@ -3,7 +3,7 @@
 // expect-stdout:
 // 8 10 0
 
-// spec 4.4.2 / 4.4.4: a capturing closure is a value of its `fn` type —
+// spec 4.4.2 / 4.4.4: a capturing closure is a value of its `fn` type -
 // it can be returned through a `fn(...)` return type (`make_adder`).
 fn make_adder(n: i32) -> fn(i32) -> i32 {
     return |x| { x + n };

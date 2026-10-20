@@ -2947,7 +2947,7 @@ fn dependency_blanket_impl_overlaps_user_impl() {
     let out = rokc(Some(&env), &dir, &["check", "app", "--extern", "dd=dd"]);
     assert_exit(&out, 1);
     assert!(
-        text(&out.stderr).contains("overlap on `Mine<T>` — bounds don't make impls disjoint"),
+        text(&out.stderr).contains("overlap on `Mine<T>` - bounds don't make impls disjoint"),
         "{}",
         text(&out.stderr)
     );

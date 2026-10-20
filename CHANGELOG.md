@@ -8,7 +8,7 @@ First release.
   `bench`, `bindgen`), package / build front-end `rok` (`rok.rokon` / `rok.lock`, path / git dependencies, stones,
   environments, toolchains), runtime `librokr.a`, standard library `core` / `std` / `bare`.
 - Install: rustup-style layout (`~/.rok/bin` proxies, `~/.rok/toolchains/<version>-<triple>/`), `install.sh` /
-  `install.ps1`, and `rok-<version>-<triple>.tar.gz` (Windows `.zip`) archives built by `dist.sh`
+  `install.ps1`, and `rok-<version>-<triple>.tar.gz` / `.tar.xz` (Windows `.zip`) archives built by `dist.sh`
   (Linux: `dist-linux.sh`, in a Debian 11 container; they need glibc 2.34 or later).
 - `rok` / `rokc` / `rokls --version` print the version, commit, and date.
 - License `MIT OR Apache-2.0`.
@@ -69,6 +69,6 @@ First release.
 - Calls between rok functions pass the thread block as an argument; the GC frame links only on paths that reach
   a safepoint; locals that only a loop's poll sees are rooted on its yield path only.
 - `task::spawn` of a future made at the call, or kept in a local nothing else names, skips the hand-off.
-- PGO profiles retrained for macOS 27 and Linux: rokc's own `-O2` builds are 5–10% faster than without.
+- PGO profiles retrained for macOS 27 and Linux: rokc's own `-O2` builds are 5-10% faster than without.
 - rok / C instructions on the bench suite: nbody 1.46x, fannkuch 1.64x, spectral_norm 1.11x, throw_parse 1.85x;
   json_tokenizer 0.69x, word_count 0.89x, binary_trees 0.55x.

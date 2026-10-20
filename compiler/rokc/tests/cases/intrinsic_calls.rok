@@ -8,7 +8,7 @@
 // 1
 
 // Stdlib spec 0.3: core's primitive trait methods are
-// `#[intrinsic("rok.OP.TYPE")]` — calling them by name lowers to the
+// `#[intrinsic("rok.OP.TYPE")]` - calling them by name lowers to the
 // machine op (method call, path call, through a type parameter).
 
 fn twice<T: Mul<T, Output = T>>(x: T, k: T) -> T { return T::mul(x, k); }

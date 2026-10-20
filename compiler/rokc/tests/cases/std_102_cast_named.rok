@@ -6,7 +6,7 @@
 // align_cast: 258 none
 // unchecked: 258
 
-// stdlib 1.2: every pointer cast is a named function — `ptr_cast`
+// stdlib 1.2: every pointer cast is a named function - `ptr_cast`
 // retypes (same address), `align_cast` checks the alignment first
 // (`none` when misaligned), `align_cast_unchecked` trusts the caller.
 use rok::bare::ptr::{Ptr, addr_of};

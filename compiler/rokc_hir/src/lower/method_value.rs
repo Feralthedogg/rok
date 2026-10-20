@@ -57,7 +57,7 @@ pub(super) fn method_path_value(
             span,
             format!(
                 "`{display}` has a `ref` parameter (or `ref self`) and cannot be used as a `fn` \
-                 value — a `fn` type has no `ref` parameters (spec 4.7.6)"
+                 value - a `fn` type has no `ref` parameters (spec 4.7.6)"
             ),
         ));
     }
@@ -82,7 +82,7 @@ pub(super) fn method_path_value(
             return Some(ctx.error_expr(
                 span,
                 format!(
-                    "type annotations needed: the `fn` type of `{display}` as a value — annotate \
+                    "type annotations needed: the `fn` type of `{display}` as a value - annotate \
                      the binding (`let f: fn(..) -> R = {display};`), pass it to a `fn` \
                      parameter, or name the type arguments (spec 3.5.3)"
                 ),

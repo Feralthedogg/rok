@@ -7,7 +7,7 @@
 // 9090
 // false
 
-// 6.10.2: `#[derive(Inspect)]` — field names, dynamic get / set via `any`.
+// 6.10.2: `#[derive(Inspect)]` - field names, dynamic get / set via `any`.
 #[derive(Inspect)]
 struct Config { host: str; port: i32; }
 

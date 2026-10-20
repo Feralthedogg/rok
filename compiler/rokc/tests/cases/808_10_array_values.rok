@@ -5,7 +5,7 @@
 // len 3 sum 6
 // grid 4
 
-// spec 8.8.10: `[T; N]` is an inline array of N elements — a value:
+// spec 8.8.10: `[T; N]` is an inline array of N elements - a value:
 // assigning it copies the elements.
 fn sum(xs: [i32; 3]) -> i32 {
     let t = 0;

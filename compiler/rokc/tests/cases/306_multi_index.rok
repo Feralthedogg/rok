@@ -4,7 +4,7 @@
 // 6
 // 12
 
-// spec 3.6.1: `m[i, j]` is `m[(i, j)]` — one `Index<(I, J)>` call.
+// spec 3.6.1: `m[i, j]` is `m[(i, j)]` - one `Index<(I, J)>` call.
 struct Grid { w: usize; cells: List<i32>; }
 
 impl Index<(usize, usize)> for Grid {

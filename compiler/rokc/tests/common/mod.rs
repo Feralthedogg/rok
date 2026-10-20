@@ -1,76 +1,76 @@
 //! Shared plumbing of the `rokc` integration tests, and the directives of
 //! the `.rok` cases (`integration.rs`), read from `//` comment lines:
-//!   - `// expect-exit: N`      — runtime exit code
-//!   - `// expect-stdout: text` — single-line stdout, or an empty value
+//!   - `// expect-exit: N`      - runtime exit code
+//!   - `// expect-stdout: text` - single-line stdout, or an empty value
 //!     followed by `// line` comments for a multi-line block (none:
 //!     empty stdout); required of every case that runs
-//!   - `// expect-error: text`  — build must fail and stderr must contain `text`
-//!   - `// forbid-error: text`  — (repeatable) that failed build's stderr must
+//!   - `// expect-error: text`  - build must fail and stderr must contain `text`
+//!   - `// forbid-error: text`  - (repeatable) that failed build's stderr must
 //!     not contain `text`
-//!   - `// expect-warning: text` — (repeatable) build stderr must contain `text`
-//!   - `// forbid-warning: text` — (repeatable) build stderr must not contain `text`
-//!   - `// expect-stderr: text` — (repeatable) the run's stderr, one
+//!   - `// expect-warning: text` - (repeatable) build stderr must contain `text`
+//!   - `// forbid-warning: text` - (repeatable) build stderr must not contain `text`
+//!   - `// expect-stderr: text` - (repeatable) the run's stderr, one
 //!     directive per line, leading and trailing blanks aside (`\` read
 //!     as `/`, library paths relative to the workspace); none: empty stderr
-//!   - `// expect-lint: L:C message` — (repeatable) `rokc lint` on the
+//!   - `// expect-lint: L:C message` - (repeatable) `rokc lint` on the
 //!     case reports exactly these `E503` lints, in order: line, column
 //!     and headline
-//!   - `// debug-only`          — skipped under `ROK_TEST_OPT` (e.g.
+//!   - `// debug-only`          - skipped under `ROK_TEST_OPT` (e.g.
 //!     overflow panics, which only `-O0` checks)
-//!   - `// gc-stress: N`        — run twice more, with
+//!   - `// gc-stress: N`        - run twice more, with
 //!     `ROK_GC_STRESS=N ROK_GC_EVAC=always` and with
 //!     `ROK_GC_STRESS=N ROK_GC_EVAC=always ROK_GC_CONCURRENT=always`,
 //!     same expectations
-//!   - `// rokc-arg: args`      — extra `rokc` arguments (`--cfg feat`)
-//!   - `// run-env: KEY=VALUE`  — (repeatable) set for every run of the
+//!   - `// rokc-arg: args`      - extra `rokc` arguments (`--cfg feat`)
+//!   - `// run-env: KEY=VALUE`  - (repeatable) set for every run of the
 //!     case (`ROK_WORKERS=3`)
-//!   - `// only-os: macos linux` — skipped unless the target's `target_os`
+//!   - `// only-os: macos linux` - skipped unless the target's `target_os`
 //!     is listed (POSIX commands, paths, signals)
-//!   - `// only-pointer-width: 64` — skipped on targets of another width
+//!   - `// only-pointer-width: 64` - skipped on targets of another width
 //!     (sizes, `usize::BITS`, layouts in the expected output)
-//!   - `// needs: threads net process fs posix-fs` — skipped on a
+//!   - `// needs: threads net process fs posix-fs` - skipped on a
 //!     target without one of them: threads only on `wasm32-wasi-threads`
 //!     among the wasm32 targets, sockets only on `wasm32-wasi`, no
 //!     processes or signals on wasm32 (stdlib 0.1.4, 3.x availability;
 //!     `process` also covers POSIX C calls), a browser no file system
 //!     (`fs`), WASI no `dup` / `flock` / `mmap` (`posix-fs`)
-//!   - `// only-target: wasm32-wasi ..` — run only on the listed
+//!   - `// only-target: wasm32-wasi ..` - run only on the listed
 //!     `ROK_TEST_TARGET`s (what one target reports that the others do
 //!     not, e.g. its `Unsupported` APIs)
-//!   - `// wasm-invoke: f(1, "a") => 2` — (repeatable) after the run, the
+//!   - `// wasm-invoke: f(1, "a") => 2` - (repeatable) after the run, the
 //!     component's export `f` called through `wasmtime run --invoke`
 //!     (WAVE syntax) prints the value after `=>`
-//!   - `// wasm-reactor` — a component without `wasi:cli/run`: not run,
+//!   - `// wasm-reactor` - a component without `wasi:cli/run`: not run,
 //!     only its `wasm-invoke`s
-//!   - `// wasm-plug: dir/main.rok` — that program (relative to the case
+//!   - `// wasm-plug: dir/main.rok` - that program (relative to the case
 //!     directory) is built too and
 //!     `wac plug` (`ROK_TEST_WAC`; the case is skipped without it)
 //!     satisfies the case's imports with its exports; the composition
 //!     runs
-//!   - `// spec: <section>`     — the spec section a case checks (a tag)
+//!   - `// spec: <section>`     - the spec section a case checks (a tag)
 //!
 //! Environment:
-//!   - `ROK_REQUIRE_LLVM=1` — a rokc built without LLVM is a failure
+//!   - `ROK_REQUIRE_LLVM=1` - a rokc built without LLVM is a failure
 //!     instead of a skip (CI sets this).
-//!   - `ROK_TEST_OPT=-O2` (or `--release`, `-O3`, ...) — build every case
+//!   - `ROK_TEST_OPT=-O2` (or `--release`, `-O3`, ...) - build every case
 //!     at that optimization level instead of the default `-O0`.
-//!   - `ROK_TEST_FILTER=text` — only the integration cases whose name
+//!   - `ROK_TEST_FILTER=text` - only the integration cases whose name
 //!     contains `text`.
-//!   - `ROK_TEST_SHARD=i/n` — only every n-th integration case of the
+//!   - `ROK_TEST_SHARD=i/n` - only every n-th integration case of the
 //!     sorted list from the i-th (1-based), and every n-th differential
 //!     suite: CI splits a corpus over n jobs.
-//!   - `ROK_TEST_TARGET=<triple>` — build for that target (with a runtime
+//!   - `ROK_TEST_TARGET=<triple>` - build for that target (with a runtime
 //!     built for it), e.g. `x86_64-apple-darwin` run under Rosetta.
 //!     `wasm32-wasi` and `wasm32-wasi-threads` run each module with
 //!     `ROK_TEST_WASM_RUNNER` (a `wasmtime` that still has wasi-threads:
 //!     46.0.3, the last);
 //!     `wasm32-unknown-unknown` with `node` and the toolchain's `rok.mjs`
 //!     host (all need `targets/build.sh <triple>` for the C library).
-//!   - `ROK_TEST_RUNNER=<program> [args]` — run a native target's case
+//!   - `ROK_TEST_RUNNER=<program> [args]` - run a native target's case
 //!     executables through it (split on whitespace), e.g.
 //!     `qemu-aarch64 -L <sysroot>` or `wine` where no binfmt handler
 //!     is registered.
-//!   - `ROK_TEST_TMP=<dir>` — where each test binary's scratch root
+//!   - `ROK_TEST_TMP=<dir>` - where each test binary's scratch root
 //!     `rok-test-<pid>` goes (default: the temp directory); the root is
 //!     removed at exit, unless `ROK_KEEP_TEST_TMP` is set.
 #![allow(dead_code)]
@@ -146,7 +146,7 @@ pub fn setup() -> Option<Env> {
         // libtest's capture for passing tests.
         let _ = writeln!(
             std::io::stderr(),
-            "\n!!!!!!!! SKIPPED: {msg} — .rok end-to-end cases NOT run !!!!!!!!\n"
+            "\n!!!!!!!! SKIPPED: {msg} - .rok end-to-end cases NOT run !!!!!!!!\n"
         );
         return None;
     }

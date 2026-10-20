@@ -2,6 +2,9 @@
 # Build a release toolchain archive (spec 9.2.19):
 #
 #   dist/rok-<version>-<triple>.tar.gz     (Windows: .zip)
+#   dist/rok-<version>-<triple>.tar.xz     the same files, about half the
+#                                          size (not on Windows); install.sh
+#                                          takes it where xz is at hand
 #     rok-<version>-<triple>/
 #       bin/{rok,rokc,rokls}                (Windows: .exe)
 #       lib/librokr.a                       (Windows: rokr.lib)
@@ -35,6 +38,23 @@ case "${1-}" in
   "") ;;
   *) echo "usage: ./dist.sh [--out <dir>]" >&2; exit 2 ;;
 esac
+
+# A release's --version names its commit: ROK_COMMIT_HASH and
+# ROK_COMMIT_DATE (dist-linux.sh passes the host's), else git. A
+# checkout without .git (`git archive`) has neither.
+if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
+  if h=$(git rev-parse --short=9 HEAD 2>/dev/null) &&
+    d=$(git log -1 --format=%cs 2>/dev/null); then
+    ROK_COMMIT_HASH=${ROK_COMMIT_HASH:-$h}
+    ROK_COMMIT_DATE=${ROK_COMMIT_DATE:-$d}
+  else
+    echo "dist.sh: no commit for --version: run from a git checkout, or set ROK_COMMIT_HASH and" \
+      "ROK_COMMIT_DATE (\`git rev-parse --short=9 HEAD\` and \`git log -1 --format=%cs\`" \
+      "in the checkout this was made from)" >&2
+    exit 1
+  fi
+fi
+export ROK_COMMIT_HASH ROK_COMMIT_DATE
 
 # The host's executable suffix, runtime archive and archive format.
 case $(uname -s) in
@@ -95,7 +115,7 @@ grep -q "^version=\"\${ROK_VERSION:-$version}\"" install.sh &&
 }
 
 stage=$out/$name
-rm -rf "$stage" "$out/$name.$ext" "$out/$name.$ext.sha256"
+rm -rf "$stage" "$out/$name".tar.* "$out/$name.$ext" "$out/$name.$ext.sha256"
 mkdir -p "$stage/bin" "$stage/lib/rok"
 # Without debug info and local symbols. rokc keeps its exported symbols:
 # the MLIR plugins it loads bind to them.
@@ -212,16 +232,27 @@ if [ -n "$devname" ]; then
 fi
 
 sum=$(command -v sha256sum || echo "shasum -a 256")
+if [ "$ext" != zip ] && ! command -v xz >/dev/null 2>&1; then
+  echo "dist.sh: xz is needed for the .tar.xz archive (Debian / Ubuntu: apt install xz-utils; macOS: brew install xz)" >&2
+  exit 1
+fi
 for n in "$name" $devname; do
+  exts=$ext
   case $ext in
     # cmake (needed for LLVM anyway) writes zip; Git Bash's tar does not.
     zip) (cd "$out" && cmake -E tar cf "$n.zip" --format=zip "$n") ;;
-    *) tar -C "$out" -czf "$out/$n.$ext" "$n" ;;
+    *)
+      tar -C "$out" -czf "$out/$n.$ext" "$n"
+      # rok toolchain install reads the .tar.gz; install.sh prefers this.
+      [ "$n" != "$name" ] || { tar -C "$out" -cf - "$n" | xz -9 -T0 > "$out/$n.tar.xz"; exts="$ext tar.xz"; }
+      ;;
   esac
-  (cd "$out" && $sum "$n.$ext" > "$n.$ext.sha256")
+  for e in $exts; do
+    (cd "$out" && $sum "$n.$e" > "$n.$e.sha256")
+    echo "archive: $(mb "$out/$n.$e")"
+    echo "$out/$n.$e"
+  done
   rm -rf "${out:?}/$n"
-  echo "archive: $(mb "$out/$n.$ext")"
-  echo "$out/$n.$ext"
 done
 # The release's version: `rok toolchain update` reads the newest release's
 # from releases/latest/download/rok-version.

@@ -456,8 +456,13 @@ pub fn entry_for(dir: &Path, m: &Manifest) -> Result<Entry, String> {
     if !git::run(dir, &["status", "--porcelain"])?.is_empty() {
         return Err("the work tree has uncommitted changes; commit them first".into());
     }
-    let url = git::run(dir, &["remote", "get-url", "origin"])
-        .map_err(|_| "the repository has no remote `origin` (where users fetch the source)")?;
+    // The url as configured: `remote get-url` applies the publisher's own
+    // `insteadOf` rewrites, which other users do not have.
+    let url = git::run(dir, &["config", "--get", "remote.origin.url"]).map_err(|_| {
+        "the repository has no remote `origin` (where users fetch the source); add one with \
+         `git remote add origin https://<host>/<owner>/<repo>`"
+    })?;
+    check_source(&url)?;
     Ok(Entry {
         name,
         vers,
@@ -704,16 +709,48 @@ pub fn api(home: &Path, url: &str, quiet: bool) -> Result<String, String> {
     Ok(a.trim_end_matches('/').to_owned())
 }
 
+/// `https://`, or plain http to this machine (tests, a local server).
+fn https_or_local(a: &str) -> bool {
+    a.starts_with("https://")
+        || ["http://127.0.0.1", "http://localhost"].iter().any(|h| {
+            a.strip_prefix(h)
+                .is_some_and(|r| r.is_empty() || r.starts_with([':', '/']))
+        })
+}
+
 fn check_api(a: &str) -> Result<(), String> {
-    let local = ["http://127.0.0.1", "http://localhost"].iter().any(|h| {
-        a.strip_prefix(h)
-            .is_some_and(|r| r.is_empty() || r.starts_with([':', '/']))
-    });
-    if a.starts_with("https://") || local {
+    if https_or_local(a) {
         Ok(())
     } else {
         Err(format!("api `{a}` must be an https:// URL"))
     }
+}
+
+/// Everyone fetches a stone's source: it must be an https:// URL. For an
+/// ssh remote the error names the https form of the same repository.
+fn check_source(url: &str) -> Result<(), String> {
+    if https_or_local(url) {
+        return Ok(());
+    }
+    // `ssh://[user@]host[:port]/path` and `[user@]host:path`.
+    let ssh = match url.strip_prefix("ssh://") {
+        Some(r) => r
+            .split_once('/')
+            .map(|(h, p)| (h.split(':').next().unwrap_or(h), p)),
+        None if !url.contains("://") => url.split_once(':').filter(|(h, _)| h.contains('@')),
+        None => None,
+    };
+    let https = match ssh {
+        Some((host, path)) => {
+            let host = host.rsplit('@').next().unwrap_or(host);
+            format!("https://{host}/{}", path.trim_start_matches('/'))
+        }
+        None => "https://<host>/<owner>/<repo>".into(),
+    };
+    Err(format!(
+        "remote `origin` is `{url}`, which other users may not be able to fetch: a stone's \
+         source must be an https:// URL; run `git remote set-url origin {https}`"
+    ))
 }
 
 /// `GET` (or `POST` of `body`) `{api}{path}` with a bearer token; the
@@ -837,6 +874,23 @@ mod tests {
             "ftp://x",
         ] {
             assert!(check_api(a).is_err(), "{a}");
+        }
+        assert!(check_source("https://github.com/o/geom").is_ok());
+        for (url, fix) in [
+            ("git@github.com:o/geom.git", "https://github.com/o/geom.git"),
+            (
+                "ssh://git@github.com:22/o/geom",
+                "https://github.com/o/geom",
+            ),
+            ("file:///srv/geom", "https://<host>/<owner>/<repo>"),
+            ("/srv/geom", "https://<host>/<owner>/<repo>"),
+            ("http://github.com/o/geom", "https://<host>/<owner>/<repo>"),
+        ] {
+            let e = check_source(url).unwrap_err();
+            assert!(
+                e.contains(&format!("run `git remote set-url origin {fix}`")),
+                "{e}"
+            );
         }
         let home = rokc_core::tmp::test_dir("token");
         let e = pick_token(None, &home).unwrap_err();

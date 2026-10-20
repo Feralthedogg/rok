@@ -212,7 +212,7 @@ fn load_prebuilt(
                     rokc_diagnostic::Span::DUMMY,
                     format!(
                         "`--extern {name}={}`: it was built as `{}`, and the name is in its \
-                         symbols — rebuild it as `{name}`",
+                         symbols - rebuild it as `{name}`",
                         root.display(),
                         r.name
                     ),
@@ -236,7 +236,7 @@ fn load_prebuilt(
                 rokc_diagnostic::ErrorKind::Module,
                 rokc_diagnostic::Span::DUMMY,
                 format!(
-                    "prebuilt `{}` and `{}` use the same GC type ids — build each dependency \
+                    "prebuilt `{}` and `{}` use the same GC type ids - build each dependency \
                      with the ones before it as `--extern` (`rok build` does)",
                     p.rokhir.name, r.name
                 ),
@@ -381,7 +381,7 @@ fn check_dependency_names(
                 rokc_diagnostic::ErrorKind::Module,
                 rokc_diagnostic::Span::DUMMY,
                 format!(
-                    "module `{dep}` has the name of the dependency `{dep}` — dependency names \
+                    "module `{dep}` has the name of the dependency `{dep}` - dependency names \
                      are top-level paths (spec 902.3); rename the module"
                 ),
             ));
@@ -2299,7 +2299,7 @@ fn keyword_tables(
                 rokc_diagnostic::ErrorKind::Meta,
                 d.span,
                 format!(
-                    "`#[keyword(\"{}\")]` must be on a function — its handler (spec 6.6.2); \
+                    "`#[keyword(\"{}\")]` must be on a function - its handler (spec 6.6.2); \
                          only the standard library names a type with it",
                     d.name
                 ),
@@ -2384,7 +2384,7 @@ fn literal_tables(
             diags.push(RokDiagnostic::error(
                 rokc_diagnostic::ErrorKind::Meta,
                 d.span,
-                "`#[literal(..)]` must be on a function — its handler (spec 6.5.2)",
+                "`#[literal(..)]` must be on a function - its handler (spec 6.5.2)",
             ));
             continue;
         }

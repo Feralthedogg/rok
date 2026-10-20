@@ -125,6 +125,19 @@ export async function load(wasm, { args = ["main"], env = {}, write = consoleWri
       view().setUint32(read, 0, true);
       return 0;
     },
+    // stdin / stdout / stderr are terminals (a character device without
+    // seek or tell), so wasi-libc's isatty holds and the runtime flushes
+    // stdout at each newline: a page shows a line as it is printed, and a
+    // program stopped from outside keeps what it printed.
+    fd_fdstat_get(fd, buf) {
+      if (fd > 2) return ENOSYS;
+      const v = view();
+      v.setUint8(buf, 2);
+      v.setUint16(buf + 2, 0, true);
+      v.setBigUint64(buf + 8, 0n, true);
+      v.setBigUint64(buf + 16, 0n, true);
+      return 0;
+    },
     // One pre-opened directory, `/`, whose every call fails with ENOSYS:
     // file system calls report Unsupported rather than "no such file".
     fd_prestat_get(fd, buf) {

@@ -40,7 +40,7 @@ pub struct Attribute {
 
 #[derive(Clone, Debug, Default)]
 pub enum AttrBody {
-    /// `#[name]` — flag only.
+    /// `#[name]` - flag only.
     #[default]
     Empty,
     /// `#[name(arg, arg, ...)]`.

@@ -1,4 +1,4 @@
-// rok::core::collections::ordered_set — `OrderedSet<T>`, a hash set that
+// rok::core::collections::ordered_set - `OrderedSet<T>`, a hash set that
 // iterates in insertion order (stdlib spec 2.9.5), over
 // `OrderedDict<T, bool>`.
 

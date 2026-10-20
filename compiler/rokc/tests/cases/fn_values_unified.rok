@@ -10,7 +10,7 @@
 // 2
 
 // Spec 4.4.2-4.4.6: named fns and closures (capturing or not) are all
-// values of one `fn` type — passed to `fn` parameters, returned, stored
+// values of one `fn` type - passed to `fn` parameters, returned, stored
 // in struct fields and collections, called later. Captures are
 // by-value snapshots (4.6). GC collections keep the captures alive.
 extern "C" {

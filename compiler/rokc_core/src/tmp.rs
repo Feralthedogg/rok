@@ -1,4 +1,4 @@
-//! Temporary entries named `<prefix><pid>[-.]…` in the system temp
+//! Temporary entries named `<prefix><pid>[-.]...` in the system temp
 //! directory: removed on drop, at `exit` and by [`remove_live`], and
 //! swept once their owner died without removing them (killed, crashed).
 
@@ -169,7 +169,7 @@ pub fn sweep_once(prefixes: &[&str]) {
     sweep(&std::env::temp_dir(), &todo, Duration::from_secs(3600));
 }
 
-/// Remove entries `<prefix><pid>[-.]…` of `dir` whose process `pid` is not
+/// Remove entries `<prefix><pid>[-.]...` of `dir` whose process `pid` is not
 /// running, at least `min_age` since their last change.
 pub fn sweep(dir: &Path, prefixes: &[&str], min_age: Duration) {
     let Ok(entries) = std::fs::read_dir(dir) else {

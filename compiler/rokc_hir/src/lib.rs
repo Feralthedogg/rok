@@ -346,7 +346,7 @@ pub enum HirStmt {
         local: LocalId,
         value: HirExpr,
     },
-    // `arr[index] = value;` — array-element write; with a `path` of
+    // `arr[index] = value;` - array-element write; with a `path` of
     // field indices, into the array field `array_local.f.g` in place.
     ArrayAssign {
         array_local: LocalId,
@@ -504,7 +504,7 @@ pub enum HirExprKind {
     Tuple {
         fields: Vec<HirExpr>,
     },
-    // `t.0`, `t.1` — read tuple field by positional index.
+    // `t.0`, `t.1` - read tuple field by positional index.
     TupleField {
         target: Box<HirExpr>,
         index: u32,
@@ -522,7 +522,7 @@ pub enum HirExprKind {
         value: Box<HirExpr>,
         len: u32,
     },
-    /// `buf_new::<T>(len)` — a zeroed `GcBuf<T>` of `len` elements.
+    /// `buf_new::<T>(len)` - a zeroed `GcBuf<T>` of `len` elements.
     BufNew {
         elem: HirTy,
         len: Box<HirExpr>,
@@ -550,13 +550,13 @@ pub enum HirExprKind {
         ty: HirTy,
         align: bool,
     },
-    /// `buf_get(buf, i)` — element `i` (unchecked).
+    /// `buf_get(buf, i)` - element `i` (unchecked).
     BufGet {
         buf: Box<HirExpr>,
         index: Box<HirExpr>,
         elem: HirTy,
     },
-    /// `buf_set(buf, i, v)` — store element `i` (unchecked); unit.
+    /// `buf_set(buf, i, v)` - store element `i` (unchecked); unit.
     BufSet {
         buf: Box<HirExpr>,
         index: Box<HirExpr>,
@@ -586,7 +586,7 @@ pub enum HirExprKind {
         args: Vec<HirExpr>,
         regions: Vec<(Vec<LocalId>, HirExpr)>,
     },
-    // `arr[idx]` — element read.
+    // `arr[idx]` - element read.
     ArrayIndex {
         array: Box<HirExpr>,
         index: Box<HirExpr>,
@@ -633,24 +633,24 @@ pub struct HirMatchArm {
 /// A lowered pattern.
 #[derive(Clone, Debug)]
 pub enum HirPattern {
-    /// `_` — matches anything, no binding.
+    /// `_` - matches anything, no binding.
     Wildcard,
-    /// `name` — matches anything and binds the value to a fresh local.
+    /// `name` - matches anything and binds the value to a fresh local.
     Binding { local: LocalId, ty: HirTy },
-    /// `name @ sub` — matches like `sub` and binds the whole value.
+    /// `name @ sub` - matches like `sub` and binds the whole value.
     At {
         local: LocalId,
         ty: HirTy,
         sub: Box<HirPattern>,
     },
-    /// `42i32`, `"foo"`, `true` — matches when the scrutinee equals
+    /// `42i32`, `"foo"`, `true` - matches when the scrutinee equals
     /// the constant value.
     Literal { value: ConstVal, prim: PrimTy },
-    /// `a | b | c` — matches if any sub-pattern matches.
+    /// `a | b | c` - matches if any sub-pattern matches.
     Or(Vec<HirPattern>),
-    /// `(p0, p1, ...)` — matches a tuple, sub-patterns aligned to elements.
+    /// `(p0, p1, ...)` - matches a tuple, sub-patterns aligned to elements.
     Tuple(Vec<HirPattern>),
-    /// `Foo { field: pat, ... }` — matches a struct, fields keyed by index
+    /// `Foo { field: pat, ... }` - matches a struct, fields keyed by index
     /// into the struct definition. Fields not listed are matched as wildcard.
     Struct {
         struct_id: StructId,
@@ -670,7 +670,7 @@ pub enum HirPattern {
         variant_index: u32,
         args: Vec<HirPattern>,
     },
-    // `name: T` — match variant of a sum at index `variant_index` and
+    // `name: T` - match variant of a sum at index `variant_index` and
     // optionally bind the unwrapped payload to `binder`.
     SumVariant {
         sum_ty: HirTy,
@@ -865,7 +865,7 @@ pub struct FnBounds {
 pub enum HirTy {
     /// Not yet inferred.
     Unknown,
-    /// Unit `()`. Empty tuple — the implicit return type when none is given.
+    /// Unit `()`. Empty tuple - the implicit return type when none is given.
     Unit,
     Prim(PrimTy),
     /// Untyped wildcard (error recovery, untyped parameters); compatible
@@ -901,7 +901,7 @@ pub enum HirTy {
     Enum(EnumId),
     // Fixed-size array `[T; N]`.
     Array(Box<HirTy>, u32),
-    // `fn(A, B) -> R` — first-class function pointer, with its bounds.
+    // `fn(A, B) -> R` - first-class function pointer, with its bounds.
     Fn(Vec<HirTy>, Box<HirTy>, FnBounds),
     // `{fn_ptr, env}`; the env type is part of the closure's identity.
     Closure {

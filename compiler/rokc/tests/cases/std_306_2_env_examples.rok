@@ -6,7 +6,7 @@
 // config: myapp.toml true
 // PATH dirs: true
 
-// stdlib 3.6.2: the spec's CLI flow — a missing variable falls back with
+// stdlib 3.6.2: the spec's CLI flow - a missing variable falls back with
 // `try?`, `home_dir` / `/` build a config path, `split_paths` walks PATH,
 // and with no input argument the tool prints its usage to stderr and
 // exits 1. `set_var` is called first thing (3.6.3).

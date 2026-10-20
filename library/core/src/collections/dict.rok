@@ -1,4 +1,4 @@
-// rok::core::collections::dict — `Dict<K, V>`, a hash map (stdlib spec
+// rok::core::collections::dict - `Dict<K, V>`, a hash map (stdlib spec
 // 2.9.3), compact: entries are appended to dense key / value / hash
 // arrays, and a power-of-two index of linear-probed slots maps a hash to
 // its entry. A table of at most `SMALL` entries has no index: lookup

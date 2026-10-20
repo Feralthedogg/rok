@@ -1,4 +1,4 @@
-// rok::core::collections — List / Dict / Set / OrderedDict / OrderedSet /
+// rok::core::collections - List / Dict / Set / OrderedDict / OrderedSet /
 // Slice (stdlib spec 2.9), Deque and BinaryHeap.
 //
 // Each collection is a small handle struct over GC buffers (`raw`):

@@ -1,4 +1,4 @@
-// rok::core::rt — the runtime ABI (`librokr`, `extern "rok"`), declared once. Extern
+// rok::core::rt - the runtime ABI (`librokr`, `extern "rok"`), declared once. Extern
 // functions share one global namespace (refs-lang 5.9.4), so `core` and
 // `std` call them by name without an import; `bare`, below `core`,
 // declares its own few. The compiler intrinsics are `pub(pkg)`: `core`

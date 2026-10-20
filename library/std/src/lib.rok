@@ -1,4 +1,4 @@
-// rok::std tier — target-dependent.
+// rok::std tier - target-dependent.
 // Owns: fs, net, time, thread (OS), io (stdin/out/err), env, process, path,
 // crypto (the OS random source),
 // rokon (the ROKON data format), wit (the component model's async ABI

@@ -1,4 +1,4 @@
-// expect-error: method `side` on `C` is ambiguous: traits `Left`, `Right` all provide it — call it as `Trait::side(x)`
+// expect-error: method `side` on `C` is ambiguous: traits `Left`, `Right` all provide it - call it as `Trait::side(x)`
 
 // Spec 4.9.6: two traits of the current package giving `C` the same
 // method name leave `c.side()` ambiguous.

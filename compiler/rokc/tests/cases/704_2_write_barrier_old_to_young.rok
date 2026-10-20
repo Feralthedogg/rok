@@ -6,7 +6,7 @@
 
 // spec 7.4.2 / 7.3.2: an object that survived a collection (old, sticky
 // mark) that is later made to point at freshly allocated (young) objects
-// must keep them alive across the following collections — the write
+// must keep them alive across the following collections - the write
 // barrier records the old -> young edge.
 extern "C" {
     fn rok_gc_collect();

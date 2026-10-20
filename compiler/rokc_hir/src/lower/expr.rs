@@ -766,7 +766,7 @@ fn lower_receiver(ctx: &mut LowerCtx<'_>, receiver: &Expr) -> HirExpr {
 /// where lowered).
 fn check_let_inferable(ctx: &LowerCtx<'_>, name: &str, init: &HirExpr) {
     let why = if init.ty.is_none() {
-        format!("`none` alone has no value type — write `let {name}: T | none = none;`")
+        format!("`none` alone has no value type - write `let {name}: T | none = none;`")
     } else if hir_expr_diverges(init) {
         "the initializer never produces a value (it always returns / breaks / loops)".to_owned()
     } else {
@@ -957,7 +957,7 @@ pub(super) fn lower_assign(
             let value = coerce(ctx, &slot_ty, v, &|| "assignment to `self`".to_owned());
             Some(ctx.store_local(local, value))
         }
-        // `arr[idx] = value` — element store on a local array.
+        // `arr[idx] = value` - element store on a local array.
         ExprKind::Index(arr_expr, idx_expr) => {
             let arr_h = lower_expected(ctx, arr_expr, HirTy::Unknown);
             // A struct / enum stores through `IndexSet::index_set`.
@@ -1625,7 +1625,7 @@ fn optional_cast_hint(ty: &Ty) -> &'static str {
         if matches!(ps.as_slice(), [n, t] if n.nest_inner().is_some()
             && matches!(t.kind, AstTyKind::None)));
     if optional {
-        "; the trailing `?` is part of the type `T?` — to propagate, write `(x as T)?`"
+        "; the trailing `?` is part of the type `T?` - to propagate, write `(x as T)?`"
     } else {
         ""
     }
@@ -2071,7 +2071,7 @@ pub(super) fn lower_break_value(ctx: &mut LowerCtx<'_>, depth: usize, e: &Expr) 
         Some((t, true)) if v.ty != HirTy::Unknown && !coercible(ctx, &t, &v.ty) => ctx.error_expr(
             v.span,
             format!(
-                "`break` values have different types `{}` and `{}` — rok does not infer \
+                "`break` values have different types `{}` and `{}` - rok does not infer \
                      a sum type; annotate the slot (`let v: {} | {} = loop ...`)",
                 ctx.ty_name(&t),
                 ctx.ty_name(&v.ty),
@@ -2202,7 +2202,7 @@ fn infer_enum_instance(
             None if ctx.infer_vars => args.push(super::infer::fresh(ctx)),
             None => {
                 ctx.emit_uninferred(format!(
-                    "cannot infer the type arguments of `{full}` for `{}` — annotate the \
+                    "cannot infer the type arguments of `{full}` for `{}` - annotate the \
                      binding with the concrete type",
                     segs.join("::")
                 ));
@@ -2214,7 +2214,7 @@ fn infer_enum_instance(
 }
 
 /// `segs` names an enum (or generic enum base) that has no variant of
-/// that name — so `E::f(..)` is an associated function call.
+/// that name - so `E::f(..)` is an associated function call.
 fn enum_lacks_variant(ctx: &LowerCtx<'_>, segs: &[&str]) -> bool {
     let Some((full, vname)) = ctx.enum_path(segs) else {
         return false;
@@ -2491,7 +2491,7 @@ pub(super) fn lower_struct_init(
                             .and_then(|v| super::mono::typed_const(ctx, name, ty, v));
                         let Some(c) = c else {
                             ctx.emit_uninferred(format!(
-                                "cannot infer const parameter `{name}` of `{full}` — \
+                                "cannot infer const parameter `{name}` of `{full}` - \
                                  annotate the binding (`let v: {}<..> = ..`)",
                                 segs.join("::")
                             ));
@@ -2510,7 +2510,7 @@ pub(super) fn lower_struct_init(
                             None if ctx.infer_vars => args.push(super::infer::fresh(ctx)),
                             None => {
                                 ctx.emit_uninferred(format!(
-                                    "cannot infer type parameter `{name}` of `{full}` — \
+                                    "cannot infer type parameter `{name}` of `{full}` - \
                                      write `{}<...> {{ ... }}`",
                                     segs.join("::")
                                 ));
@@ -3016,11 +3016,11 @@ pub(super) fn lower_if(
         t
     } else {
         // Branches of different types are an error, not an inferred
-        // sum — the slot's annotation must name the sum.
+        // sum - the slot's annotation must name the sum.
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(
-                "`if` branches have different types `{}` and `{}` — rok does not infer a \
+                "`if` branches have different types `{}` and `{}` - rok does not infer a \
                  sum type; annotate the slot (`let v: {} | {} = if ...`)",
                 ctx.ty_name(&then_ty),
                 ctx.ty_name(&else_ty),
@@ -3206,7 +3206,7 @@ fn write_through(
     }))
 }
 
-/// Spec 2.2.5: `v is T` — `match v { _: T => true, _ => false }`.
+/// Spec 2.2.5: `v is T` - `match v { _: T => true, _ => false }`.
 fn lower_is(
     ctx: &mut LowerCtx<'_>,
     operand: &Expr,
@@ -3567,7 +3567,7 @@ pub(super) fn lower_args_ref(
             Some(ArgSrc::Ast(_)) if by_ref && !is_receiver => ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "parameter `{pname}` of `{callee}` is `ref` — pass `ref x` at the call \
+                    "parameter `{pname}` of `{callee}` is `ref` - pass `ref x` at the call \
                      site (spec 4.7.3)"
                 ),
             ),
@@ -4127,7 +4127,7 @@ fn check_path_receiver(
         Some(false) if by_ref => ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(
-                "parameter `{pname}` of `{callee}` is `ref` — pass `ref x` at the call site \
+                "parameter `{pname}` of `{callee}` is `ref` - pass `ref x` at the call site \
                  (spec 4.7.3)"
             ),
         ),
@@ -4465,7 +4465,7 @@ fn check_const_overflow(
     ctx.emit_error_at(rokc_diagnostic::ErrorKind::Type, span, msg);
 }
 
-/// `{ lets; e }` — temporaries a spread argument introduced, so the
+/// `{ lets; e }` - temporaries a spread argument introduced, so the
 /// spread tuple is evaluated once.
 pub(super) fn with_lets(lets: Vec<HirStmt>, e: HirExpr) -> HirExpr {
     if lets.is_empty() {
@@ -4604,7 +4604,7 @@ fn drop_method<'m>(
 /// bounds the work on deep ones).
 const DROP_GLUE_DEPTH: u32 = 64;
 
-/// Does releasing a `ty` run any `Drop::drop` — its own, or one of a
+/// Does releasing a `ty` run any `Drop::drop` - its own, or one of a
 /// field / tuple element / payload's (stdlib spec 2.13.4)?
 fn needs_drop(ctx: &LowerCtx<'_>, ty: &HirTy, depth: u32) -> bool {
     if depth > DROP_GLUE_DEPTH {
@@ -5282,7 +5282,7 @@ fn direct_drop_error(ctx: &LowerCtx<'_>, span: rokc_diagnostic::Span) -> Option<
         ctx.error_expr(
             span,
             "`Drop::drop` cannot be called directly; it runs when a `using` block exits \
-         (spec 2.13.4) — expose a method such as `close()` to release early"
+         (spec 2.13.4) - expose a method such as `close()` to release early"
                 .to_owned(),
         ),
     )
@@ -5908,7 +5908,7 @@ pub(super) fn method_call_on(
                 return ctx.error_expr(
                     span,
                     format!(
-                        "`{method}` is an associated function, not a method — call it as \
+                        "`{method}` is an associated function, not a method - call it as \
                          `{}::{method}(...)`",
                         ctx.ty_name(&recv_h.ty)
                     ),
@@ -5969,7 +5969,7 @@ pub(super) fn method_call_on(
             );
         }
         // Spec 3.5.2: a missing method is a hard error, not a silent
-        // unit return — unless `Reflect` (every type's) answers it.
+        // unit return - unless `Reflect` (every type's) answers it.
         let recv_h = match super::reflect::method_call(ctx, recv_h, method, args) {
             Ok(r) => return r,
             Err(r) => r,
@@ -6006,7 +6006,7 @@ pub(super) fn method_call_on(
         return ctx.error_expr(
             span,
             format!(
-                "`{method}` is an associated function, not a method — call it as \
+                "`{method}` is an associated function, not a method - call it as \
                  `{}::{method}(...)`",
                 ctx.ty_name(&recv_h.ty)
             ),
@@ -6202,7 +6202,7 @@ fn any_method_call(
         return ctx.error_expr(
             span,
             format!(
-                "no method `{method}` on `{}` — only methods of its trait bound(s) and their \
+                "no method `{method}` on `{}` - only methods of its trait bound(s) and their \
                  supertraits can be called on an `any` value; narrow it with a type pattern \
                  (`match v {{ x: T => ... }}`) to reach other methods",
                 ctx.ty_name(&recv_ty)
@@ -6237,7 +6237,7 @@ fn any_method_call(
             } else if let Some(x) = n.strip_prefix("Self::") {
                 (!bound.binds.iter().any(|(n, _)| n == x)).then(|| {
                     format!(
-                        "its signature uses `Self::{x}`, which the bound leaves open — bind it \
+                        "its signature uses `Self::{x}`, which the bound leaves open - bind it \
                      (`any {provider}<{x} = ..>`)"
                     )
                 })
@@ -6245,7 +6245,7 @@ fn any_method_call(
                 (!has_args).then(|| {
                     format!(
                         "its signature uses type parameters of `{provider}` that the bound leaves \
-                     open — name them (`any {provider}<..>`)"
+                     open - name them (`any {provider}<..>`)"
                     )
                 })
             }
@@ -6900,7 +6900,7 @@ pub(super) fn pick_method<'e>(
         traits.dedup();
         let leaf = |t: &str| leaf_name(t).to_owned();
         return Err(format!(
-            "method `{method}` on `{}` is ambiguous: traits {} all provide it — call it as \
+            "method `{method}` on `{}` is ambiguous: traits {} all provide it - call it as \
              `Trait::{method}(x)` (e.g. `{}::{method}(x)`) (spec 4.9.6)",
             ctx.ty_name(ty),
             traits.join(", "),
@@ -6960,7 +6960,7 @@ pub(super) fn check_method_info_visible(ctx: &LowerCtx<'_>, info: &MethodInfo, m
             rokc_diagnostic::ErrorKind::Module,
             format!(
                 "method `{method}` is private to module `{}` and cannot be called from `{}` \
-                 (spec 5.6 — add `pub` to expose it)",
+                 (spec 5.6 - add `pub` to expose it)",
                 module_display(&info.module),
                 module_display(&ctx.current_module)
             ),
@@ -7385,7 +7385,7 @@ fn call_generic_positional(
                     )
                 } else {
                     format!(
-                        "parameter {} of `{callee}` is `ref` — pass `ref x` at the call site \
+                        "parameter {} of `{callee}` is `ref` - pass `ref x` at the call site \
                          (spec 4.7.3)",
                         i + 1
                     )
@@ -7610,7 +7610,7 @@ fn ty_hint(
     e: &Expr,
 ) -> HirTy {
     let hint = param.map_or(HirTy::Unknown, |t| {
-        // Type params not bound yet stay opaque paths — never
+        // Type params not bound yet stay opaque paths - never
         // resolved as same-named types visible from `def`.
         let mut partial = subst.clone();
         for gp in &def.generics.params {
@@ -7827,7 +7827,7 @@ fn lower_path_call(
         return call_sig(ctx, &sig, &full, None, args, span);
     }
 
-    // Generic function — monomorphize on the argument types.
+    // Generic function - monomorphize on the argument types.
     if let Some(full) = generic {
         ctx.check_item_visible(&full, "function");
         let generic_def = ctx.env.generic_fn(&full).expect("a generic function");
@@ -7851,7 +7851,7 @@ fn lower_path_call(
         return call_generic(ctx, def, None, None, args, &full, span);
     }
 
-    // `Box::get(b)` / `Box::new(v)` — generic-impl method by path.
+    // `Box::get(b)` / `Box::new(v)` - generic-impl method by path.
     if let Some((method, ty_segs)) = segs.split_last() {
         let env = ctx.env;
         let gm = ctx
@@ -7949,7 +7949,7 @@ fn lower_path_call(
             .collect();
         return lower_struct_init(ctx, p, &fields, None, span);
     }
-    // `Foo(arg, ...)` — tuple-struct constructor (spec 2.7.4).
+    // `Foo(arg, ...)` - tuple-struct constructor (spec 2.7.4).
     if let Some(sid) = ctx
         .canon_type(&segs)
         .and_then(|full| ctx.lookup_struct(&full))
@@ -7964,7 +7964,7 @@ fn lower_path_call(
         if !is_tuple_form {
             return ctx.error_expr(
                 span,
-                format!("`{display}` is not a tuple struct — use `{display} {{ field: ... }}`"),
+                format!("`{display}` is not a tuple struct - use `{display} {{ field: ... }}`"),
             );
         }
         // Spec 5.6: constructing needs every field visible here.
@@ -8034,7 +8034,7 @@ fn lower_path_call(
             if !variant.named_fields.is_empty() {
                 return ctx.error_expr(
                     span,
-                    format!("`{display}` has named fields — use `{display} {{ ... }}`"),
+                    format!("`{display}` has named fields - use `{display} {{ ... }}`"),
                 );
             }
             let mut lets = Vec::new();
@@ -8174,7 +8174,7 @@ fn lower_path_call(
                             span,
                             format!(
                                 "`{display}` is ambiguous: several instantiations of `{full}` \
-                                 provide `{method}` — name the type arguments"
+                                 provide `{method}` - name the type arguments"
                             ),
                         );
                     }
@@ -8494,7 +8494,7 @@ fn path_call_via_impls(
             return Some(ctx.error_expr(
                 span,
                 format!(
-                    "cannot tell which type's `{key}` impl `{display}` calls — annotate the \
+                    "cannot tell which type's `{key}` impl `{display}` calls - annotate the \
                      expected type"
                 ),
             ));
@@ -8623,7 +8623,7 @@ fn path_call_via_impls(
     }))
 }
 
-/// Call `t`'s method `method` — of trait `trait_key` when given —
+/// Call `t`'s method `method` - of trait `trait_key` when given -
 /// from a concrete impl, else a generic one. `recv` fills `self`.
 #[allow(clippy::too_many_arguments)]
 fn call_impl_method(
@@ -9746,7 +9746,7 @@ fn lower_buf_intrinsic(
             discard_args(ctx, args);
             return ctx.error_expr(
                 span,
-                format!("`{name}` needs its `GcBuf<T>` type from the context — annotate the slot"),
+                format!("`{name}` needs its `GcBuf<T>` type from the context - annotate the slot"),
             );
         };
         let len = index(ctx, pos[0]);
@@ -9778,7 +9778,7 @@ fn lower_buf_intrinsic(
         let Some(to @ HirTy::GcBuf(_)) = ctx.current_expected().cloned() else {
             return ctx.error_expr(
                 span,
-                format!("`{name}` needs its `GcBuf<U>` type from the context — annotate the slot"),
+                format!("`{name}` needs its `GcBuf<U>` type from the context - annotate the slot"),
             );
         };
         return HirExpr {
@@ -10252,7 +10252,7 @@ fn dyn_op(
         return ctx.error_expr(
             span,
             format!(
-                "operator `{op}` cannot be applied to {} — on an `any` value it dispatches \
+                "operator `{op}` cannot be applied to {} - on an `any` value it dispatches \
                  only over primitive types (narrow it with `is` first)",
                 tys.join(" and ")
             ),
@@ -10907,7 +10907,7 @@ fn alias_path(ctx: &LowerCtx<'_>, p: &AstPath) -> Result<Option<AstPath>, String
                     let path = segs.join("::");
                     return Err(format!(
                         "`{path}::{}` can't infer `{}`'s arguments: its aliased type's arguments \
-                         are not its distinct parameters (spec 2.6.9) — write `{path}::<..>::{}`",
+                         are not its distinct parameters (spec 2.6.9) - write `{path}::<..>::{}`",
                         last.name,
                         leaf_name(&full),
                         last.name
@@ -11020,7 +11020,7 @@ fn lower_assoc_const(
         return Some(ctx.error_expr(
             ctx.here(),
             format!(
-                "associated const `{name}` of `{}` is ambiguous: {} define it — name the \
+                "associated const `{name}` of `{}` is ambiguous: {} define it - name the \
                  trait (`<T as Tr>::{name}`) (spec 2.8.3a)",
                 ctx.ty_name(ty),
                 from.join(" and ")
@@ -11283,7 +11283,7 @@ pub(super) fn lower_path(
         let v = coerce(ctx, &ty, v, &|| format!("const `{full}`"));
         return super::const_eval::const_item(ctx, &full, v);
     }
-    // Module-level `static` — a load through the global address.
+    // Module-level `static` - a load through the global address.
     if let Some(full) = ctx.resolve_in(&segs, true) {
         let full = ctx.env.names.value_reexport(&full).cloned().unwrap_or(full);
         ctx.check_item_visible(&full, "static");
@@ -11322,7 +11322,7 @@ pub(super) fn lower_path(
     if let Some(full) = ctx.resolve_generic_fn_name(&segs) {
         ctx.check_item_visible(&full, "function");
         let def = ctx.env.generic_fn(&full).expect("a generic function");
-        // `id::<i32>`: every type argument given — that instance's value.
+        // `id::<i32>`: every type argument given - that instance's value.
         let targs = path
             .segments
             .last()
@@ -11379,7 +11379,7 @@ pub(super) fn lower_path(
             span,
             format!(
                 "generic function `{}` as a value: its type arguments are not determined \
-                 — write `{}::<..>` or give the slot a `fn(..)` type (spec 4.4.7)",
+                 - write `{}::<..>` or give the slot a `fn(..)` type (spec 4.4.7)",
                 segs.join("::"),
                 segs.join("::")
             ),
@@ -11468,7 +11468,7 @@ pub(super) fn lower_path(
 pub(super) fn expected_prim(ctx: &LowerCtx<'_>, want: fn(PrimTy) -> bool) -> Option<PrimTy> {
     match ctx.current_expected()? {
         HirTy::Prim(p) if want(*p) => Some(*p),
-        // `let x: i64 | none = 5` — the sum's single matching variant.
+        // `let x: i64 | none = 5` - the sum's single matching variant.
         HirTy::Sum(vs) => {
             let mut hits = vs.iter().filter_map(|v| match v {
                 HirTy::Prim(p) if want(*p) => Some(*p),
@@ -11720,7 +11720,7 @@ fn lower_shape(
         .any(|a| matches!(a, rokc_ast::LitArg::Many(v) if v.is_empty()));
     if empty && !ctx.infer_vars && ctx.current_expected().is_none_or(|t| *t == HirTy::Unknown) {
         ctx.emit_uninferred(format!(
-            "cannot infer the type of an empty {what} literal — annotate the slot"
+            "cannot infer the type of an empty {what} literal - annotate the slot"
         ));
         return poison(span);
     }
@@ -11785,7 +11785,7 @@ fn lower_magic(
             rokc_diagnostic::ErrorKind::Type,
             span,
             format!(
-                "ambiguous literal: handlers {} all match (spec 6.5.5) — give the slot a type \
+                "ambiguous literal: handlers {} all match (spec 6.5.5) - give the slot a type \
                  or a handler `priority = N`",
                 names.join(", ")
             ),
@@ -11947,7 +11947,7 @@ fn as_isize(e: Expr, span: rokc_diagnostic::Span) -> Expr {
     }
 }
 
-/// Spec 3.6: `rok::core::index::index_from_end(i as isize, len)` — a
+/// Spec 3.6: `rok::core::index::index_from_end(i as isize, len)` - a
 /// signed position `i` < 0 is `len + i`.
 fn from_end(i: Expr, len: Expr, span: rokc_diagnostic::Span) -> Expr {
     index_fn("index_from_end", vec![as_isize(i, span), len], span)

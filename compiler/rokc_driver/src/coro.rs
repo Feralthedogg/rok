@@ -79,7 +79,7 @@ fn rewrite_fn(f: &mut FnDef, root: bool, diags: &mut Vec<RokDiagnostic>) {
             ErrorKind::Type,
             span,
             format!(
-                "`{}`: a coroutine (`async` / `yield`) fn cannot take `ref` parameters — \
+                "`{}`: a coroutine (`async` / `yield`) fn cannot take `ref` parameters - \
                  its body runs after the call returns",
                 f.name
             ),

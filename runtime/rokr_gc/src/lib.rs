@@ -2147,7 +2147,7 @@ fn sweep_los(full: bool, concurrent: bool) -> usize {
 /// After a full collection's sweep: choose the evacuation candidates
 /// (703 §7.3.1 opportunistic defragmentation) from the exact line
 /// states the sweep left: when free lines are at least a quarter of the
-/// used blocks' lines, every block at most half occupied — if together
+/// used blocks' lines, every block at most half occupied - if together
 /// they hold an eighth of the used lines free. `ROK_GC_EVAC=always`:
 /// every used block. Whether there is any.
 // Occupancy counts lines, not live bytes (no Immix hole histogram).
@@ -2996,7 +2996,7 @@ mod tests {
         }
     }
 
-    /// `SUM_PAYLOAD`: only the active variant's words are references —
+    /// `SUM_PAYLOAD`: only the active variant's words are references -
     /// they move and are fixed; the same word under a scalar variant
     /// keeps nothing alive.
     #[allow(clippy::many_single_char_names)]

@@ -5,11 +5,11 @@
 /// Which literal the body belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EscapeMode {
-    /// `"..."` — `\xHH` is ASCII only; `\` + newline continues the line.
+    /// `"..."` - `\xHH` is ASCII only; `\` + newline continues the line.
     Str,
-    /// `'.'` — `\xHH` is ASCII only.
+    /// `'.'` - `\xHH` is ASCII only.
     Char,
-    /// `c'.'` — `\xHH` may be any byte value.
+    /// `c'.'` - `\xHH` may be any byte value.
     CChar,
 }
 

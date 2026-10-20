@@ -6,7 +6,7 @@
 // 3 1 3
 // 3
 
-// What a `static` may be: `Sync` values — a `Mutex` of a collection,
+// What a `static` may be: `Sync` values - a `Mutex` of a collection,
 // an `Atomic`, an `RwLock` of a `Sync` value, a lazily built one, a
 // per-thread `ThreadLocal`. A same-thread closure may still use
 // `[ref x]`.

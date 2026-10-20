@@ -1,4 +1,4 @@
-// rok::bare::ffi::wit — what the generated WIT bindings run on (stdlib
+// rok::bare::ffi::wit - what the generated WIT bindings run on (stdlib
 // 1.8): linear-memory access at canonical ABI addresses (`i32`), the
 // blocks strings and lists lower into, resource handles and
 // `error-context`. The async ABI is `rok::std::wit` (bare does not depend

@@ -363,7 +363,7 @@ pub(super) fn lower_let(
             } else if has_var(ctx, &t) {
                 ctx.emit_uninferred(format!(
                     "cannot infer the type of `{name}` (`{}`) from its initializer or later \
-                     uses — add an annotation (`let {name}: T = ..`)",
+                     uses - add an annotation (`let {name}: T = ..`)",
                     ctx.ty_name(&t).replace("{unknown}", "_")
                 ));
                 ctx.declare(Some(name.to_owned()), HirTy::Unknown);

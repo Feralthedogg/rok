@@ -1,4 +1,4 @@
-// Spec 6.5.3 / 6.5.7: user `#[literal]` patterns — a bracket matrix
+// Spec 6.5.3 / 6.5.7: user `#[literal]` patterns - a bracket matrix
 // with nested `%` repetitions, the spec's `(x, y)@` coordinate, and a
 // user handler for the `[..]` shape picked by the slot's type (6.5.5).
 // expect-exit: 0

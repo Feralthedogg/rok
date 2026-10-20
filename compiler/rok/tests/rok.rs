@@ -87,7 +87,24 @@ fn rok_cmd(home: &Path, cwd: &Path, args: &[&str]) -> Command {
         .env_remove("ROK_REGISTRY")
         .env_remove("ROK_REGISTRY_TOKEN")
         .args(args);
+    // Stones' https `origin` (see `origin`) fetches from the scratch tree.
+    let root = rokc_core::tmp::test_root().display().to_string();
+    c.env("GIT_CONFIG_COUNT", "1")
+        .env(
+            "GIT_CONFIG_KEY_0",
+            format!("url.{}/.insteadOf", root.replace('\\', "/")),
+        )
+        .env("GIT_CONFIG_VALUE_0", ORIGIN);
     c
+}
+
+/// Where `origin` points stones; `rok_cmd` maps it to the test root.
+const ORIGIN: &str = "https://example.invalid/";
+
+/// The https URL `rok publish` takes for the repository at `dir`.
+fn origin(dir: &Path) -> String {
+    let rel = dir.strip_prefix(rokc_core::tmp::test_root()).unwrap();
+    format!("{ORIGIN}{}", rel.display().to_string().replace('\\', "/"))
 }
 
 fn rok(home: &Path, cwd: &Path, args: &[&str]) -> Output {
@@ -1457,7 +1474,7 @@ fn rokls_is_rok_lsp() {
 const ONE: &str = "pub fn one() -> i32 { return 1; }\n";
 
 /// A stone's repository at `dir`: `files` plus a `rok.rokon` for `name`
-/// `vers` with `deps`, committed, with itself as remote `origin`.
+/// `vers` with `deps`, committed, with remote `origin` `origin(dir)`.
 fn stone(dir: &Path, name: &str, vers: &str, deps: &str, files: &[(&str, &str)]) -> String {
     stone_meta(dir, name, vers, deps, "", files)
 }
@@ -1477,10 +1494,7 @@ fn stone_meta(
     all.push(("rok.rokon", &manifest));
     let c = commit(dir, &all);
     if git(dir, &["remote"]).is_empty() {
-        git(
-            dir,
-            &["remote", "add", "origin", &dir.display().to_string()],
-        );
+        git(dir, &["remote", "add", "origin", &origin(dir)]);
     }
     c
 }
@@ -1517,10 +1531,24 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     let line = format!(
         "Stone {{ name: \"num\", vers: \"1.0.0\", deps: [], source: Dep::git({}, rev: \
          \"{c1}\"), cksum: \"{tree1}\", yanked: false }}\n",
-        q(num.display())
+        q(origin(&num))
     );
-    assert_eq!(ok(&rok(home, &num, &["publish"])), line);
-    assert_eq!(ok(&rok(home, &num, &["publish", "--index", &reg])), line);
+    let out = rok(home, &num, &["publish"]);
+    assert_eq!(ok(&out), line);
+    let note = |o: &Output| text(&o.stderr).trim().to_owned();
+    assert_eq!(
+        note(&out),
+        format!(
+            "note: dry run; --commit sends it to the registry API of {reg} (needs `rok login`), \
+             which adds it as 3/n/num"
+        )
+    );
+    let out = rok(home, &num, &["publish", "--index", &reg]);
+    assert_eq!(ok(&out), line);
+    assert_eq!(
+        note(&out),
+        format!("note: dry run; --commit commits it to {reg} as 3/n/num (not pushed)")
+    );
     assert!(!index.join("3/n/num").exists());
     // Without --index, --commit goes through the registry API: a token first.
     fails(
@@ -1582,6 +1610,41 @@ fn publish_stones(root: &Path, home: &Path, index: &Path) -> String {
     fails(
         &rok(home, &bad, &["publish"]),
         "dependency `x` is not a stone",
+    );
+    // The source is `origin` as configured, before the publisher's own
+    // `insteadOf` rewrites, and must be https.
+    let ssh = root.join("ssh");
+    stone(&ssh, "ssh", "0.1.0", "", &[("src/lib.rok", one)]);
+    git(
+        &ssh,
+        &[
+            "config",
+            "url.git@github.com:.insteadOf",
+            "https://github.com/",
+        ],
+    );
+    git(
+        &ssh,
+        &["remote", "set-url", "origin", "https://github.com/o/ssh"],
+    );
+    let line = ok(&rok(home, &ssh, &["publish"]));
+    assert!(
+        line.contains("source: Dep::git(\"https://github.com/o/ssh\""),
+        "{line}"
+    );
+    git(
+        &ssh,
+        &["remote", "set-url", "origin", "git@github.com:o/ssh.git"],
+    );
+    fails(
+        &rok(home, &ssh, &["publish"]),
+        "a stone's source must be an https:// URL; run `git remote set-url origin \
+         https://github.com/o/ssh.git`",
+    );
+    git(&ssh, &["remote", "remove", "origin"]);
+    fails(
+        &rok(home, &ssh, &["publish"]),
+        "add one with `git remote add origin https://<host>/<owner>/<repo>`",
     );
 
     tree1
@@ -1948,7 +2011,7 @@ fn stones_publish_add_update_yank() {
         .env("ROK_REGISTRY", &reg)
         .output()
         .unwrap();
-    assert_eq!(ok(&out), "geom 0.3.0 — Shapes\n");
+    assert_eq!(ok(&out), "geom 0.3.0 - Shapes\n");
     assert_eq!(ok(&rok(&home, &root, &["search", "NU"])), "num 2.0.0\n");
     // Either spelling of `-` / `_` finds a stone.
     let big = root.join("big-int");
@@ -2018,6 +2081,30 @@ fn install_sh_checks_sums() {
         home.join(format!("toolchains/9.9.1-{host}/bin/rokc"))
             .is_file()
     );
+}
+
+/// `install.sh --archive` takes a release's `.tar.xz` as well.
+// spec: §9.10.6
+#[cfg(unix)]
+#[test]
+fn install_sh_reads_tar_xz() {
+    let root = scratch("install-sh-xz");
+    let home = root.join("home");
+    fake_toolchain(&root.join("stage/rok-9.9.2"), "9.9.2");
+    let tar = Command::new("tar")
+        .current_dir(root.join("stage"))
+        .args(["-cJf", "../rok.tar.xz", "rok-9.9.2"])
+        .status()
+        .unwrap();
+    assert!(tar.success(), "tar -cJf (tar needs xz)");
+    let out = Command::new("sh")
+        .arg(workspace().join("install.sh"))
+        .args(["--archive", "rok.tar.xz"])
+        .current_dir(&root)
+        .env("ROK_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(ok(&out).contains("rok 9.9.2 is installed"));
 }
 
 /// `rok toolchain update` against a local release server: the newest

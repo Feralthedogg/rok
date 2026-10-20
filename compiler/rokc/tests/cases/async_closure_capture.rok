@@ -6,7 +6,7 @@
 // 3
 // 4
 
-// Spec 4.12.5 / 4.6: an `async ||` closure is a closure — it captures by
+// Spec 4.12.5 / 4.6: an `async ||` closure is a closure - it captures by
 // value when it is created (4.6.1), and `[ref x]` shares the binding
 // (4.6.2). The snapshot doesn't move at `await`: every call's future
 // sees the value captured when the closure was made.

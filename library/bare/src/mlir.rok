@@ -1,4 +1,4 @@
-// rok::bare::mlir — one MLIR op written in rok (stdlib spec 1.9).
+// rok::bare::mlir - one MLIR op written in rok (stdlib spec 1.9).
 //
 // One result; region bodies are straight-line ops (one block each).
 

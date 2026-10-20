@@ -1,4 +1,4 @@
-// rok::core::par — data-parallel helpers (stdlib spec 2.19), on the
+// rok::core::par - data-parallel helpers (stdlib spec 2.19), on the
 // process's task executor (`rok::core::task`): from async code on the
 // worker it runs on, from sync code with the caller as a guest worker.
 // Chunks are claimed from a shared counter by one job per worker.

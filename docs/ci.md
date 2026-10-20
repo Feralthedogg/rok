@@ -20,7 +20,7 @@ arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 
 
 - `llvm`, per host: the pinned LLVM prefix (`.github/actions/llvm-prefix`), built by `llvm/build.sh` (Windows
   `llvm/build.ps1`) only when none exists for the hash of the build script and its PGO profile, then stripped
-  of what `rokc_llvm` does not link. A GitHub-hosted runner keeps it in the actions cache (120–175 MB per
+  of what `rokc_llvm` does not link. A GitHub-hosted runner keeps it in the actions cache (120-175 MB per
   host; an entry made on a branch serves that branch only, so the first push to `main` builds every host
   once). On a private repository's standard runners a build took 0.5 h (macOS arm64), 2.2 h (macOS x86_64,
   Linux aarch64), 4.5 h (Linux x86_64) and 6.0 h (Windows: at the 6 h job limit). Linux needs clang 19+ to

@@ -1,7 +1,7 @@
 // expect-exit: 0
 // expect-stdout: 1 2 15 42
 
-// Stdlib bare 1.9: `regions = [..]` gives an op its regions — each
+// Stdlib bare 1.9: `regions = [..]` gives an op its regions - each
 // closure is one region, its parameters the entry block's arguments; the
 // body ends in the terminator op and may use the enclosing values.
 // `__mlir_type<"..">` names an MLIR type that has no rok type.

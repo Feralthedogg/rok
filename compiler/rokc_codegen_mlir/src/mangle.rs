@@ -7,7 +7,7 @@
 //! separators stay unambiguous: a literal `_` is `_0`, anything else is
 //! `_1<hex codepoint>_`. Identifiers never start with a digit, so a
 //! separator `_` is never followed by `0`/`1`. Thus `mod a { fn b }` →
-//! `…_a_b_` while a root `fn a__b` → `…__a_0_0b_`.
+//! `..._a_b_` while a root `fn a__b` → `...__a_0_0b_`.
 
 use rokc_core::hash::{hex, sha256};
 use rokc_ir_common::Linkage;

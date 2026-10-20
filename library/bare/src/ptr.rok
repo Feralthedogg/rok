@@ -1,4 +1,4 @@
-// rok::bare::ptr — raw pointers (stdlib spec 1.1). A pointer is its
+// rok::bare::ptr - raw pointers (stdlib spec 1.1). A pointer is its
 // address; reading / writing through it is `unsafe` (refs-lang 4.15.2).
 //
 // Provenance is not tracked at run time: `expose_provenance` /

@@ -1,4 +1,4 @@
-// rok::core::print — `print` / `println` / `eprint` / `eprintln`
+// rok::core::print - `print` / `println` / `eprint` / `eprintln`
 // (stdlib 3.5.2: they live in core so the implicit `use rok::core::**`
 // exposes them). Use an f-string for anything that is not a `str`:
 // `println(f"total = {total}")`.

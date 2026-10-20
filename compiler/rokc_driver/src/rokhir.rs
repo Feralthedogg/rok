@@ -204,14 +204,14 @@ impl Rokhir {
         let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let r = Self::decode(&bytes).map_err(|e| {
             format!(
-                "{}: {e} — rebuild the dependency with this rokc",
+                "{}: {e} - rebuild the dependency with this rokc",
                 path.display()
             )
         })?;
         let me = producer();
         if r.producer != me {
             return Err(format!(
-                "{} was built by `{}`, not this `{me}` — rebuild the dependency",
+                "{} was built by `{}`, not this `{me}` - rebuild the dependency",
                 path.display(),
                 r.producer
             ));

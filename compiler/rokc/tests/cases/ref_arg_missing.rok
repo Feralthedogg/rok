@@ -1,5 +1,5 @@
 // spec: §4.7.3
-// expect-error: parameter `n` of `inc` is `ref` — pass `ref x`
+// expect-error: parameter `n` of `inc` is `ref` - pass `ref x`
 
 fn inc(ref n: i32) { n = n + 1; }
 fn show(n: i32) { println(f"{n}"); }

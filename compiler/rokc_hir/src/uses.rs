@@ -13,9 +13,9 @@ use rokc_diagnostic::{ErrorKind, RokDiagnostic, Span};
 pub enum UseEntry {
     /// `use foo::bar [as baz];`: `local` resolves to `full`.
     Single { local: String, full: String },
-    /// `use foo::*;` — bare name `name` is tried as `prefix::name`.
+    /// `use foo::*;` - bare name `name` is tried as `prefix::name`.
     Glob { prefix: String },
-    /// `use foo::**;` — bare name `name` is tried as `prefix::name` and,
+    /// `use foo::**;` - bare name `name` is tried as `prefix::name` and,
     /// recursively, in any descendant of `prefix`.
     GlobDeep { prefix: String },
 }
@@ -490,7 +490,7 @@ pub fn check_use_targets(
                             ErrorKind::Module,
                             span,
                             format!(
-                                "`{full}` is {} but re-exported as {} — a re-export can't \
+                                "`{full}` is {} but re-exported as {} - a re-export can't \
                                  be wider than its item (spec 5.8.4)",
                                 vis_word(vis),
                                 vis_word(*use_vis)

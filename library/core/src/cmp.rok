@@ -1,4 +1,4 @@
-// rok::core::cmp — total equality, ordering and hashing (stdlib spec
+// rok::core::cmp - total equality, ordering and hashing (stdlib spec
 // 2.5). `PartialEq` / `PartialOrd` carry the comparison operators and
 // stay with the other operator traits in `ops.rok`. `Eq` is a pure
 // marker with no methods, so it has no slot.
@@ -69,7 +69,7 @@ pub trait Ord: PartialOrd + Eq {
     }
 }
 
-/// `a == b` ⇒ `a.hash() == b.hash()` (2.5.6) — what `Dict` / `Set`
+/// `a == b` ⇒ `a.hash() == b.hash()` (2.5.6) - what `Dict` / `Set`
 /// rely on.
 #[lang("hash_trait")]
 pub trait Hash: Eq {

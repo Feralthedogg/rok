@@ -9,7 +9,7 @@
 // f64
 // str
 
-// 6.10.1 / 2.12.2: every type has `Reflect` with no derive — static
+// 6.10.1 / 2.12.2: every type has `Reflect` with no derive - static
 // `T::type_name()` / `size()` / `align()`, and `type_name_of()` that
 // looks at the variant an `any` / sum value holds.
 fn pick() -> i32 | f64 { return 2.5; }

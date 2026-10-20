@@ -1,4 +1,4 @@
-// rok::bare::gc — keeping GC objects in place for raw pointers (stdlib
+// rok::bare::gc - keeping GC objects in place for raw pointers (stdlib
 // spec 1.6). A `Pinned<T>` from `pin` keeps the object holding `T`'s
 // data where it is (`rok_gc_pin`, counted) until it is dropped, at the
 // end of its `using` block. `GcPtr<T>` is a managed reference to one `T`

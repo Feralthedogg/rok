@@ -1,4 +1,4 @@
-// rok::std::crypto — the OS random source. The algorithms are
+// rok::std::crypto - the OS random source. The algorithms are
 // `rok::core::crypto` (pure computation); only randomness needs the OS.
 
 /// Cryptographically secure random bytes from the OS (`getrandom` on

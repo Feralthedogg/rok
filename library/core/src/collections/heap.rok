@@ -1,4 +1,4 @@
-// rok::core::collections::heap — `BinaryHeap<T>`, a priority queue
+// rok::core::collections::heap - `BinaryHeap<T>`, a priority queue
 // over a `List` laid out as an implicit binary tree. `new()` pops the
 // greatest item first; `by(before)` takes the order: `before(a, b)`
 // puts `a` nearer the top.

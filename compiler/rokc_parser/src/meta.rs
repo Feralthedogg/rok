@@ -32,9 +32,9 @@ use super::Parser;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetaKind {
-    /// `#[impl_derive]` / `#[impl_derive_attribute]` — used as `#[derive(Name)]`.
+    /// `#[impl_derive]` / `#[impl_derive_attribute]` - used as `#[derive(Name)]`.
     Derive,
-    /// `#[impl_attribute]` — used as `#[name]` / `#[name(args)]`.
+    /// `#[impl_attribute]` - used as `#[name]` / `#[name(args)]`.
     Attribute,
 }
 
@@ -88,7 +88,7 @@ pub struct MetaTable {
     defs: Vec<MetaDef>,
 }
 
-/// Attributes the compiler owns (6.2 – 6.7); `#[impl_attribute]` can't
+/// Attributes the compiler owns (6.2 - 6.7); `#[impl_attribute]` can't
 /// take their names.
 const BUILTIN_ATTRS: &[&str] = &[
     "allow",
@@ -740,7 +740,7 @@ impl Expander<'_> {
                 }
             }
         }
-        // `@x.name.as_str()` — the name as a string literal.
+        // `@x.name.as_str()` - the name as a string literal.
         let as_str = matches!(
             full.as_str(),
             "field.name" | "variant.name" | "item.name" | "Self" | "Self.name"
@@ -1504,7 +1504,7 @@ impl Parser<'_> {
     }
 
     /// Expand `def` over `target` and parse the result (expanding again
-    /// what it produces — 6.8.8).
+    /// what it produces - 6.8.8).
     fn run_meta(&mut self, def: &MetaDef, target: &Target, item: &Item) -> Vec<Item> {
         let key = format!("{:?}:{}", def.kind, def.name);
         if self.meta_stack.contains(&key) || self.meta_stack.len() >= 32 {
@@ -1595,7 +1595,7 @@ impl Parser<'_> {
             }
             self.diagnostics.push(d);
         }
-        // 6.9.8: `#[cfg]` runs before expansion — what the item's cfg
+        // 6.9.8: `#[cfg]` runs before expansion - what the item's cfg
         // removes, its expansion goes with it.
         let cfgs: Vec<&Attribute> = item.attrs().iter().filter(|a| a.name() == "cfg").collect();
         for i in &mut items {

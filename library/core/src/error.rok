@@ -1,4 +1,4 @@
-// rok::core::error — `Result<T, E>`, an error kept as a value.
+// rok::core::error - `Result<T, E>`, an error kept as a value.
 // Errors travel through `throws` / `try` (spec 4.14); `Result` is for
 // holding one (collected results, callbacks, caches): "throw it →
 // `throws`; keep it → `Result`". `?` does not apply to it (`T | none`

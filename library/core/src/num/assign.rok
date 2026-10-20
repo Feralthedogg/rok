@@ -1,4 +1,4 @@
-// rok::core::num::assign — the `*Assign` impls (stdlib 2.4.6) of the
+// rok::core::num::assign - the `*Assign` impls (stdlib 2.4.6) of the
 // primitives, `int` / `float` and `str`. A primitive's method is
 // `#[intrinsic("rok.OP_assign.TYPE")]`: `a += b` and a by-name call both
 // lower to `a = a op b`. `%%=` has no machine op; it calls `Modulo`.

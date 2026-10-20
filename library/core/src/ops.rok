@@ -12,7 +12,7 @@ pub trait Add<Rhs = Self> {
     fn add(self, rhs: Rhs) -> Output;
 }
 
-/// `%%`: floored modulo (2.3) — the result takes the divisor's sign, so
+/// `%%`: floored modulo (2.3) - the result takes the divisor's sign, so
 /// a positive divisor gives `[0, rhs)` (Python's `%`). No lang slot.
 pub trait Modulo<Rhs = Self> {
     type Output;

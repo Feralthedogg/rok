@@ -94,7 +94,7 @@ pub(super) fn lower_match(
                 ctx.emit_error(
                     rokc_diagnostic::ErrorKind::Type,
                     format!(
-                        "`match` arms have different types `{}` and `{}` (arm {}) — rok does \
+                        "`match` arms have different types `{}` and `{}` (arm {}) - rok does \
                          not infer a sum type; annotate the slot (`let v: {} | {} = match ...`)",
                         ctx.ty_name(&result_ty),
                         ctx.ty_name(&a.body.ty),
@@ -964,7 +964,7 @@ pub(super) fn lower_pattern_inner(
             None => mismatch(ctx, "this literal pattern".to_owned()),
         },
         AstPatternKind::TypeCheck { binder, ty } => {
-            // `name: T` — narrow a sum scrutinee to variant `T` (or, on a
+            // `name: T` - narrow a sum scrutinee to variant `T` (or, on a
             // non-sum of exactly type `T`, bind it).
             let target_ty = ctx.resolve_ast_ty(ty);
             let bind = |ctx: &mut LowerCtx<'_>| {
@@ -1319,7 +1319,7 @@ pub(super) fn lower_pattern_inner(
                 let field_ty = def.fields[idx].ty.clone();
                 let sub = match &fp.pat {
                     Some(p) => lower_pattern(ctx, p, &field_ty),
-                    // Shorthand `Foo { x }` — bind a local of the field's name.
+                    // Shorthand `Foo { x }` - bind a local of the field's name.
                     None => {
                         let local = ctx.declare_bound(&fp.name, field_ty.clone(), pat.span);
                         HirPattern::Binding {
@@ -1345,7 +1345,7 @@ pub(super) fn lower_pattern_inner(
     }
 }
 
-/// `Pair(x, 4)` — a tuple struct's positional fields.
+/// `Pair(x, 4)` - a tuple struct's positional fields.
 fn tuple_struct_pattern(
     ctx: &mut LowerCtx<'_>,
     segs: &[&str],

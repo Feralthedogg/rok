@@ -581,7 +581,7 @@ struct FnBuilder<'a> {
     loop_stack: Vec<LoopFrame>,
     /// Set of block ids that have been explicitly terminated. Once a
     /// block is terminated further `push_stmt` / `terminate` calls are
-    /// dropped — the rest of the source path is dead code.
+    /// dropped - the rest of the source path is dead code.
     terminated: std::collections::HashSet<u32>,
     /// Lexical scope being lowered (`Statement::Loc`), and the last id.
     scope: crate::Scope,
@@ -672,7 +672,7 @@ impl<'a> FnBuilder<'a> {
         if let Some(t) = &b.trailing {
             self.push_loc(t.span);
             let op = self.lower_expr_to_operand(t);
-            // Unit-typed trailing — emit a no-args return so void-fn
+            // Unit-typed trailing - emit a no-args return so void-fn
             // signatures stay well-typed.
             let term = if matches!(self.ty(&t.ty), MirTy::Unit) {
                 Terminator::Return(None)
@@ -781,7 +781,7 @@ impl<'a> FnBuilder<'a> {
         }
         match s {
             HirStmt::Let { local, init } => {
-                // Array literals write directly into the target slot —
+                // Array literals write directly into the target slot -
                 // routing them through a temporary would copy a memref
                 // by value, which is ill-typed.
                 if let HirExprKind::ArrayInit { elem_ty, elements } = &init.kind {
@@ -1133,7 +1133,7 @@ impl<'a> FnBuilder<'a> {
         };
         self.loop_stack.push(LoopFrame {
             // `continue` inside a labeled block isn't
-            // meaningful — point it at exit so misuse
+            // meaningful - point it at exit so misuse
             // becomes a no-op rather than a crash.
             continue_bb: exit_bb,
             break_bb: exit_bb,
@@ -1361,7 +1361,7 @@ impl<'a> FnBuilder<'a> {
                     });
                     return Operand::Copy(dst);
                 }
-                // Payload-less sum (all-none, exotic) — return tag only.
+                // Payload-less sum (all-none, exotic) - return tag only.
                 let MirTy::Tuple(parts) = &mir_ty else {
                     return tag_op;
                 };
@@ -2016,7 +2016,7 @@ impl<'a> FnBuilder<'a> {
 
     /// Or-pattern test. Chain: the first alt that matches lands in a
     /// per-alt success block, runs its own `bind_pattern`, then jumps to
-    /// the arm body. Spec 3.11.4 — each alt's bindings reach the arm body
+    /// the arm body. Spec 3.11.4 - each alt's bindings reach the arm body
     /// through the same shared locals (allocated in HIR lowering). No
     /// alts match nothing (a type test decided false per instance).
     fn lower_or_test(
@@ -2956,7 +2956,7 @@ impl<'a> FnBuilder<'a> {
             else_args: Vec::new(),
         });
 
-        // Body — `lower_block_value` so a trailing expression doesn't
+        // Body - `lower_block_value` so a trailing expression doesn't
         // get rewritten into a synthetic `func.return`.
         self.current = body_bb;
         self.loop_stack.push(LoopFrame {
@@ -3248,7 +3248,7 @@ impl<'a> FnBuilder<'a> {
             }
         }
 
-        // If neither arm reaches the merge, the merge is unreachable —
+        // If neither arm reaches the merge, the merge is unreachable -
         // mark it terminated so a downstream `terminate` won't write a
         // dead edge into it.
         if !then_to_merge && !else_to_merge {

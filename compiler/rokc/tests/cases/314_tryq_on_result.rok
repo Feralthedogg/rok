@@ -1,5 +1,5 @@
 // spec: 003.14-try-q
-// `?` is for `T | none` only; `Result` has no `?` — propagate with `throws` + `try`.
+// `?` is for `T | none` only; `Result` has no `?` - propagate with `throws` + `try`.
 // expect-error: `?` only works on `T | none`
 
 enum E { Bad }

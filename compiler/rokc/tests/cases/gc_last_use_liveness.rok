@@ -8,7 +8,7 @@
 
 // GC: a function's top-level `let`s and temporaries stop being roots
 // right after their last use (MIR liveness), not at function end; a
-// value still used later — after a loop, or on one branch — stays live.
+// value still used later - after a loop, or on one branch - stays live.
 extern "C" {
     fn rok_gc_collect();
     fn rok_gc_stats_live_bytes() -> usize;

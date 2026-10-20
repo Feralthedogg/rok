@@ -6,7 +6,7 @@
 //
 // `Path` is immutable: `/` returns a new one, `p /= q` is `p = p / q`.
 // `RawPath` holds the OS form (Unix bytes, Windows UTF-16); the fs layer
-// never produces one — it reports non-UTF-8 names as `InvalidData`.
+// never produces one - it reports non-UTF-8 names as `InvalidData`.
 
 use rok::std::fs;
 use rok::std::fs::Metadata;

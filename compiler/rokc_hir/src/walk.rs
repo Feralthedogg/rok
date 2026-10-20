@@ -19,7 +19,7 @@ pub trait AstVisitor {
     fn ty(&mut self, _t: &Ty) {}
     fn bind(&mut self, _name: &str) {}
     /// `bind`, with the declaring construct's span (a `let` statement, a
-    /// parameter, a pattern) — what identifies the binding.
+    /// parameter, a pattern) - what identifies the binding.
     fn bind_at(&mut self, name: &str, _at: rokc_diagnostic::Span) {
         self.bind(name);
     }

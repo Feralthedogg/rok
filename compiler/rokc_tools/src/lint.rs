@@ -969,7 +969,7 @@ impl<'a> Cx<'a> {
     }
 
     fn unused_imports(&mut self, items: &[Item]) {
-        // `use a::inner; use inner::f;` — a path's first segment may be an
+        // `use a::inner; use inner::f;` - a path's first segment may be an
         // earlier import (spec 5.5).
         for item in items {
             if let Item::Use(u) = item {
@@ -1491,7 +1491,7 @@ fn unclosed(
                 "unclosed_resource",
                 span,
                 format!(
-                    "`{name}` holds a `{}` that is never closed — bind it with `using` or \
+                    "`{name}` holds a `{}` that is never closed - bind it with `using` or \
                      call `close()`; the GC does not close it (stdlib 2.13)",
                     short_name(ty)
                 ),

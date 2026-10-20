@@ -1,9 +1,9 @@
-// rok::core tier (foundation) — safe, target-independent.
+// rok::core tier (foundation) - safe, target-independent.
 // Owns: List, Dict, Set, Tuple, Int, Float, ops, iter, sync (Atomic/Mutex),
 //       task, par, fmt, reflect, future, crypto (algorithms).
 // Bootstraps operator dispatch (`#[infix]`, `#[prefix]`, `#[postfix]`) and
 // literal handlers (`#[literal]`).
-// User code gets an implicit `use rok::core::**;` (stdlib spec 0.1, 0.2) —
+// User code gets an implicit `use rok::core::**;` (stdlib spec 0.1, 0.2) -
 // there is no separate prelude module.
 
 pub mod array;

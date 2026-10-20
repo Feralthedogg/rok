@@ -1634,7 +1634,7 @@ impl<'a> Parser<'a> {
         }
         if !self.meta.is_empty() {
             // Spec 6.8.3: a user attribute replaces the item with its
-            // expansion (which expands again — 6.8.8).
+            // expansion (which expands again - 6.8.8).
             if let Some(items) = self.expand_user_attribute(&item, from) {
                 let mut it = items.into_iter();
                 let first = it.next();
@@ -1828,7 +1828,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `static [mut] NAME: T = expr;` — a module-level global.
+    /// `static [mut] NAME: T = expr;` - a module-level global.
     fn parse_static(
         &mut self,
         vis: Visibility,
@@ -1945,7 +1945,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `union Name<G> { f: T; g: U; }` — fields share storage.
+    /// `union Name<G> { f: T; g: U; }` - fields share storage.
     fn parse_union(&mut self, vis: Visibility, attrs: Vec<Attribute>) -> Option<UnionDef> {
         let start = self.peek_span();
         self.bump(); // contextual `union`
@@ -1978,7 +1978,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `{ [attrs] [vis] name: T [= default]; ... }` — struct, union and
+    /// `{ [attrs] [vis] name: T [= default]; ... }` - struct, union and
     /// enum-variant bodies. Defaults only where `allow_default`.
     fn parse_named_fields(&mut self, allow_default: bool) -> Option<Vec<NamedField>> {
         self.expect(&TokenKind::LBrace, "`{`")?;
@@ -2060,7 +2060,7 @@ impl<'a> Parser<'a> {
         } else {
             self.parse_generic_params()
         };
-        // `impl !Send for T {}` — auto-trait opt-out.
+        // `impl !Send for T {}` - auto-trait opt-out.
         let negative = self.eat(&TokenKind::Bang);
         let first_ty = self.parse_type()?;
         if negative && !matches!(self.peek(), TokenKind::For) {
@@ -2068,7 +2068,7 @@ impl<'a> Parser<'a> {
             self.error(s, "`impl !Trait` needs `for Type`");
         }
         let (trait_path, self_ty) = if self.eat(&TokenKind::For) {
-            // `impl TRAIT for SELF` — the first parsed type was the trait.
+            // `impl TRAIT for SELF` - the first parsed type was the trait.
             let trait_path = match &first_ty.kind {
                 TyKind::Path(p) => Some(p.clone()),
                 _ => None,
@@ -2523,7 +2523,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_use_tree(&mut self) -> Option<rokc_ast::UseTree> {
-        // Path prefix — every form starts with at least one segment.
+        // Path prefix - every form starts with at least one segment.
         let prefix_start = self.peek_span();
         let mut segments: Vec<PathSegment> = Vec::new();
         loop {
@@ -2565,7 +2565,7 @@ impl<'a> Parser<'a> {
         let kind = match self.peek().clone() {
             TokenKind::Star => {
                 self.bump();
-                // `**` is two consecutive Stars — the second `*` follows
+                // `**` is two consecutive Stars - the second `*` follows
                 // immediately when there's no space.
                 if matches!(self.peek(), TokenKind::Star) {
                     self.bump();
@@ -3356,11 +3356,11 @@ impl<'a> Parser<'a> {
             );
             return None;
         };
-        // Spec 4.2.5: `xs: ...T` — `...` precedes the element type; the
+        // Spec 4.2.5: `xs: ...T` - `...` precedes the element type; the
         // param is marked `variadic` (its type becomes `Slice<T>`).
         let (ty, variadic) = if self.eat(&TokenKind::Colon) {
             if self.eat(&TokenKind::DotDot) && self.eat(&TokenKind::Dot) {
-                // `...T` — three dots. Lexed as `..` then `.`.
+                // `...T` - three dots. Lexed as `..` then `.`.
                 let elem = self.parse_type()?;
                 (Some(elem), true)
             } else {
@@ -3523,7 +3523,7 @@ impl<'a> Parser<'a> {
                         span,
                     };
                 }
-                // `fn(..) -> R + Send + Sync` — auto-trait bounds.
+                // `fn(..) -> R + Send + Sync` - auto-trait bounds.
                 let mut bounds = rokc_ast::FnTyBounds::default();
                 while self.eat(&TokenKind::Plus) {
                     bounds.auto.push(self.parse_type_path()?);
@@ -4025,7 +4025,7 @@ impl<'a> Parser<'a> {
         let mut block = self.parse_block_stmts()?;
         self.rename_local_items(&mut block, lifted);
         // Spec 4.10.5 / 3.9.1: a nested fn and a `use` hold in their whole
-        // block — in the bodies of the fns lifted from inside it too.
+        // block - in the bodies of the fns lifted from inside it too.
         let markers: Vec<Stmt> = block
             .stmts
             .iter()
@@ -5015,7 +5015,7 @@ impl<'a> Parser<'a> {
 
         loop {
             self.chain_link()?;
-            // Spec 3.2.3: `as` / `is` sit at level 11, left-assoc — below
+            // Spec 3.2.3: `as` / `is` sit at level 11, left-assoc - below
             // prefix unary (`-x as i64` is `(-x) as i64`), above arithmetic.
             if matches!(self.peek(), TokenKind::As | TokenKind::Is) {
                 if CAST_PREC < min_bp {
@@ -5029,7 +5029,7 @@ impl<'a> Parser<'a> {
                 let kind = if is_cast {
                     ExprKind::Cast(Box::new(lhs), ty)
                 } else {
-                    // Spec 2.2.5: `v is T` — runtime type test.
+                    // Spec 2.2.5: `v is T` - runtime type test.
                     ExprKind::Is(
                         Box::new(lhs),
                         rokc_ast::Pattern {
@@ -6409,7 +6409,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `[ref x, y] |..| body` — a closure with a capture list (spec 4.6.2).
+    /// `[ref x, y] |..| body` - a closure with a capture list (spec 4.6.2).
     fn parse_capture_closure(&mut self) -> Option<ExprKind> {
         self.bump(); // `[`
         let mut captures: Vec<rokc_ast::CaptureSpec> = Vec::new();
@@ -6946,7 +6946,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) if name == "_" => {
                 self.bump();
-                // `_: T` — type-check pattern without a binding (3.11.4).
+                // `_: T` - type-check pattern without a binding (3.11.4).
                 if self.eat(&TokenKind::Colon) {
                     let ty = self.parse_type()?;
                     PatternKind::TypeCheck { binder: None, ty }
@@ -6997,7 +6997,7 @@ impl<'a> Parser<'a> {
                     let path = self.parse_path()?;
                     self.parse_struct_pattern_body(path)?
                 } else if matches!(self.peek_next(), Some(TokenKind::Colon)) {
-                    // `name: T` — type-narrow pattern (sum-type slot).
+                    // `name: T` - type-narrow pattern (sum-type slot).
                     let TokenKind::Ident(name) = self.peek().clone() else {
                         unreachable!()
                     };

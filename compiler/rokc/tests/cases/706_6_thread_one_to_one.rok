@@ -6,8 +6,8 @@
 // distinct threads: 4
 // 0 10 20 30
 
-// spec 7.6.6: `thread::spawn` maps 1:1 onto an OS thread — each spawned
-// thread has its own id, distinct from the main thread — and `join`
+// spec 7.6.6: `thread::spawn` maps 1:1 onto an OS thread - each spawned
+// thread has its own id, distinct from the main thread - and `join`
 // hands back the closure's value. `rok_cpu_count` reports >= 1.
 use rok::std::thread;
 

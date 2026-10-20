@@ -1,4 +1,4 @@
-// rok::core::str — `str` methods and trait impls (stdlib 2.15).
+// rok::core::str - `str` methods and trait impls (stdlib 2.15).
 //
 // `str` is an immutable `(ptr, len)` value (2.15.1): literals are static
 // bytes, run-time strings GC objects, and a slice shares its source's

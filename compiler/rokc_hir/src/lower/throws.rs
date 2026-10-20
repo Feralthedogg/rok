@@ -427,7 +427,7 @@ pub(super) fn raise(
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "error `{}` is not covered by the enclosing function's `throws ({})` — \
+                    "error `{}` is not covered by the enclosing function's `throws ({})` - \
                      catch it or add it to the `throws` list (spec 4.14)",
                     ctx.ty_name(&ety),
                     ctx.ty_name(&decl)
@@ -1161,7 +1161,7 @@ pub(super) fn lower_try(
         warn_if_idle(ctx, &e);
         return e;
     }
-    // `let x: i32 | none = try? f()` — the operand's slot is the payload.
+    // `let x: i32 | none = try? f()` - the operand's slot is the payload.
     let inner_expected = match (kind, optional_parts(&expected)) {
         (TryKind::Optional, Some((_, some))) => super::desugar::without_none(&some),
         (TryKind::Optional, None) if expected != HirTy::Unit => HirTy::Unknown,

@@ -2,7 +2,7 @@
 // expect-stdout:
 // 5 10 4 10
 
-// Trait method with a body acts as a default — `impl Trait for Type`
+// Trait method with a body acts as a default - `impl Trait for Type`
 // blocks that don't override it pick up the default body specialized
 // for `Self = Type`.
 trait Greeter {
@@ -21,7 +21,7 @@ struct B {
 
 impl Greeter for A {
     fn greet(self) -> i32 { self.n + 1 }
-    // No greet_loudly — picks up the default body.
+    // No greet_loudly - picks up the default body.
 }
 
 impl Greeter for B {

@@ -1,9 +1,9 @@
 // spec: refs-lang §2.8.3 §2.8.3a §2.10.3 §3.1.3 §4.9.6
-// expect-error: `T::Output` is ambiguous: the bounds `Add<i32>` and `Add<f64>` of `T` both give it — name the bound (`<T as Add<i32>>::Output`)
+// expect-error: `T::Output` is ambiguous: the bounds `Add<i32>` and `Add<f64>` of `T` both give it - name the bound (`<T as Add<i32>>::Output`)
 // expect-error: operator `+` on `T`: the literal fits several `Add` bounds (`i64`, `u8`); add a suffix or `as`
 // expect-error: operator `+` on `T` needs a bound `Add<str>`, but `T` has `Add<i32>` and `Add<f64>`
-// expect-error: `make` on `T` is ambiguous: the arguments do not choose between its bounds `Tag<i32>` and `Tag<bool>` — name one (`<T as Tag<i32>>::make(..)`)
-// expect-error: `T::ID` is ambiguous: the bounds `Tag<i32>` and `Tag<bool>` of `T` both give it — name the bound (`<T as Tag<i32>>::ID`)
+// expect-error: `make` on `T` is ambiguous: the arguments do not choose between its bounds `Tag<i32>` and `Tag<bool>` - name one (`<T as Tag<i32>>::make(..)`)
+// expect-error: `T::ID` is ambiguous: the bounds `Tag<i32>` and `Tag<bool>` of `T` both give it - name the bound (`<T as Tag<i32>>::ID`)
 // expect-error: `T::from` on `T`: the literal fits several of its bounds (`i64`, `u8`); add a suffix or `as`
 // expect-error: `tag` on `T` needs a bound `Tag<str>`, but `T` has `Tag<i32>` and `Tag<bool>`
 // expect-error: method `go` on `T` is ambiguous: traits `Fast`, `Slow` all provide it

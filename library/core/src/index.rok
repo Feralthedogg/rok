@@ -27,7 +27,7 @@ pub trait Sliceable<R> {
     fn slice(self, range: R) -> Output;
 }
 
-/// Spec 3.6: the position of a signed index `i` in a length `len` —
+/// Spec 3.6: the position of a signed index `i` in a length `len` -
 /// `i` itself, or `len + i` when negative (`xs[-1]` is the last). The
 /// compiler routes every signed position (`xs[i]` / `a[i]` on a `List`,
 /// `Slice`, fixed array; slice bounds of those and of `str` / `StrBuf`)

@@ -155,7 +155,7 @@ pub enum ThrowsKind {
     /// Bare `throws` = `throws (any Error)`; the parser rewrites it to
     /// `Typed([untyped_throws_ty(..)])`.
     Untyped,
-    /// `throws (A | B)` — the listed types form the error sum.
+    /// `throws (A | B)` - the listed types form the error sum.
     Typed(Vec<Ty>),
 }
 
@@ -213,7 +213,7 @@ pub struct Stmt {
 
 #[derive(Clone, Debug)]
 pub enum StmtKind {
-    /// `let name [: ty] = init;` — fresh binding.
+    /// `let name [: ty] = init;` - fresh binding.
     Let {
         name: String,
         ty: Option<Ty>,
@@ -246,9 +246,9 @@ pub enum StmtKind {
         ty: Option<Ty>,
         init: Expr,
     },
-    /// `name = expr;` — reassignment (no `let`).
+    /// `name = expr;` - reassignment (no `let`).
     Assign(Expr, Expr),
-    /// `name op= expr;` — `op` is the lexical compound symbol (`+=` etc.).
+    /// `name op= expr;` - `op` is the lexical compound symbol (`+=` etc.).
     CompoundAssign {
         target: Expr,
         op: String,
@@ -329,7 +329,7 @@ pub enum ExprKind {
     SelfUpper,
     Tuple(Vec<Expr>),
     List(Vec<Expr>),
-    /// `[v; N]` — `v` repeated `N` times, a `[T; N]` (spec 2.11).
+    /// `[v; N]` - `v` repeated `N` times, a `[T; N]` (spec 2.11).
     ArrayRepeat {
         value: Box<Expr>,
         len: ConstExpr,
@@ -432,9 +432,9 @@ pub enum ExprKind {
     /// `x?.a.b(..)[i]`: the links after `?.` are all skipped when `x` is
     /// `none` (spec 3.8.8).
     QuestionDot(Box<Expr>, Vec<AccessTail>),
-    /// `lhs ?? rhs` — language-level sum-type-aware coalesce.
+    /// `lhs ?? rhs` - language-level sum-type-aware coalesce.
     NullishCoalesce(Box<Expr>, Box<Expr>),
-    /// `expr?` — postfix early-return for sum types. Yields the
+    /// `expr?` - postfix early-return for sum types. Yields the
     /// non-none value or `return none` from the enclosing function.
     TryQ(Box<Expr>),
     Closure {
@@ -528,11 +528,11 @@ pub struct MatchArm {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TryKind {
-    /// `try e` — errors propagate.
+    /// `try e` - errors propagate.
     Plain,
-    /// `try? e` — errors become `none`.
+    /// `try? e` - errors become `none`.
     Optional,
-    /// `try! e` — errors panic.
+    /// `try! e` - errors panic.
     Force,
 }
 
@@ -562,7 +562,7 @@ pub enum PatternKind {
         end: Option<Literal>,
         inclusive: bool,
     },
-    /// `name: T` — type-narrowing pattern.
+    /// `name: T` - type-narrowing pattern.
     TypeCheck {
         binder: Option<String>,
         ty: Ty,
@@ -657,13 +657,13 @@ pub enum TyKind {
     Array(Box<Ty>, ConstExpr),
     /// `any` slot.
     Any,
-    /// `any Tr` / `any (A + B)` — a dynamic slot bounded by traits.
+    /// `any Tr` / `any (A + B)` - a dynamic slot bounded by traits.
     AnyTrait(Vec<Path>),
     /// `none` (used inside sum types).
     None,
     /// Self type.
     SelfUpper,
-    /// `!` — the never type of a diverging function (`panic`, `exit`).
+    /// `!` - the never type of a diverging function (`panic`, `exit`).
     Never,
     /// A const generic argument in a type-argument list (`Matrix<f64, 3, 4>`,
     /// `replicate::<i32, 8>`; spec 2.11.4).

@@ -1,4 +1,4 @@
-// rok::core::panic — the compiler hooks `panic_fn` / `oom_fn` /
+// rok::core::panic - the compiler hooks `panic_fn` / `oom_fn` /
 // `unreachable_fn` (stdlib spec 2.14.5): print a message to stderr and
 // exit 101. They never return: `-> !` fits any slot.
 

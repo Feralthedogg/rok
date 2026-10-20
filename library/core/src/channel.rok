@@ -1,4 +1,4 @@
-// rok::core::channel — message passing between threads (stdlib spec
+// rok::core::channel - message passing between threads (stdlib spec
 // 2.17). Multi-producer, single-consumer; `recv` / `send` block the OS
 // thread, `recv_async` / `for await` / `send_async` suspend the task
 // (`task::park`: receivers on the `meta` address, senders one past it).

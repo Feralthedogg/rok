@@ -190,7 +190,7 @@ pub fn nfkc(s: &str) -> String {
     normalize(s, true)
 }
 
-/// Spec 1.4.2: an identifier's canonical spelling — NFC, then the emoji
+/// Spec 1.4.2: an identifier's canonical spelling - NFC, then the emoji
 /// variation selectors U+FE0E / U+FE0F removed.
 #[must_use]
 pub fn normalize_ident(s: &str) -> String {
@@ -200,7 +200,7 @@ pub fn normalize_ident(s: &str) -> String {
     nfc(s).replace(['\u{FE0E}', '\u{FE0F}'], "")
 }
 
-/// Bidirectional formatting controls (U+202A–202E, U+2066–2069): never
+/// Bidirectional formatting controls (U+202A-202E, U+2066-2069): never
 /// allowed in source text (spec 1.1).
 #[must_use]
 pub const fn is_bidi_control(c: char) -> bool {
@@ -274,7 +274,7 @@ const fn script(c: char) -> Option<Script> {
 }
 
 /// A risky script mix inside one identifier: Cyrillic with Latin or
-/// Greek. (Latin + Greek is ordinary math notation — `Δt`, `σx`.)
+/// Greek. (Latin + Greek is ordinary math notation - `Δt`, `σx`.)
 #[must_use]
 pub fn mixed_script(s: &str) -> bool {
     let has = |sc: Script| s.chars().any(|c| script(c) == Some(sc));

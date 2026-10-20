@@ -4,7 +4,7 @@
 // 3
 
 // A struct may hold `any Tr | none` of its own trait (an error-cause
-// chain) — the payload is a heap pointer, so the type stays finite.
+// chain) - the payload is a heap pointer, so the type stays finite.
 trait Fault { fn code(self) -> i32; fn depth(self) -> i32; }
 struct Leaf { c: i32; }
 struct Wrap { c: i32; cause: any Fault | none; }

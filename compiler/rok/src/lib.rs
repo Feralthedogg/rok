@@ -121,7 +121,8 @@ stones (the index is a git repository; sources are not uploaded):
   logout                       remove it
   publish [--index <dir>] [--commit]
                                the index entry for this package (its git
-                               remote `origin`, HEAD commit and tree); a dry
+                               remote `origin`, an https:// URL, HEAD
+                               commit and tree); a dry
                                run, checked against the index checkout <dir>
                                if given. --commit: commit it to <dir>, or
                                without --index, send it to the registry API
@@ -2154,7 +2155,7 @@ fn cmd_deps(g: &Global, args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
-/// `rok search [--native] <query>`: `name newest — description` for each
+/// `rok search [--native] <query>`: `name newest - description` for each
 /// name containing the query (any case).
 fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
     let (q, native) = match args {
@@ -2185,7 +2186,7 @@ fn cmd_search(g: &Global, args: &[String]) -> Result<i32, String> {
         };
         if let Some((name, vers, meta)) = newest {
             match meta.iter().find(|(k, _)| *k == "description") {
-                Some((_, d)) => println!("{name} {vers} — {d}"),
+                Some((_, d)) => println!("{name} {vers} - {d}"),
                 None => println!("{name} {vers}"),
             }
         }
@@ -2284,8 +2285,13 @@ fn cmd_publish(g: &Global, args: &[String]) -> Result<i32, String> {
     if !g.quiet {
         if write {
             eprintln!("   Published {what}{name} {vers} to {to}");
+        } else if index.is_some() {
+            eprintln!("note: dry run; --commit commits it to {to} as {rel} (not pushed)");
         } else {
-            eprintln!("note: dry run; --commit adds it to {to} as {rel}");
+            eprintln!(
+                "note: dry run; --commit sends it to the registry API of {to} (needs `rok \
+                 login`), which adds it as {rel}"
+            );
         }
     }
     Ok(0)

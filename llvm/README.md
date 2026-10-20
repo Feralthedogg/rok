@@ -15,7 +15,7 @@ is the last release of the newest major the emitted MLIR is tested with.
 
 - `arm64e-x1.patch`: upstream b8007a8e4020 (in LLVM 23.1), library
   sources only. The macOS 27 SDK's `.tbd` files list `arm64e.x1-macos`,
-  which 22.1.8's TextAPI rejects ("malformed file … unknown
+  which 22.1.8's TextAPI rejects ("malformed file ... unknown
   architecture"), so ld64.lld found no libSystem symbols and every
   macOS link failed. On Apple hosts rokc_llvm only takes a prefix with
   the patch (`build.sh` rebuilds an older one; `build.ps1` does not apply

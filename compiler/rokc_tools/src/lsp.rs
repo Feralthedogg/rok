@@ -590,7 +590,7 @@ fn path_completions(hir: &HirModule, segs: &[&str], push: &mut impl FnMut(&str, 
             push(parts[n], if more { 9 } else { kind }, name.to_owned());
         }
     }
-    // `Type::` — its impl functions are named `<key>__<method>`.
+    // `Type::` - its impl functions are named `<key>__<method>`.
     let last = segs[n - 1];
     let mut keys = vec![last.to_owned()];
     for s in &hir.structs {

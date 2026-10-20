@@ -3181,7 +3181,7 @@ impl<'a> FnEmit<'a> {
                 .and_then(Option::as_ref)
                 .cloned()
                 .unwrap_or_else(|| {
-                    // Truly unknown — emit a typed zero so callers stay valid.
+                    // Truly unknown - emit a typed zero so callers stay valid.
                     let v = self.fresh_value();
                     let ty = mlir_type(&self.local_ty(id), self.target);
                     let _ = writeln!(self.body, "    {v} = arith.constant 0 : {ty}");

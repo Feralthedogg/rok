@@ -1,4 +1,4 @@
-// rok::core::collections::broadcast — the element-wise dot operators
+// rok::core::collections::broadcast - the element-wise dot operators
 // on `List<T>` (stdlib spec 2.6.7): `List op List` (same length, else a
 // panic), `List op T` and `T op List` (the scalar applies to every
 // element). Arithmetic / bitwise ones give `List<T>`, comparisons

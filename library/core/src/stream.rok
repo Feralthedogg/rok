@@ -1,4 +1,4 @@
-// rok::core::stream — `Stream` / `IntoStream` / `FromStream` (stdlib
+// rok::core::stream - `Stream` / `IntoStream` / `FromStream` (stdlib
 // spec 2.8).
 //
 // `for await x in s` polls `s.poll_next(ref ctx)` (after

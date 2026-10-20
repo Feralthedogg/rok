@@ -4,7 +4,7 @@
 # proxies $ROK_HOME/bin/{rok,rokc,rokls}.
 #
 #   curl -fsSL https://rok-lang.org/install.sh | sh
-#   sh install.sh --archive rok-<version>-<triple>.tar.gz
+#   sh install.sh --archive rok-<version>-<triple>.tar.xz   (or .tar.gz)
 #   rok-<version>-<triple>/install.sh          (from an unpacked archive)
 #
 # Environment: ROK_HOME, ROK_VERSION (default below), ROK_DIST (where
@@ -19,7 +19,7 @@ archive=""
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: error: %s\n' "$*" >&2; exit 1; }
 usage() {
-  say "usage: install.sh [--archive <rok-*.tar.gz>] [--version <version>]"
+  say "usage: install.sh [--archive <rok-*.tar.xz | rok-*.tar.gz>] [--version <version>]"
   say "installs into \$ROK_HOME (now $home)"
 }
 
@@ -67,6 +67,32 @@ check_sum() {
   [ "$got" = "$want" ] || die "$1 has SHA-256 $got, but its .sha256 says $want (a damaged or altered download)"
 }
 
+supported="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc"
+
+# Download $1 to $2; fail with 1 on a 404, die on anything else.
+download() {
+  code=$(curl -sSL --proto '=https' -o "$2" -w '%{http_code}' "$1") ||
+    die "cannot download $1 (no network, or the host is unreachable?)"
+  case $code in
+    2??) ;;
+    404) return 1 ;;
+    *) die "cannot download $1: HTTP $code" ;;
+  esac
+}
+
+# The archive for $triple is missing: no such host, or no such version.
+no_archive() {
+  case " $supported " in
+    *" $triple "*)
+      die "rok $version has no release archive at $url; check the version (--version, ROK_VERSION)" ;;
+  esac
+  printf 'install.sh: error: there is no rok %s release archive for %s\n' "$version" "$triple" >&2
+  printf '  release archives are built for: %s\n' "$supported" >&2
+  printf '  on this host, build rok from source: see "Building from source" in\n' >&2
+  printf '  https://github.com/rok-lang/rok#building-from-source\n' >&2
+  exit 1
+}
+
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/rok-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -77,18 +103,33 @@ if [ -z "$archive" ] && [ -n "$here" ] && [ -x "$here/bin/rok" ] && [ -x "$here/
 else
   if [ -z "$archive" ]; then
     triple=$(host_triple)
-    url="$dist/download/v$version/rok-$version-$triple.tar.gz"
-    say "downloading $url"
-    archive="$tmp/rok.tar.gz"
-    curl -fsSL --proto '=https' -o "$archive" "$url" || die "cannot download $url"
-    curl -fsSL --proto '=https' -o "$archive.sha256" "$url.sha256" || die "cannot download $url.sha256"
+    base="$dist/download/v$version/rok-$version-$triple"
+    # The .tar.xz is about half the .tar.gz; tar needs xz for it on Linux
+    # (macOS's tar reads it itself). A release without one gets the .tar.gz.
+    url=""
+    if [ "$(uname -s)" = Darwin ] || command -v xz >/dev/null 2>&1; then
+      url="$base.tar.xz"
+      archive="$tmp/rok.tar.xz"
+      say "downloading $url"
+      download "$url" "$archive" || url=""
+    fi
+    if [ -z "$url" ]; then
+      url="$base.tar.gz"
+      archive="$tmp/rok.tar.gz"
+      say "downloading $url"
+      download "$url" "$archive" || no_archive
+    fi
+    download "$url.sha256" "$archive.sha256" || die "$url.sha256 is missing (HTTP 404), so the archive cannot be checked; report it at https://github.com/rok-lang/rok/issues"
   fi
   [ -f "$archive" ] || die "$archive does not exist"
   # A download is checked against its release's .sha256, an archive
   # file against the one beside it, if any.
   if [ -f "$archive.sha256" ]; then check_sum "$archive" "$archive.sha256"; fi
   mkdir "$tmp/files"
-  tar -xzf "$archive" -C "$tmp/files" || die "cannot unpack $archive"
+  case $archive in
+    *.tar.xz | *.txz) tar -xJf "$archive" -C "$tmp/files" || die "cannot unpack $archive (tar needs xz for a .tar.xz: install xz, or use the .tar.gz)" ;;
+    *) tar -xzf "$archive" -C "$tmp/files" || die "cannot unpack $archive" ;;
+  esac
   src=$(find "$tmp/files" -mindepth 2 -maxdepth 2 -name bin -type d | head -n 1)
   [ -n "$src" ] || die "$archive is not a rok toolchain (no bin/)"
   src=$(dirname "$src")

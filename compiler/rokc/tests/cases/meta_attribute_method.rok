@@ -9,7 +9,7 @@
 // [enter] describe
 // R
 
-// Spec 6.9.5: `@accept(fn)` is "a function or a method" — a user
+// Spec 6.9.5: `@accept(fn)` is "a function or a method" - a user
 // attribute on an impl or trait method expands in place (to methods).
 #[impl_attribute(traced)]
 pub @attribute {

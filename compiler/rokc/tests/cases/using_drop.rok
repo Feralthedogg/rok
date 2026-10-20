@@ -11,7 +11,7 @@
 // caught
 
 // Spec 3.17: `using` drops its resources in reverse order on every way
-// out of the block — normal end, `return`, and a propagating error.
+// out of the block - normal end, `return`, and a propagating error.
 struct Res { id: i32; }
 
 impl Drop for Res {

@@ -1,4 +1,4 @@
-// rok::core::num::floats — `f32` / `f64` inherent methods and constants
+// rok::core::num::floats - `f32` / `f64` inherent methods and constants
 // (stdlib spec 2.1.4). The math functions are libm's (`floor`, `sin`,
 // `pow`, ..) behind the runtime's `rok_f64_*` / `rok_f32_*` symbols
 // (`runtime/rokr/src/math.rs`); `to_bits` / `from_bits` reinterpret

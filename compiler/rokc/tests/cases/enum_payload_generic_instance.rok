@@ -6,7 +6,7 @@
 // 5
 
 // A plain enum whose payload names a generic instance (`List<V>`, a
-// user `G<i32>`) — including itself, recursively — and a named variant
+// user `G<i32>`) - including itself, recursively - and a named variant
 // with a single struct field (a one-field payload tuple).
 struct G<T> { v: T; }
 struct P { a: i64; b: i64; }

@@ -1,4 +1,4 @@
-// rok::core::reflect — `Reflect` / `Inspect` (refs-lang 6.10, stdlib 2.12).
+// rok::core::reflect - `Reflect` / `Inspect` (refs-lang 6.10, stdlib 2.12).
 //
 // `Reflect` is implemented by the compiler for every type (no impl in
 // source; a manual one is an error): `T::type_name()`, `T::size()`,

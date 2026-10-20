@@ -1,4 +1,4 @@
-// rok::bare::alloc — raw allocation outside the GC (stdlib spec 1.4).
+// rok::bare::alloc - raw allocation outside the GC (stdlib spec 1.4).
 // Over the runtime's `rok_alloc_raw` / `rok_realloc_raw` / `rok_free`
 // (system malloc); failure is a null `CPtr`, never an abort.
 //

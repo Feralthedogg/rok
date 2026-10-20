@@ -12,8 +12,8 @@
 // 7
 // 101
 
-// `[ref x]` (spec 4.6.2) names one binding — the innermost `x` at the
-// closure — and only that binding lives in a cell: `let`, destructuring,
+// `[ref x]` (spec 4.6.2) names one binding - the innermost `x` at the
+// closure - and only that binding lives in a cell: `let`, destructuring,
 // `for`, `match` and closure-parameter bindings.
 
 struct P { a: i32; b: i32; }

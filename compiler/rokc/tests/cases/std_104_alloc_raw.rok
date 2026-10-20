@@ -7,7 +7,7 @@
 // raii: 6
 // layout error: true
 
-// stdlib 1.4: memory outside the GC — `alloc` / `alloc_zeroed` /
+// stdlib 1.4: memory outside the GC - `alloc` / `alloc_zeroed` /
 // `realloc` / `dealloc`, the typed helpers, the RAII `Allocation`, and
 // `Layout`'s overflow check.
 use rok::bare::alloc::{

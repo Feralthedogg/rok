@@ -3,7 +3,7 @@
 // expect-stdout:
 // equal
 
-// spec 6.2: `#[derive(PartialEq, Eq)]` — field-wise equality.
+// spec 6.2: `#[derive(PartialEq, Eq)]` - field-wise equality.
 #[derive(PartialEq, Eq)]
 struct Pt { x: i32; y: i32; }
 

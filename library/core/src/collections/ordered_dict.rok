@@ -1,4 +1,4 @@
-// rok::core::collections::ordered_dict — `OrderedDict<K, V>`, a hash map
+// rok::core::collections::ordered_dict - `OrderedDict<K, V>`, a hash map
 // that iterates in insertion order (stdlib spec 2.9.5): a `Dict`, whose
 // compact entries already keep that order. Re-inserting a present key
 // keeps its place; a removed key re-inserted goes last.

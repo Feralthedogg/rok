@@ -11,7 +11,7 @@
 // 2
 
 // Range values (stdlib 2.7.4): `a..b` / `a..=b` / `a..` are `Range` /
-// `RangeInclusive` / `RangeFrom` values — in `let`s, fields, arguments —
+// `RangeInclusive` / `RangeFrom` values - in `let`s, fields, arguments -
 // iterating through `Step` (2.7.3); `Range` / `RangeInclusive` are
 // `DoubleEndedIterator`s. `RangeFrom` stops before the type maximum.
 

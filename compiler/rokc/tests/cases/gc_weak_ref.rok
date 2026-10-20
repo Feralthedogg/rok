@@ -10,8 +10,8 @@
 // churn ok 1000
 
 // 8.2.8 `WEAK_REF`: a `Weak<T>` does not keep its `GcPtr<T>`'s object
-// alive. The collection that frees the object — minor (it was young),
-// full, or concurrent — clears every weak reference to it; one that
+// alive. The collection that frees the object - minor (it was young),
+// full, or concurrent - clears every weak reference to it; one that
 // moves it (evacuation) updates them. The gc-stress runs collect, move
 // and mark concurrently all along.
 use rok::bare::gc;

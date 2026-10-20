@@ -411,7 +411,7 @@ pub fn hidden_module(
 pub fn hidden_module_msg(full: &str, module: &str, cur: &str) -> String {
     format!(
         "`{full}` is not visible from `{}`: module `{module}` is private to `{}` \
-         (spec 5.6.13 — add `pub` to the `mod` to expose it)",
+         (spec 5.6.13 - add `pub` to the `mod` to expose it)",
         module_display(cur),
         module_display(&module_of(module))
     )
@@ -662,7 +662,7 @@ pub(super) fn resolve_ty_with_structs(
             };
             HirTy::Array(Box::new(rec(elem)), n)
         }
-        // `T | U` — recurse so Path("Counter") resolves to Struct(id), not
+        // `T | U` - recurse so Path("Counter") resolves to Struct(id), not
         // an opaque path the MIR layer would treat as `Any`.
         AstTyKind::Sum(parts) => {
             crate::ty::written_sum(parts, |n| params.is_some_and(|ps| ps.contains_key(n)), rec)
@@ -686,7 +686,7 @@ pub(super) fn resolve_ty_with_structs(
                         sc.names.error(
                             sc.at,
                             format!(
-                                "`{written}` in `any {written}` is not a trait — `any` bounds \
+                                "`{written}` in `any {written}` is not a trait - `any` bounds \
                                  must name traits"
                             ),
                         );

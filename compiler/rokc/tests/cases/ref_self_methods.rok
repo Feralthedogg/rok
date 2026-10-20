@@ -12,7 +12,7 @@
 // 7
 
 // Spec 4.7.5: a `ref self` method's assignments to `self` reach the
-// caller's binding — a local, or a field chain on one — with no `ref`
+// caller's binding - a local, or a field chain on one - with no `ref`
 // at the call. A user iterator keeps its state in its fields
 // (stdlib 2.7.1 `next(ref self)`).
 

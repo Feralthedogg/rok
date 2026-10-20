@@ -197,7 +197,7 @@ pub fn check_keyword(def: &KeywordDef) -> Option<RokDiagnostic> {
     }
     if def.handler.is_empty() {
         return err(format!(
-            "`#[keyword(\"{n}\")]` must be on a free function — its handler (spec 6.6.2)"
+            "`#[keyword(\"{n}\")]` must be on a free function - its handler (spec 6.6.2)"
         ));
     }
     None

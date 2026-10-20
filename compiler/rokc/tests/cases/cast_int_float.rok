@@ -13,11 +13,11 @@ fn main() -> i32 {
     println(f"{f}");
 
     let b: f64 = 7.9f64;
-    let i = b as i32;                 // 7 — truncation
+    let i = b as i32;                 // 7 - truncation
     println(f"{i}");
 
     let c: f64 = -2.3f64;
-    let j = c as i32;                 // -2 — truncation toward zero
+    let j = c as i32;                 // -2 - truncation toward zero
     println(f"{j}");
     return 0;
 }

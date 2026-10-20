@@ -471,7 +471,7 @@ impl TypeNames {
                 self.error(
                     at,
                     format!(
-                        "type name `{}` is ambiguous in module `{}` — multiple glob imports \
+                        "type name `{}` is ambiguous in module `{}` - multiple glob imports \
                      resolve it: {}",
                         segments.join("::"),
                         module_display(module),
@@ -494,7 +494,7 @@ impl TypeNames {
             if !visible_from(module, &def_module, vis) {
                 let msg = format!(
                     "type `{full}` is private to module `{}` and cannot be used from `{}` \
-                     (spec 5.6 — add `pub` to expose it)",
+                     (spec 5.6 - add `pub` to expose it)",
                     module_display(&def_module),
                     module_display(module)
                 );
@@ -542,7 +542,7 @@ impl TypeNames {
                 self.error(
                     at,
                     format!(
-                        "variant name `{}` is ambiguous in module `{}` — multiple glob imports \
+                        "variant name `{}` is ambiguous in module `{}` - multiple glob imports \
                      resolve it: {}",
                         segments.join("::"),
                         module_display(module),
@@ -569,7 +569,7 @@ impl TypeNames {
                     self.error(
                         at,
                         format!(
-                            "`{}` in a `fn` type bound is not an auto trait — only `Send` / \
+                            "`{}` in a `fn` type bound is not an auto trait - only `Send` / \
                          `Sync` can bound a `fn` type",
                             segs.join("::")
                         ),
@@ -2189,34 +2189,34 @@ fn holds_ref_cell(ty: &HirTy) -> bool {
 /// Why a function value does not fit a `fn` slot (`""`: no hint).
 fn fn_mismatch_hint(slot: &HirTy, ty: &HirTy) -> &'static str {
     if matches!(slot, HirTy::Fn(_, _, want) if !want.auto.is_empty()) && holds_ref_cell(ty) {
-        " — the closure holds a `[ref ..]` capture, which the code that made it could change at \
+        " - the closure holds a `[ref ..]` capture, which the code that made it could change at \
          the same time; share the value through a `Mutex` or an `Atomic` instead (spec 4.6.9)"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Closure { .. }) if *want != crate::FnBounds::default())
     {
-        " — the closure's captures don't meet the `fn` type's bounds"
+        " - the closure's captures don't meet the `fn` type's bounds"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
         if have.unsafe_fn && !want.unsafe_fn)
     {
-        " — an `unsafe fn` value only fits an `unsafe fn` type (spec 4.15)"
+        " - an `unsafe fn` value only fits an `unsafe fn` type (spec 4.15)"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
         if want.c_abi != have.c_abi)
     {
-        " — an `extern \"C\" fn` value is a bare C function pointer, not a rok `fn` value \
+        " - an `extern \"C\" fn` value is a bare C function pointer, not a rok `fn` value \
          (spec 5.9.4)"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
         if want.stdcall != have.stdcall)
     {
-        " — `extern \"system\" fn` is `stdcall` on this target, not `extern \"C\" fn` \
+        " - `extern \"system\" fn` is `stdcall` on this target, not `extern \"C\" fn` \
          (spec 5.9.4)"
     } else if matches!((slot, ty), (HirTy::Fn(_, _, want), HirTy::Fn(_, _, have))
         if !fn_bounds_fit(want, have))
     {
-        " — a `fn` value must already carry the bound in its type; only a named \
+        " - a `fn` value must already carry the bound in its type; only a named \
          function or a capture-free closure is always `Send + Sync`"
     } else if matches!((slot, ty), (HirTy::Fn(_, r, _), HirTy::Fn(..))
         if matches!(**r, HirTy::Throws { .. }))
     {
-        " — a function value fits a `fn` type that throws more only with the same \
+        " - a function value fits a `fn` type that throws more only with the same \
          parameters and result (spec 4.4.9)"
     } else {
         ""
@@ -2354,7 +2354,7 @@ fn box_into_any(ctx: &LowerCtx<'_>, slot: &HirTy, value: HirExpr) -> HirExpr {
         HirTy::AnyTrait(_) => ctx.error_expr(
             value.span,
             format!(
-                "cannot store an `{}` value in an `{}` slot without narrowing — test it with \
+                "cannot store an `{}` value in an `{}` slot without narrowing - test it with \
                  `is` or a type pattern (`match v {{ x: T => ... }}`) first (spec 2.2.10)",
                 ctx.ty_name(&value.ty),
                 ctx.ty_name(target)
@@ -2695,7 +2695,7 @@ struct LowerCtx<'a> {
     /// unsafe calls are allowed when > 0.
     unsafe_depth: u32,
     /// Enclosing breakable constructs, innermost last: `(label,
-    /// is_loop)` — labelled blocks accept `break 'l` but not `continue`.
+    /// is_loop)` - labelled blocks accept `break 'l` but not `continue`.
     breakables: Vec<(Option<String>, bool)>,
     /// `breakables` index → the type its `break` values must have:
     /// the annotated slot (`true` = inferred from the first `break`).
@@ -4109,7 +4109,7 @@ impl<'a> LowerCtx<'a> {
         self.emit_error(
             rokc_diagnostic::ErrorKind::Module,
             format!(
-                "name `{name}` is ambiguous in module `{}` — multiple glob imports \
+                "name `{name}` is ambiguous in module `{}` - multiple glob imports \
                  resolve it: {}",
                 module_display(&self.current_module),
                 hits.join(", ")
@@ -4156,7 +4156,7 @@ impl<'a> LowerCtx<'a> {
             rokc_diagnostic::ErrorKind::Module,
             format!(
                 "{what} `{full}` is private to module `{}` and cannot be used from `{}` \
-                 (spec 5.6 — add `pub` to expose it)",
+                 (spec 5.6 - add `pub` to expose it)",
                 module_display(&def_module),
                 module_display(&self.current_module)
             ),
@@ -4185,7 +4185,7 @@ impl<'a> LowerCtx<'a> {
             self.emit_error(
                 rokc_diagnostic::ErrorKind::Module,
                 format!(
-                    "field `{field}` of `{}` is private to module `{}` (spec 5.6 — add \
+                    "field `{field}` of `{}` is private to module `{}` (spec 5.6 - add \
                      `pub` to the field to expose it)",
                     self.ty_name(&HirTy::Struct(sid)),
                     module_display(&def_module)
@@ -4612,7 +4612,7 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// Associated type `name` of concrete type `base`, from its trait
-    /// impls (concrete or generic) — of `traits` only, when given.
+    /// impls (concrete or generic) - of `traits` only, when given.
     fn project(
         &self,
         base: &HirTy,
@@ -4682,7 +4682,7 @@ impl<'a> LowerCtx<'a> {
             self.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "associated type `{}::{name}` is ambiguous: impls define it as {} — name \
+                    "associated type `{}::{name}` is ambiguous: impls define it as {} - name \
                      the trait (`<T as Tr>::{name}`, spec 2.13.4)",
                     self.ty_name(base),
                     names.join(", ")

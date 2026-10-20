@@ -1,4 +1,4 @@
-// rok::core::collections::deque — `Deque<T>`, a growable ring buffer
+// rok::core::collections::deque - `Deque<T>`, a growable ring buffer
 // with O(1) push and pop at both ends. `meta` holds `[head, len, cap]`;
 // a vacated slot is overwritten with a zeroed `T` so the deque does not
 // keep a popped value alive.

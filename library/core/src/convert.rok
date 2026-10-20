@@ -55,7 +55,7 @@ impl<S> SaturatingInto for S {
     const fn saturating_into<T: SaturatingFrom<S>>(self) -> T { T::saturating_from(self) }
 }
 
-/// Keep the low bits — `as` spelled as a method (2.11.5).
+/// Keep the low bits - `as` spelled as a method (2.11.5).
 pub trait WrappingFrom<U> {
     fn wrapping_from(value: U) -> Self;
 }

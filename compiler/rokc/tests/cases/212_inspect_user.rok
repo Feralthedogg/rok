@@ -9,8 +9,8 @@
 // name = str
 // email = str
 
-// stdlib 2.12.3: the `User` example — an `i32` literal sets a `u64`
-// field (it fits) — and `dump_struct` over `T: Inspect`.
+// stdlib 2.12.3: the `User` example - an `i32` literal sets a `u64`
+// field (it fits) - and `dump_struct` over `T: Inspect`.
 #[derive(Inspect)]
 struct User {
     id: u64;

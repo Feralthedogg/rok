@@ -344,7 +344,7 @@ fn plain_write(t: &Expr, value: Expr, kind: Kind, debug: bool, flags: Expr, coun
     }
 }
 
-/// `let #fN = e;` — the temp's path, or `None` when `e` didn't type.
+/// `let #fN = e;` - the temp's path, or `None` when `e` didn't type.
 fn bind(ctx: &mut LowerCtx<'_>, stmts: &mut Vec<HirStmt>, e: &Expr) -> Option<Expr> {
     // A hole has no expected type: the f-string's own `str` slot is not it.
     ctx.push_expected(HirTy::Unknown);
@@ -356,7 +356,7 @@ fn bind(ctx: &mut LowerCtx<'_>, stmts: &mut Vec<HirStmt>, e: &Expr) -> Option<Ex
     Some(bind_hir(ctx, stmts, "#f", init, point(e.span)))
 }
 
-/// `let <prefix>N = init;` — the temp's path.
+/// `let <prefix>N = init;` - the temp's path.
 fn bind_hir(
     ctx: &mut LowerCtx<'_>,
     stmts: &mut Vec<HirStmt>,

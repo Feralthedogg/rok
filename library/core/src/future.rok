@@ -1,8 +1,8 @@
-// rok::core::future — `Future` / `Poll` / `Context` / `Waker` /
+// rok::core::future - `Future` / `Poll` / `Context` / `Waker` /
 // `IntoFuture` (stdlib spec 2.20).
 //
-// `await e` (inside an `async` body) polls `e` — or `e.into_future()` when
-// `e` has no `poll` — until `Ready`, suspending the coroutine with
+// `await e` (inside an `async` body) polls `e` - or `e.into_future()` when
+// `e` has no `poll` - until `Ready`, suspending the coroutine with
 // `Pending` in between (refs-lang 4.12, `rokc_hir::lower::coro`).
 
 use rok::core::collections::raw::{GcBuf, buf_erase, buf_new};

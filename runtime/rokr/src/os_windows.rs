@@ -862,7 +862,7 @@ pub extern "C" fn rok_os_copy_fd(src: i32, dst: i32) -> i64 {
 
 /// Copy `from` to a new `to`, both under `dir` (`CopyFileExW`: block
 /// cloning where the volume supports it, attributes included). 0 or
-/// `-error` (`to` exists, ...) — the caller then copies the bytes.
+/// `-error` (`to` exists, ...) - the caller then copies the bytes.
 #[unsafe(no_mangle)]
 pub extern "C" fn rok_os_clone(dir: i32, from: RokStr, to: RokStr) -> i32 {
     let (mut a, mut b) = match (path_w(dir, from), path_w(dir, to)) {

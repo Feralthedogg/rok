@@ -80,7 +80,7 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
                 rokc_diagnostic::ErrorKind::Meta,
                 at,
                 format!(
-                    "`#[derive({tr})]` on `{name}` needs `{missing}` too — derive both \
+                    "`#[derive({tr})]` on `{name}` needs `{missing}` too - derive both \
                          (`#[derive({missing}, {tr})]`; spec 2.5.1)"
                 ),
             ));
@@ -88,7 +88,7 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
         }
         let Some(path) = derivable(&tr) else {
             let why = if tr == "Display" {
-                "`Display` is written by hand — its format is the type's own choice \
+                "`Display` is written by hand - its format is the type's own choice \
                  (stdlib 2.10.10)"
                     .to_owned()
             } else {
@@ -152,7 +152,7 @@ pub(crate) fn derive_items(item: &Item, file: &str) -> (Vec<Item>, Vec<RokDiagno
     (items, diags)
 }
 
-/// `<T: Tr, const N: usize>` — every type parameter bound by the trait.
+/// `<T: Tr, const N: usize>` - every type parameter bound by the trait.
 fn impl_params(g: &Generics, path: &str) -> String {
     if g.params.is_empty() {
         return String::new();
@@ -168,7 +168,7 @@ fn impl_params(g: &Generics, path: &str) -> String {
     format!("<{}>", ps.join(", "))
 }
 
-/// `<T, N>` — the item's own parameters as its arguments.
+/// `<T, N>` - the item's own parameters as its arguments.
 fn self_args(g: &Generics) -> String {
     if g.params.is_empty() {
         return String::new();
@@ -196,7 +196,7 @@ pub(crate) fn ty_text(t: &Ty) -> String {
     }
 }
 
-/// `h = rotl(h, 5) ^ x.hash();` — a field folded into a hash.
+/// `h = rotl(h, 5) ^ x.hash();` - a field folded into a hash.
 fn hash_step(x: &str) -> String {
     format!("        h = ((h << 5) | (h >> 59)) ^ {x}.hash();\n")
 }
@@ -363,7 +363,7 @@ fn enum_body(tr: &str, e: &EnumDef) -> Option<String> {
             })
             .collect()
     };
-    // `let ta = match self { .. }` — the variant's index.
+    // `let ta = match self { .. }` - the variant's index.
     let tag = |x: &str, var: &str| -> String {
         let a: String = e
             .variants

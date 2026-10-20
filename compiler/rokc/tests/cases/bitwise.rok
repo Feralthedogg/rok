@@ -7,7 +7,7 @@
 // 64
 // 1
 
-// Bitwise ops on i32 — and, or, xor, shift-left, shift-right.
+// Bitwise ops on i32 - and, or, xor, shift-left, shift-right.
 // Each routes through `infix_for_prim` to the matching `arith` op.
 fn main() -> i32 {
     let a = 12i32;       // 0b1100

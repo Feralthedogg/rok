@@ -849,7 +849,7 @@ pub fn cancel_requested(ctx: Context) -> bool {
 /// because of a cancel (its value is then a placeholder): the `await`
 /// after a ready poll checks this, not the bare flag, so a value a
 /// hand-written future handed over (a message, a guard) is kept when the
-/// cancel lands meanwhile — the next cancellation point leaves.
+/// cancel lands meanwhile - the next cancellation point leaves.
 pub fn unwinding(ctx: Context) -> bool {
     unsafe {
         let t = ctx.waker.task;
@@ -2057,7 +2057,7 @@ impl Future for IoReady {
 // wakes once: register again for the next wait.
 
 /// Wake `w[0]` once `fd` may be readable (`interest & 1`) or writable
-/// (`interest & 2`) — at once if it already is, or if the fd cannot be
+/// (`interest & 2`) - at once if it already is, or if the fd cannot be
 /// watched (the retried operation reports the error).
 extern "C" fn hook_io(fd: i32, interest: u32, w: GcBuf<Waker>) {
     unsafe {

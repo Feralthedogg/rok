@@ -56,7 +56,7 @@ impl Pos {
 }
 
 /// Attributes the compiler gives meaning to in places of its own
-/// choosing (magic, 6.4 – 6.8); only their names are checked.
+/// choosing (magic, 6.4 - 6.8); only their names are checked.
 const MAGIC: &[&str] = &[
     "lang",
     "intrinsic",

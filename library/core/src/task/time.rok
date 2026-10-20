@@ -1,4 +1,4 @@
-// rok::core::task::time — `Duration` / `Instant` (stdlib spec 2.18.6,
+// rok::core::task::time - `Duration` / `Instant` (stdlib spec 2.18.6,
 // 3.3.2). `rok::std::time` re-exports both.
 
 // Spec 3.3.5: arithmetic overflow panics in debug builds and saturates
@@ -54,7 +54,7 @@ impl Duration {
     pub const MAX: Duration = Duration { ns: 9223372036854775807 };
 
     /// `s` seconds, truncated to whole nanoseconds (saturating at the
-    /// `i64` range, NaN → 0 — the `as` rules).
+    /// `i64` range, NaN → 0 - the `as` rules).
     pub const fn from_secs_f64(s: f64) -> Duration { Duration { ns: (s * 1000000000.0) as i64 } }
 
     pub const fn as_ns(self) -> i64 { self.ns }

@@ -345,7 +345,7 @@ impl PatParser<'_> {
             [t] if diags.is_empty() => Ok((t.kind.clone(), s.to_owned())),
             _ => Err((
                 span,
-                format!("`\"{s}\"` is not a single token — quote each token on its own"),
+                format!("`\"{s}\"` is not a single token - quote each token on its own"),
             )),
         }
     }
@@ -599,7 +599,7 @@ impl Parser<'_> {
             self.error(
                 span,
                 format!(
-                    "unknown numeric literal suffix `{suffix}` — no `#[literal(number \
+                    "unknown numeric literal suffix `{suffix}` - no `#[literal(number \
                      \"{suffix}\")]` handler is registered (spec 1.6.2, 6.5)"
                 ),
             );

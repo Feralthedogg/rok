@@ -373,7 +373,7 @@ pub(super) fn monomorphize_on(
                 } else {
                     ctx.emit_uninferred(format!(
                         "cannot infer type parameter `{name}` of `{}` from the call \
-                         arguments, the expected type or a later use — annotate the \
+                         arguments, the expected type or a later use - annotate the \
                          binding or write `::<..>`",
                         fn_def.name
                     ));
@@ -384,7 +384,7 @@ pub(super) fn monomorphize_on(
                 let Some(v) = subst.get(name).and_then(HirTy::as_const) else {
                     ctx.emit_uninferred(format!(
                         "cannot infer const parameter `{name}` of `{}` from the call \
-                         arguments or the expected type — pass it explicitly (`::<..>`) \
+                         arguments or the expected type - pass it explicitly (`::<..>`) \
                          (spec 2.11.6)",
                         fn_def.name
                     ));
@@ -410,7 +410,7 @@ pub(super) fn monomorphize_on(
             rokc_diagnostic::ErrorKind::Type,
             format!(
                 "instantiating generic function `{}` recursed past the limit \
-                 (depth {MONO_DEPTH_LIMIT}) — the instantiation never reaches a \
+                 (depth {MONO_DEPTH_LIMIT}) - the instantiation never reaches a \
                  fixed point",
                 fn_def.name
             ),
@@ -660,7 +660,7 @@ fn lower_instance(
 }
 
 /// An instance over `let` inference variables (`infer`): its signature
-/// only — the probe that asked for it is rolled back.
+/// only - the probe that asked for it is rolled back.
 fn var_instance(
     ctx: &LowerCtx<'_>,
     fn_def: &FnDef,
@@ -940,7 +940,7 @@ fn infer_ret_of(
             rokc_diagnostic::ErrorKind::Type,
             fn_def.span,
             format!(
-                "cannot infer the return type of `{}`: {why} — write `-> T` (spec 4.1.3)",
+                "cannot infer the return type of `{}`: {why} - write `-> T` (spec 4.1.3)",
                 leaf_name(&fn_def.name)
             ),
         );

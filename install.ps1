@@ -26,6 +26,21 @@ function HostTriple {
     }
 }
 
+$supported = 'aarch64-apple-darwin', 'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu', 'x86_64-pc-windows-msvc'
+
+# Download $Uri to $OutFile: $false on a 404, an error on anything else.
+function Download([string]$Uri, [string]$OutFile) {
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile
+        return $true
+    } catch {
+        $r = $_.Exception.Response
+        if ($r -and [int]$r.StatusCode -eq 404) { return $false }
+        if ($r) { throw "cannot download ${Uri}: HTTP $([int]$r.StatusCode)" }
+        throw "cannot download $Uri (no network, or the host is unreachable?): $($_.Exception.Message)"
+    }
+}
+
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "rok-install-$([Guid]::NewGuid())"
 New-Item -ItemType Directory $tmp | Out-Null
 try {
@@ -35,11 +50,23 @@ try {
         $src = $here
     } else {
         if (-not $Archive) {
-            $url = "$dist/download/v$Version/rok-$Version-$(HostTriple).zip"
+            $triple = HostTriple
+            $url = "$dist/download/v$Version/rok-$Version-$triple.zip"
             Write-Output "downloading $url"
             $Archive = Join-Path $tmp 'rok.zip'
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $Archive
-            Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256" -OutFile "$Archive.sha256"
+            if (-not (Download $url $Archive)) {
+                # No such host, or no such version.
+                if ($supported -contains $triple) {
+                    throw "rok $Version has no release archive at $url; check the version (-Version, ROK_VERSION)"
+                }
+                throw ("there is no rok $Version release archive for $triple`n" +
+                    "  release archives are built for: $($supported -join ' ')`n" +
+                    "  on this host, build rok from source: see `"Building from source`" in`n" +
+                    "  https://github.com/rok-lang/rok#building-from-source")
+            }
+            if (-not (Download "$url.sha256" "$Archive.sha256")) {
+                throw "$url.sha256 is missing (HTTP 404), so the archive cannot be checked; report it at https://github.com/rok-lang/rok/issues"
+            }
         }
         if (-not (Test-Path $Archive)) { throw "$Archive does not exist" }
         # A download is checked against its release's .sha256, an archive

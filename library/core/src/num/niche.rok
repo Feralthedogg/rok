@@ -1,4 +1,4 @@
-// rok::core::num::niche — wrappers that leave out values (stdlib spec
+// rok::core::num::niche - wrappers that leave out values (stdlib spec
 // 2.2): `NonZero<T>` (0), `NonNan<F>` (NaN), `Finite<F>` (NaN, ±∞),
 // `Positive<T>` (negatives; refs-lang 2.7.6). Each is a `#[niche(..)]`
 // newtype, so `NonZero<i32> | none` is 4 bytes and `NonNan<f64> | none`

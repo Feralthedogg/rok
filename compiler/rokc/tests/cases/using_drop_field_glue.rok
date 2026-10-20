@@ -16,7 +16,7 @@
 // end
 
 // stdlib 2.13.4: after a value's own `drop`, `using` drops its `Drop`
-// fields in reverse declaration order — also for a struct without its
+// fields in reverse declaration order - also for a struct without its
 // own `Drop`, tuple elements and the payload an enum / sum holds.
 struct R { name: str; }
 impl Drop for R {

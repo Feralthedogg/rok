@@ -20,6 +20,20 @@ case "${1-}" in
   "") ;;
   *) echo "usage: ./dist-linux.sh [--out <dir>]" >&2; exit 2 ;;
 esac
+# The commit for --version, taken here: the container may not see the
+# repository (a worktree's .git points outside the mount).
+if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
+  if h=$(git rev-parse --short=9 HEAD 2>/dev/null) &&
+    d=$(git log -1 --format=%cs 2>/dev/null); then
+    ROK_COMMIT_HASH=${ROK_COMMIT_HASH:-$h}
+    ROK_COMMIT_DATE=${ROK_COMMIT_DATE:-$d}
+  else
+    echo "dist-linux.sh: no commit for --version: run from a git checkout, or set" \
+      "ROK_COMMIT_HASH and ROK_COMMIT_DATE (\`git rev-parse --short=9 HEAD\` and" \
+      "\`git log -1 --format=%cs\` in the checkout this was made from)" >&2
+    exit 1
+  fi
+fi
 engine=$(command -v podman || command -v docker) || {
   echo "dist-linux.sh: needs podman or docker" >&2
   exit 1
@@ -43,6 +57,7 @@ $engine run --rm $user \
   -e HOME=/cache/home -e RUSTUP_HOME=/cache/rustup -e CARGO_HOME=/cache/cargo \
   -e ROK_LLVM_CACHE=/cache/rok -e CARGO_TARGET_DIR=/cache/target -e TMPDIR=/cache/tmp \
   -e ROK_LLVM_JOBS="${ROK_LLVM_JOBS-}" \
+  -e ROK_COMMIT_HASH="$ROK_COMMIT_HASH" -e ROK_COMMIT_DATE="$ROK_COMMIT_DATE" \
   "$tag" sh -euc '
     mkdir -p "$HOME" "$TMPDIR"
     [ -x "$CARGO_HOME/bin/rustup" ] ||

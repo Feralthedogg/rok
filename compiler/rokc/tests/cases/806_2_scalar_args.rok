@@ -8,7 +8,7 @@
 // 3.5
 
 // spec 8.6.1/8.6.2: rok scalars cross `extern "C"` with the platform C
-// ABI — f64 and i32 mixed in registers, i64 not truncated.
+// ABI - f64 and i32 mixed in registers, i64 not truncated.
 extern "C" {
     fn pow(x: f64, y: f64) -> f64;
     fn hypot(x: f64, y: f64) -> f64;

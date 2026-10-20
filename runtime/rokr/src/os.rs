@@ -717,7 +717,7 @@ fn rw_copy(src: i32, dst: i32, mut total: i64) -> Result<i64, i32> {
 
 /// Reflink `from` (a regular file) to a new `to`, both under `dir`
 /// (macOS `clonefileat`: same-volume APFS copies share their blocks).
-/// 0, or `-errno` (`EEXIST`, cross-volume, no support) — the caller
+/// 0, or `-errno` (`EEXIST`, cross-volume, no support) - the caller
 /// then copies the bytes. Elsewhere always `-ENOTSUP` (Linux reflinks
 /// through `copy_file_range` in `rok_os_copy_fd`).
 #[unsafe(no_mangle)]

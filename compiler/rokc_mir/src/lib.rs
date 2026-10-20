@@ -291,7 +291,7 @@ pub enum Statement {
         target: LocalId,
         rvalue: RValue,
     },
-    // `arr[index] = value` — store into a memref-stored array local, or
+    // `arr[index] = value` - store into a memref-stored array local, or
     // into the array `offset` bytes into one (`s.buf[i] = v` in place).
     ArrayWrite {
         array: LocalId,
@@ -329,7 +329,7 @@ pub enum Statement {
         index: u32,
         value: Operand,
     },
-    // `STATIC_NAME = value` — store into a module-level global.
+    // `STATIC_NAME = value` - store into a module-level global.
     StaticStore {
         name: String,
         value: Operand,
@@ -347,7 +347,7 @@ pub enum Statement {
 #[derive(Clone, Debug)]
 pub enum RValue {
     Use(Operand),
-    /// `op_ty` is the operand type — the result type lives on the
+    /// `op_ty` is the operand type - the result type lives on the
     /// destination `LocalDecl` (comparisons widen to `bool`).
     BinOp {
         op: PrimOp,

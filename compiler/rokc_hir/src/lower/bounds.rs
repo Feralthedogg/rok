@@ -238,7 +238,7 @@ fn item_bound(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
                     "`{t}::{name}` is ambiguous: the bounds `{}` and `{}` of `{t}` both give it \
-                     — name the bound (`<{t} as {}>::{name}`) (spec 2.13.4)",
+                     - name the bound (`<{t} as {}>::{name}`) (spec 2.13.4)",
                     show(a),
                     show(b),
                     show(a)
@@ -436,7 +436,7 @@ pub(super) fn pick_bound(
         }
         _ => Err(format!(
             "`{method}` on `{t}` is ambiguous: the arguments do not choose between its \
-             bounds {} — name one (`<{t} as {}>::{method}(..)`) (spec 4.9.6)",
+             bounds {} - name one (`<{t} as {}>::{method}(..)`) (spec 4.9.6)",
             all.join(" and "),
             cands[0].render(leaf_name(key), |t| ctx.ty_name(t))
         )),

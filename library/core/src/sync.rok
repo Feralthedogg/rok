@@ -1,4 +1,4 @@
-// rok::core::sync — concurrency primitives (stdlib spec 2.16).
+// rok::core::sync - concurrency primitives (stdlib spec 2.16).
 //
 // Every type is a handle over GC buffers: copying it (into a closure,
 // another thread) shares the one primitive. Blocking goes through the

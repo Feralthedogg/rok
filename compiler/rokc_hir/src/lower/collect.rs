@@ -1027,7 +1027,7 @@ fn collect<'a>(
                 span: s.span,
             });
         }
-        // Spec 5.9.3: `extern "C" { static errno: i32; }` — a C global,
+        // Spec 5.9.3: `extern "C" { static errno: i32; }` - a C global,
         // read (and with `mut` written) like a `static`.
         if let Item::Extern(blk) = item {
             let dll_import = !links_static(&blk.attrs);
@@ -1280,7 +1280,7 @@ fn collect<'a>(
                             format!(
                                 "`{}`: a `rok_*` symbol is the runtime's, whose `str` is \
                                  `(ptr, len)`; an `extern \"C\"` `str` is a `char*` (spec 5.9.4, \
-                                 8.5) — give the C function another name",
+                                 8.5) - give the C function another name",
                                 fn_def.name
                             ),
                         );
@@ -1823,7 +1823,7 @@ fn collect<'a>(
                                  `throws`, so an impl can't add one (spec 4.4.9){}",
                                 td.name,
                                 if td.attrs.iter().any(|a| a.path == ["lang"]) {
-                                    " — operators don't throw; return a `Result` or use \
+                                    " - operators don't throw; return a `Result` or use \
                                      a named method"
                                 } else {
                                     ""
@@ -3319,7 +3319,7 @@ pub(super) fn check_unresolved_types(
                 f.span,
                 format!(
                     "internal compiler error: an expression in `{}` has no resolved type \
-                 (lowering fell through without a diagnostic) — please report",
+                 (lowering fell through without a diagnostic) - please report",
                     f.name
                 ),
             ));
@@ -3706,7 +3706,7 @@ pub(super) fn lower_enum_def(
                     named_fields: Vec::new(),
                     arity: 0,
                 },
-                // Single-element tuple — store the payload type directly.
+                // Single-element tuple - store the payload type directly.
                 AstEnumVariantKind::Tuple(tys) if tys.len() == 1 => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
@@ -3714,7 +3714,7 @@ pub(super) fn lower_enum_def(
                     named_fields: Vec::new(),
                     arity: 1,
                 },
-                // Multi-element tuple — pack into a tuple payload type.
+                // Multi-element tuple - pack into a tuple payload type.
                 AstEnumVariantKind::Tuple(tys) => HirEnumVariant {
                     name: v.name.clone(),
                     tag,
@@ -5901,7 +5901,7 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
                     gi.self_ty.span,
                     format!(
                         "conflicting implementations of trait `{}` for `{}`: the concrete \
-                         impl overlaps `impl<..> {} for {}` (spec 2.9.3 — one impl per \
+                         impl overlaps `impl<..> {} for {}` (spec 2.9.3 - one impl per \
                          trait and type; no specialization)",
                         gi.trait_key,
                         ctx.ty_name(ty),
@@ -5970,7 +5970,7 @@ fn check_impl_overlap(env: &Env<'_>, own: &dyn Fn(&str) -> bool) {
                     b.self_ty.span,
                     format!(
                         "conflicting implementations of trait `{}`: `impl<..> {} for {}` and \
-                         `impl<..> {} for {}` overlap on `{t}` — bounds don't make impls \
+                         `impl<..> {} for {}` overlap on `{t}` - bounds don't make impls \
                          disjoint (spec 2.9.5 coherence; no specialization)",
                         a.trait_key,
                         a.trait_key,
@@ -6481,7 +6481,7 @@ fn check_auto_impl(
             err(
                 diags,
                 format!(
-                    "`{tr}` is not an auto trait — `unsafe impl` and `impl !Trait` are only \
+                    "`{tr}` is not an auto trait - `unsafe impl` and `impl !Trait` are only \
                      for `Send` / `Sync`"
                 ),
             );
@@ -6543,7 +6543,7 @@ fn check_extern_fn(f: &FnDef, abi: &str, diags: &mut Vec<rokc_diagnostic::RokDia
         bad("unsupported ABI (`\"C\"` or `\"system\"`)".to_owned());
     }
     if !matches!(f.throws, rokc_ast::ThrowsKind::None) {
-        bad("cannot `throws` — an error cannot cross into C".to_owned());
+        bad("cannot `throws` - an error cannot cross into C".to_owned());
     }
     if !f.generics.params.is_empty() {
         bad("cannot be generic".to_owned());
@@ -6766,7 +6766,7 @@ pub(super) fn intrinsic_of(
     };
     let Some(intrinsic) = name.as_deref().and_then(Intrinsic::parse) else {
         return err(format!(
-            "`#[intrinsic({})]` on `{}`: unknown intrinsic — expected `rok.OP.TYPE` \
+            "`#[intrinsic({})]` on `{}`: unknown intrinsic - expected `rok.OP.TYPE` \
              (stdlib spec 0.3.3)",
             name.map_or_else(String::new, |n| format!("\"{n}\"")),
             m.name
@@ -7645,7 +7645,7 @@ fn literal_handlers(
                     attr.span,
                     format!(
                         "`#[literal({text})]` is already registered by `{first}` with the same \
-                         priority and return type: every use would be ambiguous — drop one, or \
+                         priority and return type: every use would be ambiguous - drop one, or \
                          give one a `priority = N` (spec 6.5.5)"
                     ),
                 )

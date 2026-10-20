@@ -66,7 +66,7 @@ pub(super) fn lower_closure_expr(
         ctx.emit_error(
             rokc_diagnostic::ErrorKind::Type,
             format!(
-                "closure parameter `{}` cannot be `ref` — a `fn` type has no `ref` \
+                "closure parameter `{}` cannot be `ref` - a `fn` type has no `ref` \
                  parameters (spec 4.7.6)",
                 p.name
             ),
@@ -347,7 +347,7 @@ pub(super) fn closure_ctx<'a>(
                     ctx.emit_error(
                         rokc_diagnostic::ErrorKind::Type,
                         format!(
-                            "cannot infer the type of closure parameter `{}` — annotate \
+                            "cannot infer the type of closure parameter `{}` - annotate \
                              it (`|{}: i32| ...`)",
                             p.name, p.name
                         ),
@@ -477,7 +477,7 @@ pub(super) fn desugar_question_dot(
         return ctx.error_expr(
             span,
             format!(
-                "`?.` needs an optional (`T | none`) receiver, found `{}` — it is not \
+                "`?.` needs an optional (`T | none`) receiver, found `{}` - it is not \
                  optional, so use `.`",
                 ctx.ty_name(&recv.ty)
             ),
@@ -611,7 +611,7 @@ pub(super) fn desugar_try_q(
         return ctx.error_expr(
             span,
             format!(
-                "`?` only works on `T | none`, found `{}` — to propagate errors use `throws` \
+                "`?` only works on `T | none`, found `{}` - to propagate errors use `throws` \
                  and `try` (spec 3.14 / 4.14)",
                 ctx.ty_name(&inner.ty)
             ),
@@ -622,7 +622,7 @@ pub(super) fn desugar_try_q(
         return ctx.error_expr(
             span,
             format!(
-                "`?` propagates `none`, but the enclosing function returns `{}` — its \
+                "`?` propagates `none`, but the enclosing function returns `{}` - its \
                  return type must include `none`",
                 ctx.ty_name(&ret_ty)
             ),
@@ -827,7 +827,7 @@ pub(super) fn bind_irrefutable(
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
-                    "this pattern can't destructure a value of type `{}` here — it must be \
+                    "this pattern can't destructure a value of type `{}` here - it must be \
                      irrefutable: a name, `_`, `name @ pat`, or a tuple / struct of those",
                     ctx.ty_name(&ty)
                 ),
@@ -940,7 +940,7 @@ pub(super) fn lower_for_iter(
         return ctx.error_expr(
             span,
             format!(
-                "cannot iterate over a value of type `{}` — `for` needs an integer range, \
+                "cannot iterate over a value of type `{}` - `for` needs an integer range, \
                  an array, or an `IntoIterator` / `Iterator` impl (stdlib 2.7.2)",
                 ctx.ty_name(&iter_h.ty)
             ),

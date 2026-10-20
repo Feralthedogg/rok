@@ -98,7 +98,7 @@ pub(super) fn method_call(
     Ok(dynamic(ctx, recv, method))
 }
 
-/// `Reflect::type_name_of(x)` / `Reflect::type_name()` — the trait named
+/// `Reflect::type_name_of(x)` / `Reflect::type_name()` - the trait named
 /// as the path.
 pub(super) fn trait_call(
     ctx: &mut LowerCtx<'_>,

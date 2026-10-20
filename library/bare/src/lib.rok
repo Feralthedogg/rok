@@ -1,4 +1,4 @@
-// rok::bare — raw pointers, transmute, raw allocation, pinning and
+// rok::bare - raw pointers, transmute, raw allocation, pinning and
 // volatile access, over the runtime's `extern "rok"` symbols only. Never
 // in the prelude: code that needs it says `use rok::bare::..`.
 

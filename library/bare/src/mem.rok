@@ -1,4 +1,4 @@
-// rok::bare::mem — raw memory operations, `Pod` and bit casts (stdlib
+// rok::bare::mem - raw memory operations, `Pod` and bit casts (stdlib
 // spec 1.2.5 / 1.2.6 / 1.3).
 //
 // A bit cast goes through a scratch block outside the GC (a generic

@@ -1,4 +1,4 @@
-// rok::std::rokon — ROKON (Rok Object Notation, `.rokon`): one value
+// rok::std::rokon - ROKON (Rok Object Notation, `.rokon`): one value
 // written in rok literal syntax (stdlib spec 3.9).
 //
 // `parse` reads a document into a `Value`, `Value::to_string` writes the

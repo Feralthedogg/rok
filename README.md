@@ -2,8 +2,8 @@
 
 The implementation of the rok language: the compiler `rokc`, the package / build front-end `rok`, the language
 server `rokls`, the runtime `librokr.a`, and the standard library (`library/{core,std,bare}`). The language
-specification lives in [rok-lang/spec](https://github.com/rok-lang/spec); the introduction and getting-started
-guide are at [rok-lang.org](https://rok-lang.org).
+specification lives in [rok-lang/spec](https://github.com/rok-lang/spec); the guide, the
+reference and the standard library API are at [docs.rok-lang.org](https://docs.rok-lang.org).
 
 ## Requirements
 
@@ -36,7 +36,7 @@ curl -fsSL https://rok-lang.org/install.sh | sh
 Or from a release archive:
 
 ```sh
-sh install.sh --archive rok-0.1.0-aarch64-apple-darwin.tar.gz
+sh install.sh --archive rok-0.1.0-aarch64-apple-darwin.tar.xz   # or the .tar.gz
 rok-0.1.0-aarch64-apple-darwin/install.sh     # from inside an unpacked archive
 ```
 
@@ -116,7 +116,7 @@ rok jupyter install  # rok kernel for Jupyter / VS Code
 
 ```sh
 cargo build --release                 # target/release/{rok,rokc,rokls}, librokr.a
-./dist.sh                             # dist/rok-<version>-<triple>.tar.gz (+ .sha256),
+./dist.sh                             # dist/rok-<version>-<triple>.tar.gz and .tar.xz (+ .sha256),
                                       # dist/rok-mlir-dev-<version>-<triple>.tar.gz (MLIR plugins)
 sh install.sh --archive dist/rok-*.tar.gz
 ```

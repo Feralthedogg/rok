@@ -14,7 +14,7 @@
 // guard 8
 // sum 6
 
-// `name @ pat` binds the whole value matched by `pat` — in match,
+// `name @ pat` binds the whole value matched by `pat` - in match,
 // if let and while let, nested in tuples / structs / enum payloads.
 struct Point { x: i32; y: i32; }
 
