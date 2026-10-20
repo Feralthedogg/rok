@@ -27,39 +27,39 @@ src=$(mktemp -d)
 trap 'rm -rf "$src"' EXIT
 
 fetch() {
-	mkdir -p "$src/$(dirname "$1")"
-	curl -fsSL --retry 3 -o "$src/$1" "$BASE/$1"
+  mkdir -p "$src/$(dirname "$1")"
+  curl -fsSL --retry 3 -o "$src/$1" "$BASE/$1"
 }
 for f in $INCLUDES; do fetch "$f"; done
 echo "$LIBS" | while read -r name path x86; do
-	[ -n "$name" ] || continue
-	fetch "$path"
-	[ -z "$x86" ] || fetch "$x86"
+  [ -n "$name" ] || continue
+  fetch "$path"
+  [ -z "$x86" ] || fetch "$x86"
 done
 curl -fsSL --retry 3 -o "$here/COPYING.mingw-w64" "${BASE%/mingw-w64-crt}/COPYING"
 
 for arch in x86_64 aarch64 i686; do
-	mkdir -p "$here/$arch"
-	echo "$LIBS" | while read -r name path x86; do
-		[ -n "$name" ] || continue
-		# stdcall's `@<bytes>` stays on x86 (rokc imports those
-		# undecorated, like dlltool -k); the other arches have none.
-		strip='s/^\([A-Za-z_][A-Za-z0-9_]*\)@[0-9][0-9]*/\1/'
-		if [ "$arch" = i686 ]; then
-			strip='s/^$//'
-			path=${x86:-$path}
-		fi
-		{
-			echo "; $(basename "$path") of mingw-w64 $COMMIT (COPYING.mingw-w64),"
-			echo "; preprocessed for $arch-pc-windows-msvc by gen.sh, comments dropped."
-			clang -E -P -x c -target "$arch-pc-windows-msvc" -w -I"$src/def-include" "$src/$path" |
-				sed -e 's/[[:space:]]*;.*$//' -e '/^[[:space:]]*$/d' -e "$strip"
-			# The 64-bit arithmetic helpers LLVM calls on x86 (MSVC's
-			# names), which x86 ntdll exports and mingw-w64 lists not.
-			if [ "$arch$name" = i686ntdll ]; then
-				printf '%s\n' _alldiv _alldvrm _allmul _allrem _allshl _allshr \
-					_aulldiv _aulldvrm _aullrem _aullshr
-			fi
-		} > "$here/$arch/$name.def"
-	done
+  mkdir -p "$here/$arch"
+  echo "$LIBS" | while read -r name path x86; do
+    [ -n "$name" ] || continue
+    # stdcall's `@<bytes>` stays on x86 (rokc imports those
+    # undecorated, like dlltool -k); the other arches have none.
+    strip='s/^\([A-Za-z_][A-Za-z0-9_]*\)@[0-9][0-9]*/\1/'
+    if [ "$arch" = i686 ]; then
+      strip='s/^$//'
+      path=${x86:-$path}
+    fi
+    {
+      echo "; $(basename "$path") of mingw-w64 $COMMIT (COPYING.mingw-w64),"
+      echo "; preprocessed for $arch-pc-windows-msvc by gen.sh, comments dropped."
+      clang -E -P -x c -target "$arch-pc-windows-msvc" -w -I"$src/def-include" "$src/$path" |
+        sed -e 's/[[:space:]]*;.*$//' -e '/^[[:space:]]*$/d' -e "$strip"
+      # The 64-bit arithmetic helpers LLVM calls on x86 (MSVC's
+      # names), which x86 ntdll exports and mingw-w64 lists not.
+      if [ "$arch$name" = i686ntdll ]; then
+        printf '%s\n' _alldiv _alldvrm _allmul _allrem _allshl _allshr \
+          _aulldiv _aulldvrm _aullrem _aullshr
+      fi
+    } > "$here/$arch/$name.def"
+  done
 done

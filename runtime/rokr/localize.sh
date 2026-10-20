@@ -18,7 +18,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 case $(uname -s) in MINGW* | MSYS* | CYGWIN*) exe=.exe ;; *) exe="" ;; esac
 host=$(rustc -vV | sed -n 's/^host: //p')
-rustup component add llvm-tools >/dev/null
+rustup component add llvm-tools > /dev/null
 bin=$(rustc --print sysroot)/lib/rustlib/$host/bin
 cache=${ROK_LLVM_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok}
 lld=${ROK_LLVM_PREFIX:-$cache/llvm-22.1.8}/bin/ld.lld$exe
@@ -37,7 +37,7 @@ case $magic in
     # meets another staticlib's. The intrinsics are weak externals
     # already and keep their names. x86 spells C names `_rok*`.
     "$bin/llvm-nm$exe" --defined-only --extern-only "$tmp"/x/*.o |
-      awk '$2 ~ /^[TDRB]$/ && $3 !~ /^_?rok/ { print $3, "rokr." $3 }' | sort -u >"$tmp/names"
+      awk '$2 ~ /^[TDRB]$/ && $3 !~ /^_?rok/ { print $3, "rokr." $3 }' | sort -u > "$tmp/names"
     for o in "$tmp"/x/*.o; do
       "$bin/llvm-objcopy$exe" --redefine-syms="$tmp/names" "$o"
     done
@@ -63,7 +63,7 @@ case $magic in
     # name: ld64 refuses to export a private extern (`_rok_tls_addr`)
     # that a `_rok_*` pattern matches; private externs become local.
     nm -gmU "$tmp"/x/*.o | awk '$0 !~ /private external/ && $NF ~ /^_rok_/ { print $NF }' |
-      sort -u >"$tmp/exports"
+      sort -u > "$tmp/exports"
     cc -r -nostdlib -arch "$(lipo -archs "$first")" "$tmp"/x/*.o \
       -Wl,-exported_symbols_list,"$tmp/exports" -Wl,-S -o "$tmp/rokr.o"
     format=darwin

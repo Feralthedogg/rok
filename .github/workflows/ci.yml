@@ -43,6 +43,32 @@ defaults:
     shell: bash
 
 jobs:
+  # Shell and PowerShell hygiene (justfile `fmt-check` for *.sh, `lint-sh`,
+  # `lint-ps`). Independent of the build matrix and cheap, so it runs on
+  # every event. shellcheck and pwsh ship in the runner image.
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shfmt
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/shfmt \
+            https://github.com/mvdan/sh/releases/download/v3.14.0/shfmt_v3.14.0_linux_amd64
+          sudo chmod +x /usr/local/bin/shfmt
+          find . -name '*.sh' -not -path './target/*' -exec shfmt -d {} +
+      - name: shellcheck
+        run: find . -name '*.sh' -not -path './target/*' -exec shellcheck --severity=warning {} +
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser -SkipPublisherCheck
+          $found = Get-ChildItem -Recurse -Filter *.ps1 |
+              Where-Object { $_.FullName -notmatch '[/\\]target[/\\]' } |
+              ForEach-Object { Invoke-ScriptAnalyzer -Path $_.FullName -Settings ./PSScriptAnalyzerSettings.psd1 }
+          $found | Format-Table -AutoSize
+          if ($found) { exit 1 }
+
   # What runs where. hosts: the gate's hosts; prefixes: the hosts whose
   # LLVM prefix a later job restores; runners: host -> runs-on labels
   # (a repository variable puts linux-x64 / windows-x64 on a self-hosted

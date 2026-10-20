@@ -5,7 +5,7 @@ use std::fmt::Write;
 use rokc_ir_common::{ConstVal, PrimTy};
 
 use crate::{
-    HirBlock, HirExpr, HirExprKind, HirFunction, HirMatchArm, HirModule, HirPattern, HirStmt, HirTy,
+    HirBlock, HirExpr, HirExprKind, HirFunction, HirModule, HirPattern, HirStmt, HirTy,
 };
 
 #[must_use]
@@ -571,9 +571,6 @@ fn print_pattern(out: &mut String, p: &HirPattern) {
         }
     }
 }
-
-#[allow(unused)]
-const fn _silence(_: &HirMatchArm) {}
 
 fn print_const(out: &mut String, c: &ConstVal) {
     match c {

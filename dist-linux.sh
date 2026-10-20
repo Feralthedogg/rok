@@ -18,13 +18,16 @@ out=dist
 case "${1-}" in
   --out) out=$2 ;;
   "") ;;
-  *) echo "usage: ./dist-linux.sh [--out <dir>]" >&2; exit 2 ;;
+  *)
+    echo "usage: ./dist-linux.sh [--out <dir>]" >&2
+    exit 2
+    ;;
 esac
 # The commit for --version, taken here: the container may not see the
 # repository (a worktree's .git points outside the mount).
 if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
-  if h=$(git rev-parse --short=9 HEAD 2>/dev/null) &&
-    d=$(git log -1 --format=%cs 2>/dev/null); then
+  if h=$(git rev-parse --short=9 HEAD 2> /dev/null) &&
+    d=$(git log -1 --format=%cs 2> /dev/null); then
     ROK_COMMIT_HASH=${ROK_COMMIT_HASH:-$h}
     ROK_COMMIT_DATE=${ROK_COMMIT_DATE:-$d}
   else
@@ -44,8 +47,8 @@ out=$(cd "$out" && pwd)
 
 # The image is named after its definition.
 tag=rok-dist-linux:$(sha256sum dist-linux.Containerfile | cut -c1-12)
-$engine image inspect "$tag" >/dev/null 2>&1 ||
-  $engine build -t "$tag" - <dist-linux.Containerfile
+$engine image inspect "$tag" > /dev/null 2>&1 ||
+  $engine build -t "$tag" - < dist-linux.Containerfile
 
 # Rootless podman maps the container's root to the caller; docker's is
 # root, so it runs as the caller.

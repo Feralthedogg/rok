@@ -17,7 +17,10 @@ home="${ROK_HOME:-$HOME/.rok}"
 archive=""
 
 say() { printf '%s\n' "$*"; }
-die() { printf 'install.sh: error: %s\n' "$*" >&2; exit 1; }
+die() {
+  printf 'install.sh: error: %s\n' "$*" >&2
+  exit 1
+}
 usage() {
   say "usage: install.sh [--archive <rok-*.tar.xz | rok-*.tar.gz>] [--version <version>]"
   say "installs into \$ROK_HOME (now $home)"
@@ -25,10 +28,30 @@ usage() {
 
 while [ $# -gt 0 ]; do
   case $1 in
-    --archive) [ $# -ge 2 ] || { usage >&2; exit 2; }; archive=$2; shift 2 ;;
-    --version) [ $# -ge 2 ] || { usage >&2; exit 2; }; version=$2; shift 2 ;;
-    -h | --help) usage; exit 0 ;;
-    *) usage >&2; exit 2 ;;
+    --archive)
+      [ $# -ge 2 ] || {
+        usage >&2
+        exit 2
+      }
+      archive=$2
+      shift 2
+      ;;
+    --version)
+      [ $# -ge 2 ] || {
+        usage >&2
+        exit 2
+      }
+      version=$2
+      shift 2
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
   esac
 done
 
@@ -43,7 +66,7 @@ host_triple() {
     Darwin) say "$arch-apple-darwin" ;;
     Linux)
       # A musl system has its loader, /lib/ld-musl-<arch>.so.1.
-      if ls /lib/ld-musl-* >/dev/null 2>&1; then
+      if ls /lib/ld-musl-* > /dev/null 2>&1; then
         say "$arch-unknown-linux-musl"
       else
         say "$arch-unknown-linux-gnu"
@@ -57,9 +80,9 @@ host_triple() {
 # Check archive $1 against the SHA-256 in $2 (a release's .sha256).
 check_sum() {
   want=$(awk '{ print tolower($1); exit }' "$2")
-  if command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum > /dev/null 2>&1; then
     got=$(sha256sum "$1" | awk '{ print $1 }')
-  elif command -v shasum >/dev/null 2>&1; then
+  elif command -v shasum > /dev/null 2>&1; then
     got=$(shasum -a 256 "$1" | awk '{ print $1 }')
   else
     die "sha256sum or shasum is needed to check $1"
@@ -84,7 +107,8 @@ download() {
 no_archive() {
   case " $supported " in
     *" $triple "*)
-      die "rok $version has no release archive at $url; check the version (--version, ROK_VERSION)" ;;
+      die "rok $version has no release archive at $url; check the version (--version, ROK_VERSION)"
+      ;;
   esac
   printf 'install.sh: error: there is no rok %s release archive for %s\n' "$version" "$triple" >&2
   printf '  release archives are built for: %s\n' "$supported" >&2
@@ -97,7 +121,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/rok-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 # An unpacked toolchain around this script installs itself.
-here=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || here=""
+here=$(cd "$(dirname "$0")" 2> /dev/null && pwd) || here=""
 if [ -z "$archive" ] && [ -n "$here" ] && [ -x "$here/bin/rok" ] && [ -x "$here/bin/rokc" ]; then
   src=$here
 else
@@ -107,7 +131,7 @@ else
     # The .tar.xz is about half the .tar.gz; tar needs xz for it on Linux
     # (macOS's tar reads it itself). A release without one gets the .tar.gz.
     url=""
-    if [ "$(uname -s)" = Darwin ] || command -v xz >/dev/null 2>&1; then
+    if [ "$(uname -s)" = Darwin ] || command -v xz > /dev/null 2>&1; then
       url="$base.tar.xz"
       archive="$tmp/rok.tar.xz"
       say "downloading $url"
@@ -139,7 +163,7 @@ full=$("$src/bin/rokc" --version | awk 'NR == 1 { print $2 }') || die "cannot ru
 # The toolchain's own rok installs it (and checks it).
 ROK_HOME=$home "$src/bin/rok" -q toolchain install "$full" --from "$src"
 ROK_HOME=$home "$src/bin/rok" -q toolchain default "$full"
-"$home/bin/rok" --version >/dev/null || die "the installed proxy $home/bin/rok does not run"
+"$home/bin/rok" --version > /dev/null || die "the installed proxy $home/bin/rok does not run"
 
 say ""
 say "rok $full is installed in $home"
@@ -156,7 +180,7 @@ esac
 # rokc links its own LLVM and linker, and on Linux its own C library
 # files (lib/rok/targets); on macOS the link needs the SDK of Xcode's
 # command line tools.
-if [ "$(uname -s)" = Darwin ] && ! xcrun --show-sdk-path >/dev/null 2>&1; then
+if [ "$(uname -s)" = Darwin ] && ! xcrun --show-sdk-path > /dev/null 2>&1; then
   say ""
   say "rok needs the macOS SDK to link programs: xcode-select --install"
 fi

@@ -36,15 +36,18 @@ out=dist
 case "${1-}" in
   --out) out=$2 ;;
   "") ;;
-  *) echo "usage: ./dist.sh [--out <dir>]" >&2; exit 2 ;;
+  *)
+    echo "usage: ./dist.sh [--out <dir>]" >&2
+    exit 2
+    ;;
 esac
 
 # A release's --version names its commit: ROK_COMMIT_HASH and
 # ROK_COMMIT_DATE (dist-linux.sh passes the host's), else git. A
 # checkout without .git (`git archive`) has neither.
 if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
-  if h=$(git rev-parse --short=9 HEAD 2>/dev/null) &&
-    d=$(git log -1 --format=%cs 2>/dev/null); then
+  if h=$(git rev-parse --short=9 HEAD 2> /dev/null) &&
+    d=$(git log -1 --format=%cs 2> /dev/null); then
     ROK_COMMIT_HASH=${ROK_COMMIT_HASH:-$h}
     ROK_COMMIT_DATE=${ROK_COMMIT_DATE:-$d}
   else
@@ -155,7 +158,7 @@ fi
 # versions into the binaries, and its headers (C23 __isoc23_*) into the
 # runtimes, which link against their target's stub libc (glibc 2.36).
 if [ "$(uname -s)" = Linux ] && [ -z "$static" ]; then
-  rustup component add llvm-tools >/dev/null
+  rustup component add llvm-tools > /dev/null
   tools=$(rustc --print sysroot)/lib/rustlib/$triple/bin
   readelf() { "$tools/llvm-readobj" --elf-output-style=GNU "$@"; }
   # The lines of stdin whose last GLIBC_ version is above 2.34 (or none).
@@ -200,12 +203,13 @@ cp install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE \
 # Its programs need glibc 2.34: an older host (dist-linux.sh's) only
 # links them, and dist-linux.sh runs them on 2.34.
 run=1
-case $(getconf GNU_LIBC_VERSION 2>/dev/null) in "glibc 2."[0-9] | "glibc 2."[12][0-9] | "glibc 2.3"[0-3]) run="" ;; esac
+case $(getconf GNU_LIBC_VERSION 2> /dev/null) in "glibc 2."[0-9] | "glibc 2."[12][0-9] | "glibc 2.3"[0-3]) run="" ;; esac
 printf 'fn main() -> i32 {\n    println("ok");\n    0\n}\n' > "$stage/check.rok"
 for o in -O0 -O2; do
   PATH=/usr/bin:/bin "$stage/bin/rokc$exe" -q build "$stage/check.rok" $o -o "$stage/check$exe"
   [ -z "$run" ] || [ "$("$stage/check$exe")" = ok ]
   # Every shipped target links (it runs only where the machine can).
+  # shellcheck disable=SC2045 # the target dirs are controlled triples: no spaces or globs
   for t in $(ls "$stage/lib/rok/targets"); do
     PATH=/usr/bin:/bin "$stage/bin/rokc$exe" -q build "$stage/check.rok" $o --target "$t" -o "$stage/check$exe"
   done
@@ -232,7 +236,7 @@ if [ -n "$devname" ]; then
 fi
 
 sum=$(command -v sha256sum || echo "shasum -a 256")
-if [ "$ext" != zip ] && ! command -v xz >/dev/null 2>&1; then
+if [ "$ext" != zip ] && ! command -v xz > /dev/null 2>&1; then
   echo "dist.sh: xz is needed for the .tar.xz archive (Debian / Ubuntu: apt install xz-utils; macOS: brew install xz)" >&2
   exit 1
 fi
@@ -244,7 +248,10 @@ for n in "$name" $devname; do
     *)
       tar -C "$out" -czf "$out/$n.$ext" "$n"
       # rok toolchain install reads the .tar.gz; install.sh prefers this.
-      [ "$n" != "$name" ] || { tar -C "$out" -cf - "$n" | xz -9 -T0 > "$out/$n.tar.xz"; exts="$ext tar.xz"; }
+      [ "$n" != "$name" ] || {
+        tar -C "$out" -cf - "$n" | xz -9 -T0 > "$out/$n.tar.xz"
+        exts="$ext tar.xz"
+      }
       ;;
   esac
   for e in $exts; do

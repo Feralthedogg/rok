@@ -1,0 +1,25 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Shell: POSIX sh. shfmt reads these keys too.
+[*.sh]
+indent_size = 2
+switch_case_indent = true
+space_redirects = true
+
+[*.ps1]
+indent_size = 4
+
+[*.{yml,yaml,toml,json}]
+indent_size = 2
+
+# Keep hard line breaks (two trailing spaces) in prose.
+[*.md]
+trim_trailing_whitespace = false

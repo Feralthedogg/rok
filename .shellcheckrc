@@ -1,0 +1,4 @@
+# ShellCheck configuration. The scripts are POSIX sh (per their shebangs),
+# so ShellCheck flags bashisms. None are sourced, so do not follow sources.
+# The warning/error gate lives in the justfile (shellcheck --severity).
+external-sources=false

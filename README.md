@@ -18,7 +18,7 @@ reference and the standard library API are at [docs.rok-lang.org](https://docs.r
   `riscv64gc-unknown-linux-gnu`; `wasm32-*`) and every optimized build goes through LLVM.
 - The REPL and the Jupyter kernel run on macOS, Linux and Windows; a static (musl) `rokc` has no REPL,
   `rokc bindgen` or MLIR plugins.
-- Building from source needs Rust (`rust-toolchain.toml`; no external crates are used), and for anything above
+- Building from source needs Rust (`rust-toolchain.toml`; only the `libc` sys crate otherwise), and for anything above
   `-O0` the pinned LLVM: `llvm/build.sh` builds it once into `~/.cache/rok` (cmake, ninja, about an hour; see
   `llvm/README.md`). Without it `rokc` builds `-O0` only (the native backend), linking with the system `cc`.
   `targets/build.sh` builds what `--target` links into `target/lib/rok/targets/` (rustup with llvm-tools, curl, make,
