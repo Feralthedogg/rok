@@ -920,6 +920,22 @@ fn macro_expansion_is_recorded() {
 }
 
 #[test]
+fn macro_string_interpolation() {
+    // `@name` inside a string interpolates the binding (per-element in @for).
+    let (p, diags) = parse_meta(
+        "#[impl_macro(tag)] pub @macro { (@rep[sep = \",\"] { @t: ident }) => { \
+         @for @t { fn @concat(g_, @t)() -> str { return \"@t\"; } } } }\n\
+         tag!(a, b);",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    let joined = p.expanded.join("\n");
+    assert!(
+        joined.contains("\"a\"") && joined.contains("\"b\""),
+        "{joined}"
+    );
+}
+
+#[test]
 fn macro_expr_no_rule_matches() {
     let (_, diags) = parse_meta(
         "#[impl_macro(one)] pub @macro { (@a: expr, @b: expr) => { (@a, @b) } }\n\

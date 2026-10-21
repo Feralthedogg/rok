@@ -84,6 +84,25 @@ fn declarative_macros_run_end_to_end() {
     assert_eq!(text(&out.stdout), "400 1\n");
 }
 
+// The integer `*Assign` impls are macro-generated (spec 6.8.12); check a
+// few compound assignments across types actually work at runtime.
+#[test]
+fn macro_generated_compound_assigns_work() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("assigns");
+    let app = new_package(&dir, "app", false);
+    put(
+        app.join("src/main.rok"),
+        "fn main() {\n    let a = 10i64;\n    a += 5i64;\n    a *= 2i64;\n    a -= 1i64;\n\
+         \x20   let b = 12u8;\n    b <<= 1u8;\n    b &= 254u8;\n    println(f\"{a} {b}\");\n}\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["-q", "run"]);
+    assert_exit(&out, 0);
+    // a: ((10+5)*2)-1 = 29;  b: (12<<1) & 254 = 24
+    assert_eq!(text(&out.stdout), "29 24\n");
+}
+
 // spec: §9.1.1 §9.1.2 §9.1.4 §9.1.5 §9.2.2 §9.2.15
 #[test]
 fn new_bin_package_runs_from_its_directory() {

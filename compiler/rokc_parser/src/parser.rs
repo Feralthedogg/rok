@@ -21,6 +21,7 @@ mod fstring;
 pub mod literal;
 #[path = "macros.rs"]
 mod macros;
+pub use macros::expand_to_text;
 #[path = "meta.rs"]
 pub mod meta;
 

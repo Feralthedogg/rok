@@ -158,6 +158,29 @@ impl<W: Write> Server<W> {
                                 Json::Arr(vec![Json::str("."), Json::str(":")]),
                             )]),
                         ),
+                        // Highlight what the static grammar cannot know:
+                        // macro calls and user-defined literal suffixes.
+                        (
+                            "semanticTokensProvider",
+                            Json::obj([
+                                (
+                                    "legend",
+                                    Json::obj([
+                                        (
+                                            "tokenTypes",
+                                            Json::Arr(vec![
+                                                Json::str("macro"),
+                                                Json::str("decorator"),
+                                                Json::str("keyword"),
+                                                Json::str("operator"),
+                                            ]),
+                                        ),
+                                        ("tokenModifiers", Json::Arr(Vec::new())),
+                                    ]),
+                                ),
+                                ("full", Json::Bool(true)),
+                            ]),
+                        ),
                     ]),
                 ),
                 (
@@ -197,6 +220,14 @@ impl<W: Write> Server<W> {
                 self.docs.remove(&uri);
                 self.publish(&uri, Vec::new());
                 return None;
+            }
+            "textDocument/semanticTokens/full" => {
+                let data = self
+                    .docs
+                    .get(&uri)
+                    .map(|d| semantic_tokens(&d.text))
+                    .unwrap_or_default();
+                Json::obj([("data", Json::Arr(data.into_iter().map(Json::num).collect()))])
             }
             "textDocument/hover"
             | "textDocument/definition"
@@ -437,8 +468,11 @@ impl<W: Write> Server<W> {
                 ))
             }
             "textDocument/hover" => {
-                let a = doc.good.as_ref()?;
-                let value = hover(a, &key, text, off)?;
+                // On a `name!(..)` call, show its expansion in place.
+                let value = macro_hover(text, off).or_else(|| {
+                    let a = doc.good.as_ref()?;
+                    hover(a, &key, text, off)
+                })?;
                 Some(Json::obj([(
                     "contents",
                     Json::obj([("kind", Json::str("markdown")), ("value", Json::str(value))]),
@@ -1218,6 +1252,203 @@ fn offset(text: &str, line: u32, col: u32) -> usize {
 }
 
 /// LSP position of a byte offset.
+/// If `off` is inside a `name!(..)` macro call whose macro is defined in
+/// this file, its expansion rendered as markdown (spec 6.8.12 tooling:
+/// "expand in place", surfaced through hover).
+fn macro_hover(text: &str, off: usize) -> Option<String> {
+    use rokc_lexer::{Lexer, TokenKind};
+    use rokc_parser::MetaKind;
+    let (toks, _) = Lexer::new(text, "").lex_all();
+    for (i, t) in toks.iter().enumerate() {
+        let TokenKind::Ident(name) = &t.kind else {
+            continue;
+        };
+        if toks.get(i + 1).map(|x| &x.kind) != Some(&TokenKind::Bang) {
+            continue;
+        }
+        let open = i + 2;
+        if !matches!(
+            toks.get(open).map(|x| &x.kind),
+            Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace)
+        ) {
+            continue;
+        }
+        let Some(close) = balanced_close(&toks, open) else {
+            continue;
+        };
+        let (lo, hi) = (t.span.start as usize, toks[close].span.end as usize);
+        if off < lo || off > hi {
+            continue;
+        }
+        let def = rokc_parser::collect_meta_blocks(&toks, "")
+            .into_iter()
+            .find(|d| d.kind == MetaKind::Macro && &d.name == name)?;
+        let call = toks[open + 1..close].to_vec();
+        let expanded = rokc_parser::expand_to_text(&def, &call, t.span)?;
+        return Some(format!("```rok\n{expanded}\n```"));
+    }
+    None
+}
+
+/// The matching close of a bracket at `open` (`#[` / `#![` count as opens).
+fn balanced_close(toks: &[rokc_lexer::Token], open: usize) -> Option<usize> {
+    use rokc_lexer::TokenKind as K;
+    let mut depth = 0i32;
+    for (i, t) in toks.iter().enumerate().skip(open) {
+        match &t.kind {
+            K::LParen | K::LBracket | K::LBrace | K::HashLBracket | K::HashBangLBracket => {
+                depth += 1;
+            }
+            K::RParen | K::RBracket | K::RBrace => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 0-based line and UTF-16 character of a byte offset.
+fn line_col(text: &str, off: usize) -> (u32, u32) {
+    let off = off.min(text.len());
+    let before = &text[..off];
+    let line = before.matches('\n').count() as u32;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let col: u32 = before[line_start..]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+    (line, col)
+}
+
+/// LSP semantic tokens (delta-encoded) for what the grammar cannot know:
+/// macro calls `name!(..)` (type `macro`) and user-defined literal
+/// suffixes `123suffix` (type `decorator`) - spec 6.5 / 6.8.12.
+fn semantic_tokens(text: &str) -> Vec<u32> {
+    use rokc_lexer::{Lexer, TokenKind};
+    let (raw, _) = Lexer::new(text, "").lex_all();
+    // User operator symbols from `#[infix/prefix/postfix("X")]`; re-lex with
+    // them so their uses tokenize as extension operators.
+    let ops: Vec<String> = raw
+        .windows(4)
+        .filter_map(|w| {
+            let (
+                TokenKind::HashLBracket,
+                TokenKind::Ident(a),
+                TokenKind::LParen,
+                TokenKind::StrLit(s),
+            ) = (&w[0].kind, &w[1].kind, &w[2].kind, &w[3].kind)
+            else {
+                return None;
+            };
+            matches!(a.as_str(), "infix" | "prefix" | "postfix").then(|| s.clone())
+        })
+        .collect();
+    let (toks, _) = Lexer::new(text, "").with_ext_ops(ops).lex_all();
+    // User-defined literal suffixes registered in this file by
+    // `#[literal(number "x")]` - only these are highlighted (spec 6.5), so
+    // `5kg` lights up when the user defined `kg`, not for any stray suffix.
+    let suffixes: std::collections::HashSet<String> = rokc_parser::collect_literals(&toks, "")
+        .iter()
+        .filter_map(|d| match d.tokens.as_slice() {
+            [a, b] if matches!(&a.kind, TokenKind::Ident(n) if n == "number") => match &b.kind {
+                TokenKind::StrLit(s) => Some(s.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    // User-defined keywords (#[keyword]) and derives / attributes (meta
+    // blocks); the macro / operator / literal forms are recognised from the
+    // token stream directly.
+    let keywords: std::collections::HashSet<String> =
+        rokc_parser::collect_keywords(&parse_doc(text, "").items, "")
+            .into_iter()
+            .map(|k| k.name)
+            .collect();
+    let metas = rokc_parser::collect_meta_blocks(&toks, "");
+    let is_kind =
+        |want: rokc_parser::MetaKind, n: &str| metas.iter().any(|d| d.kind == want && d.name == n);
+    // Token type indices in the legend: macro, decorator, keyword, operator.
+    let mut spans: Vec<(usize, usize, u32)> = Vec::new();
+    let span =
+        |t: &rokc_lexer::Token| (t.span.start as usize, (t.span.end - t.span.start) as usize);
+    for (i, t) in toks.iter().enumerate() {
+        match &t.kind {
+            // A macro call `name!( .. )`.
+            TokenKind::Ident(_)
+                if toks.get(i + 1).map(|x| &x.kind) == Some(&TokenKind::Bang)
+                    && matches!(
+                        toks.get(i + 2).map(|x| &x.kind),
+                        Some(TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace)
+                    ) =>
+            {
+                let start = t.span.start as usize;
+                let end = toks[i + 1].span.end as usize; // through the `!`
+                spans.push((start, end - start, 0));
+            }
+            // A user-defined keyword (#[keyword(..)]).
+            TokenKind::Ident(n) if keywords.contains(n) => {
+                let (o, l) = span(t);
+                spans.push((o, l, 2));
+            }
+            // A user-defined literal suffix (#[literal(number "x")]).
+            TokenKind::IntLit(s) | TokenKind::FloatLit(s) => {
+                if let Some(sfx) = rokc_parser::user_suffix(s) {
+                    if suffixes.contains(sfx) {
+                        let end = t.span.end as usize;
+                        spans.push((end - sfx.len(), sfx.len(), 1));
+                    }
+                }
+            }
+            // A user-defined operator (#[infix] / #[prefix] / #[postfix]):
+            // an extension operator token is user-defined by construction.
+            TokenKind::ExtOp(_) => {
+                let (o, l) = span(t);
+                spans.push((o, l, 3));
+            }
+            // `#[derive(X, ..)]` / `#[attr]`: light up user-defined names.
+            TokenKind::HashLBracket | TokenKind::HashBangLBracket => {
+                if let Some(close) = balanced_close(&toks, i) {
+                    if let Some(TokenKind::Ident(n)) = toks.get(i + 1).map(|x| &x.kind) {
+                        if is_kind(rokc_parser::MetaKind::Attribute, n) {
+                            let (o, l) = span(&toks[i + 1]);
+                            spans.push((o, l, 1));
+                        }
+                    }
+                    for x in &toks[i + 1..close] {
+                        if let TokenKind::Ident(n) = &x.kind {
+                            if is_kind(rokc_parser::MetaKind::Derive, n) {
+                                let (o, l) = span(x);
+                                spans.push((o, l, 1));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    spans.sort_by_key(|s| s.0);
+    spans.dedup();
+    let mut data = Vec::with_capacity(spans.len() * 5);
+    let (mut pl, mut pc) = (0u32, 0u32);
+    for (off, len, ty) in spans {
+        let (l, c) = line_col(text, off);
+        let (dl, dc) = (l - pl, if l == pl { c - pc } else { c });
+        let len16 = text[off..off + len]
+            .chars()
+            .map(|c| c.len_utf16() as u32)
+            .sum();
+        data.extend([dl, dc, len16, ty, 0]);
+        (pl, pc) = (l, c);
+    }
+    data
+}
+
 fn position(text: &str, off: usize) -> Json {
     let mut off = off.min(text.len());
     while !text.is_char_boundary(off) {

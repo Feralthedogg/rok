@@ -752,7 +752,7 @@ fn split_suffix(text: &str) -> (&str, &str) {
 }
 
 /// The suffix of `text` if it's not a built-in one.
-pub(super) fn user_suffix(text: &str) -> Option<&str> {
+pub fn user_suffix(text: &str) -> Option<&str> {
     let (_, s) = split_suffix(text);
     (!s.is_empty() && !INT_SUFFIXES.contains(&s) && !FLOAT_SUFFIXES.contains(&s)).then_some(s)
 }

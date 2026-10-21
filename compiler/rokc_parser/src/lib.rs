@@ -15,9 +15,10 @@ mod tests;
 pub use cfg::CfgEnv;
 pub use keyword::{KeywordDef, KeywordTable, apply_keywords, check_keyword, collect_keywords};
 pub use lang::{LangEntry, LangItemKind, LangTable, collect_lang_table, collect_lang_table_onto};
+pub use parser::expand_to_text;
 pub use parser::literal::{
     ArgKind, LitRule, LiteralDef, LiteralTable, PatElem, PatKind, Pattern, Shape, collect_literals,
-    parse_pattern,
+    parse_pattern, user_suffix,
 };
 pub use parser::meta::{MetaDef, MetaKind, MetaTable, PKG_ROOT, collect_meta_blocks};
 pub use parser::{

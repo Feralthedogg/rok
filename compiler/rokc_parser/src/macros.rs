@@ -32,7 +32,12 @@ pub(super) fn close_of(toks: &[Token], open: usize) -> Option<usize> {
     let mut depth = 0i32;
     for (i, t) in toks.iter().enumerate().skip(open) {
         match &t.kind {
-            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            // `#[` and `#![` are single opener tokens that close with `]`.
+            TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::HashLBracket
+            | TokenKind::HashBangLBracket => depth += 1,
             k if *k == closer
                 || matches!(
                     k,
@@ -306,7 +311,11 @@ fn boundary(call: &[Token], start: usize, sep: &str) -> Option<usize> {
     let mut depth = 0i32;
     for (i, t) in call.iter().enumerate().skip(start) {
         match &t.kind {
-            TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
+            TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::HashLBracket
+            | TokenKind::HashBangLBracket => depth += 1,
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
             _ if depth == 0 && t.kind.text() == sep => return Some(i),
             _ => {}
@@ -358,6 +367,14 @@ const fn is_literal(k: &TokenKind) -> bool {
             | TokenKind::ByteStrLit(_)
             | TokenKind::CharLit(_)
     )
+}
+
+/// Expand `def` on the `call` token tree and render the result as rok
+/// source, for tooling (e.g. the language server's "expand in place");
+/// `None` if no rule matches.
+pub fn expand_to_text(def: &MetaDef, call: &[Token], at: Span) -> Option<String> {
+    let (out, _) = expand_macro(def, call, at);
+    out.map(|t| super::meta::render(&t))
 }
 
 /// Expand `def` on the `call` token tree; the output tokens (to re-parse)
@@ -428,6 +445,29 @@ fn hygienic(name: &str) -> String {
     format!("{name}__mac")
 }
 
+/// Replace `@name` in a string / f-string with the bound metavariable's
+/// text (the current `@for` element first, then the outer bindings).
+fn interp(s: &str, binds: &Bindings, rep: Option<&Bindings>) -> String {
+    let mut out = s.to_owned();
+    let mut sub = |name: &str, b: &Binding| {
+        if let Binding::One(ts) = b {
+            let text: String = ts.iter().map(|t| t.kind.text()).collect();
+            out = out.replace(&format!("@{name}"), &text);
+        }
+    };
+    if let Some(r) = rep {
+        for (name, b) in r {
+            sub(name, b);
+        }
+    }
+    for (name, b) in binds {
+        if rep.is_none_or(|r| !r.contains_key(name)) {
+            sub(name, b);
+        }
+    }
+    out
+}
+
 /// Emit `template`, substituting metavariables and `@for` / `@concat`,
 /// renaming template-bound locals. `rep` is the current `@for` element's
 /// bindings, if inside one.
@@ -478,6 +518,9 @@ fn emit(
             TokenKind::Ident(n) if bound.contains(n) && renames(template, k) => {
                 TokenKind::Ident(hygienic(n))
             }
+            // `@name` inside a string / f-string interpolates the binding.
+            TokenKind::StrLit(s) => TokenKind::StrLit(interp(s, binds, rep)),
+            TokenKind::FStrText(s) => TokenKind::FStrText(interp(s, binds, rep)),
             other => other.clone(),
         };
         out.push(tok(kind, at));
