@@ -84,6 +84,32 @@ fn declarative_macros_run_end_to_end() {
     assert_eq!(text(&out.stdout), "400 1\n");
 }
 
+// The integer operator impls (Add, Sub, .. Ord) are macro-generated in
+// num.rok (spec 6.8.12); check arithmetic across signed and unsigned.
+#[test]
+fn macro_generated_integer_ops_work() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("intops");
+    let app = new_package(&dir, "app", false);
+    put(
+        app.join("src/main.rok"),
+        "fn main() {\n\
+         \x20   let a = 7i32 + 3i32; let b = 7i32 - 3i32; let c = 7i32 * 3i32;\n\
+         \x20   let d = 7i32 / 3i32; let e = 7i32 % 3i32;\n\
+         \x20   let f = 6i32 & 3i32; let g = 6i32 | 1i32; let h = 6i32 ^ 3i32;\n\
+         \x20   let i = 1i32 << 3i32; let j = 16i32 >> 2i32; let k = -5i32;\n\
+         \x20   let eq = if 3i32 == 3i32 { 1i32 } else { 0i32 };\n\
+         \x20   let lt = if 2i32 < 3i32 { 1i32 } else { 0i32 };\n\
+         \x20   let u = 200u8 + 1u8;\n\
+         \x20   println(f\"{a} {b} {c} {d} {e} {f} {g} {h} {i} {j} {k} {eq} {lt} {u}\");\n\
+         }\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["-q", "run"]);
+    assert_exit(&out, 0);
+    assert_eq!(text(&out.stdout), "10 4 21 2 1 2 7 5 8 4 -5 1 1 201\n");
+}
+
 // The integer `*Assign` impls are macro-generated (spec 6.8.12); check a
 // few compound assignments across types actually work at runtime.
 #[test]

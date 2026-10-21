@@ -1184,3 +1184,107 @@ fn misplaced_doc_comments() {
         ]
     );
 }
+
+#[test]
+fn macro_probe_multirule() {
+    // Several rules; the first matching one is chosen by arity.
+    let (_, d) = parse_meta(
+        "#[impl_macro(pick)] pub @macro { (@a: expr) => { (@a,) } (@a: expr, @b: expr) => { (@a, @b) } }\n\
+         fn f() -> (i32, i32) { return pick!(1i32, 2i32); }",
+    );
+    assert!(d.is_empty(), "multirule: {d:?}");
+}
+
+#[test]
+fn macro_probe_trailing_sep() {
+    let (_, d) = parse_meta(
+        "#[impl_macro(li)] pub @macro { (@rep[sep = \",\"] { @x: expr }) => { \
+         { let acc = List::new(); @for @x { acc.push(@x); } acc } } }\n\
+         fn f() -> List<i32> { return li![1, 2, 3,]; }",
+    );
+    assert!(d.is_empty(), "trailing sep: {d:?}");
+}
+
+#[test]
+fn macro_probe_nested_rep() {
+    // Nested @rep: rows of columns.
+    let (_, d) = parse_meta(
+        "#[impl_macro(grid)] pub @macro { (@rep[sep = \";\"] { @rep[sep = \",\"] { @x: expr } }) => { \
+         { let n = 0i32; @for @x { n = n + @x; } n } } }\n\
+         fn f() -> i32 { return grid![1, 2; 3, 4]; }",
+    );
+    assert!(d.is_empty(), "nested rep: {d:?}");
+}
+
+#[test]
+fn macro_rejects_shape_tokens() {
+    // Type-driven template tokens (@apply_if, @Self, @field, ..) are not
+    // valid in a macro; it has no shape to test (spec 6.8.12).
+    let (_, d) = parse_meta(
+        "#[impl_macro(ai)] pub @macro { (@e: expr) => { @apply_if(true) { @e } } }\n\
+         fn f() -> i32 { return ai!(5i32); }",
+    );
+    assert!(
+        d.iter()
+            .any(|x| format!("{x:?}").contains("not valid in a macro template")),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn macro_unknown_fragment_errors() {
+    let (_, d) = parse_meta(
+        "#[impl_macro(bad)] pub @macro { (@x: wat) => { @x } }\n\
+         fn f() -> i32 { return bad!(1i32); }",
+    );
+    assert!(
+        d.iter()
+            .any(|x| format!("{x:?}").contains("unknown fragment")),
+        "{d:?}"
+    );
+}
+
+#[test]
+fn macro_tuple_rep() {
+    // A @rep of `( @t, @v )` tuples (bounds / defaults carried per type).
+    let (p, d) = parse_meta(
+        "#[impl_macro(defs)] pub @macro { (@rep[sep = \",\"] { (@t: ty, @v: expr) }) => { \
+         @for @t { fn @concat(z_, @t)() -> @t { @v } } } }\n\
+         defs!((i8, 0i8), (bool, false));",
+    );
+    assert!(d.is_empty(), "{d:?}");
+    let names: Vec<&str> = p
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["z_i8", "z_bool"], "{names:?}");
+}
+
+#[test]
+fn macro_json_int_shape_parses() {
+    // The shape used by json/toml `convert.rok` (ToJson/FromJson per int):
+    // `let n` is hygienic; `@t::try_from`, `int_of::<@t>` resolve on @t.
+    let (p, d) = parse_meta(
+        "#[impl_macro(ji)] pub @macro { (@rep[sep = \",\"] { @t: ty }) => { \
+         @for @t { \
+         impl ToJson for @t { fn to_json(self) -> Value { Value::Int(Int::from(self)) } } \
+         impl FromJson for @t { fn from_json(v: Value) throws (JsonError) -> @t { \
+         let n = try int_of::<@t>(v); try @t::try_from(n) catch _ { throw oor::<@t>(n); } } } } } }\n\
+         ji!(i8, u32);",
+    );
+    assert!(d.is_empty(), "{d:?}");
+    // 2 types x 2 impls = 4 impl items.
+    assert_eq!(
+        p.items
+            .iter()
+            .filter(|i| matches!(i, Item::Impl(_)))
+            .count(),
+        4,
+        "{:?}",
+        p.items
+    );
+}

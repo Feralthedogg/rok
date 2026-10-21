@@ -310,6 +310,12 @@ fn sub_var_names(sub: &[MatchItem]) -> Vec<String> {
 fn boundary(call: &[Token], start: usize, sep: &str) -> Option<usize> {
     let mut depth = 0i32;
     for (i, t) in call.iter().enumerate().skip(start) {
+        // Check the separator before adjusting depth, so a closing-bracket
+        // separator (e.g. `)` ending a `( @t, @v )` sub-pattern) is found at
+        // the current level rather than swallowed as a depth decrement.
+        if depth == 0 && t.kind.text() == sep {
+            return Some(i);
+        }
         match &t.kind {
             TokenKind::LParen
             | TokenKind::LBracket
@@ -317,7 +323,6 @@ fn boundary(call: &[Token], start: usize, sep: &str) -> Option<usize> {
             | TokenKind::HashLBracket
             | TokenKind::HashBangLBracket => depth += 1,
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => depth -= 1,
-            _ if depth == 0 && t.kind.text() == sep => return Some(i),
             _ => {}
         }
     }
@@ -391,8 +396,8 @@ pub(super) fn expand_macro(
     for rule in &rules {
         let mut binds = Bindings::new();
         if match_items(&rule.matcher, call, &mut binds, None) {
-            let out = transcribe(&rule.template, &binds, at);
-            return (Some(out), Vec::new());
+            let (out, errs) = transcribe(&rule.template, &binds, at);
+            return (Some(out), errs);
         }
     }
     (
@@ -407,12 +412,14 @@ pub(super) fn expand_macro(
     )
 }
 
-/// Transcribe a template with the bindings, remapping spans to the call.
-fn transcribe(template: &[Token], binds: &Bindings, at: Span) -> Vec<Token> {
+/// Transcribe a template with the bindings, remapping spans to the call;
+/// the tokens and any diagnostics (an unknown `@token` in the template).
+fn transcribe(template: &[Token], binds: &Bindings, at: Span) -> (Vec<Token>, Vec<RokDiagnostic>) {
     let bound = template_binders(template, binds);
     let mut out = Vec::new();
-    emit(template, binds, &bound, None, at, &mut out);
-    out
+    let mut errs = Vec::new();
+    emit(template, binds, &bound, None, at, &mut out, &mut errs);
+    (out, errs)
 }
 
 /// Names the template binds itself (let / for / closure), to make hygienic.
@@ -478,6 +485,7 @@ fn emit(
     rep: Option<&Bindings>,
     at: Span,
     out: &mut Vec<Token>,
+    errs: &mut Vec<RokDiagnostic>,
 ) {
     let get = |name: &str| -> Option<Vec<Token>> {
         if let Some(r) = rep {
@@ -496,7 +504,7 @@ fn emit(
         if t.kind == TokenKind::At {
             // `for` is a keyword token, not an identifier.
             if template.get(k + 1).map(|t| &t.kind) == Some(&TokenKind::For) {
-                k = emit_for(template, k, binds, bound, at, out);
+                k = emit_for(template, k, binds, bound, at, out, errs);
                 continue;
             }
             if let Some(TokenKind::Ident(head)) = template.get(k + 1).map(|t| &t.kind) {
@@ -511,6 +519,18 @@ fn emit(
                     k += 2;
                     continue;
                 }
+                // Not a metavariable, `@for` or `@concat`: the shape tokens
+                // (`@Self`, `@field`, `@apply_if`, ..) belong to the
+                // type-driven forms, not a macro.
+                errs.push(err(
+                    at,
+                    format!(
+                        "`@{head}` is not valid in a macro template; use a metavariable, \
+                         `@for` or `@concat` (spec 6.8.12)"
+                    ),
+                ));
+                k += 2;
+                continue;
             }
         }
         // A plain token: rename a template-bound local, else emit as is.
@@ -537,6 +557,7 @@ fn emit_for(
     bound: &HashSet<String>,
     at: Span,
     out: &mut Vec<Token>,
+    errs: &mut Vec<RokDiagnostic>,
 ) -> usize {
     // @ for @ name { body }
     let name_at = at_tok + 3; // At for At name
@@ -572,7 +593,7 @@ fn emit_for(
                 }
             }
         }
-        emit(body, binds, bound, Some(&elem), at, out);
+        emit(body, binds, bound, Some(&elem), at, out, errs);
     }
     end + 1
 }

@@ -26,21 +26,17 @@ pub const fn default_of<T: Default>() -> T {
     T::default()
 }
 
-impl Default for i8 { const fn default() -> i8 { 0 } }
-impl Default for i16 { const fn default() -> i16 { 0 } }
-impl Default for i32 { const fn default() -> i32 { 0 } }
-impl Default for i64 { const fn default() -> i64 { 0 } }
-impl Default for isize { const fn default() -> isize { 0 } }
-impl Default for u8 { const fn default() -> u8 { 0 } }
-impl Default for u16 { const fn default() -> u16 { 0 } }
-impl Default for u32 { const fn default() -> u32 { 0 } }
-impl Default for u64 { const fn default() -> u64 { 0 } }
-impl Default for usize { const fn default() -> usize { 0 } }
-impl Default for f32 { const fn default() -> f32 { 0.0 } }
-impl Default for f64 { const fn default() -> f64 { 0.0 } }
-impl Default for bool { const fn default() -> bool { false } }
-impl Default for char { const fn default() -> char { '\0' } }
-impl Default for str { const fn default() -> str { "" } }
+// One `Default` per primitive, with its zero value (spec 6.8.12).
+#[impl_macro(default_impls)] @macro {
+    (@rep[sep = ","] { (@t: ty, @v: expr) }) => {
+        @for @t { impl Default for @t { const fn default() -> @t { @v } } }
+    }
+}
+default_impls!(
+    (i8, 0), (i16, 0), (i32, 0), (i64, 0), (isize, 0),
+    (u8, 0), (u16, 0), (u32, 0), (u64, 0), (usize, 0),
+    (f32, 0.0), (f64, 0.0), (bool, false), (char, '\0'), (str, "")
+);
 
 /// Bitwise copy is a correct duplicate (stdlib 2.13.3). A marker: every
 /// value already copies on `let y = x;`; `#[derive(Copy)]` checks that
@@ -48,88 +44,21 @@ impl Default for str { const fn default() -> str { "" } }
 pub trait Copy: Clone {}
 
 // Primitives (and the immutable `(ptr, len)` `str`, 2.13.6) clone by
-// copying.
-impl Clone for i8 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> i8 { self }
+// copying, and are `Copy`. One pair of impls per type (spec 6.8.12).
+#[impl_macro(copy_types)] @macro {
+    (@rep[sep = ","] { @t: ty }) => {
+        @for @t {
+            impl Clone for @t {
+                #[intrinsic("rok.clone.copy")]
+                const fn clone(self) -> @t { self }
+            }
+            impl Copy for @t {}
+        }
+    }
 }
-impl Clone for i16 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> i16 { self }
-}
-impl Clone for i32 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> i32 { self }
-}
-impl Clone for i64 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> i64 { self }
-}
-impl Clone for isize {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> isize { self }
-}
-impl Clone for u8 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> u8 { self }
-}
-impl Clone for u16 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> u16 { self }
-}
-impl Clone for u32 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> u32 { self }
-}
-impl Clone for u64 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> u64 { self }
-}
-impl Clone for usize {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> usize { self }
-}
-impl Clone for f32 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> f32 { self }
-}
-impl Clone for f64 {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> f64 { self }
-}
-impl Clone for bool {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> bool { self }
-}
-impl Clone for char {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> char { self }
-}
-impl Clone for c_char {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> c_char { self }
-}
-impl Clone for str {
-    #[intrinsic("rok.clone.copy")]
-    const fn clone(self) -> str { self }
-}
-
-impl Copy for i8 {}
-impl Copy for i16 {}
-impl Copy for i32 {}
-impl Copy for i64 {}
-impl Copy for isize {}
-impl Copy for u8 {}
-impl Copy for u16 {}
-impl Copy for u32 {}
-impl Copy for u64 {}
-impl Copy for usize {}
-impl Copy for f32 {}
-impl Copy for f64 {}
-impl Copy for bool {}
-impl Copy for char {}
-impl Copy for c_char {}
-impl Copy for str {}
+copy_types!(
+    i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, bool, char, c_char, str
+);
 
 // Stdlib spec 2.13.4. `using` (refs-lang 3.17) calls `drop` on every way
 // out of its block. Plain `let`s get no implicit scope-exit drop

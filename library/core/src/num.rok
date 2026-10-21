@@ -25,1115 +25,239 @@ pub trait One {
     fn one() -> Self;
 }
 
-// i8
+// Integer operator impls, one block per type (spec 6.8.12). The bodies
+// are the primitive `rok.OP.<type>` intrinsics; signed types add Neg.
+#[impl_macro(signed_int_ops)] @macro {
+    (@rep[sep = ","] { @t: ty }) => {
+        @for @t {
+            impl Zero for @t {
+                const fn zero() -> @t { 0 }
+            }
 
-impl Zero for i8 {
-    const fn zero() -> i8 { 0 }
-}
+            impl One for @t {
+                const fn one() -> @t { 1 }
+            }
 
-impl One for i8 {
-    const fn one() -> i8 { 1 }
-}
+            impl Add for @t {
+                type Output = @t;
+                #[intrinsic("rok.add.@t")]
+                const fn add(self, rhs: @t) -> @t { self + rhs }
+            }
 
-impl Add for i8 {
-    type Output = i8;
-    #[intrinsic("rok.add.i8")]
-    const fn add(self, rhs: i8) -> i8 { self + rhs }
-}
+            impl Sub for @t {
+                type Output = @t;
+                #[intrinsic("rok.sub.@t")]
+                const fn sub(self, rhs: @t) -> @t { self - rhs }
+            }
 
-impl Sub for i8 {
-    type Output = i8;
-    #[intrinsic("rok.sub.i8")]
-    const fn sub(self, rhs: i8) -> i8 { self - rhs }
-}
+            impl Mul for @t {
+                type Output = @t;
+                #[intrinsic("rok.mul.@t")]
+                const fn mul(self, rhs: @t) -> @t { self * rhs }
+            }
 
-impl Mul for i8 {
-    type Output = i8;
-    #[intrinsic("rok.mul.i8")]
-    const fn mul(self, rhs: i8) -> i8 { self * rhs }
-}
+            impl Div for @t {
+                type Output = @t;
+                #[intrinsic("rok.div.@t")]
+                const fn div(self, rhs: @t) -> @t { self / rhs }
+            }
 
-impl Div for i8 {
-    type Output = i8;
-    #[intrinsic("rok.div.i8")]
-    const fn div(self, rhs: i8) -> i8 { self / rhs }
-}
+            impl Rem for @t {
+                type Output = @t;
+                #[intrinsic("rok.rem.@t")]
+                const fn rem(self, rhs: @t) -> @t { self % rhs }
+            }
 
-impl Rem for i8 {
-    type Output = i8;
-    #[intrinsic("rok.rem.i8")]
-    const fn rem(self, rhs: i8) -> i8 { self % rhs }
-}
+            impl Neg for @t {
+                type Output = @t;
+                #[intrinsic("rok.neg.@t")]
+                const fn neg(self) -> @t { -self }
+            }
 
-impl Neg for i8 {
-    type Output = i8;
-    #[intrinsic("rok.neg.i8")]
-    const fn neg(self) -> i8 { -self }
-}
+            impl BitAnd for @t {
+                type Output = @t;
+                #[intrinsic("rok.and.@t")]
+                const fn bitand(self, rhs: @t) -> @t { self & rhs }
+            }
 
-impl BitAnd for i8 {
-    type Output = i8;
-    #[intrinsic("rok.and.i8")]
-    const fn bitand(self, rhs: i8) -> i8 { self & rhs }
-}
+            impl BitOr for @t {
+                type Output = @t;
+                #[intrinsic("rok.or.@t")]
+                const fn bitor(self, rhs: @t) -> @t { self | rhs }
+            }
 
-impl BitOr for i8 {
-    type Output = i8;
-    #[intrinsic("rok.or.i8")]
-    const fn bitor(self, rhs: i8) -> i8 { self | rhs }
-}
+            impl BitXor for @t {
+                type Output = @t;
+                #[intrinsic("rok.xor.@t")]
+                const fn bitxor(self, rhs: @t) -> @t { self ^ rhs }
+            }
 
-impl BitXor for i8 {
-    type Output = i8;
-    #[intrinsic("rok.xor.i8")]
-    const fn bitxor(self, rhs: i8) -> i8 { self ^ rhs }
-}
+            impl Shl for @t {
+                type Output = @t;
+                #[intrinsic("rok.shl.@t")]
+                const fn shl(self, rhs: @t) -> @t { self << rhs }
+            }
 
-impl Shl for i8 {
-    type Output = i8;
-    #[intrinsic("rok.shl.i8")]
-    const fn shl(self, rhs: i8) -> i8 { self << rhs }
-}
+            impl Shr for @t {
+                type Output = @t;
+                #[intrinsic("rok.shr.@t")]
+                const fn shr(self, rhs: @t) -> @t { self >> rhs }
+            }
 
-impl Shr for i8 {
-    type Output = i8;
-    #[intrinsic("rok.shr.i8")]
-    const fn shr(self, rhs: i8) -> i8 { self >> rhs }
-}
+            impl BitNot for @t {
+                type Output = @t;
+                #[intrinsic("rok.not.@t")]
+                const fn bitnot(self) -> @t { ~self }
+            }
 
-impl BitNot for i8 {
-    type Output = i8;
-    #[intrinsic("rok.not.i8")]
-    const fn bitnot(self) -> i8 { ~self }
-}
+            impl PartialEq for @t {
+                #[intrinsic("rok.eq.@t")]
+                const fn eq(self, rhs: @t) -> bool { self == rhs }
+                #[intrinsic("rok.ne.@t")]
+                const fn ne(self, rhs: @t) -> bool { self != rhs }
+            }
 
-impl PartialEq for i8 {
-    #[intrinsic("rok.eq.i8")]
-    const fn eq(self, rhs: i8) -> bool { self == rhs }
-    #[intrinsic("rok.ne.i8")]
-    const fn ne(self, rhs: i8) -> bool { self != rhs }
-}
+            impl PartialOrd for @t {
+                #[intrinsic("rok.lt.@t")]
+                const fn lt(self, rhs: @t) -> bool { self < rhs }
+                #[intrinsic("rok.gt.@t")]
+                const fn gt(self, rhs: @t) -> bool { self > rhs }
+                #[intrinsic("rok.le.@t")]
+                const fn le(self, rhs: @t) -> bool { self <= rhs }
+                #[intrinsic("rok.ge.@t")]
+                const fn ge(self, rhs: @t) -> bool { self >= rhs }
+            }
 
-impl PartialOrd for i8 {
-    #[intrinsic("rok.lt.i8")]
-    const fn lt(self, rhs: i8) -> bool { self < rhs }
-    #[intrinsic("rok.gt.i8")]
-    const fn gt(self, rhs: i8) -> bool { self > rhs }
-    #[intrinsic("rok.le.i8")]
-    const fn le(self, rhs: i8) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.i8")]
-    const fn ge(self, rhs: i8) -> bool { self >= rhs }
-}
+            impl Eq for @t {}
 
-impl Eq for i8 {}
+            impl Hash for @t {
+                const fn hash(self) -> u64 { self as u64 }
+            }
 
-impl Hash for i8 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for i8 {
-    const fn cmp(self, other: i8) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
+            impl Ord for @t {
+                const fn cmp(self, other: @t) -> Ordering {
+                    if self < other { return Ordering::Less; }
+                    if self > other { return Ordering::Greater; }
+                    Ordering::Equal
+                }
+            }
+        }
     }
 }
+signed_int_ops!(i8, i16, i32, i64, isize);
 
-// i16
+#[impl_macro(unsigned_int_ops)] @macro {
+    (@rep[sep = ","] { @t: ty }) => {
+        @for @t {
+            impl Zero for @t {
+                const fn zero() -> @t { 0 }
+            }
 
-impl Zero for i16 {
-    const fn zero() -> i16 { 0 }
-}
+            impl One for @t {
+                const fn one() -> @t { 1 }
+            }
 
-impl One for i16 {
-    const fn one() -> i16 { 1 }
-}
+            impl Add for @t {
+                type Output = @t;
+                #[intrinsic("rok.add.@t")]
+                const fn add(self, rhs: @t) -> @t { self + rhs }
+            }
 
-impl Add for i16 {
-    type Output = i16;
-    #[intrinsic("rok.add.i16")]
-    const fn add(self, rhs: i16) -> i16 { self + rhs }
-}
+            impl Sub for @t {
+                type Output = @t;
+                #[intrinsic("rok.sub.@t")]
+                const fn sub(self, rhs: @t) -> @t { self - rhs }
+            }
 
-impl Sub for i16 {
-    type Output = i16;
-    #[intrinsic("rok.sub.i16")]
-    const fn sub(self, rhs: i16) -> i16 { self - rhs }
-}
+            impl Mul for @t {
+                type Output = @t;
+                #[intrinsic("rok.mul.@t")]
+                const fn mul(self, rhs: @t) -> @t { self * rhs }
+            }
 
-impl Mul for i16 {
-    type Output = i16;
-    #[intrinsic("rok.mul.i16")]
-    const fn mul(self, rhs: i16) -> i16 { self * rhs }
-}
+            impl Div for @t {
+                type Output = @t;
+                #[intrinsic("rok.div.@t")]
+                const fn div(self, rhs: @t) -> @t { self / rhs }
+            }
 
-impl Div for i16 {
-    type Output = i16;
-    #[intrinsic("rok.div.i16")]
-    const fn div(self, rhs: i16) -> i16 { self / rhs }
-}
+            impl Rem for @t {
+                type Output = @t;
+                #[intrinsic("rok.rem.@t")]
+                const fn rem(self, rhs: @t) -> @t { self % rhs }
+            }
 
-impl Rem for i16 {
-    type Output = i16;
-    #[intrinsic("rok.rem.i16")]
-    const fn rem(self, rhs: i16) -> i16 { self % rhs }
-}
+            impl BitAnd for @t {
+                type Output = @t;
+                #[intrinsic("rok.and.@t")]
+                const fn bitand(self, rhs: @t) -> @t { self & rhs }
+            }
 
-impl Neg for i16 {
-    type Output = i16;
-    #[intrinsic("rok.neg.i16")]
-    const fn neg(self) -> i16 { -self }
-}
+            impl BitOr for @t {
+                type Output = @t;
+                #[intrinsic("rok.or.@t")]
+                const fn bitor(self, rhs: @t) -> @t { self | rhs }
+            }
 
-impl BitAnd for i16 {
-    type Output = i16;
-    #[intrinsic("rok.and.i16")]
-    const fn bitand(self, rhs: i16) -> i16 { self & rhs }
-}
+            impl BitXor for @t {
+                type Output = @t;
+                #[intrinsic("rok.xor.@t")]
+                const fn bitxor(self, rhs: @t) -> @t { self ^ rhs }
+            }
 
-impl BitOr for i16 {
-    type Output = i16;
-    #[intrinsic("rok.or.i16")]
-    const fn bitor(self, rhs: i16) -> i16 { self | rhs }
-}
+            impl Shl for @t {
+                type Output = @t;
+                #[intrinsic("rok.shl.@t")]
+                const fn shl(self, rhs: @t) -> @t { self << rhs }
+            }
 
-impl BitXor for i16 {
-    type Output = i16;
-    #[intrinsic("rok.xor.i16")]
-    const fn bitxor(self, rhs: i16) -> i16 { self ^ rhs }
-}
+            impl Shr for @t {
+                type Output = @t;
+                #[intrinsic("rok.shr.@t")]
+                const fn shr(self, rhs: @t) -> @t { self >> rhs }
+            }
 
-impl Shl for i16 {
-    type Output = i16;
-    #[intrinsic("rok.shl.i16")]
-    const fn shl(self, rhs: i16) -> i16 { self << rhs }
-}
+            impl BitNot for @t {
+                type Output = @t;
+                #[intrinsic("rok.not.@t")]
+                const fn bitnot(self) -> @t { ~self }
+            }
 
-impl Shr for i16 {
-    type Output = i16;
-    #[intrinsic("rok.shr.i16")]
-    const fn shr(self, rhs: i16) -> i16 { self >> rhs }
-}
+            impl PartialEq for @t {
+                #[intrinsic("rok.eq.@t")]
+                const fn eq(self, rhs: @t) -> bool { self == rhs }
+                #[intrinsic("rok.ne.@t")]
+                const fn ne(self, rhs: @t) -> bool { self != rhs }
+            }
 
-impl BitNot for i16 {
-    type Output = i16;
-    #[intrinsic("rok.not.i16")]
-    const fn bitnot(self) -> i16 { ~self }
-}
+            impl PartialOrd for @t {
+                #[intrinsic("rok.lt.@t")]
+                const fn lt(self, rhs: @t) -> bool { self < rhs }
+                #[intrinsic("rok.gt.@t")]
+                const fn gt(self, rhs: @t) -> bool { self > rhs }
+                #[intrinsic("rok.le.@t")]
+                const fn le(self, rhs: @t) -> bool { self <= rhs }
+                #[intrinsic("rok.ge.@t")]
+                const fn ge(self, rhs: @t) -> bool { self >= rhs }
+            }
 
-impl PartialEq for i16 {
-    #[intrinsic("rok.eq.i16")]
-    const fn eq(self, rhs: i16) -> bool { self == rhs }
-    #[intrinsic("rok.ne.i16")]
-    const fn ne(self, rhs: i16) -> bool { self != rhs }
-}
+            impl Eq for @t {}
 
-impl PartialOrd for i16 {
-    #[intrinsic("rok.lt.i16")]
-    const fn lt(self, rhs: i16) -> bool { self < rhs }
-    #[intrinsic("rok.gt.i16")]
-    const fn gt(self, rhs: i16) -> bool { self > rhs }
-    #[intrinsic("rok.le.i16")]
-    const fn le(self, rhs: i16) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.i16")]
-    const fn ge(self, rhs: i16) -> bool { self >= rhs }
-}
+            impl Hash for @t {
+                const fn hash(self) -> u64 { self as u64 }
+            }
 
-impl Eq for i16 {}
-
-impl Hash for i16 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for i16 {
-    const fn cmp(self, other: i16) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
+            impl Ord for @t {
+                const fn cmp(self, other: @t) -> Ordering {
+                    if self < other { return Ordering::Less; }
+                    if self > other { return Ordering::Greater; }
+                    Ordering::Equal
+                }
+            }
+        }
     }
 }
-
-// i32
-
-impl Zero for i32 {
-    const fn zero() -> i32 { 0 }
-}
-
-impl One for i32 {
-    const fn one() -> i32 { 1 }
-}
-
-impl Add for i32 {
-    type Output = i32;
-    #[intrinsic("rok.add.i32")]
-    const fn add(self, rhs: i32) -> i32 { self + rhs }
-}
-
-impl Sub for i32 {
-    type Output = i32;
-    #[intrinsic("rok.sub.i32")]
-    const fn sub(self, rhs: i32) -> i32 { self - rhs }
-}
-
-impl Mul for i32 {
-    type Output = i32;
-    #[intrinsic("rok.mul.i32")]
-    const fn mul(self, rhs: i32) -> i32 { self * rhs }
-}
-
-impl Div for i32 {
-    type Output = i32;
-    #[intrinsic("rok.div.i32")]
-    const fn div(self, rhs: i32) -> i32 { self / rhs }
-}
-
-impl Rem for i32 {
-    type Output = i32;
-    #[intrinsic("rok.rem.i32")]
-    const fn rem(self, rhs: i32) -> i32 { self % rhs }
-}
-
-impl Neg for i32 {
-    type Output = i32;
-    #[intrinsic("rok.neg.i32")]
-    const fn neg(self) -> i32 { -self }
-}
-
-impl BitAnd for i32 {
-    type Output = i32;
-    #[intrinsic("rok.and.i32")]
-    const fn bitand(self, rhs: i32) -> i32 { self & rhs }
-}
-
-impl BitOr for i32 {
-    type Output = i32;
-    #[intrinsic("rok.or.i32")]
-    const fn bitor(self, rhs: i32) -> i32 { self | rhs }
-}
-
-impl BitXor for i32 {
-    type Output = i32;
-    #[intrinsic("rok.xor.i32")]
-    const fn bitxor(self, rhs: i32) -> i32 { self ^ rhs }
-}
-
-impl Shl for i32 {
-    type Output = i32;
-    #[intrinsic("rok.shl.i32")]
-    const fn shl(self, rhs: i32) -> i32 { self << rhs }
-}
-
-impl Shr for i32 {
-    type Output = i32;
-    #[intrinsic("rok.shr.i32")]
-    const fn shr(self, rhs: i32) -> i32 { self >> rhs }
-}
-
-impl BitNot for i32 {
-    type Output = i32;
-    #[intrinsic("rok.not.i32")]
-    const fn bitnot(self) -> i32 { ~self }
-}
-
-impl PartialEq for i32 {
-    #[intrinsic("rok.eq.i32")]
-    const fn eq(self, rhs: i32) -> bool { self == rhs }
-    #[intrinsic("rok.ne.i32")]
-    const fn ne(self, rhs: i32) -> bool { self != rhs }
-}
-
-impl PartialOrd for i32 {
-    #[intrinsic("rok.lt.i32")]
-    const fn lt(self, rhs: i32) -> bool { self < rhs }
-    #[intrinsic("rok.gt.i32")]
-    const fn gt(self, rhs: i32) -> bool { self > rhs }
-    #[intrinsic("rok.le.i32")]
-    const fn le(self, rhs: i32) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.i32")]
-    const fn ge(self, rhs: i32) -> bool { self >= rhs }
-}
-
-impl Eq for i32 {}
-
-impl Hash for i32 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for i32 {
-    const fn cmp(self, other: i32) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// i64
-
-impl Zero for i64 {
-    const fn zero() -> i64 { 0 }
-}
-
-impl One for i64 {
-    const fn one() -> i64 { 1 }
-}
-
-impl Add for i64 {
-    type Output = i64;
-    #[intrinsic("rok.add.i64")]
-    const fn add(self, rhs: i64) -> i64 { self + rhs }
-}
-
-impl Sub for i64 {
-    type Output = i64;
-    #[intrinsic("rok.sub.i64")]
-    const fn sub(self, rhs: i64) -> i64 { self - rhs }
-}
-
-impl Mul for i64 {
-    type Output = i64;
-    #[intrinsic("rok.mul.i64")]
-    const fn mul(self, rhs: i64) -> i64 { self * rhs }
-}
-
-impl Div for i64 {
-    type Output = i64;
-    #[intrinsic("rok.div.i64")]
-    const fn div(self, rhs: i64) -> i64 { self / rhs }
-}
-
-impl Rem for i64 {
-    type Output = i64;
-    #[intrinsic("rok.rem.i64")]
-    const fn rem(self, rhs: i64) -> i64 { self % rhs }
-}
-
-impl Neg for i64 {
-    type Output = i64;
-    #[intrinsic("rok.neg.i64")]
-    const fn neg(self) -> i64 { -self }
-}
-
-impl BitAnd for i64 {
-    type Output = i64;
-    #[intrinsic("rok.and.i64")]
-    const fn bitand(self, rhs: i64) -> i64 { self & rhs }
-}
-
-impl BitOr for i64 {
-    type Output = i64;
-    #[intrinsic("rok.or.i64")]
-    const fn bitor(self, rhs: i64) -> i64 { self | rhs }
-}
-
-impl BitXor for i64 {
-    type Output = i64;
-    #[intrinsic("rok.xor.i64")]
-    const fn bitxor(self, rhs: i64) -> i64 { self ^ rhs }
-}
-
-impl Shl for i64 {
-    type Output = i64;
-    #[intrinsic("rok.shl.i64")]
-    const fn shl(self, rhs: i64) -> i64 { self << rhs }
-}
-
-impl Shr for i64 {
-    type Output = i64;
-    #[intrinsic("rok.shr.i64")]
-    const fn shr(self, rhs: i64) -> i64 { self >> rhs }
-}
-
-impl BitNot for i64 {
-    type Output = i64;
-    #[intrinsic("rok.not.i64")]
-    const fn bitnot(self) -> i64 { ~self }
-}
-
-impl PartialEq for i64 {
-    #[intrinsic("rok.eq.i64")]
-    const fn eq(self, rhs: i64) -> bool { self == rhs }
-    #[intrinsic("rok.ne.i64")]
-    const fn ne(self, rhs: i64) -> bool { self != rhs }
-}
-
-impl PartialOrd for i64 {
-    #[intrinsic("rok.lt.i64")]
-    const fn lt(self, rhs: i64) -> bool { self < rhs }
-    #[intrinsic("rok.gt.i64")]
-    const fn gt(self, rhs: i64) -> bool { self > rhs }
-    #[intrinsic("rok.le.i64")]
-    const fn le(self, rhs: i64) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.i64")]
-    const fn ge(self, rhs: i64) -> bool { self >= rhs }
-}
-
-impl Eq for i64 {}
-
-impl Hash for i64 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for i64 {
-    const fn cmp(self, other: i64) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// isize
-
-impl Zero for isize {
-    const fn zero() -> isize { 0 }
-}
-
-impl One for isize {
-    const fn one() -> isize { 1 }
-}
-
-impl Add for isize {
-    type Output = isize;
-    #[intrinsic("rok.add.isize")]
-    const fn add(self, rhs: isize) -> isize { self + rhs }
-}
-
-impl Sub for isize {
-    type Output = isize;
-    #[intrinsic("rok.sub.isize")]
-    const fn sub(self, rhs: isize) -> isize { self - rhs }
-}
-
-impl Mul for isize {
-    type Output = isize;
-    #[intrinsic("rok.mul.isize")]
-    const fn mul(self, rhs: isize) -> isize { self * rhs }
-}
-
-impl Div for isize {
-    type Output = isize;
-    #[intrinsic("rok.div.isize")]
-    const fn div(self, rhs: isize) -> isize { self / rhs }
-}
-
-impl Rem for isize {
-    type Output = isize;
-    #[intrinsic("rok.rem.isize")]
-    const fn rem(self, rhs: isize) -> isize { self % rhs }
-}
-
-impl Neg for isize {
-    type Output = isize;
-    #[intrinsic("rok.neg.isize")]
-    const fn neg(self) -> isize { -self }
-}
-
-impl BitAnd for isize {
-    type Output = isize;
-    #[intrinsic("rok.and.isize")]
-    const fn bitand(self, rhs: isize) -> isize { self & rhs }
-}
-
-impl BitOr for isize {
-    type Output = isize;
-    #[intrinsic("rok.or.isize")]
-    const fn bitor(self, rhs: isize) -> isize { self | rhs }
-}
-
-impl BitXor for isize {
-    type Output = isize;
-    #[intrinsic("rok.xor.isize")]
-    const fn bitxor(self, rhs: isize) -> isize { self ^ rhs }
-}
-
-impl Shl for isize {
-    type Output = isize;
-    #[intrinsic("rok.shl.isize")]
-    const fn shl(self, rhs: isize) -> isize { self << rhs }
-}
-
-impl Shr for isize {
-    type Output = isize;
-    #[intrinsic("rok.shr.isize")]
-    const fn shr(self, rhs: isize) -> isize { self >> rhs }
-}
-
-impl BitNot for isize {
-    type Output = isize;
-    #[intrinsic("rok.not.isize")]
-    const fn bitnot(self) -> isize { ~self }
-}
-
-impl PartialEq for isize {
-    #[intrinsic("rok.eq.isize")]
-    const fn eq(self, rhs: isize) -> bool { self == rhs }
-    #[intrinsic("rok.ne.isize")]
-    const fn ne(self, rhs: isize) -> bool { self != rhs }
-}
-
-impl PartialOrd for isize {
-    #[intrinsic("rok.lt.isize")]
-    const fn lt(self, rhs: isize) -> bool { self < rhs }
-    #[intrinsic("rok.gt.isize")]
-    const fn gt(self, rhs: isize) -> bool { self > rhs }
-    #[intrinsic("rok.le.isize")]
-    const fn le(self, rhs: isize) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.isize")]
-    const fn ge(self, rhs: isize) -> bool { self >= rhs }
-}
-
-impl Eq for isize {}
-
-impl Hash for isize {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for isize {
-    const fn cmp(self, other: isize) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// u8
-
-impl Zero for u8 {
-    const fn zero() -> u8 { 0 }
-}
-
-impl One for u8 {
-    const fn one() -> u8 { 1 }
-}
-
-impl Add for u8 {
-    type Output = u8;
-    #[intrinsic("rok.add.u8")]
-    const fn add(self, rhs: u8) -> u8 { self + rhs }
-}
-
-impl Sub for u8 {
-    type Output = u8;
-    #[intrinsic("rok.sub.u8")]
-    const fn sub(self, rhs: u8) -> u8 { self - rhs }
-}
-
-impl Mul for u8 {
-    type Output = u8;
-    #[intrinsic("rok.mul.u8")]
-    const fn mul(self, rhs: u8) -> u8 { self * rhs }
-}
-
-impl Div for u8 {
-    type Output = u8;
-    #[intrinsic("rok.div.u8")]
-    const fn div(self, rhs: u8) -> u8 { self / rhs }
-}
-
-impl Rem for u8 {
-    type Output = u8;
-    #[intrinsic("rok.rem.u8")]
-    const fn rem(self, rhs: u8) -> u8 { self % rhs }
-}
-
-impl BitAnd for u8 {
-    type Output = u8;
-    #[intrinsic("rok.and.u8")]
-    const fn bitand(self, rhs: u8) -> u8 { self & rhs }
-}
-
-impl BitOr for u8 {
-    type Output = u8;
-    #[intrinsic("rok.or.u8")]
-    const fn bitor(self, rhs: u8) -> u8 { self | rhs }
-}
-
-impl BitXor for u8 {
-    type Output = u8;
-    #[intrinsic("rok.xor.u8")]
-    const fn bitxor(self, rhs: u8) -> u8 { self ^ rhs }
-}
-
-impl Shl for u8 {
-    type Output = u8;
-    #[intrinsic("rok.shl.u8")]
-    const fn shl(self, rhs: u8) -> u8 { self << rhs }
-}
-
-impl Shr for u8 {
-    type Output = u8;
-    #[intrinsic("rok.shr.u8")]
-    const fn shr(self, rhs: u8) -> u8 { self >> rhs }
-}
-
-impl BitNot for u8 {
-    type Output = u8;
-    #[intrinsic("rok.not.u8")]
-    const fn bitnot(self) -> u8 { ~self }
-}
-
-impl PartialEq for u8 {
-    #[intrinsic("rok.eq.u8")]
-    const fn eq(self, rhs: u8) -> bool { self == rhs }
-    #[intrinsic("rok.ne.u8")]
-    const fn ne(self, rhs: u8) -> bool { self != rhs }
-}
-
-impl PartialOrd for u8 {
-    #[intrinsic("rok.lt.u8")]
-    const fn lt(self, rhs: u8) -> bool { self < rhs }
-    #[intrinsic("rok.gt.u8")]
-    const fn gt(self, rhs: u8) -> bool { self > rhs }
-    #[intrinsic("rok.le.u8")]
-    const fn le(self, rhs: u8) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.u8")]
-    const fn ge(self, rhs: u8) -> bool { self >= rhs }
-}
-
-impl Eq for u8 {}
-
-impl Hash for u8 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for u8 {
-    const fn cmp(self, other: u8) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// u16
-
-impl Zero for u16 {
-    const fn zero() -> u16 { 0 }
-}
-
-impl One for u16 {
-    const fn one() -> u16 { 1 }
-}
-
-impl Add for u16 {
-    type Output = u16;
-    #[intrinsic("rok.add.u16")]
-    const fn add(self, rhs: u16) -> u16 { self + rhs }
-}
-
-impl Sub for u16 {
-    type Output = u16;
-    #[intrinsic("rok.sub.u16")]
-    const fn sub(self, rhs: u16) -> u16 { self - rhs }
-}
-
-impl Mul for u16 {
-    type Output = u16;
-    #[intrinsic("rok.mul.u16")]
-    const fn mul(self, rhs: u16) -> u16 { self * rhs }
-}
-
-impl Div for u16 {
-    type Output = u16;
-    #[intrinsic("rok.div.u16")]
-    const fn div(self, rhs: u16) -> u16 { self / rhs }
-}
-
-impl Rem for u16 {
-    type Output = u16;
-    #[intrinsic("rok.rem.u16")]
-    const fn rem(self, rhs: u16) -> u16 { self % rhs }
-}
-
-impl BitAnd for u16 {
-    type Output = u16;
-    #[intrinsic("rok.and.u16")]
-    const fn bitand(self, rhs: u16) -> u16 { self & rhs }
-}
-
-impl BitOr for u16 {
-    type Output = u16;
-    #[intrinsic("rok.or.u16")]
-    const fn bitor(self, rhs: u16) -> u16 { self | rhs }
-}
-
-impl BitXor for u16 {
-    type Output = u16;
-    #[intrinsic("rok.xor.u16")]
-    const fn bitxor(self, rhs: u16) -> u16 { self ^ rhs }
-}
-
-impl Shl for u16 {
-    type Output = u16;
-    #[intrinsic("rok.shl.u16")]
-    const fn shl(self, rhs: u16) -> u16 { self << rhs }
-}
-
-impl Shr for u16 {
-    type Output = u16;
-    #[intrinsic("rok.shr.u16")]
-    const fn shr(self, rhs: u16) -> u16 { self >> rhs }
-}
-
-impl BitNot for u16 {
-    type Output = u16;
-    #[intrinsic("rok.not.u16")]
-    const fn bitnot(self) -> u16 { ~self }
-}
-
-impl PartialEq for u16 {
-    #[intrinsic("rok.eq.u16")]
-    const fn eq(self, rhs: u16) -> bool { self == rhs }
-    #[intrinsic("rok.ne.u16")]
-    const fn ne(self, rhs: u16) -> bool { self != rhs }
-}
-
-impl PartialOrd for u16 {
-    #[intrinsic("rok.lt.u16")]
-    const fn lt(self, rhs: u16) -> bool { self < rhs }
-    #[intrinsic("rok.gt.u16")]
-    const fn gt(self, rhs: u16) -> bool { self > rhs }
-    #[intrinsic("rok.le.u16")]
-    const fn le(self, rhs: u16) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.u16")]
-    const fn ge(self, rhs: u16) -> bool { self >= rhs }
-}
-
-impl Eq for u16 {}
-
-impl Hash for u16 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for u16 {
-    const fn cmp(self, other: u16) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// u32
-
-impl Zero for u32 {
-    const fn zero() -> u32 { 0 }
-}
-
-impl One for u32 {
-    const fn one() -> u32 { 1 }
-}
-
-impl Add for u32 {
-    type Output = u32;
-    #[intrinsic("rok.add.u32")]
-    const fn add(self, rhs: u32) -> u32 { self + rhs }
-}
-
-impl Sub for u32 {
-    type Output = u32;
-    #[intrinsic("rok.sub.u32")]
-    const fn sub(self, rhs: u32) -> u32 { self - rhs }
-}
-
-impl Mul for u32 {
-    type Output = u32;
-    #[intrinsic("rok.mul.u32")]
-    const fn mul(self, rhs: u32) -> u32 { self * rhs }
-}
-
-impl Div for u32 {
-    type Output = u32;
-    #[intrinsic("rok.div.u32")]
-    const fn div(self, rhs: u32) -> u32 { self / rhs }
-}
-
-impl Rem for u32 {
-    type Output = u32;
-    #[intrinsic("rok.rem.u32")]
-    const fn rem(self, rhs: u32) -> u32 { self % rhs }
-}
-
-impl BitAnd for u32 {
-    type Output = u32;
-    #[intrinsic("rok.and.u32")]
-    const fn bitand(self, rhs: u32) -> u32 { self & rhs }
-}
-
-impl BitOr for u32 {
-    type Output = u32;
-    #[intrinsic("rok.or.u32")]
-    const fn bitor(self, rhs: u32) -> u32 { self | rhs }
-}
-
-impl BitXor for u32 {
-    type Output = u32;
-    #[intrinsic("rok.xor.u32")]
-    const fn bitxor(self, rhs: u32) -> u32 { self ^ rhs }
-}
-
-impl Shl for u32 {
-    type Output = u32;
-    #[intrinsic("rok.shl.u32")]
-    const fn shl(self, rhs: u32) -> u32 { self << rhs }
-}
-
-impl Shr for u32 {
-    type Output = u32;
-    #[intrinsic("rok.shr.u32")]
-    const fn shr(self, rhs: u32) -> u32 { self >> rhs }
-}
-
-impl BitNot for u32 {
-    type Output = u32;
-    #[intrinsic("rok.not.u32")]
-    const fn bitnot(self) -> u32 { ~self }
-}
-
-impl PartialEq for u32 {
-    #[intrinsic("rok.eq.u32")]
-    const fn eq(self, rhs: u32) -> bool { self == rhs }
-    #[intrinsic("rok.ne.u32")]
-    const fn ne(self, rhs: u32) -> bool { self != rhs }
-}
-
-impl PartialOrd for u32 {
-    #[intrinsic("rok.lt.u32")]
-    const fn lt(self, rhs: u32) -> bool { self < rhs }
-    #[intrinsic("rok.gt.u32")]
-    const fn gt(self, rhs: u32) -> bool { self > rhs }
-    #[intrinsic("rok.le.u32")]
-    const fn le(self, rhs: u32) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.u32")]
-    const fn ge(self, rhs: u32) -> bool { self >= rhs }
-}
-
-impl Eq for u32 {}
-
-impl Hash for u32 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for u32 {
-    const fn cmp(self, other: u32) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// u64
-
-impl Zero for u64 {
-    const fn zero() -> u64 { 0 }
-}
-
-impl One for u64 {
-    const fn one() -> u64 { 1 }
-}
-
-impl Add for u64 {
-    type Output = u64;
-    #[intrinsic("rok.add.u64")]
-    const fn add(self, rhs: u64) -> u64 { self + rhs }
-}
-
-impl Sub for u64 {
-    type Output = u64;
-    #[intrinsic("rok.sub.u64")]
-    const fn sub(self, rhs: u64) -> u64 { self - rhs }
-}
-
-impl Mul for u64 {
-    type Output = u64;
-    #[intrinsic("rok.mul.u64")]
-    const fn mul(self, rhs: u64) -> u64 { self * rhs }
-}
-
-impl Div for u64 {
-    type Output = u64;
-    #[intrinsic("rok.div.u64")]
-    const fn div(self, rhs: u64) -> u64 { self / rhs }
-}
-
-impl Rem for u64 {
-    type Output = u64;
-    #[intrinsic("rok.rem.u64")]
-    const fn rem(self, rhs: u64) -> u64 { self % rhs }
-}
-
-impl BitAnd for u64 {
-    type Output = u64;
-    #[intrinsic("rok.and.u64")]
-    const fn bitand(self, rhs: u64) -> u64 { self & rhs }
-}
-
-impl BitOr for u64 {
-    type Output = u64;
-    #[intrinsic("rok.or.u64")]
-    const fn bitor(self, rhs: u64) -> u64 { self | rhs }
-}
-
-impl BitXor for u64 {
-    type Output = u64;
-    #[intrinsic("rok.xor.u64")]
-    const fn bitxor(self, rhs: u64) -> u64 { self ^ rhs }
-}
-
-impl Shl for u64 {
-    type Output = u64;
-    #[intrinsic("rok.shl.u64")]
-    const fn shl(self, rhs: u64) -> u64 { self << rhs }
-}
-
-impl Shr for u64 {
-    type Output = u64;
-    #[intrinsic("rok.shr.u64")]
-    const fn shr(self, rhs: u64) -> u64 { self >> rhs }
-}
-
-impl BitNot for u64 {
-    type Output = u64;
-    #[intrinsic("rok.not.u64")]
-    const fn bitnot(self) -> u64 { ~self }
-}
-
-impl PartialEq for u64 {
-    #[intrinsic("rok.eq.u64")]
-    const fn eq(self, rhs: u64) -> bool { self == rhs }
-    #[intrinsic("rok.ne.u64")]
-    const fn ne(self, rhs: u64) -> bool { self != rhs }
-}
-
-impl PartialOrd for u64 {
-    #[intrinsic("rok.lt.u64")]
-    const fn lt(self, rhs: u64) -> bool { self < rhs }
-    #[intrinsic("rok.gt.u64")]
-    const fn gt(self, rhs: u64) -> bool { self > rhs }
-    #[intrinsic("rok.le.u64")]
-    const fn le(self, rhs: u64) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.u64")]
-    const fn ge(self, rhs: u64) -> bool { self >= rhs }
-}
-
-impl Eq for u64 {}
-
-impl Hash for u64 {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for u64 {
-    const fn cmp(self, other: u64) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
-
-// usize
-
-impl Zero for usize {
-    const fn zero() -> usize { 0 }
-}
-
-impl One for usize {
-    const fn one() -> usize { 1 }
-}
-
-impl Add for usize {
-    type Output = usize;
-    #[intrinsic("rok.add.usize")]
-    const fn add(self, rhs: usize) -> usize { self + rhs }
-}
-
-impl Sub for usize {
-    type Output = usize;
-    #[intrinsic("rok.sub.usize")]
-    const fn sub(self, rhs: usize) -> usize { self - rhs }
-}
-
-impl Mul for usize {
-    type Output = usize;
-    #[intrinsic("rok.mul.usize")]
-    const fn mul(self, rhs: usize) -> usize { self * rhs }
-}
-
-impl Div for usize {
-    type Output = usize;
-    #[intrinsic("rok.div.usize")]
-    const fn div(self, rhs: usize) -> usize { self / rhs }
-}
-
-impl Rem for usize {
-    type Output = usize;
-    #[intrinsic("rok.rem.usize")]
-    const fn rem(self, rhs: usize) -> usize { self % rhs }
-}
-
-impl BitAnd for usize {
-    type Output = usize;
-    #[intrinsic("rok.and.usize")]
-    const fn bitand(self, rhs: usize) -> usize { self & rhs }
-}
-
-impl BitOr for usize {
-    type Output = usize;
-    #[intrinsic("rok.or.usize")]
-    const fn bitor(self, rhs: usize) -> usize { self | rhs }
-}
-
-impl BitXor for usize {
-    type Output = usize;
-    #[intrinsic("rok.xor.usize")]
-    const fn bitxor(self, rhs: usize) -> usize { self ^ rhs }
-}
-
-impl Shl for usize {
-    type Output = usize;
-    #[intrinsic("rok.shl.usize")]
-    const fn shl(self, rhs: usize) -> usize { self << rhs }
-}
-
-impl Shr for usize {
-    type Output = usize;
-    #[intrinsic("rok.shr.usize")]
-    const fn shr(self, rhs: usize) -> usize { self >> rhs }
-}
-
-impl BitNot for usize {
-    type Output = usize;
-    #[intrinsic("rok.not.usize")]
-    const fn bitnot(self) -> usize { ~self }
-}
-
-impl PartialEq for usize {
-    #[intrinsic("rok.eq.usize")]
-    const fn eq(self, rhs: usize) -> bool { self == rhs }
-    #[intrinsic("rok.ne.usize")]
-    const fn ne(self, rhs: usize) -> bool { self != rhs }
-}
-
-impl PartialOrd for usize {
-    #[intrinsic("rok.lt.usize")]
-    const fn lt(self, rhs: usize) -> bool { self < rhs }
-    #[intrinsic("rok.gt.usize")]
-    const fn gt(self, rhs: usize) -> bool { self > rhs }
-    #[intrinsic("rok.le.usize")]
-    const fn le(self, rhs: usize) -> bool { self <= rhs }
-    #[intrinsic("rok.ge.usize")]
-    const fn ge(self, rhs: usize) -> bool { self >= rhs }
-}
-
-impl Eq for usize {}
-
-impl Hash for usize {
-    const fn hash(self) -> u64 { self as u64 }
-}
-
-impl Ord for usize {
-    const fn cmp(self, other: usize) -> Ordering {
-        if self < other { return Ordering::Less; }
-        if self > other { return Ordering::Greater; }
-        Ordering::Equal
-    }
-}
+unsigned_int_ops!(u8, u16, u32, u64, usize);
 
 // f32
 
