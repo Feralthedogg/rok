@@ -1632,7 +1632,7 @@ impl Parser<'_> {
 
 /// Tokens as source text: one statement / brace per line, indented.
 /// Long expressions are not line-broken.
-fn render(tokens: &[Token]) -> String {
+pub(super) fn render(tokens: &[Token]) -> String {
     use TokenKind as K;
     let mut out = String::new();
     let mut depth = 0usize;
@@ -1751,7 +1751,11 @@ fn render(tokens: &[Token]) -> String {
     out
 }
 
-rokc_core::codec_enum!(MetaKind { Derive, Attribute, Macro });
+rokc_core::codec_enum!(MetaKind {
+    Derive,
+    Attribute,
+    Macro
+});
 rokc_core::codec_struct!(MetaDef {
     kind,
     name,

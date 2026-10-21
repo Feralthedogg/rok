@@ -33,7 +33,12 @@ pub(super) fn close_of(toks: &[Token], open: usize) -> Option<usize> {
     for (i, t) in toks.iter().enumerate().skip(open) {
         match &t.kind {
             TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace => depth += 1,
-            k if *k == closer || matches!(k, TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace) => {
+            k if *k == closer
+                || matches!(
+                    k,
+                    TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
+                ) =>
+            {
                 depth -= 1;
                 if depth == 0 {
                     return Some(i);
@@ -105,24 +110,41 @@ fn parse_rules(body: &[Token], span: Span) -> Result<Vec<Rule>, RokDiagnostic> {
     let mut i = 0;
     while i < body.len() {
         if body[i].kind != TokenKind::LParen {
-            return Err(err(body[i].span, "a macro rule starts with `( matcher )` (spec 6.8.12)"));
+            return Err(err(
+                body[i].span,
+                "a macro rule starts with `( matcher )` (spec 6.8.12)",
+            ));
         }
-        let mp = close_of(body, i).ok_or_else(|| err(body[i].span, "unbalanced `(` in macro matcher"))?;
+        let mp = close_of(body, i)
+            .ok_or_else(|| err(body[i].span, "unbalanced `(` in macro matcher"))?;
         let matcher = parse_matcher(&body[i + 1..mp])?;
         i = mp + 1;
         if body.get(i).map(|t| &t.kind) != Some(&TokenKind::FatArrow) {
-            return Err(err(body.get(i).map_or(span, |t| t.span), "a macro rule needs `=>` after its matcher"));
+            return Err(err(
+                body.get(i).map_or(span, |t| t.span),
+                "a macro rule needs `=>` after its matcher",
+            ));
         }
         i += 1;
         if body.get(i).map(|t| &t.kind) != Some(&TokenKind::LBrace) {
-            return Err(err(body.get(i).map_or(span, |t| t.span), "a macro rule needs a `{ template }` body"));
+            return Err(err(
+                body.get(i).map_or(span, |t| t.span),
+                "a macro rule needs a `{ template }` body",
+            ));
         }
-        let tp = close_of(body, i).ok_or_else(|| err(body[i].span, "unbalanced `{` in macro template"))?;
-        rules.push(Rule { matcher, template: body[i + 1..tp].to_vec() });
+        let tp = close_of(body, i)
+            .ok_or_else(|| err(body[i].span, "unbalanced `{` in macro template"))?;
+        rules.push(Rule {
+            matcher,
+            template: body[i + 1..tp].to_vec(),
+        });
         i = tp + 1;
     }
     if rules.is_empty() {
-        return Err(err(span, "a macro needs at least one `( matcher ) => { template }` rule"));
+        return Err(err(
+            span,
+            "a macro needs at least one `( matcher ) => { template }` rule",
+        ));
     }
     Ok(rules)
 }
@@ -135,7 +157,10 @@ fn parse_matcher(toks: &[Token]) -> Result<Vec<MatchItem>, RokDiagnostic> {
     while i < toks.len() {
         if toks[i].kind == TokenKind::At {
             let Some(TokenKind::Ident(head)) = toks.get(i + 1).map(|t| &t.kind) else {
-                return Err(err(toks[i].span, "`@` in a matcher must be `@name: frag` or `@rep`"));
+                return Err(err(
+                    toks[i].span,
+                    "`@` in a matcher must be `@name: frag` or `@rep`",
+                ));
             };
             if head == "rep" {
                 // @rep [ opts ] { sub }
@@ -143,13 +168,15 @@ fn parse_matcher(toks: &[Token]) -> Result<Vec<MatchItem>, RokDiagnostic> {
                 if toks.get(lb).map(|t| &t.kind) != Some(&TokenKind::LBracket) {
                     return Err(err(toks[i].span, "`@rep` needs `[ sep = \",\" ]`"));
                 }
-                let rb = close_of(toks, lb).ok_or_else(|| err(toks[lb].span, "unbalanced `[` in `@rep`"))?;
+                let rb = close_of(toks, lb)
+                    .ok_or_else(|| err(toks[lb].span, "unbalanced `[` in `@rep`"))?;
                 let sep = rep_sep(&toks[lb + 1..rb]);
                 let br = rb + 1;
                 if toks.get(br).map(|t| &t.kind) != Some(&TokenKind::LBrace) {
                     return Err(err(toks[i].span, "`@rep[..]` needs a `{ sub-pattern }`"));
                 }
-                let be = close_of(toks, br).ok_or_else(|| err(toks[br].span, "unbalanced `{` in `@rep`"))?;
+                let be = close_of(toks, br)
+                    .ok_or_else(|| err(toks[br].span, "unbalanced `{` in `@rep`"))?;
                 let sub = parse_matcher(&toks[br + 1..be])?;
                 items.push(MatchItem::Rep { sep, sub });
                 i = be + 1;
@@ -159,11 +186,21 @@ fn parse_matcher(toks: &[Token]) -> Result<Vec<MatchItem>, RokDiagnostic> {
                     return Err(err(toks[i].span, "a metavariable is `@name: frag`"));
                 }
                 let Some(TokenKind::Ident(fname)) = toks.get(i + 3).map(|t| &t.kind) else {
-                    return Err(err(toks[i].span, "`@name:` needs a fragment (expr, ty, ident, ..)"));
+                    return Err(err(
+                        toks[i].span,
+                        "`@name:` needs a fragment (expr, ty, ident, ..)",
+                    ));
                 };
-                let frag = Frag::parse(fname)
-                    .ok_or_else(|| err(toks[i + 3].span, format!("unknown fragment `{fname}` (spec 6.9.8)")))?;
-                items.push(MatchItem::Var { name: head.clone(), frag });
+                let frag = Frag::parse(fname).ok_or_else(|| {
+                    err(
+                        toks[i + 3].span,
+                        format!("unknown fragment `{fname}` (spec 6.9.8)"),
+                    )
+                })?;
+                items.push(MatchItem::Var {
+                    name: head.clone(),
+                    frag,
+                });
                 i += 4;
             }
         } else {
@@ -279,11 +316,19 @@ fn boundary(call: &[Token], start: usize, sep: &str) -> Option<usize> {
 }
 
 /// Capture a fragment from `call` at `i`; the tokens and the next index.
-fn capture(call: &[Token], i: usize, frag: Frag, stop: Option<&str>) -> Option<(Vec<Token>, usize)> {
+fn capture(
+    call: &[Token],
+    i: usize,
+    frag: Frag,
+    stop: Option<&str>,
+) -> Option<(Vec<Token>, usize)> {
     match frag {
         Frag::Ident => matches!(call.get(i).map(|t| &t.kind), Some(TokenKind::Ident(_)))
             .then(|| (vec![call[i].clone()], i + 1)),
-        Frag::Literal => call.get(i).filter(|t| is_literal(&t.kind)).map(|t| (vec![t.clone()], i + 1)),
+        Frag::Literal => call
+            .get(i)
+            .filter(|t| is_literal(&t.kind))
+            .map(|t| (vec![t.clone()], i + 1)),
         Frag::Tt => {
             let t = call.get(i)?;
             match t.kind {
@@ -295,7 +340,9 @@ fn capture(call: &[Token], i: usize, frag: Frag, stop: Option<&str>) -> Option<(
             }
         }
         Frag::Run => {
-            let end = stop.and_then(|s| boundary(call, i, s)).unwrap_or(call.len());
+            let end = stop
+                .and_then(|s| boundary(call, i, s))
+                .unwrap_or(call.len());
             (end > i).then(|| (call[i..end].to_vec(), end))
         }
     }
@@ -315,7 +362,11 @@ const fn is_literal(k: &TokenKind) -> bool {
 
 /// Expand `def` on the `call` token tree; the output tokens (to re-parse)
 /// or diagnostics.
-pub(super) fn expand_macro(def: &MetaDef, call: &[Token], at: Span) -> (Option<Vec<Token>>, Vec<RokDiagnostic>) {
+pub(super) fn expand_macro(
+    def: &MetaDef,
+    call: &[Token],
+    at: Span,
+) -> (Option<Vec<Token>>, Vec<RokDiagnostic>) {
     let rules = match parse_rules(&def.body, def.span) {
         Ok(r) => r,
         Err(d) => return (None, vec![d]),
@@ -329,7 +380,13 @@ pub(super) fn expand_macro(def: &MetaDef, call: &[Token], at: Span) -> (Option<V
     }
     (
         None,
-        vec![err(at, format!("no rule of macro `{}!` matches this call (spec 6.8.12)", def.name))],
+        vec![err(
+            at,
+            format!(
+                "no rule of macro `{}!` matches this call (spec 6.8.12)",
+                def.name
+            ),
+        )],
     )
 }
 
@@ -353,7 +410,8 @@ fn template_binders(template: &[Token], binds: &Bindings) -> HashSet<String> {
             || matches!(&template[k].kind, TokenKind::Ident(n) if n == "let");
         if binds_here {
             let mut j = k + 1;
-            if matches!(&template.get(j).map(|t| &t.kind), Some(TokenKind::Ident(m)) if m == "mut") {
+            if matches!(&template.get(j).map(|t| &t.kind), Some(TokenKind::Ident(m)) if m == "mut")
+            {
                 j += 1;
             }
             if let Some(TokenKind::Ident(n)) = template.get(j).map(|t| &t.kind) {
@@ -373,7 +431,14 @@ fn hygienic(name: &str) -> String {
 /// Emit `template`, substituting metavariables and `@for` / `@concat`,
 /// renaming template-bound locals. `rep` is the current `@for` element's
 /// bindings, if inside one.
-fn emit(template: &[Token], binds: &Bindings, bound: &HashSet<String>, rep: Option<&Bindings>, at: Span, out: &mut Vec<Token>) {
+fn emit(
+    template: &[Token],
+    binds: &Bindings,
+    bound: &HashSet<String>,
+    rep: Option<&Bindings>,
+    at: Span,
+    out: &mut Vec<Token>,
+) {
     let get = |name: &str| -> Option<Vec<Token>> {
         if let Some(r) = rep {
             if let Some(Binding::One(t)) = r.get(name) {
@@ -422,7 +487,14 @@ fn emit(template: &[Token], binds: &Bindings, bound: &HashSet<String>, rep: Opti
 
 /// `@for @name { body }`: emit `body` once per element of `@name`'s
 /// sequence, binding each repeated metavariable in lockstep.
-fn emit_for(template: &[Token], at_tok: usize, binds: &Bindings, bound: &HashSet<String>, at: Span, out: &mut Vec<Token>) -> usize {
+fn emit_for(
+    template: &[Token],
+    at_tok: usize,
+    binds: &Bindings,
+    bound: &HashSet<String>,
+    at: Span,
+    out: &mut Vec<Token>,
+) -> usize {
     // @ for @ name { body }
     let name_at = at_tok + 3; // At for At name
     let name = match template.get(at_tok + 2).map(|t| &t.kind) {
@@ -464,7 +536,14 @@ fn emit_for(template: &[Token], at_tok: usize, binds: &Bindings, bound: &HashSet
 
 /// `@concat(a, @x, "s")`: join name tokens and string literals into one
 /// identifier.
-fn emit_concat(template: &[Token], at_tok: usize, binds: &Bindings, rep: Option<&Bindings>, at: Span, out: &mut Vec<Token>) -> usize {
+fn emit_concat(
+    template: &[Token],
+    at_tok: usize,
+    binds: &Bindings,
+    rep: Option<&Bindings>,
+    at: Span,
+    out: &mut Vec<Token>,
+) -> usize {
     let lp = at_tok + 2;
     let Some(TokenKind::LParen) = template.get(lp).map(|t| &t.kind) else {
         return lp;
@@ -478,10 +557,7 @@ fn emit_concat(template: &[Token], at_tok: usize, binds: &Bindings, rep: Option<
             TokenKind::Comma => {}
             TokenKind::At => {
                 if let Some(TokenKind::Ident(n)) = inner.get(k + 1).map(|t| &t.kind) {
-                    let toks = rep
-                        .and_then(|r| r.get(n))
-                        .or_else(|| binds.get(n))
-                        .cloned();
+                    let toks = rep.and_then(|r| r.get(n)).or_else(|| binds.get(n)).cloned();
                     if let Some(Binding::One(ts)) = toks {
                         for s in &ts {
                             name.push_str(&s.kind.text());
@@ -505,5 +581,8 @@ fn emit_concat(template: &[Token], at_tok: usize, binds: &Bindings, rep: Option<
 /// (not a member `.x`, path `::x`, or metavar `@x`).
 fn renames(template: &[Token], k: usize) -> bool {
     let prev = k.checked_sub(1).map(|p| &template[p].kind);
-    !matches!(prev, Some(TokenKind::Dot | TokenKind::ColonColon | TokenKind::At))
+    !matches!(
+        prev,
+        Some(TokenKind::Dot | TokenKind::ColonColon | TokenKind::At)
+    )
 }

@@ -1597,6 +1597,10 @@ fn write_harness_manifest(
     filter: Option<&str>,
     harnesses: &[(PathBuf, Vec<String>)],
 ) {
+    // Resolve the thread count for a test run whether or not a manifest is
+    // emitted, so `ROKC_NUM_JOBS` is validated (and a bad value warned)
+    // on every `rokc test`.
+    let threads = (mode == Mode::Test).then(|| test_threads(a));
     let Some(path) = a.emit_harness.as_ref() else {
         if !a.quiet {
             for (exe, _) in harnesses {
@@ -1618,7 +1622,7 @@ fn write_harness_manifest(
         }
         m.push_str(&format!("samples {}\n", a.samples.unwrap_or(10)));
     } else {
-        m.push_str(&format!("threads {}\n", test_threads(a)));
+        m.push_str(&format!("threads {}\n", threads.unwrap_or(1)));
         if a.show_output {
             m.push_str("show_output\n");
         }

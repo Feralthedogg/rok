@@ -873,6 +873,53 @@ fn macro_item_name_synthesis() {
 }
 
 #[test]
+fn macro_stmt_position() {
+    // `name!(..);` at statement position splices in a `let` whose binding
+    // comes from a metavariable (so it is visible to the caller's code).
+    let (_, diags) = parse_meta(
+        "#[impl_macro(decl)] pub @macro { (@n: ident, @v: expr) => { let @n = @v; } }\n\
+         fn f() -> i64 { decl!(x, 41i64); return x + 1i64; }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn macro_type_position() {
+    let (_, diags) = parse_meta(
+        "#[impl_macro(pair_of)] pub @macro { (@t: ty) => { (@t, @t) } }\n\
+         fn f(x: pair_of!(i32)) -> i32 { return x.0; }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn macro_pattern_position() {
+    let (_, diags) = parse_meta(
+        "#[impl_macro(both)] pub @macro { (@a: pat, @b: pat) => { (@a, @b) } }\n\
+         fn f(p: (i32, i32)) -> i32 { match p { both!(a, b) => { return a + b; } } }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn macro_expansion_is_recorded() {
+    // The expansion is recorded (surfaced by `rokc --emit expanded`, the
+    // "expand in place" source, spec 6.8.12 tooling).
+    let (p, diags) = parse_meta(
+        "#[impl_macro(twice)] pub @macro { (@e: expr) => { (@e, @e) } }\n\
+         fn f() -> (i32, i32) { return twice!(1i32); }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(
+        p.expanded
+            .iter()
+            .any(|e| e.contains("expanded from twice!")),
+        "{:?}",
+        p.expanded
+    );
+}
+
+#[test]
 fn macro_expr_no_rule_matches() {
     let (_, diags) = parse_meta(
         "#[impl_macro(one)] pub @macro { (@a: expr, @b: expr) => { (@a, @b) } }\n\
