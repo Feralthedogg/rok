@@ -793,6 +793,110 @@ fn meta_derive_expands_fields() {
 }
 
 #[test]
+fn meta_macro_block_registers() {
+    // `#[impl_macro(name)] @macro { (matcher) => { template } }` (spec 6.8.12)
+    // is collected as a Macro meta definition and registered as `name!`.
+    let src = "#[impl_macro(dup)] pub @macro { (@e: expr) => { (@e, @e) } }\n";
+    let (tokens, _) = Lexer::new(src, "test").lex_all();
+    let defs = crate::collect_meta_blocks(&tokens, "test");
+    assert_eq!(defs.len(), 1, "{defs:?}");
+    assert!(matches!(defs[0].kind, crate::MetaKind::Macro));
+    assert_eq!(defs[0].name, "dup");
+    let mut table = crate::MetaTable::default();
+    assert!(table.add(defs[0].clone()).is_none());
+    assert!(table.find_macro("dup").is_some());
+    // A macro is not an item-attached derive / attribute trigger.
+    assert!(!table.defines("dup"));
+}
+
+#[test]
+fn macro_expr_simple() {
+    let (p, diags) = parse_meta(
+        "#[impl_macro(twice)] pub @macro { (@e: expr) => { (@e, @e) } }\n\
+         fn f() -> (i32, i32) { return twice!(1 + 2); }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    assert!(matches!(p.items.last(), Some(Item::Fn(_))));
+}
+
+#[test]
+fn macro_expr_multi_arg_and_hygiene() {
+    // Three `expr` fragments, and a template-local `v` that must be made
+    // hygienic (not clash with a caller `v`).
+    let (_, diags) = parse_meta(
+        "#[impl_macro(clamp)] pub @macro { (@x: expr, @lo: expr, @hi: expr) => { \
+         { let v = @x; if v < @lo { @lo } else if v > @hi { @hi } else { v } } } }\n\
+         fn f(v: i32) -> i32 { return clamp!(v, 0, 9); }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn macro_expr_repetition() {
+    let (_, diags) = parse_meta(
+        "#[impl_macro(list)] pub @macro { (@rep[sep = \",\"] { @x: expr }) => { \
+         { let acc = List::new(); @for @x { acc.push(@x); } acc } } }\n\
+         fn f() -> List<i32> { return list![1, 2, 3]; }",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+}
+
+#[test]
+fn macro_item_repetition_impls() {
+    let (p, diags) = parse_meta(
+        "#[impl_macro(imp)] pub @macro { (@rep[sep = \",\"] { @t: ty }) => { \
+         @for @t { impl Foo for @t {} } } }\n\
+         imp!(i8, i16, i32);",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    assert_eq!(p.items.len(), 3, "{:?}", p.items);
+    assert!(p.items.iter().all(|i| matches!(i, Item::Impl(_))));
+}
+
+#[test]
+fn macro_item_name_synthesis() {
+    let (p, diags) = parse_meta(
+        "#[impl_macro(mk)] pub @macro { (@rep[sep = \",\"] { @n: ident }) => { \
+         @for @n { fn @concat(do_, @n)() {} } } }\n\
+         mk!(a, b);",
+    );
+    assert!(diags.is_empty(), "{diags:?}");
+    let names: Vec<&str> = p
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Fn(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["do_a", "do_b"], "{names:?}");
+}
+
+#[test]
+fn macro_expr_no_rule_matches() {
+    let (_, diags) = parse_meta(
+        "#[impl_macro(one)] pub @macro { (@a: expr, @b: expr) => { (@a, @b) } }\n\
+         fn f() -> i32 { return one!(42); }",
+    );
+    assert!(
+        diags.iter().any(|d| format!("{d:?}").contains("no rule")),
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn meta_macro_rejects_builtin_bang_name() {
+    // `#[impl_macro]` cannot take a reserved built-in `!`-form name.
+    let src = "#[impl_macro(cfg)] pub @macro { (@e: expr) => { @e } }\n";
+    let (tokens, _) = Lexer::new(src, "test").lex_all();
+    let defs = crate::collect_meta_blocks(&tokens, "test");
+    assert_eq!(defs.len(), 1, "{defs:?}");
+    let mut table = crate::MetaTable::default();
+    // `cfg!` is a reserved built-in form, so registration is refused.
+    assert!(table.add(defs[0].clone()).is_some());
+}
+
+#[test]
 fn meta_error_points_at_template_and_use() {
     let (_, diags) = parse_meta(
         "#[impl_derive(Tr)] pub @derive {\n  impl Tr for @Self { fn f() { @nope; } }\n}\n\

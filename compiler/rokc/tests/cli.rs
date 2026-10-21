@@ -61,6 +61,29 @@ fn new_package(dir: &Path, name: &str, lib: bool) -> PathBuf {
     pkg
 }
 
+// spec: §6.8.12
+#[test]
+fn declarative_macros_run_end_to_end() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("macros");
+    let app = new_package(&dir, "app", false);
+    // An item macro (repetition + @concat name synthesis) and an expression
+    // macro (with a hygienic local), both used from the same program.
+    put(
+        app.join("src/main.rok"),
+        "#[impl_macro(sq)] pub @macro { (@e: expr) => { { let v = @e; v * v } } }\n\
+         #[impl_macro(mk)] pub @macro { (@rep[sep = \",\"] { @n: ident }) => { \
+         @for @n { fn @concat(f_, @n)() -> i64 { 10i64 } } } }\n\
+         mk!(a, b);\n\
+         fn main() {\n    let v = 1i64;\n    println(f\"{sq!(f_a() + f_b())} {v}\");\n}\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["-q", "run"]);
+    assert_exit(&out, 0);
+    // (10 + 10)^2 = 400; the caller's `v` is untouched by `sq!`'s own `v`.
+    assert_eq!(text(&out.stdout), "400 1\n");
+}
+
 // spec: §9.1.1 §9.1.2 §9.1.4 §9.1.5 §9.2.2 §9.2.15
 #[test]
 fn new_bin_package_runs_from_its_directory() {

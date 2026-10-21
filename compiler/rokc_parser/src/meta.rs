@@ -36,6 +36,8 @@ pub enum MetaKind {
     Derive,
     /// `#[impl_attribute]` - used as `#[name]` / `#[name(args)]`.
     Attribute,
+    /// `#[impl_macro]` - used as `name!(..)` at a call site (spec 6.8.12).
+    Macro,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +104,7 @@ const BUILTIN_ATTRS: &[&str] = &[
     "impl_attribute",
     "impl_derive",
     "impl_derive_attribute",
+    "impl_macro",
     "infix",
     "inline",
     "intrinsic",
@@ -121,6 +124,10 @@ const BUILTIN_ATTRS: &[&str] = &[
     "warn",
 ];
 
+/// Compiler built-in `!`-forms ([6.3](603)/[6.11](611)); a macro cannot
+/// take their names (spec 6.8.12).
+const BUILTIN_BANGS: &[&str] = &["cfg", "include_bytes", "include_str"];
+
 impl MetaTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -128,10 +135,19 @@ impl MetaTable {
     }
 
     /// Whether `name` is a derive or attribute a meta block registers
-    /// (what the parser expands).
+    /// (what the parser expands on an item). Macros expand at call sites,
+    /// so they are not counted here.
     #[must_use]
     pub fn defines(&self, name: &str) -> bool {
-        self.defs.iter().any(|d| d.name == name)
+        self.defs
+            .iter()
+            .any(|d| d.name == name && d.kind != MetaKind::Macro)
+    }
+
+    /// The macro `name!` a meta block registers, if any (spec 6.8.12).
+    #[must_use]
+    pub fn find_macro(&self, name: &str) -> Option<&MetaDef> {
+        self.find(MetaKind::Macro, name)
     }
 
     /// Whether some meta block defines attribute `name` (as the attribute,
@@ -168,6 +184,7 @@ impl MetaTable {
             let what = match def.kind {
                 MetaKind::Derive => format!("derive `{}`", def.name),
                 MetaKind::Attribute => format!("attribute `#[{}]`", def.name),
+                MetaKind::Macro => format!("macro `{}!`", def.name),
             };
             return Some(
                 clash(format!(
@@ -185,6 +202,12 @@ impl MetaTable {
         if def.kind == MetaKind::Attribute && BUILTIN_ATTRS.contains(&def.name.as_str()) {
             return Some(clash(format!(
                 "`#[{}]` is a built-in attribute; a meta block cannot redefine it (spec 6.2)",
+                def.name
+            )));
+        }
+        if def.kind == MetaKind::Macro && BUILTIN_BANGS.contains(&def.name.as_str()) {
+            return Some(clash(format!(
+                "`{}!` is a built-in form; a macro cannot take its name (spec 6.8.12)",
                 def.name
             )));
         }
@@ -226,7 +249,7 @@ pub fn collect_meta_blocks(tokens: &[Token], file: &str) -> Vec<MetaDef> {
 fn is_meta_attr(a: &Attribute) -> bool {
     matches!(
         a.name(),
-        "impl_derive" | "impl_attribute" | "impl_derive_attribute"
+        "impl_derive" | "impl_attribute" | "impl_derive_attribute" | "impl_macro"
     )
 }
 
@@ -379,6 +402,7 @@ impl Expander<'_> {
         let what = match self.def.kind {
             MetaKind::Derive => format!("in this `#[derive({})]`", self.def.name),
             MetaKind::Attribute => format!("in this `#[{}]`", self.def.name),
+            MetaKind::Macro => format!("in this `{}!` macro", self.def.name),
         };
         self.diags
             .push(meta_err(span, msg).with_secondary(self.t.at, what));
@@ -1201,10 +1225,10 @@ impl Parser<'_> {
         } else {
             String::new()
         };
-        let want = if ma.name() == "impl_attribute" {
-            "attribute"
-        } else {
-            "derive"
+        let want = match ma.name() {
+            "impl_attribute" => "attribute",
+            "impl_macro" => "macro",
+            _ => "derive",
         };
         let body_start = self.pos;
         let Some(end) = (self.peek() == &TokenKind::LBrace)
@@ -1254,10 +1278,10 @@ impl Parser<'_> {
             return Some(None);
         }
         Some(Some(MetaDef {
-            kind: if want == "derive" {
-                MetaKind::Derive
-            } else {
-                MetaKind::Attribute
+            kind: match want {
+                "derive" => MetaKind::Derive,
+                "macro" => MetaKind::Macro,
+                _ => MetaKind::Attribute,
             },
             name: words[0].clone(),
             field_attr: words.get(1).cloned(),
@@ -1546,6 +1570,7 @@ impl Parser<'_> {
         let what = match def.kind {
             MetaKind::Derive => format!("expanded from this `#[derive({})]`", def.name),
             MetaKind::Attribute => format!("expanded from this `#[{}]`", def.name),
+            MetaKind::Macro => format!("expanded from this `{}!` macro", def.name),
         };
         let (file, at) = (&self.file, target.at);
         self.expanded.push(format!(
@@ -1726,7 +1751,7 @@ fn render(tokens: &[Token]) -> String {
     out
 }
 
-rokc_core::codec_enum!(MetaKind { Derive, Attribute });
+rokc_core::codec_enum!(MetaKind { Derive, Attribute, Macro });
 rokc_core::codec_struct!(MetaDef {
     kind,
     name,
