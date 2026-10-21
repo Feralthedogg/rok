@@ -5,9 +5,6 @@
 //! 2 usage error, 101 internal error. `run` exits with the program's own
 //! code.
 
-mod bench_runner;
-mod test_runner;
-
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -31,11 +28,11 @@ commands:
                          at -O2+ / -Os; a --target build goes under
                          target/<target>/
   run [path] [-- args]   build, then run; args after `--` are forwarded
-  test [path] [filter]   build and run the `#[test]` functions, the library's
-                         then the executable's (filter: regex with ^ $ . * + ?,
-                         or a substring)
-  bench [path] [filter]  build (-O2 unless -O given) and time the `#[bench]`
-                         functions; prints ns/iter (+/- deviation)
+  test [path] [filter]   build the `#[test]` harness, the library's then the
+                         executable's; `rok test` runs it (filter: regex with
+                         ^ $ . * + ?, or a substring)
+  bench [path] [filter]  build (-O2 unless -O given) the `#[bench]` harness;
+                         `rok bench` runs it and prints ns/iter (+/- deviation)
   check [path | -]       front end, lints and codegen, no native build
                          (`-`: source on stdin)
   lint [path]            front end and lints; exit 1 if a `deny` lint fires
@@ -171,6 +168,8 @@ check options:  --check-library (check every library body, reached or not)
 test options:   --threads=N, --show-output
 bench options:  --iters=N (calls per sample; default: calibrated to ~10ms),
                 --samples=N (timed samples, default 10)
+harness:        --emit-harness <file> (write the built harness and its cases
+                to <file> for `rok` to run, instead of naming it)
 doc options:    --std (document the standard library too; without a path,
                 only it, into ./target/doc/)
 lint options:   --list
@@ -244,6 +243,10 @@ struct Args {
     connection_file: Option<PathBuf>,
     iters: Option<u64>,
     samples: Option<u64>,
+    /// `--emit-harness <file>`: write the test / bench harness manifest
+    /// (built executables and their cases) to `<file>` instead of running;
+    /// `rok` reads it and runs the cases (its runner, spec 9.1).
+    emit_harness: Option<PathBuf>,
     /// An `-O` level or `--release` was given.
     opt_set: bool,
     /// The prebuilt standard library this build links (`prebuild`).
@@ -269,8 +272,8 @@ fn command_help(cmd: &str) -> String {
     let mut out = format!("usage: rokc [global options] {cmd} [options] [args]\n\n{entry}");
     let sections: &[&str] = match cmd {
         "build" | "run" | "emit" => &["build options"],
-        "test" => &["build options", "test options"],
-        "bench" => &["build options", "bench options"],
+        "test" => &["build options", "test options", "harness"],
+        "bench" => &["build options", "bench options", "harness"],
         "check" => &["check options"],
         "lint" => &["lint options"],
         "fmt" => &["fmt options"],
@@ -368,6 +371,7 @@ fn parse_args(raw: Vec<String>) -> Args {
             }
             "--name" => a.name = Some(value(&name, inline, &mut it)),
             "--target-dir" => a.target_dir = Some(value(&name, inline, &mut it).into()),
+            "--emit-harness" => a.emit_harness = Some(value(&name, inline, &mut it).into()),
             "--target" => a.target = Some(value(&name, inline, &mut it)),
             "--rokr" => a.opts.rokr = value(&name, inline, &mut it),
             "-L" => a.opts.lib_dirs.push(value(&name, inline, &mut it).into()),
@@ -1531,9 +1535,9 @@ fn path_and_filter(a: &Args) -> (&str, Option<&str>) {
     }
 }
 
-/// `rokc test` / `rokc bench [path] [filter]` (`-O2` unless given):
-/// build and run the harness. A package with both roots runs the
-/// library's first, then the executable's if those passed.
+/// `rokc test` / `rokc bench [path] [filter]` (`-O2` unless given): build
+/// the harness and emit the manifest `rok` runs (spec 9.1). `rokc` no
+/// longer runs the cases; `--emit-harness` names the manifest file.
 fn cmd_harness(mut a: Args, mode: Mode) {
     if mode == Mode::Bench && !a.opt_set {
         "2".clone_into(&mut a.opts.opt_level);
@@ -1542,56 +1546,98 @@ fn cmd_harness(mut a: Args, mode: Mode) {
     let filter = filter.map(str::to_owned);
     let pkg = discover_at(&a, path);
     prebuild(&mut a, Some(&pkg)).unwrap_or_else(|e| fail(&e));
+    // `rokc` builds the harness; the `rok` runner (spec 9.1) runs it. A
+    // package with both roots builds the library's first, the
+    // executable's second. Each goes into the target directory so it
+    // survives this process, and its path and cases go to the manifest.
+    let mut harnesses: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for target in pkg.library_target().into_iter().chain([pkg.clone()]) {
         mount_library(&mut a, &target);
-        if !run_harness(&a, &target, mode, filter.as_deref()) {
-            process::exit(1);
-        }
+        harnesses.push(build_harness(&a, &target, mode));
     }
+    write_harness_manifest(&a, mode, filter.as_deref(), &harnesses);
 }
 
-/// Build and run `pkg`'s test or bench harness; whether all passed.
-fn run_harness(a: &Args, pkg: &Package, mode: Mode, filter: Option<&str>) -> bool {
+/// Build `pkg`'s test or bench harness into the target directory; its
+/// executable and the cases in it.
+fn build_harness(a: &Args, pkg: &Package, mode: Mode) -> (PathBuf, Vec<String>) {
     let kind = if mode == Mode::Bench { "bench" } else { "test" };
     let (result, _, started) = compile(a, pkg, mode);
-    let tmp = fail_on(TempDir::new(a.opts.keep_temps), &SourceMap::new());
     let unit = format!("{}-{kind}", unit_name(pkg));
-    let exe = tmp.path().join(exe_file(a, &unit));
+    let dir = out_dir(a, Some(pkg)).join("harness");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        fail(&format!("{}: {e}", dir.display()));
+    }
+    let exe = dir.join(exe_file(a, &unit));
     let t = Instant::now();
     link_exe(a, pkg, &result, &exe, &unit);
     stage(a, "codegen + link", t);
     finished(a, started);
-    if !a.quiet {
-        eprintln!("     Running {}", pkg.root.display());
-    }
-    if mode == Mode::Bench {
-        return bench_runner::run(
-            &exe,
-            &result.tests,
-            &bench_runner::Options {
-                filter,
-                iters: a.iters,
-                samples: a.samples.unwrap_or(10),
-            },
-        );
-    }
-    let threads = a
-        .threads
+    (exe, result.tests)
+}
+
+/// The default test thread count: `--threads`, else `ROKC_NUM_JOBS`, else
+/// the available parallelism. `rok`'s runner reads it from the manifest.
+fn test_threads(a: &Args) -> usize {
+    a.threads
         .or_else(|| {
             rokc_core::env_knob("ROKC_NUM_JOBS", "a positive number", |v| {
                 v.parse().ok().filter(|&n| n > 0)
             })
         })
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from));
-    test_runner::run(
-        &exe,
-        &result.tests,
-        &test_runner::Options {
-            filter,
-            threads,
-            show_output: a.show_output,
-        },
-    )
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+}
+
+/// Write the harness manifest `rok` runs (spec 9.1): the run options
+/// `rokc` resolved, then each executable with its cases. Without
+/// `--emit-harness`, name the built executables for a human instead.
+fn write_harness_manifest(
+    a: &Args,
+    mode: Mode,
+    filter: Option<&str>,
+    harnesses: &[(PathBuf, Vec<String>)],
+) {
+    let Some(path) = a.emit_harness.as_ref() else {
+        if !a.quiet {
+            for (exe, _) in harnesses {
+                eprintln!("       Built {}", exe.display());
+            }
+            eprintln!("note: run the harness with `rok {}`", a.cmd);
+        }
+        return;
+    };
+    let mut m = String::new();
+    m.push_str(if mode == Mode::Bench {
+        "kind bench\n"
+    } else {
+        "kind test\n"
+    });
+    if mode == Mode::Bench {
+        if let Some(n) = a.iters {
+            m.push_str(&format!("iters {n}\n"));
+        }
+        m.push_str(&format!("samples {}\n", a.samples.unwrap_or(10)));
+    } else {
+        m.push_str(&format!("threads {}\n", test_threads(a)));
+        if a.show_output {
+            m.push_str("show_output\n");
+        }
+    }
+    // The filter is raw to end of line, so it may hold spaces.
+    if let Some(f) = filter {
+        m.push_str(&format!("filter {f}\n"));
+    }
+    for (exe, cases) in harnesses {
+        // Absolute, so the runner finds it from any working directory.
+        let exe = std::path::absolute(exe).unwrap_or_else(|_| exe.clone());
+        m.push_str(&format!("exe {}\n", exe.display()));
+        for c in cases {
+            m.push_str(&format!("case {c}\n"));
+        }
+    }
+    if let Err(e) = std::fs::write(path, m) {
+        fail(&format!("{}: {e}", path.display()));
+    }
 }
 
 /// `rokc doc [path]`: HTML into `target/doc/` (see `rokc_tools::doc`).

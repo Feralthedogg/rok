@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "rokc_core",
  "rokc_diagnostic",
+ "rokc_harness",
  "rokc_lexer",
  "rokc_rokon",
  "rokc_target",
@@ -27,6 +28,7 @@ dependencies = [
  "rokc_core",
  "rokc_diagnostic",
  "rokc_fmt",
+ "rokc_harness",
  "rokc_interface",
  "rokc_lexer",
  "rokc_llvm",
@@ -105,6 +107,10 @@ dependencies = [
  "rokc_parser",
  "rokc_rokon",
 ]
+
+[[package]]
+name = "rokc_harness"
+version = "0.1.0"
 
 [[package]]
 name = "rokc_hir"

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/rok.svg" alt="rok" width="96" height="96">
+</p>
+
 # rok
 
 The implementation of the rok language: the compiler `rokc`, the package / build front-end `rok`, the language

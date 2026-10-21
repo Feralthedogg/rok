@@ -10,6 +10,7 @@ members = [
     "compiler/rokc_diagnostic",
     "compiler/rokc_driver",
     "compiler/rokc_fmt",
+    "compiler/rokc_harness",
     "compiler/rokc_hir",
     "compiler/rokc_interface",
     "compiler/rokc_ir_common",
@@ -41,6 +42,7 @@ rokc_core = { path = "compiler/rokc_core" }
 rokc_diagnostic = { path = "compiler/rokc_diagnostic" }
 rokc_driver = { path = "compiler/rokc_driver" }
 rokc_fmt = { path = "compiler/rokc_fmt" }
+rokc_harness = { path = "compiler/rokc_harness" }
 rokc_hir = { path = "compiler/rokc_hir" }
 rokc_interface = { path = "compiler/rokc_interface" }
 rokc_ir_common = { path = "compiler/rokc_ir_common" }
@@ -56,7 +58,7 @@ rokc_wit = { path = "compiler/rokc_wit" }
 rokr_common = { path = "runtime/rokr_common" }
 rokr_gc = { path = "runtime/rokr_gc" }
 
-# Platform sys crates only (targets.md: zero external dependencies).
+# Platform sys crates only; zero external dependencies.
 libc = "0.2"
 
 [workspace.lints.rust]

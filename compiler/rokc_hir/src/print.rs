@@ -4,9 +4,7 @@ use std::fmt::Write;
 
 use rokc_ir_common::{ConstVal, PrimTy};
 
-use crate::{
-    HirBlock, HirExpr, HirExprKind, HirFunction, HirModule, HirPattern, HirStmt, HirTy,
-};
+use crate::{HirBlock, HirExpr, HirExprKind, HirFunction, HirModule, HirPattern, HirStmt, HirTy};
 
 #[must_use]
 pub fn print_hir(module: &HirModule) -> String {

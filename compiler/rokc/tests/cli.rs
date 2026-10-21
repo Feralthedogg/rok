@@ -22,6 +22,30 @@ fn rokc(env: Option<&Env>, cwd: &Path, args: &[&str]) -> Output {
     cmd.output().unwrap()
 }
 
+/// Build the `kind` (`test` | `bench`) harness in `cwd` with `rokc`, then
+/// run it the way `rok` does (the `rokc_harness` runner). Returns the exit
+/// code, the runner's stdout, and the build's stderr (its warnings, or a
+/// build error when the harness does not build).
+#[track_caller]
+fn harness(env: &Env, cwd: &Path, kind: &str, extra: &[&str]) -> (i32, String, String) {
+    let man = cwd.join("harness.manifest");
+    let mut args = vec![kind, "--emit-harness", man.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    let build = rokc(Some(env), cwd, &args);
+    let build_err = text(&build.stderr);
+    if !build.status.success() {
+        return (
+            build.status.code().unwrap_or(1),
+            text(&build.stdout),
+            build_err,
+        );
+    }
+    let manifest = fs::read_to_string(&man).unwrap();
+    let mut out = Vec::new();
+    let code = rokc_harness::run_manifest(&manifest, &mut out);
+    (code, text(&out), build_err)
+}
+
 /// `dir/name/src/main.rok` (or `src/lib.rok` with a test), as `rok new`
 /// makes it.
 fn new_package(dir: &Path, name: &str, lib: bool) -> PathBuf {
@@ -128,17 +152,12 @@ fn lib_and_main_package() {
     assert_exit(&out, 0);
     assert_eq!(text(&out.stdout), "5\n");
 
-    let out = rokc(Some(&env), &app, &["test"]);
-    assert_exit(&out, 0);
-    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    // The library's tests run before the executable's (manifest order).
+    let (code, stdout, _) = harness(&env, &app, "test", &[]);
+    assert_eq!(code, 0, "{stdout}");
     let lib_at = stdout.find("test adds ... ok").expect(&stdout);
     let main_at = stdout.find("test main_adds ... ok").expect(&stdout);
     assert!(lib_at < main_at, "{stdout}");
-    let (lib_run, main_run) = (
-        stderr.find("Running src/lib.rok").expect(&stderr),
-        stderr.find("Running src/main.rok").expect(&stderr),
-    );
-    assert!(lib_run < main_run, "{stderr}");
     // A failing library test stops before the executable's.
     let lib = fs::read_to_string(app.join("src/lib.rok")).unwrap();
     put(
@@ -146,9 +165,8 @@ fn lib_and_main_package() {
         lib.replace("add(2, 2) != 4", "add(2, 2) != 5"),
     )
     .unwrap();
-    let out = rokc(Some(&env), &app, &["test"]);
-    assert_exit(&out, 1);
-    let stdout = text(&out.stdout);
+    let (code, stdout, _) = harness(&env, &app, "test", &[]);
+    assert_eq!(code, 1, "{stdout}");
     assert!(stdout.contains("test adds ... FAILED"), "{stdout}");
     assert!(!stdout.contains("main_adds"), "{stdout}");
     put(app.join("src/lib.rok"), &lib).unwrap();
@@ -335,9 +353,8 @@ fn builds_print_lints() {
         "fn main() {}\n\n#[test]\nfn t() {\n    let y = 2;\n}\n",
     )
     .unwrap();
-    let out = rokc(Some(&env), &app, &["test"]);
-    assert_exit(&out, 0);
-    let err = text(&out.stderr);
+    let (code, _, err) = harness(&env, &app, "test", &[]);
+    assert_eq!(code, 0, "{err}");
     assert!(err.contains("warning[E503]: unused variable `y`"), "{err}");
     // A lone file's cached executable.
     put(dir.join("s.rok"), src).unwrap();
@@ -1246,9 +1263,8 @@ fn lib_package_builds_archive_and_runs_tests() {
     // A library has no entry point.
     assert_exit(&rokc(Some(&env), &dir, &["run", "mylib"]), 1);
 
-    let out = rokc(Some(&env), &lib, &["test"]);
-    assert_exit(&out, 0);
-    let stdout = text(&out.stdout);
+    let (code, stdout, _) = harness(&env, &lib, "test", &[]);
+    assert_eq!(code, 0, "{stdout}");
     assert!(stdout.contains("test adds ... ok"), "{stdout}");
     assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
 
@@ -1258,17 +1274,19 @@ fn lib_package_builds_archive_and_runs_tests() {
          println(\"from boom\");\n        panic(\"boom\");\n    }\n}\n",
     );
     put(lib.join("src/lib.rok"), src).unwrap();
-    let out = rokc(Some(&env), &lib, &["test"]);
-    assert_exit(&out, 1);
-    let stdout = text(&out.stdout);
+    let (code, stdout, _) = harness(&env, &lib, "test", &[]);
+    assert_eq!(code, 1, "{stdout}");
     assert!(stdout.contains("test tests::boom ... FAILED"), "{stdout}");
     assert!(stdout.contains("from boom"), "{stdout}");
     assert!(stdout.contains("1 passed; 1 failed"), "{stdout}");
 
     // Filter (a lone non-path argument), regex anchors included.
-    let out = rokc(Some(&env), &lib, &["test", "^add"]);
-    assert_exit(&out, 0);
-    assert!(text(&out.stdout).contains("1 passed; 0 failed; 1 filtered out"));
+    let (code, stdout, _) = harness(&env, &lib, "test", &["^add"]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("1 passed; 0 failed; 1 filtered out"),
+        "{stdout}"
+    );
 
     // `#[test]` functions are not part of a normal build (6.2.5).
     assert_exit(&rokc(Some(&env), &lib, &["build"]), 0);
@@ -1291,9 +1309,8 @@ fn tests_in_private_modules_run() {
         "mod checks {\n    #[test]\n    fn h() {}\n}\n",
     )
     .unwrap();
-    let out = rokc(Some(&env), &lib, &["test"]);
-    assert_exit(&out, 1);
-    let stdout = text(&out.stdout);
+    let (code, stdout, _) = harness(&env, &lib, "test", &[]);
+    assert_eq!(code, 1, "{stdout}");
     for line in [
         "test inner::deeper::f ... ok",
         "test inner::g ... FAILED",
@@ -1309,9 +1326,9 @@ fn tests_in_private_modules_run() {
         "mod checks {\n    #[test]\n    fn h() {}\n}\npub fn leak() { checks::h(); }\n",
     )
     .unwrap();
-    let out = rokc(Some(&env), &lib, &["test"]);
-    assert_exit(&out, 1);
-    assert!(text(&out.stderr).contains("`util::checks::h` is private"));
+    let (code, _, err) = harness(&env, &lib, "test", &[]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("`util::checks::h` is private"), "{err}");
 }
 
 // The day's eviction of the shared lone-file cache runs inside a build:

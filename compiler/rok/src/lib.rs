@@ -431,6 +431,7 @@ fn run(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> i32 {
         "env" => env::cmd(g, post),
         "toolchain" => toolchain::cmd(post, g.quiet),
         "jupyter" if post.first().is_some_and(|p| p == "install") => install_kernel(g, &post[1..]),
+        "test" | "bench" => harness(g, cmd, pre, post),
         c if DELEGATED.contains(&c) => delegate(g, cmd, pre, post),
         other => return usage(&format!("unknown command `{other}`")),
     };
@@ -740,6 +741,31 @@ fn split_features(v: &str) -> impl Iterator<Item = String> {
 fn delegate(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
     let (c, rokc) = rokc_command(g, cmd, pre, post, None)?;
     Ok(exec(c, &rokc))
+}
+
+/// `rok test` / `rok bench`: `rokc` builds the harness and writes a
+/// manifest (the built executables and their cases); the runner here runs
+/// each case, out of the compiler (spec 9.1).
+fn harness(g: &Global, cmd: &str, pre: &[String], post: &[String]) -> Result<i32, String> {
+    let (mut c, rokc) = rokc_command(g, cmd, pre, post, None)?;
+    let tmp = TempEntry::dir("rok-harness-").map_err(|e| e.to_string())?;
+    let manifest = tmp.path().join("manifest");
+    c.arg("--emit-harness").arg(&manifest);
+    // Build the harness; its progress and diagnostics stream through.
+    let status = c
+        .status()
+        .map_err(|e| format!("cannot run {}: {e}", rokc.display()))?;
+    if !status.success() {
+        return Ok(status.code().unwrap_or(1));
+    }
+    // No manifest means there was nothing to run (e.g. `--emit`).
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => Ok(rokc_harness::run_manifest(
+            &text,
+            &mut std::io::stdout().lock(),
+        )),
+        Err(_) => Ok(0),
+    }
 }
 
 /// `delegate`'s rokc command, and the rokc it runs; with `in_env`, on

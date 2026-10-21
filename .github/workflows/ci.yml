@@ -218,7 +218,7 @@ jobs:
       - name: fmt library
         if: ${{ !cancelled() }}
         run: '"${CARGO_TARGET_DIR:-target}/debug/rokc" fmt --check library'
-      - name: compiler / runtime isolation (targets.md)
+      - name: compiler / runtime isolation
         if: ${{ !cancelled() }}
         run: |
           if cargo tree -p rokc -e normal | grep -E '\brokr(_[a-z]+)?\b'; then
