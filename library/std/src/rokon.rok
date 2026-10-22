@@ -556,77 +556,21 @@ fn out_of_range<T>(n: int) -> RokonError {
     RokonError::new(f"integer {n} is out of range for {T::type_name()}")
 }
 
-impl ToRokon for i8 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for i16 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for i32 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for i64 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for isize { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u8 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u16 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u32 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for u64 { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-impl ToRokon for usize { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
-
-impl FromRokon for i8 {
-    fn from_rokon(v: Value) throws (RokonError) -> i8 {
-        let n = try int_of::<i8>(v);
-        try i8::try_from(n) catch _ { throw out_of_range::<i8>(n); }
+// ToRokon / FromRokon for every integer type (spec 6.8.12).
+#[impl_macro(rokon_int)] @macro {
+    (@rep[sep = ","] { @t: ty }) => {
+        @for @t {
+            impl ToRokon for @t { const fn to_rokon(self) -> Value { Value::Int(Int::from(self)) } }
+            impl FromRokon for @t {
+                fn from_rokon(v: Value) throws (RokonError) -> @t {
+                    let n = try int_of::<@t>(v);
+                    try @t::try_from(n) catch _ { throw out_of_range::<@t>(n); }
+                }
+            }
+        }
     }
 }
-impl FromRokon for i16 {
-    fn from_rokon(v: Value) throws (RokonError) -> i16 {
-        let n = try int_of::<i16>(v);
-        try i16::try_from(n) catch _ { throw out_of_range::<i16>(n); }
-    }
-}
-impl FromRokon for i32 {
-    fn from_rokon(v: Value) throws (RokonError) -> i32 {
-        let n = try int_of::<i32>(v);
-        try i32::try_from(n) catch _ { throw out_of_range::<i32>(n); }
-    }
-}
-impl FromRokon for i64 {
-    fn from_rokon(v: Value) throws (RokonError) -> i64 {
-        let n = try int_of::<i64>(v);
-        try i64::try_from(n) catch _ { throw out_of_range::<i64>(n); }
-    }
-}
-impl FromRokon for isize {
-    fn from_rokon(v: Value) throws (RokonError) -> isize {
-        let n = try int_of::<isize>(v);
-        try isize::try_from(n) catch _ { throw out_of_range::<isize>(n); }
-    }
-}
-impl FromRokon for u8 {
-    fn from_rokon(v: Value) throws (RokonError) -> u8 {
-        let n = try int_of::<u8>(v);
-        try u8::try_from(n) catch _ { throw out_of_range::<u8>(n); }
-    }
-}
-impl FromRokon for u16 {
-    fn from_rokon(v: Value) throws (RokonError) -> u16 {
-        let n = try int_of::<u16>(v);
-        try u16::try_from(n) catch _ { throw out_of_range::<u16>(n); }
-    }
-}
-impl FromRokon for u32 {
-    fn from_rokon(v: Value) throws (RokonError) -> u32 {
-        let n = try int_of::<u32>(v);
-        try u32::try_from(n) catch _ { throw out_of_range::<u32>(n); }
-    }
-}
-impl FromRokon for u64 {
-    fn from_rokon(v: Value) throws (RokonError) -> u64 {
-        let n = try int_of::<u64>(v);
-        try u64::try_from(n) catch _ { throw out_of_range::<u64>(n); }
-    }
-}
-impl FromRokon for usize {
-    fn from_rokon(v: Value) throws (RokonError) -> usize {
-        let n = try int_of::<usize>(v);
-        try usize::try_from(n) catch _ { throw out_of_range::<usize>(n); }
-    }
-}
+rokon_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 
 impl ToRokon for Float {
     const fn to_rokon(self) -> Value { Value::Float(self) }

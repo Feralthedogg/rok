@@ -84,6 +84,28 @@ fn declarative_macros_run_end_to_end() {
     assert_eq!(text(&out.stdout), "400 1\n");
 }
 
+// WrappingFrom (the as-cast conversion matrix) is macro-generated in
+// convert.rok (spec 6.8.12); check a couple of wrapping conversions.
+#[test]
+fn macro_generated_wrapping_casts_work() {
+    let Some(env) = setup() else { return };
+    let dir = scratch("wrap");
+    let app = new_package(&dir, "app", false);
+    put(
+        app.join("src/main.rok"),
+        "fn main() {\n\
+         \x20   let a = (300i32).wrapping_into::<u8>();\n\
+         \x20   let b = (200i32).wrapping_into::<i8>();\n\
+         \x20   println(f\"{a} {b}\");\n\
+         }\n",
+    )
+    .unwrap();
+    let out = rokc(Some(&env), &app, &["-q", "run"]);
+    assert_exit(&out, 0);
+    // 300 as u8 = 44;  200 as i8 = -56
+    assert_eq!(text(&out.stdout), "44 -56\n");
+}
+
 // The integer operator impls (Add, Sub, .. Ord) are macro-generated in
 // num.rok (spec 6.8.12); check arithmetic across signed and unsigned.
 #[test]

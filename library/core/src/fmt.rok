@@ -284,19 +284,18 @@ impl Display for bool {
 impl Display for char { const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_char(self) } }
 impl Display for str { const fn fmt(self, ref f: Formatter) throws (FmtError) { try f.pad(self) } }
 
-impl Debug for i8 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for i16 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for i32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for i64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for isize { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u8 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u16 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for u64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for usize { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for f32 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for f64 { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
-impl Debug for bool { const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) } }
+// Debug is Display for the primitives (char escapes, so it is separate).
+#[impl_macro(debug_via_display)] @macro {
+    (@rep[sep = ","] { @t: ty }) => {
+        @for @t {
+            impl Debug for @t {
+                const fn fmt(self, ref f: Formatter) throws (FmtError) { try Display::fmt(self, ref f) }
+            }
+        }
+    }
+}
+debug_via_display!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f32, f64, bool);
+
 /// A rok literal: quotes, `\\`, `\n` `\r` `\t` `\0` escaped, other
 /// control and bidi chars as `\u{..}` (2.10.4).
 impl Debug for char {

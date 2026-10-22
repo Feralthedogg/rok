@@ -202,6 +202,20 @@ struct Region {
 /// warnings (confusables become `confusable_idents`), then findings as
 /// warnings or (deny) errors.
 #[must_use]
+/// A macro or meta template renames its own locals with a hygiene suffix
+/// (`x__mac` / `x__meta`); the user never wrote it, so strip it before a name
+/// reaches a diagnostic.
+fn demangle(name: &str) -> &str {
+    for suf in ["__mac", "__meta"] {
+        if let Some(base) = name.strip_suffix(suf) {
+            if !base.is_empty() {
+                return base;
+            }
+        }
+    }
+    name
+}
+
 pub fn run(result: &CompileResult, cli: &[(Level, String)]) -> Vec<RokDiagnostic> {
     let mut out = Vec::new();
     let mut base: HashMap<&'static str, (Level, Option<String>)> =
@@ -749,7 +763,8 @@ impl<'a> Cx<'a> {
 
     fn name_lint(&mut self, what: &str, name: &str, span: Span, kind: u8) {
         // An item in a block by its own name (spec 3.9.1).
-        let name = &*rokc_core::local::leaf(name);
+        let leaf = rokc_core::local::leaf(name);
+        let name = demangle(&leaf);
         let (ok, lint, fixed, style) = match kind {
             0 => (
                 is_snake(name),
@@ -1173,6 +1188,7 @@ impl<'a> Cx<'a> {
                     else {
                         continue;
                     };
+                    let name = demangle(name);
                     let (head, fix) = split(&msg, name);
                     let unused = self
                         .findings
@@ -1697,13 +1713,13 @@ impl AstVisitor for Cx<'_> {
         }
         for b in s.bindings {
             if !b.used {
+                let name = demangle(&b.name);
                 self.findings.push(Finding {
                     lint: "unused_variables",
                     span: b.span,
-                    msg: format!("unused variable `{}`", b.name),
+                    msg: format!("unused variable `{name}`"),
                     notes: vec![format!(
-                        "if this is intentional, prefix it with an underscore: `_{}`",
-                        b.name
+                        "if this is intentional, prefix it with an underscore: `_{name}`"
                     )],
                     secondary: None,
                 });
@@ -1887,6 +1903,15 @@ impl AstVisitor for Cx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demangle_hides_hygiene_suffix() {
+        assert_eq!(demangle("count__mac"), "count");
+        assert_eq!(demangle("Field__meta"), "Field");
+        assert_eq!(demangle("plain"), "plain");
+        // a lone suffix is not a hygiene name - leave it be.
+        assert_eq!(demangle("__mac"), "__mac");
+    }
 
     #[test]
     fn names_and_levels() {
