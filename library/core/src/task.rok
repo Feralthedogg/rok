@@ -2320,8 +2320,13 @@ impl BlockingPool {
                     job = self.jobs.pop_front();
                     if job is none {
                         if now_ns() - idle_since >= keep_alive {
-                            self.threads[0] -= 1;
-                            self.forget(id);
+                            // The in-place drain (`id == 0`, no thread to be
+                            // had) already gave back its count and was
+                            // forgotten before it ran: it just returns.
+                            if id != 0 {
+                                self.threads[0] -= 1;
+                                self.forget(id);
+                            }
                             quit = true;
                         } else {
                             me[0] = 0;

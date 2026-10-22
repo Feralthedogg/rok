@@ -423,7 +423,7 @@ const fn drain(m: Memo) {
 
 // A `Work` whose `n` is at least this reports a hand-off that cannot be
 // done (`Memo::fail`); the rest is the reason.
-const FAILED: usize = 1usize << 62;
+const FAILED: usize = 1usize << (usize::BITS as usize - 2);
 pub(pkg) const HAND_STARTED: usize = 0;
 pub(pkg) const HAND_CELL: usize = 1;
 pub(pkg) const HAND_FINISHED: usize = 2;
