@@ -72,7 +72,7 @@ programs they build do: RHEL / Rocky / Alma 9, Ubuntu 22.04, Debian 12 and newer
 `--target` covers 19 triples. The test corpus runs programs for Apple arm64 and x86_64 (Rosetta); Linux
 x86_64 and aarch64 (gnu and musl; aarch64 natively and under qemu-user), i686, armv7 (qemu-user) and riscv64 (a riscv64
 kernel under qemu-system); Windows x86_64 and i686; and the three wasm32 targets (wasmtime, node).
-`aarch64-pc-windows-msvc` links but has not run.
+`aarch64-pc-windows-msvc` links but has not run. The built-in targets `powerpc64le-unknown-linux-gnu`, `s390x-unknown-linux-gnu`, `riscv32imac-unknown-none` and `x86_64-unknown-freebsd` are not in the test corpus.
 
 ## Install layout
 
