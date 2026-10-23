@@ -90,7 +90,7 @@ check_sum() {
   [ "$got" = "$want" ] || die "$1 has SHA-256 $got, but its .sha256 says $want (a damaged or altered download)"
 }
 
-supported="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc"
+supported="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
 
 # Download $1 to $2; fail with 1 on a 404, die on anything else.
 download() {

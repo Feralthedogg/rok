@@ -69,7 +69,7 @@ The toolchain (`rok`, `rokc`, `rokls`) is tested natively on macOS arm64 (macOS 
 Windows arm64 are untested as hosts. The Linux archives (x86_64, aarch64) need glibc 2.34 or later, as the
 programs they build do: RHEL / Rocky / Alma 9, Ubuntu 22.04, Debian 12 and newer.
 
-`--target` covers 15 triples. The test corpus runs programs for Apple arm64 and x86_64 (Rosetta); Linux
+`--target` covers 19 triples. The test corpus runs programs for Apple arm64 and x86_64 (Rosetta); Linux
 x86_64 and aarch64 (gnu and musl; aarch64 natively and under qemu-user), i686, armv7 (qemu-user) and riscv64 (a riscv64
 kernel under qemu-system); Windows x86_64 and i686; and the three wasm32 targets (wasmtime, node).
 `aarch64-pc-windows-msvc` links but has not run.

@@ -1,9 +1,9 @@
 # Releasing
 
-How a `rok` release is cut. 0.1.0 ships six host archives — there is no CI
-job that builds or uploads them, so they are built by hand on each host,
-gathered, verified with `release.sh`, and uploaded together. Nothing here
-runs on its own; a release happens only when it is meant to.
+How a `rok` release is cut. 0.1.0 ships six host archives. No CI job
+builds or uploads them, so they are built by hand on each host, gathered,
+verified with `release.sh`, and uploaded together. Nothing here runs on
+its own; a release happens only when it is meant to.
 
 ## Host archives
 
@@ -33,7 +33,7 @@ host, into one `dist/` directory.
 ```
 
 It checks that all six triples' archives and their checksums are present
-and that every `.sha256` verifies, and exits non-zero if any is missing —
+and that every `.sha256` verifies, and exits non-zero if any is missing,
 so the release cannot go out with a dead download link. It changes
 nothing without `--publish`.
 
@@ -42,7 +42,7 @@ nothing without `--publish`.
 1. In `CHANGELOG.md`, change `## 0.1.0 (unreleased)` to `## 0.1.0
    (<date>)`; commit on the release branch.
 2. Confirm the version matches across `rok`/`rokc` (`--version`),
-   `install.sh`, `install.ps1` and `rok-lang.org` `site.rokon` — `dist.sh`
+   `install.sh`, `install.ps1` and `rok-lang.org` `site.rokon`. `dist.sh`
    already fails if the install scripts disagree.
 3. Publish (this is the release itself):
 

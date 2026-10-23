@@ -37,7 +37,7 @@ commands:
                          (`-`: source on stdin)
   lint [path]            front end and lints; exit 1 if a `deny` lint fires
   repl [path]            interactive session, each cell compiled and run
-                         (macOS arm64; :type <expr>, :reset, :quit); a program
+                         (:type <expr>, :reset, :quit); a program
                          path runs in the session first, its bindings and
                          items staying in scope; a library is loaded and
                          `use`d

@@ -5,3 +5,10 @@
 # other targets.
 [env]
 RUST_LIBC_UNSTABLE_GNU_TIME_BITS = "64"
+
+# aarch64 musl: LLVM's Memory.cpp calls __clear_cache (an instruction-
+# cache flush on arm64), which musl leaves to libgcc. A static musl rokc
+# links with -nodefaultlibs, so pull libgcc in to resolve it. x86_64
+# needs no such flush, and other targets link no LLVM.
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-Clink-arg=-lgcc"]
