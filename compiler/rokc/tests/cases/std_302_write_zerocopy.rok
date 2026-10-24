@@ -1,6 +1,6 @@
 // spec: std §3.2.7
 // only-os: linux
-// needs: threads
+// needs: threads native-run
 // expect-exit: 0
 // expect-stdout:
 // sent 65536 got 65536 sum 8355840

@@ -98,4 +98,5 @@ fn main() throws (IoError) {
 
 // spec: std 307-process
 // only-os: macos linux
+// needs: native-run
 // spec: std 305-io §3.5.2 §3.5.5, 307-process §3.7.3

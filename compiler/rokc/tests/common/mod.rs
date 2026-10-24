@@ -28,8 +28,8 @@
 //!     is listed (POSIX commands, paths, signals)
 //!   - `// only-pointer-width: 64` - skipped on targets of another width
 //!     (sizes, `usize::BITS`, layouts in the expected output)
-//!   - `// needs: threads net process fs posix-fs` - skipped on a
-//!     target without one of them: threads only on `wasm32-wasi-threads`
+//!   - `// needs: threads net process fs posix-fs native-run` - skipped
+//!     on a target without one of them: threads only on `wasm32-wasi-threads`
 //!     among the wasm32 targets, sockets only on `wasm32-wasi`, no
 //!     processes or signals on wasm32 (stdlib 0.1.4, 3.x availability;
 //!     `process` also covers POSIX C calls), a browser no file system
@@ -48,6 +48,9 @@
 //!     satisfies the case's imports with its exports; the composition
 //!     runs
 //!   - `// spec: <section>`     - the spec section a case checks (a tag)
+//!   - `native-run` is skipped when the target runs under CPU emulation
+//!     (a foreign arch executed through qemu-user), where some syscalls
+//!     (zerocopy, process and signal details) are not faithfully emulated.
 //!
 //! Environment:
 //!   - `ROK_REQUIRE_LLVM=1` - a rokc built without LLVM is a failure
@@ -287,6 +290,21 @@ pub fn target_pointer_width() -> u32 {
     spec().pointer_width
 }
 
+/// The cases run under CPU emulation: a foreign-arch target executed
+/// through qemu-user, where some syscalls (zerocopy, process and signal
+/// details) are not faithfully emulated. `x86_64` also runs `i686`
+/// natively; every other arch mismatch is emulated. wasm runs under its
+/// own engine and is not counted here.
+pub fn emulated() -> bool {
+    let Some(t) = test_target() else { return false };
+    let arch = t.split('-').next().unwrap_or("");
+    if arch.starts_with("wasm") {
+        return false;
+    }
+    let host = std::env::consts::ARCH;
+    !(arch == host || (host == "x86_64" && arch == "i686"))
+}
+
 /// A case's `// only-os: <os> ..` excludes the target's OS, its
 /// `// only-pointer-width: <bits>` the target's width, its `// needs:`
 /// something the target lacks.
@@ -312,6 +330,7 @@ fn lacks(need: &str) -> bool {
         // Sockets: WASI preview 2 (a component).
         "net" => wasm() && t.linker != Linker::WasmComponentLd,
         "fs" => t.reactor(),
+        "native-run" => emulated(),
         _ => panic!("unknown `// needs: {need}`"),
     }
 }
