@@ -1,7 +1,7 @@
 # MLIR plugins
 
 `rokc --load-mlir-plugin` / `--load-mlir-pass-plugin` load MLIR dialect and pass plugins into rokc's own
-MLIR (std `rok::bare::mlir`, 1.10), and `--mlir-pass <pass>` runs a pass before the LLVM lowering. A
+MLIR (std `rok::bare::mlir`, 1.9), and `--mlir-pass <pass>` runs a pass before the LLVM lowering. A
 plugin is a shared library with MLIR's entry points (`mlirGetDialectPluginInfo`, `mlirGetPassPluginInfo`)
 built against the LLVM / MLIR rokc embeds (22.1.8). It does not link MLIR: its MLIR and LLVM symbols bind
 to the ones rokc exports, which are the MLIR rokc links (its dialects and what they use) and all of

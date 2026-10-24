@@ -4,7 +4,7 @@
 
 # rok
 
-The implementation of the rok language: the compiler `rokc`, the package / build front-end `rok`, the language
+The implementation of the rok language: the compiler `rokc`, the package / build front end `rok`, the language
 server `rokls`, the runtime `librokr.a`, and the standard library (`library/{core,std,bare}`). The language
 specification lives in [rok-lang/spec](https://github.com/rok-lang/spec); the guide, the
 reference and the standard library API are at [docs.rok-lang.org](https://docs.rok-lang.org).

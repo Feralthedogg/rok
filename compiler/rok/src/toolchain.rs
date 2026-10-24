@@ -548,12 +548,45 @@ fn update(home: &Path, version: Option<&str>, quiet: bool) -> Result<(), String>
     Ok(())
 }
 
+/// `rok toolchain clean`: remove every installed toolchain but the
+/// current default. Opt-in tidy-up; a version a project pins is removed
+/// too, so it is never run implicitly.
+fn clean(home: &Path, quiet: bool) -> Result<(), String> {
+    let def = default_pin(home)?.and_then(|p| find(home, &p)).ok_or_else(|| {
+        "no default toolchain to keep; set one with `rok toolchain default <version>`, \
+         or remove a toolchain by name (`rok toolchain remove <version>`)"
+            .to_owned()
+    })?;
+    let mut removed = 0;
+    for (name, _) in installed(home) {
+        let dir = root(home).join(&name);
+        if dir == def {
+            continue;
+        }
+        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        removed += 1;
+        if !quiet {
+            eprintln!("     Removed toolchain {name}");
+        }
+    }
+    if !quiet {
+        let kept = def.file_name().unwrap_or_default().to_string_lossy();
+        if removed == 0 {
+            eprintln!("nothing to clean; only the default ({kept}) is installed");
+        } else {
+            eprintln!("        Kept the default toolchain {kept}");
+        }
+    }
+    Ok(())
+}
+
 pub const USAGE: &str = "\
 usage: rok toolchain list
        rok toolchain install <version> --from <dir | .tar[.gz] | .zip | url>
        rok toolchain default [<version>]
        rok toolchain remove <version>
-       rok toolchain update [<version>]";
+       rok toolchain update [<version>]
+       rok toolchain clean";
 
 pub fn cmd(args: &[String], quiet: bool) -> Result<i32, String> {
     let h = home();
@@ -598,6 +631,7 @@ pub fn cmd(args: &[String], quiet: bool) -> Result<i32, String> {
         }
         ["update"] => update(&h, None, quiet)?,
         ["update", v] if !v.starts_with('-') => update(&h, Some(v), quiet)?,
+        ["clean"] => clean(&h, quiet)?,
         ["default"] => match default_pin(&h)? {
             Some(p) => println!("{p}"),
             None => return Err("no default toolchain".into()),
