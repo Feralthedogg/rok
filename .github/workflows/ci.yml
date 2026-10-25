@@ -113,6 +113,7 @@ jobs:
             {"target": "i686-unknown-linux-gnu", "host": "linux-x64"},
             {"target": "armv7-unknown-linux-gnueabihf", "host": "linux-x64"},
             {"target": "x86_64-unknown-linux-musl", "host": "linux-x64"},
+            {"target": "aarch64-unknown-linux-musl", "host": "linux-arm64"},
             {"target": "i686-pc-windows-msvc", "host": "windows-x64"},
             {"target": "aarch64-pc-windows-msvc", "host": "windows-arm64"}
           ]'
@@ -302,7 +303,7 @@ jobs:
         with:
           arch: ${{ matrix.entry.host == 'windows-arm64' && 'X64' || '' }}
       - name: i386 and armhf runtimes, qemu-user
-        if: runner.os == 'Linux' && runner.environment == 'github-hosted' && matrix.entry.target != 'x86_64-unknown-linux-musl'
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted' && !contains(matrix.entry.target, 'musl')
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q libc6-i386 libc6-armhf-cross qemu-user-binfmt
