@@ -8,12 +8,12 @@ name: build prefixes
 on:
   workflow_dispatch:
     inputs:
-      hosts:
-        description: "Space-separated subset of macos-arm64 macos-x64 linux-x64 linux-arm64, or all."
-        default: all
       what:
         description: "llvm, libclang or both."
         default: both
+
+# Rebuild a subset by re-running only the failed jobs of a run
+# (gh run rerun --failed), or re-dispatch with what=llvm / what=libclang.
 
 permissions:
   contents: write
@@ -30,7 +30,6 @@ jobs:
           - { host: linux-arm64,  runs-on: ubuntu-24.04-arm }
     name: build (${{ matrix.host }})
     runs-on: ${{ matrix.runs-on }}
-    if: ${{ inputs.hosts == 'all' || contains(inputs.hosts, matrix.host) }}
     timeout-minutes: 360
     env:
       GH_TOKEN: ${{ github.token }}
@@ -97,7 +96,7 @@ jobs:
   # (publish it first with seed-llvm-windows.yml).
   libclang-windows:
     name: build (windows-x64 libclang)
-    if: (inputs.what == 'both' || inputs.what == 'libclang') && (inputs.hosts == 'all' || contains(inputs.hosts, 'windows'))
+    if: ${{ inputs.what == 'both' || inputs.what == 'libclang' }}
     runs-on: windows-latest
     timeout-minutes: 120
     env:
