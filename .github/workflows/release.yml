@@ -51,7 +51,8 @@ jobs:
         run: rustup toolchain install && rustc -vV
       - name: dist.sh
         if: matrix.kind == 'native'
-        run: ./dist.sh --out "${{ runner.temp }}/dist"
+        shell: bash
+        run: ./dist.sh --out "$PWD/dist"
 
       # --- linux gnu (dist-linux.sh in a container; cache its LLVM prefix) ---
       - name: cache container prefix (gnu)
@@ -62,7 +63,7 @@ jobs:
           key: dist-linux-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-linux.Containerfile') }}
       - name: dist-linux.sh
         if: matrix.kind == 'gnu'
-        run: ./dist-linux.sh --out "${{ runner.temp }}/dist"
+        run: ./dist-linux.sh --out "$PWD/dist"
 
       # --- linux musl (dist-musl.sh in a container) ---
       - name: cache container prefix (musl)
@@ -73,12 +74,12 @@ jobs:
           key: dist-musl-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-musl.Containerfile') }}
       - name: dist-musl.sh
         if: matrix.kind == 'musl'
-        run: ./dist-musl.sh --out "${{ runner.temp }}/dist"
+        run: ./dist-musl.sh --out "$PWD/dist"
 
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.name }}
-          path: ${{ runner.temp }}/dist
+          path: dist
           if-no-files-found: error
 
   publish:
