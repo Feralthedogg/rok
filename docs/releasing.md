@@ -5,6 +5,26 @@ builds or uploads them, so they are built by hand on each host, gathered,
 verified with `release.sh`, and uploaded together. Nothing here runs on
 its own; a release happens only when it is meant to.
 
+## Versioning and cadence
+
+rok uses semantic versioning, read one step down while the major version
+is 0: a minor bump (`0.2.0`) may add features and may break compatibility,
+and a patch bump (`0.1.1`) carries only fixes, with no new features and no
+breaking changes. 1.0 waits until the language and standard library are
+meant to be stable.
+
+Releases are cut on demand, when a version's work is ready; there is no
+fixed schedule. A release is cut from `main` and tagged `v<version>`.
+There is no long-lived release branch: a maintenance branch (for example
+`0.1`) is made from a release tag only if a patch for an older minor is
+needed after `main` has moved on.
+
+A new version may first go out as a release candidate (`v<version>-rc.N`)
+to exercise the pipeline before the final tag; when the product and the
+pipeline are already verified, the final tag can be cut directly. The
+stones, the sites and CI version and deploy on their own terms; this file
+covers only cutting the toolchain release.
+
 ## Host archives
 
 | Host | Machine | Command |
@@ -40,7 +60,7 @@ nothing without `--publish`.
 ## Cut the release
 
 1. In `CHANGELOG.md`, change `## 0.1.0 (unreleased)` to `## 0.1.0
-   (<date>)`; commit on the release branch.
+   (<date>)`; commit on `main`.
 2. Confirm the version matches across `rok`/`rokc` (`--version`),
    `install.sh`, `install.ps1` and `rok-lang.org` `site.rokon`. `dist.sh`
    already fails if the install scripts disagree.
