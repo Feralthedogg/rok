@@ -37,10 +37,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          dest="$LOCALAPPDATA/rok"
+          dest="$(cygpath -u "$LOCALAPPDATA")/rok"
           mkdir -p "$dest"
           gh release download llvm-prefix -R "${{ github.repository }}" -p llvm-win.tar.gz -O "$RUNNER_TEMP/llvm-win.tar.gz"
-          tar -xzf "$RUNNER_TEMP/llvm-win.tar.gz" -C "$dest"
+          # GNU tar (Git bash) reads a `D:\..` path as a remote host, so use
+          # the unix form of the runner's temp/appdata drives.
+          tar -xzf "$(cygpath -u "$RUNNER_TEMP")/llvm-win.tar.gz" -C "$dest"
           ls "$dest"
       - name: save cache
         if: steps.look.outputs.cache-hit != 'true'
