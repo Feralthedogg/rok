@@ -16,6 +16,12 @@ inputs:
   build:
     description: Build and save the prefix when the cache has none.
     default: "false"
+  use:
+    description: >
+      Fully restore a cache hit (not lookup-only) because this job also
+      uses the prefix, not only builds it. Needed when one job both builds
+      on a cold cache and consumes the result on a warm one.
+    default: "false"
   arch:
     description: The runner architecture (X64, ARM64) whose prefix to take instead of this runner's (an emulated rokc).
     default: ""
@@ -74,7 +80,7 @@ runs:
       with:
         path: ${{ steps.where.outputs.prefix }}
         key: ${{ steps.where.outputs.key }}
-        lookup-only: ${{ inputs.build }}
+        lookup-only: ${{ inputs.build == 'true' && inputs.use != 'true' }}
         fail-on-cache-miss: ${{ inputs.build != 'true' }}
 
     - name: Missing (self-hosted)

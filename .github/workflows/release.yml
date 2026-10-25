@@ -42,6 +42,7 @@ jobs:
         if: matrix.kind == 'native'
         with:
           build: ${{ matrix.name == 'windows' && 'false' || 'true' }}
+          use: "true"
       - uses: ./.github/actions/libclang-prefix
         if: matrix.kind == 'native'
         with:
