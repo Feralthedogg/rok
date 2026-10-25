@@ -1,0 +1,129 @@
+name: build prefixes
+
+# Build the pinned LLVM (and libclang) prefix for each native host and
+# publish it, SHA-256 verified, as an asset on the prefixes-<version>
+# release, which .github/actions/{llvm,libclang}-prefix download. Run once
+# per version, or when the build scripts change. Windows is published from
+# the box by seed-llvm-windows.yml (it exceeds the 6 h job limit here).
+on:
+  workflow_dispatch:
+    inputs:
+      hosts:
+        description: "Space-separated subset of macos-arm64 macos-x64 linux-x64 linux-arm64, or all."
+        default: all
+      what:
+        description: "llvm, libclang or both."
+        default: both
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: macos-arm64,  runs-on: macos-latest }
+          - { host: macos-x64,    runs-on: macos-13 }
+          - { host: linux-x64,    runs-on: ubuntu-latest }
+          - { host: linux-arm64,  runs-on: ubuntu-24.04-arm }
+    name: build (${{ matrix.host }})
+    runs-on: ${{ matrix.runs-on }}
+    if: ${{ inputs.hosts == 'all' || contains(inputs.hosts, matrix.host) }}
+    timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      HOST: ${{ matrix.host }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The build tree needs ~15 GB more than a runner's free disk.
+      - name: Free disk (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift
+          df -h "$HOME"
+
+      # clang reads llvm/rok.profdata.xz (indexed format 12: clang 19+);
+      # Ubuntu 24.04's default clang is 18 and its c++ is gcc.
+      - name: Build, strip and publish LLVM
+        if: inputs.what == 'both' || inputs.what == 'llvm'
+        shell: bash
+        run: |
+          v=$(sed -n 's/^VERSION=//p' llvm/build.sh)
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q clang-19
+            export CC=clang-19 CXX=clang++-19
+          fi
+          pfx=$RUNNER_TEMP/llvm-$v
+          llvm/build.sh "$pfx" 2>&1 | tee "$RUNNER_TEMP/llvm-build.log"
+          if grep -q 'without PGO' "$RUNNER_TEMP/llvm-build.log"; then
+            echo "::error::the LLVM prefix was built without llvm/rok.profdata.xz"; exit 1
+          fi
+          # Drop what rokc_llvm's build.rs never links; mark it complete.
+          ( cd "$pfx" && rm -rf lib/objects-Release share/opt-viewer lib/*.dylib lib/*.so lib/*.so.* && du -sh . && touch .complete )
+          mkdir -p out
+          a=rok-llvm-$v-$HOST.tar.gz
+          tar -C "$RUNNER_TEMP" -czf "out/$a" "llvm-$v"
+          ( cd out && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
+          gh release view "prefixes-$v" -R "$REPO" >/dev/null 2>&1 || \
+            gh release create "prefixes-$v" -R "$REPO" --prerelease --title "LLVM/libclang $v prefixes" \
+              --notes "Prebuilt prefixes downloaded and verified by .github/actions/{llvm,libclang}-prefix." || true
+          gh release upload "prefixes-$v" -R "$REPO" "out/$a" "out/$a.sha256" --clobber
+
+      - name: Build and publish libclang
+        if: inputs.what == 'both' || inputs.what == 'libclang'
+        shell: bash
+        run: |
+          v=$(sed -n 's/^VERSION=//p' llvm/build-libclang.sh)
+          pfx=$RUNNER_TEMP/libclang-$v
+          llvm/build-libclang.sh "$pfx"
+          touch "$pfx/.complete"
+          mkdir -p out
+          a=rok-libclang-$v-$HOST.tar.gz
+          tar -C "$RUNNER_TEMP" -czf "out/$a" "libclang-$v"
+          ( cd out && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
+          gh release view "prefixes-$v" -R "$REPO" >/dev/null 2>&1 || \
+            gh release create "prefixes-$v" -R "$REPO" --prerelease --title "LLVM/libclang $v prefixes" \
+              --notes "Prebuilt prefixes downloaded and verified by .github/actions/{llvm,libclang}-prefix." || true
+          gh release upload "prefixes-$v" -R "$REPO" "out/$a" "out/$a.sha256" --clobber
+
+  # libclang on Windows builds within the limit (unlike the LLVM prefix), so
+  # it is produced here, not on the box. It downloads the Windows LLVM prefix
+  # (publish it first with seed-llvm-windows.yml).
+  libclang-windows:
+    name: build (windows-x64 libclang)
+    if: (inputs.what == 'both' || inputs.what == 'libclang') && (inputs.hosts == 'all' || contains(inputs.hosts, 'windows'))
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/llvm-prefix
+      - id: lc
+        shell: bash
+        run: echo "v=$(sed -n 's/^VERSION=//p' llvm/build-libclang.sh)" >> "$GITHUB_OUTPUT"
+      - name: Build libclang
+        shell: pwsh
+        run: '& llvm/build-libclang.ps1 "$env:RUNNER_TEMP\libclang-${{ steps.lc.outputs.v }}"'
+      - name: Publish libclang
+        shell: bash
+        env:
+          V: ${{ steps.lc.outputs.v }}
+        run: |
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          touch "$tmp/libclang-$V/.complete"
+          mkdir -p "$tmp/out"
+          a=rok-libclang-$V-windows-x64.tar.gz
+          tar -C "$tmp" -czf "$tmp/out/$a" "libclang-$V"
+          ( cd "$tmp/out" && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
+          gh release view "prefixes-$V" -R "$REPO" >/dev/null 2>&1 || \
+            gh release create "prefixes-$V" -R "$REPO" --prerelease --title "LLVM/libclang $V prefixes" \
+              --notes "Prebuilt prefixes downloaded and verified by .github/actions/{llvm,libclang}-prefix." || true
+          gh release upload "prefixes-$V" -R "$REPO" "$tmp/out/$a" "$tmp/out/$a.sha256" --clobber

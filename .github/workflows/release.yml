@@ -1,9 +1,9 @@
 name: release
 
 # Build all six host archives on GitHub-hosted runners and cut the GitHub
-# release. macOS/Windows use dist.sh with the pinned LLVM/libclang prefixes
-# (the prefix actions cache them; the Windows LLVM prefix is seeded once by
-# seed-llvm-windows.yml because a cold build exceeds the 6 h job limit).
+# release. macOS/Windows use dist.sh with the pinned LLVM/libclang prefixes,
+# which the prefix actions download from the prefixes-<v> release (built by
+# build-prefixes.yml; Windows published by seed-llvm-windows.yml).
 # Linux gnu/musl use the container scripts, whose in-container LLVM is cached
 # per build-script content. A tag push publishes; a manual run only verifies.
 on:
@@ -37,16 +37,12 @@ jobs:
       - uses: actions/checkout@v4
 
       # --- native hosts: macOS + Windows (dist.sh, host LLVM/libclang) ---
-      # Windows restores the seeded LLVM prefix (build:false); macOS builds it.
+      # The prefixes are downloaded from the prefixes-<v> release (published
+      # by build-prefixes.yml; Windows by seed-llvm-windows.yml).
       - uses: ./.github/actions/llvm-prefix
         if: matrix.kind == 'native'
-        with:
-          build: ${{ matrix.name == 'windows' && 'false' || 'true' }}
-          use: "true"
       - uses: ./.github/actions/libclang-prefix
         if: matrix.kind == 'native'
-        with:
-          build: "true"
       - name: rust toolchain
         if: matrix.kind == 'native'
         run: rustup toolchain install && rustc -vV

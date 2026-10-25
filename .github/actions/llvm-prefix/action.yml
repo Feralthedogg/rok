@@ -1,29 +1,26 @@
 name: llvm-prefix
 description: >
   The pinned LLVM + MLIR + lld prefix of llvm/build.sh (Windows:
-  llvm/build.ps1), named by ROK_LLVM_PREFIX: restored from the actions
-  cache on a GitHub-hosted runner; on a self-hosted one kept in
-  ROK_CI_HOME (the runner's environment), which also holds the cargo
-  target directory (CARGO_TARGET_DIR, one per runner). With build, a
-  missing prefix is built, stripped and saved instead; without, a
-  missing prefix fails the job. Windows: the MSVC environment is
-  exported for every later step.
+  llvm/build.ps1), named by ROK_LLVM_PREFIX. It is downloaded from the
+  prefixes-<version> release's published asset and verified by SHA-256,
+  with the actions cache as a fast layer on a GitHub-hosted runner; on a
+  self-hosted runner it stays in ROK_CI_HOME (which also holds the cargo
+  target directory, one per runner). The prefixes are built and published
+  by build-prefixes.yml (Windows by seed-llvm-windows.yml from the box),
+  not here. Windows: the MSVC environment is exported for every later step.
 
 inputs:
   root:
     description: The implementation checkout, relative to the workspace, with a trailing slash.
     default: ""
-  build:
-    description: Build and save the prefix when the cache has none.
-    default: "false"
-  use:
-    description: >
-      Fully restore a cache hit (not lookup-only) because this job also
-      uses the prefix, not only builds it. Needed when one job both builds
-      on a cold cache and consumes the result on a warm one.
-    default: "false"
   arch:
     description: The runner architecture (X64, ARM64) whose prefix to take instead of this runner's (an emulated rokc).
+    default: ""
+  build:
+    description: Deprecated and ignored; the prefix is downloaded, never built here.
+    default: ""
+  use:
+    description: Deprecated and ignored.
     default: ""
 
 outputs:
@@ -60,6 +57,8 @@ runs:
       run: |
         v=$(sed -n 's/^VERSION=//p' "${ROOT}llvm/build.sh")
         arch=${ARCH:-$RUNNER_ARCH}
+        os=$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
+        case "$arch" in ARM64|arm64) ha=arm64 ;; X64|x64) ha=x64 ;; *) ha=$(printf '%s' "$arch" | tr '[:upper:]' '[:lower:]') ;; esac
         if [ "$ENVIRONMENT" = self-hosted ]; then
           home=${ROK_CI_HOME:?the self-hosted runner sets ROK_CI_HOME, its persistent directory (docs/ci.md)}
           p=$home/llvm-$v-$arch-${HASH:0:16}
@@ -72,109 +71,55 @@ runs:
         fi
         echo "prefix=$p" >>"$GITHUB_OUTPUT"
         echo "key=llvm-$v-$RUNNER_OS-$arch-$HASH" >>"$GITHUB_OUTPUT"
+        echo "v=$v" >>"$GITHUB_OUTPUT"
+        echo "host=$os-$ha" >>"$GITHUB_OUTPUT"
         echo "ROK_LLVM_PREFIX=$p" >>"$GITHUB_ENV"
 
+    # Fast layer: the cache that the first job of a run populates from the
+    # asset below; a miss (new branch, evicted) falls through to a download.
     - id: cache
       if: runner.environment == 'github-hosted'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.where.outputs.prefix }}
         key: ${{ steps.where.outputs.key }}
-        lookup-only: ${{ inputs.build == 'true' && inputs.use != 'true' }}
-        fail-on-cache-miss: ${{ inputs.build != 'true' }}
 
-    - name: Missing (self-hosted)
-      if: runner.environment == 'self-hosted' && steps.where.outputs.hit != 'true' && inputs.build != 'true'
-      shell: bash
-      run: |
-        echo "::error::no LLVM prefix at $ROK_LLVM_PREFIX (the llvm job builds it)"
-        exit 1
-
-    # The build tree needs ~15 GB more than a runner's free disk.
-    - name: Free disk (Linux)
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux' && runner.environment == 'github-hosted'
-      shell: bash
-      run: |
-        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift
-        df -h "$HOME"
-
-    # clang reads llvm/rok.profdata.xz (indexed format 12: clang 19+);
-    # Ubuntu 24.04's default clang is 18 and its c++ is gcc. A
-    # self-hosted runner has clang-19 installed.
-    - name: Build (Unix)
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os != 'Windows'
+    # Source of truth: the versioned, SHA-256-verified prefix published to
+    # the prefixes-<v> release. A self-hosted runner downloads only when its
+    # ROK_CI_HOME has no complete prefix.
+    - name: Download prefix
+      if: steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true'
       shell: bash
       env:
-        ROOT: ${{ inputs.root }}
-        ENVIRONMENT: ${{ runner.environment }}
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        V: ${{ steps.where.outputs.v }}
+        HOST: ${{ steps.where.outputs.host }}
       run: |
-        if [ "$RUNNER_OS" = Linux ]; then
-          if [ "$ENVIRONMENT" = github-hosted ]; then
-            sudo apt-get update -q
-            sudo apt-get install -y -q clang-19
-          fi
-          export CC=clang-19 CXX=clang++-19
+        pfx=$ROK_LLVM_PREFIX
+        tmp=$RUNNER_TEMP
+        if [ "$RUNNER_OS" = Windows ]; then
+          pfx=$(cygpath -u "$ROK_LLVM_PREFIX")
+          tmp=$(cygpath -u "$RUNNER_TEMP")
         fi
-        "${ROOT}llvm/build.sh" "$ROK_LLVM_PREFIX" 2>&1 | tee "$RUNNER_TEMP/llvm-build.log"
-        if grep -q 'without PGO' "$RUNNER_TEMP/llvm-build.log"; then
-          echo "::error::the LLVM prefix was built without llvm/rok.profdata.xz"
-          exit 1
-        fi
+        dir=$(dirname "$pfx")
+        mkdir -p "$dir"
+        a=rok-llvm-$V-$HOST.tar.gz
+        gh release download "prefixes-$V" -R "$REPO" -p "$a" -p "$a.sha256" -D "$tmp" --clobber
+        want=$(cut -d' ' -f1 "$tmp/$a.sha256")
+        if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$a" | cut -d' ' -f1); else got=$(shasum -a 256 "$tmp/$a" | cut -d' ' -f1); fi
+        [ "$want" = "$got" ] || { echo "::error::sha256 mismatch for $a ($got != $want)"; exit 1; }
+        tar -xzf "$tmp/$a" -C "$dir"
+        # The tarball holds llvm-<v>/; a self-hosted prefix is named with its
+        # arch and hash, so move it into place when the names differ.
+        ext="$dir/llvm-$V"
+        [ "$ext" = "$pfx" ] || { rm -rf "$pfx"; mv "$ext" "$pfx"; }
+        [ -e "$pfx/.complete" ] || { echo "::error::$a did not extract a complete prefix at $pfx"; exit 1; }
+        rm -f "$tmp/$a" "$tmp/$a.sha256"
 
-    # llvm/rok-msvc.profdata.tar.xz is read by clang-cl 22+ only (cl
-    # reads no clang profile): the pinned release's clang-cl and resource
-    # headers, nothing installed. Its version is in this file, hence in
-    # the Windows cache key.
-    - name: clang-cl (Windows)
-      id: clang
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $v = '22.1.8'
-        $n, $sha = switch ($env:RUNNER_ARCH) {
-          'X64' { "clang+llvm-$v-x86_64-pc-windows-msvc", 'd96c2cc1736f4eb7fa43cb9bbdf56d93551a9ae0a9aadb9c99c3c3b2b712a234' }
-          'ARM64' { "clang+llvm-$v-aarch64-pc-windows-msvc", 'de718c58ebbc5f61d58c17b90457fcf42983bc2c4a4aba3e010d108713bfd7f1' }
-        }
-        $tar = "$env:RUNNER_TEMP\$n.tar.xz"
-        Invoke-WebRequest -UseBasicParsing -OutFile $tar `
-          "https://github.com/llvm/llvm-project/releases/download/llvmorg-$v/$n.tar.xz"
-        if ((Get-FileHash -Algorithm SHA256 $tar).Hash.ToLower() -ne $sha) { throw "checksum mismatch for $tar" }
-        & "$env:SystemRoot\System32\tar.exe" -xf $tar -C $env:RUNNER_TEMP "$n/bin/clang-cl.exe" "$n/lib/clang"
-        if ($LASTEXITCODE) { throw "cannot unpack $tar" }
-        Remove-Item $tar
-        "cl=$env:RUNNER_TEMP\$n\bin\clang-cl.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-
-    - name: Build (Windows)
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true' && runner.os == 'Windows'
-      shell: pwsh
-      env:
-        ROOT: ${{ inputs.root }}
-        CC: ${{ steps.clang.outputs.cl }}
-        CXX: ${{ steps.clang.outputs.cl }}
-      run: |
-        & "${env:ROOT}llvm/build.ps1" $env:ROK_LLVM_PREFIX *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\llvm-build.log"
-        if (Select-String -Quiet -Path "$env:RUNNER_TEMP\llvm-build.log" -Pattern 'without PGO') {
-          Write-Output '::error::the LLVM prefix was built without llvm/rok-msvc.profdata.tar.xz'
-          exit 1
-        }
-
-    # What rokc_llvm's build.rs does not read: shared libraries, the
-    # object libraries, opt-viewer; on Windows also bin/, where lld is five
-    # copies, not links (targets/build.sh needs bin/ld.lld on Unix only).
-    # A self-hosted prefix is marked complete last.
-    - name: Strip
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true'
-      shell: bash
-      run: |
-        cd "$ROK_LLVM_PREFIX"
-        rm -rf lib/objects-Release share/opt-viewer lib/*.dylib lib/*.so lib/*.so.*
-        if [ "$RUNNER_OS" = Windows ]; then rm -rf bin; fi
-        du -sh .
-        touch .complete
-
-    - name: Save
-      if: inputs.build == 'true' && steps.cache.outputs.cache-hit != 'true' && runner.environment == 'github-hosted'
+    - name: Save cache
+      if: runner.environment == 'github-hosted' && steps.cache.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ steps.where.outputs.prefix }}
-        key: ${{ steps.cache.outputs.cache-primary-key }}
+        key: ${{ steps.where.outputs.key }}
