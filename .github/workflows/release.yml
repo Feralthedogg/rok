@@ -1,0 +1,102 @@
+name: release
+
+# Build all six host archives on GitHub-hosted runners and cut the GitHub
+# release. macOS/Windows use dist.sh with the pinned LLVM/libclang prefixes
+# (the prefix actions cache them; the Windows LLVM prefix is seeded once by
+# seed-llvm-windows.yml because a cold build exceeds the 6 h job limit).
+# Linux gnu/musl use the container scripts, whose in-container LLVM is cached
+# per build-script content. A tag push publishes; a manual run only verifies.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macos,            runs-on: macos-latest,     kind: native }
+          - { name: windows,          runs-on: windows-latest,   kind: native }
+          - { name: linux-gnu-x64,    runs-on: ubuntu-latest,     kind: gnu }
+          - { name: linux-gnu-arm64,  runs-on: ubuntu-24.04-arm,  kind: gnu }
+          - { name: linux-musl-x64,   runs-on: ubuntu-latest,     kind: musl }
+          - { name: linux-musl-arm64, runs-on: ubuntu-24.04-arm,  kind: musl }
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- native hosts: macOS + Windows (dist.sh, host LLVM/libclang) ---
+      # Windows restores the seeded LLVM prefix (build:false); macOS builds it.
+      - uses: ./.github/actions/llvm-prefix
+        if: matrix.kind == 'native'
+        with:
+          build: ${{ matrix.name == 'windows' && 'false' || 'true' }}
+      - uses: ./.github/actions/libclang-prefix
+        if: matrix.kind == 'native'
+        with:
+          build: "true"
+      - name: rust toolchain
+        if: matrix.kind == 'native'
+        run: rustup toolchain install && rustc -vV
+      - name: dist.sh
+        if: matrix.kind == 'native'
+        run: ./dist.sh --out "${{ runner.temp }}/dist"
+
+      # --- linux gnu (dist-linux.sh in a container; cache its LLVM prefix) ---
+      - name: cache container prefix (gnu)
+        if: matrix.kind == 'gnu'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rok/dist-linux
+          key: dist-linux-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-linux.Containerfile') }}
+      - name: dist-linux.sh
+        if: matrix.kind == 'gnu'
+        run: ./dist-linux.sh --out "${{ runner.temp }}/dist"
+
+      # --- linux musl (dist-musl.sh in a container) ---
+      - name: cache container prefix (musl)
+        if: matrix.kind == 'musl'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rok/dist-musl
+          key: dist-musl-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-musl.Containerfile') }}
+      - name: dist-musl.sh
+        if: matrix.kind == 'musl'
+        run: ./dist-musl.sh --out "${{ runner.temp }}/dist"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: ${{ runner.temp }}/dist
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: list
+        run: ls -la dist
+      - name: verify
+        run: ./release.sh --dir dist
+      - name: publish (tag only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./release.sh --dir dist --publish

@@ -1,0 +1,50 @@
+name: seed llvm (windows)
+
+# One-time (and whenever llvm/build.ps1 or the profdata changes): place the
+# pre-built Windows LLVM prefix into the actions cache under the exact key
+# that .github/actions/llvm-prefix computes, so release.yml's Windows job
+# restores it instead of building (a cold build exceeds the 6 h job limit).
+# The prefix comes from the 'llvm-prefix' prerelease asset llvm-win.tar.gz
+# (a one-time copy of the box-built prefix; packaged as the llvm-<v>/ dir).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  seed:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: key + path
+        id: k
+        shell: bash
+        run: |
+          v=$(sed -n 's/^VERSION=//p' llvm/build.sh)
+          echo "path=$LOCALAPPDATA\\rok\\llvm-$v" >> "$GITHUB_OUTPUT"
+          echo "key=llvm-$v-Windows-X64-${{ hashFiles('llvm/build.ps1', 'llvm/rok-msvc.profdata.tar.xz', '.github/actions/llvm-prefix/action.yml') }}" >> "$GITHUB_OUTPUT"
+      - name: already cached?
+        id: look
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.k.outputs.path }}
+          key: ${{ steps.k.outputs.key }}
+          lookup-only: true
+      - name: download + extract prefix
+        if: steps.look.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          dest="$LOCALAPPDATA/rok"
+          mkdir -p "$dest"
+          gh release download llvm-prefix -R "${{ github.repository }}" -p llvm-win.tar.gz -O "$RUNNER_TEMP/llvm-win.tar.gz"
+          tar -xzf "$RUNNER_TEMP/llvm-win.tar.gz" -C "$dest"
+          ls "$dest"
+      - name: save cache
+        if: steps.look.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.k.outputs.path }}
+          key: ${{ steps.k.outputs.key }}
