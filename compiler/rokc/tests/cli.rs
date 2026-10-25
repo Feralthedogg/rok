@@ -5034,6 +5034,14 @@ fn tls_interop_openssl() {
         );
         return;
     };
+    if minor < 2 {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "\n!!!!!!!! SKIPPED tls_interop_openssl: OpenSSL 3.2+ needed (x509 -not_before / -not_after); found 3.{minor} (set ROK_OPENSSL) !!!!!!!!\n"
+        );
+        return;
+    }
     let hybrid = minor >= 5;
     let dir = scratch("tls_interop");
     interop_certs(&o, &dir);
