@@ -7,11 +7,12 @@ its own; a release happens only when it is meant to.
 
 ## Versioning and cadence
 
-rok uses semantic versioning, read one step down while the major version
-is 0: a minor bump (`0.2.0`) may add features and may break compatibility,
-and a patch bump (`0.1.1`) carries only fixes, with no new features and no
-breaking changes. 1.0 waits until the language and standard library are
-meant to be stable.
+rok shifts semantic versioning down one level while the major version is 0,
+the way Cargo treats 0.x crates: the minor number is the breaking slot and
+the patch number carries features and fixes. A minor bump (`0.2.0`) is for
+breaking changes; a patch bump (`0.1.1`, `0.1.2`, ...) adds
+backward-compatible features and fixes. 1.0 waits until the language and
+standard library are meant to be stable.
 
 Releases are cut on demand, when a version's work is ready; there is no
 fixed schedule. A release is cut from `main` and tagged `v<version>`.
@@ -74,22 +75,3 @@ nothing without `--publish`.
    checksum and `rok-version` with the `gh` CLI. `install.sh` /
    `install.ps1` download `v<version>` by default, and `rok-version` is
    served from `releases/latest/`.
-
-## Stones
-
-Publish the libraries under `../stones` to the index, so their
-`"<name>": "0.1"` dependency resolves. For each of `json`, `toml`, `http`,
-`markdown`, `rok-syntax`:
-
-1. Push the repository to `github.com/rok-lang/<name>`.
-2. In a [rokstones.io-index](https://github.com/rok-lang/rokstones.io-index)
-   checkout: `rok publish` to preview the index line, then `rok publish
-   --index <checkout> --commit`, and open a pull request.
-3. Once merged, switch the sites (`rok-lang.org`, `playground`,
-   `rokstones.io`) from `Dep::path("../stones/<name>")` to `"<name>":
-   "0.1"`.
-
-## Sites
-
-Deploy `rok-lang.org` (home + docs) and `playground.rok-lang.org` from
-their own repositories after the release and the stones are up.
