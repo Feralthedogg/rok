@@ -2,8 +2,8 @@ name: release
 
 # Build all six host archives on GitHub-hosted runners and cut the GitHub
 # release. macOS/Windows use dist.sh with the pinned LLVM/libclang prefixes,
-# which the prefix actions download from the prefixes-<v> release (built by
-# build-prefixes.yml; Windows published by seed-llvm-windows.yml).
+# which the prefix actions download from the rok-lang-artifacts S3 bucket
+# (built by prefixes.yml; Windows published by prefixes-windows.yml).
 # Linux gnu/musl use the container scripts, whose in-container LLVM is cached
 # per build-script content. A tag push publishes; a manual run only verifies.
 on:
@@ -37,8 +37,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # --- native hosts: macOS + Windows (dist.sh, host LLVM/libclang) ---
-      # The prefixes are downloaded from the prefixes-<v> release (published
-      # by build-prefixes.yml; Windows by seed-llvm-windows.yml).
+      # The prefixes are downloaded from the rok-lang-artifacts S3 bucket
+      # (published by prefixes.yml; Windows by prefixes-windows.yml).
       - uses: ./.github/actions/llvm-prefix
         if: matrix.kind == 'native'
       - uses: ./.github/actions/libclang-prefix

@@ -1,0 +1,47 @@
+name: publish llvm prefix (windows)
+
+# Publish the Windows LLVM prefix to the rok-lang-artifacts S3 bucket at
+# llvm/<version>/x86_64-pc-windows-msvc/llvm.tar.gz, which .github/actions/llvm-prefix
+# downloads. The prefix is box-built (a cold Windows build exceeds the 6 h
+# job limit) and dropped at llvm/<version>/x86_64-pc-windows-msvc/llvm-src.tar.gz (the
+# llvm-<v>/ tree); this re-packs it to the common layout, SHA-256 verified.
+# Run once per version (and whenever the box rebuilds the prefix). Upload
+# auth is keyless (OIDC -> rok-ci-artifacts).
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC -> assume rok-ci-artifacts for the S3 upload
+  contents: read
+
+env:
+  AWS_ROLE: arn:aws:iam::893677554379:role/rok-ci-artifacts
+  AWS_REGION: us-east-1
+  BUCKET: rok-lang-artifacts
+  BASE: https://rok-lang-artifacts.s3.us-east-1.amazonaws.com
+  TRIPLE: x86_64-pc-windows-msvc
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: repack and publish
+        shell: bash
+        run: |
+          v=$(sed -n 's/^VERSION=//p' llvm/build.sh)
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          mkdir -p "$tmp/x" "$tmp/out"
+          curl -fsSL "$BASE/llvm/$v/$TRIPLE/llvm-src.tar.gz" -o "$tmp/llvm-src.tar.gz"
+          tar -xzf "$tmp/llvm-src.tar.gz" -C "$tmp/x"
+          [ -d "$tmp/x/llvm-$v" ] || { echo "::error::llvm-src.tar.gz has no llvm-$v/ tree"; exit 1; }
+          touch "$tmp/x/llvm-$v/.complete"
+          a=rok-llvm-$v-windows-x64.tar.gz
+          tar -C "$tmp/x" -czf "$tmp/out/$a" "llvm-$v"
+          ( cd "$tmp/out" && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
+          aws s3 cp "$tmp/out/$a"        "s3://$BUCKET/llvm/$v/$TRIPLE/llvm.tar.gz"
+          aws s3 cp "$tmp/out/$a.sha256" "s3://$BUCKET/llvm/$v/$TRIPLE/llvm.tar.gz.sha256"

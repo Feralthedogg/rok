@@ -1,10 +1,12 @@
 name: build prefixes
 
 # Build the pinned LLVM (and libclang) prefix for each native host and
-# publish it, SHA-256 verified, as an asset on the prefixes-<version>
-# release, which .github/actions/{llvm,libclang}-prefix download. Run once
-# per version, or when the build scripts change. Windows is published from
-# the box by seed-llvm-windows.yml (it exceeds the 6 h job limit here).
+# upload it, SHA-256 verified, to the public rok-lang-artifacts S3 bucket at
+# llvm/<version>/<host>/{llvm,libclang}.tar.gz, which the
+# .github/actions/{llvm,libclang}-prefix actions download. Run once per
+# version, or when the build scripts change. Upload auth is keyless (OIDC →
+# rok-ci-artifacts). Windows's LLVM is published from the box by
+# prefixes-windows.yml (it exceeds the 6 h job limit here).
 on:
   workflow_dispatch:
     inputs:
@@ -16,7 +18,13 @@ on:
 # (gh run rerun --failed), or re-dispatch with what=llvm / what=libclang.
 
 permissions:
-  contents: write
+  id-token: write   # OIDC -> assume rok-ci-artifacts for the S3 upload
+  contents: read
+
+env:
+  AWS_ROLE: arn:aws:iam::893677554379:role/rok-ci-artifacts
+  AWS_REGION: us-east-1
+  BUCKET: rok-lang-artifacts
 
 jobs:
   build:
@@ -24,18 +32,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { host: macos-arm64,  runs-on: macos-latest }
-          - { host: linux-x64,    runs-on: ubuntu-latest }
-          - { host: linux-arm64,  runs-on: ubuntu-24.04-arm }
+          - { host: macos-arm64,  runs-on: macos-latest,     triple: aarch64-apple-darwin }
+          - { host: linux-x64,    runs-on: ubuntu-latest,     triple: x86_64-unknown-linux-gnu }
+          - { host: linux-arm64,  runs-on: ubuntu-24.04-arm,  triple: aarch64-unknown-linux-gnu }
     name: build (${{ matrix.host }})
     runs-on: ${{ matrix.runs-on }}
     timeout-minutes: 360
     env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
       HOST: ${{ matrix.host }}
+      TRIPLE: ${{ matrix.triple }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
 
       # The build tree needs ~15 GB more than a runner's free disk.
       - name: Free disk (Linux)
@@ -68,10 +79,8 @@ jobs:
           a=rok-llvm-$v-$HOST.tar.gz
           tar -C "$RUNNER_TEMP" -czf "out/$a" "llvm-$v"
           ( cd out && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
-          gh release view "prefixes-$v" -R "$REPO" >/dev/null 2>&1 || \
-            gh release create "prefixes-$v" -R "$REPO" --prerelease --title "LLVM/libclang $v prefixes" \
-              --notes "Prebuilt prefixes downloaded and verified by .github/actions/{llvm,libclang}-prefix." || true
-          gh release upload "prefixes-$v" -R "$REPO" "out/$a" "out/$a.sha256" --clobber
+          aws s3 cp "out/$a"        "s3://$BUCKET/llvm/$v/$TRIPLE/llvm.tar.gz"
+          aws s3 cp "out/$a.sha256" "s3://$BUCKET/llvm/$v/$TRIPLE/llvm.tar.gz.sha256"
 
       - name: Build and publish libclang
         if: inputs.what == 'both' || inputs.what == 'libclang'
@@ -85,24 +94,23 @@ jobs:
           a=rok-libclang-$v-$HOST.tar.gz
           tar -C "$RUNNER_TEMP" -czf "out/$a" "libclang-$v"
           ( cd out && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
-          gh release view "prefixes-$v" -R "$REPO" >/dev/null 2>&1 || \
-            gh release create "prefixes-$v" -R "$REPO" --prerelease --title "LLVM/libclang $v prefixes" \
-              --notes "Prebuilt prefixes downloaded and verified by .github/actions/{llvm,libclang}-prefix." || true
-          gh release upload "prefixes-$v" -R "$REPO" "out/$a" "out/$a.sha256" --clobber
+          aws s3 cp "out/$a"        "s3://$BUCKET/llvm/$v/$TRIPLE/libclang.tar.gz"
+          aws s3 cp "out/$a.sha256" "s3://$BUCKET/llvm/$v/$TRIPLE/libclang.tar.gz.sha256"
 
   # libclang on Windows builds within the limit (unlike the LLVM prefix), so
   # it is produced here, not on the box. It downloads the Windows LLVM prefix
-  # (publish it first with seed-llvm-windows.yml).
+  # (publish it first with prefixes-windows.yml).
   libclang-windows:
     name: build (windows-x64 libclang)
     if: ${{ inputs.what == 'both' || inputs.what == 'libclang' }}
     runs-on: windows-latest
     timeout-minutes: 120
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
       - uses: ./.github/actions/llvm-prefix
       - id: lc
         shell: bash
@@ -114,6 +122,7 @@ jobs:
         shell: bash
         env:
           V: ${{ steps.lc.outputs.v }}
+          TRIPLE: x86_64-pc-windows-msvc
         run: |
           tmp=$(cygpath -u "$RUNNER_TEMP")
           touch "$tmp/libclang-$V/.complete"
@@ -121,7 +130,5 @@ jobs:
           a=rok-libclang-$V-windows-x64.tar.gz
           tar -C "$tmp" -czf "$tmp/out/$a" "libclang-$V"
           ( cd "$tmp/out" && { command -v sha256sum >/dev/null 2>&1 && sha256sum "$a" || shasum -a 256 "$a"; } > "$a.sha256" )
-          gh release view "prefixes-$V" -R "$REPO" >/dev/null 2>&1 || \
-            gh release create "prefixes-$V" -R "$REPO" --prerelease --title "LLVM/libclang $V prefixes" \
-              --notes "Prebuilt prefixes downloaded and verified by .github/actions/{llvm,libclang}-prefix." || true
-          gh release upload "prefixes-$V" -R "$REPO" "$tmp/out/$a" "$tmp/out/$a.sha256" --clobber
+          aws s3 cp "$tmp/out/$a"        "s3://$BUCKET/llvm/$V/$TRIPLE/libclang.tar.gz"
+          aws s3 cp "$tmp/out/$a.sha256" "s3://$BUCKET/llvm/$V/$TRIPLE/libclang.tar.gz.sha256"

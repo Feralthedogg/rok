@@ -2,10 +2,10 @@ name: libclang-prefix
 description: >
   The pinned libclang of llvm/build-libclang.sh (Windows:
   llvm/build-libclang.ps1), named by ROK_LIBCLANG_PREFIX. Downloaded from
-  the prefixes-<version> release's published asset and verified by
-  SHA-256, with the actions cache as a fast layer on a GitHub-hosted
+  the public rok-lang-artifacts S3 bucket (llvm/<version>/<host>/libclang.tar.gz)
+  and verified by SHA-256, with the actions cache as a fast layer on a GitHub-hosted
   runner; it stays in the default cache directory on a self-hosted runner.
-  Published by build-prefixes.yml (Windows by seed-llvm-windows.yml), apart
+  Published by prefixes.yml (Windows by prefixes-windows.yml), apart
   from the LLVM prefix. Run after llvm-prefix (Windows: its MSVC environment).
 
 inputs:
@@ -33,6 +33,15 @@ runs:
         arch=${ARCH:-$RUNNER_ARCH}
         os=$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
         case "$arch" in ARM64|arm64) ha=arm64 ;; X64|x64) ha=x64 ;; *) ha=$(printf '%s' "$arch" | tr '[:upper:]' '[:lower:]') ;; esac
+        case "$os-$ha" in
+          macos-arm64)   triple=aarch64-apple-darwin ;;
+          macos-x64)     triple=x86_64-apple-darwin ;;
+          linux-arm64)   triple=aarch64-unknown-linux-gnu ;;
+          linux-x64)     triple=x86_64-unknown-linux-gnu ;;
+          windows-arm64) triple=aarch64-pc-windows-msvc ;;
+          windows-x64)   triple=x86_64-pc-windows-msvc ;;
+          *) echo "::error::no prefix target triple for host $os-$ha"; exit 1 ;;
+        esac
         if [ "$RUNNER_OS" = Windows ]; then
           p="$LOCALAPPDATA\\rok\\libclang-$v"
         else
@@ -42,7 +51,7 @@ runs:
         echo "prefix=$p" >>"$GITHUB_OUTPUT"
         echo "key=libclang-$RUNNER_OS-$arch-${{ runner.os == 'Windows' && hashFiles('llvm/build-libclang.ps1') || hashFiles('llvm/build-libclang.sh') }}" >>"$GITHUB_OUTPUT"
         echo "v=$v" >>"$GITHUB_OUTPUT"
-        echo "host=$os-$ha" >>"$GITHUB_OUTPUT"
+        echo "triple=$triple" >>"$GITHUB_OUTPUT"
         echo "ROK_LIBCLANG_PREFIX=$p" >>"$GITHUB_ENV"
 
     - id: cache
@@ -56,10 +65,9 @@ runs:
       if: steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-        REPO: ${{ github.repository }}
+        BASE: https://rok-lang-artifacts.s3.us-east-1.amazonaws.com
         V: ${{ steps.where.outputs.v }}
-        HOST: ${{ steps.where.outputs.host }}
+        TRIPLE: ${{ steps.where.outputs.triple }}
       run: |
         pfx=$ROK_LIBCLANG_PREFIX
         tmp=$RUNNER_TEMP
@@ -69,8 +77,10 @@ runs:
         fi
         dir=$(dirname "$pfx")
         mkdir -p "$dir"
-        a=rok-libclang-$V-$HOST.tar.gz
-        gh release download "prefixes-$V" -R "$REPO" -p "$a" -p "$a.sha256" -D "$tmp" --clobber
+        a=rok-libclang-$V-$TRIPLE.tar.gz
+        url=$BASE/llvm/$V/$TRIPLE/libclang.tar.gz
+        curl -fsSL "$url"        -o "$tmp/$a"
+        curl -fsSL "$url.sha256" -o "$tmp/$a.sha256"
         want=$(cut -d' ' -f1 "$tmp/$a.sha256")
         if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$a" | cut -d' ' -f1); else got=$(shasum -a 256 "$tmp/$a" | cut -d' ' -f1); fi
         [ "$want" = "$got" ] || { echo "::error::sha256 mismatch for $a ($got != $want)"; exit 1; }

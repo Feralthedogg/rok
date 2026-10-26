@@ -2,11 +2,12 @@ name: llvm-prefix
 description: >
   The pinned LLVM + MLIR + lld prefix of llvm/build.sh (Windows:
   llvm/build.ps1), named by ROK_LLVM_PREFIX. It is downloaded from the
-  prefixes-<version> release's published asset and verified by SHA-256,
+  public rok-lang-artifacts S3 bucket (llvm/<version>/<host>/llvm.tar.gz)
+  and verified by SHA-256,
   with the actions cache as a fast layer on a GitHub-hosted runner; on a
   self-hosted runner it stays in ROK_CI_HOME (which also holds the cargo
   target directory, one per runner). The prefixes are built and published
-  by build-prefixes.yml (Windows by seed-llvm-windows.yml from the box),
+  by prefixes.yml (Windows by prefixes-windows.yml from the box),
   not here. Windows: the MSVC environment is exported for every later step.
 
 inputs:
@@ -59,6 +60,15 @@ runs:
         arch=${ARCH:-$RUNNER_ARCH}
         os=$(printf '%s' "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')
         case "$arch" in ARM64|arm64) ha=arm64 ;; X64|x64) ha=x64 ;; *) ha=$(printf '%s' "$arch" | tr '[:upper:]' '[:lower:]') ;; esac
+        case "$os-$ha" in
+          macos-arm64)   triple=aarch64-apple-darwin ;;
+          macos-x64)     triple=x86_64-apple-darwin ;;
+          linux-arm64)   triple=aarch64-unknown-linux-gnu ;;
+          linux-x64)     triple=x86_64-unknown-linux-gnu ;;
+          windows-arm64) triple=aarch64-pc-windows-msvc ;;
+          windows-x64)   triple=x86_64-pc-windows-msvc ;;
+          *) echo "::error::no prefix target triple for host $os-$ha"; exit 1 ;;
+        esac
         if [ "$ENVIRONMENT" = self-hosted ]; then
           home=${ROK_CI_HOME:?the self-hosted runner sets ROK_CI_HOME, its persistent directory (docs/ci.md)}
           p=$home/llvm-$v-$arch-${HASH:0:16}
@@ -72,7 +82,7 @@ runs:
         echo "prefix=$p" >>"$GITHUB_OUTPUT"
         echo "key=llvm-$v-$RUNNER_OS-$arch-$HASH" >>"$GITHUB_OUTPUT"
         echo "v=$v" >>"$GITHUB_OUTPUT"
-        echo "host=$os-$ha" >>"$GITHUB_OUTPUT"
+        echo "triple=$triple" >>"$GITHUB_OUTPUT"
         echo "ROK_LLVM_PREFIX=$p" >>"$GITHUB_ENV"
 
     # Fast layer: the cache that the first job of a run populates from the
@@ -84,17 +94,17 @@ runs:
         path: ${{ steps.where.outputs.prefix }}
         key: ${{ steps.where.outputs.key }}
 
-    # Source of truth: the versioned, SHA-256-verified prefix published to
-    # the prefixes-<v> release. A self-hosted runner downloads only when its
+    # Source of truth: the versioned, SHA-256-verified prefix in the public
+    # rok-lang-artifacts S3 bucket (llvm/<v>/<host>/llvm.tar.gz, uploaded by
+    # prefixes.yml). A self-hosted runner downloads only when its
     # ROK_CI_HOME has no complete prefix.
     - name: Download prefix
       if: steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true'
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-        REPO: ${{ github.repository }}
+        BASE: https://rok-lang-artifacts.s3.us-east-1.amazonaws.com
         V: ${{ steps.where.outputs.v }}
-        HOST: ${{ steps.where.outputs.host }}
+        TRIPLE: ${{ steps.where.outputs.triple }}
       run: |
         pfx=$ROK_LLVM_PREFIX
         tmp=$RUNNER_TEMP
@@ -104,8 +114,10 @@ runs:
         fi
         dir=$(dirname "$pfx")
         mkdir -p "$dir"
-        a=rok-llvm-$V-$HOST.tar.gz
-        gh release download "prefixes-$V" -R "$REPO" -p "$a" -p "$a.sha256" -D "$tmp" --clobber
+        a=rok-llvm-$V-$TRIPLE.tar.gz
+        url=$BASE/llvm/$V/$TRIPLE/llvm.tar.gz
+        curl -fsSL "$url"        -o "$tmp/$a"
+        curl -fsSL "$url.sha256" -o "$tmp/$a.sha256"
         want=$(cut -d' ' -f1 "$tmp/$a.sha256")
         if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum "$tmp/$a" | cut -d' ' -f1); else got=$(shasum -a 256 "$tmp/$a" | cut -d' ' -f1); fi
         [ "$want" = "$got" ] || { echo "::error::sha256 mismatch for $a ($got != $want)"; exit 1; }
