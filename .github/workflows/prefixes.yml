@@ -1,4 +1,4 @@
-name: build prefixes
+name: prefixes
 
 # Build the pinned LLVM (and libclang) prefix for each native host and
 # upload it, SHA-256 verified, to the public rok-lang-artifacts S3 bucket at
