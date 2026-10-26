@@ -25,7 +25,7 @@
 #
 # plus their .sha256 and dist/rok-version; every file is a release asset.
 #
-#   ./dist.sh [--out <dir>]    (Windows: Git Bash in a Developer prompt)
+#   ./dist-native.sh [--out <dir>]    (Windows: Git Bash in a Developer prompt)
 #
 # LLVM comes from ROK_LLVM_PREFIX, libclang from ROK_LIBCLANG_PREFIX,
 # else llvm/build*.sh's (.ps1 on Windows), built here when missing.
@@ -37,13 +37,13 @@ case "${1-}" in
   --out) out=$2 ;;
   "") ;;
   *)
-    echo "usage: ./dist.sh [--out <dir>]" >&2
+    echo "usage: ./dist-native.sh [--out <dir>]" >&2
     exit 2
     ;;
 esac
 
 # A release's --version names its commit: ROK_COMMIT_HASH and
-# ROK_COMMIT_DATE (dist-linux.sh passes the host's), else git. A
+# ROK_COMMIT_DATE (dist-linux-gnu.sh passes the host's), else git. A
 # checkout without .git (`git archive`) has neither.
 if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
   if h=$(git rev-parse --short=9 HEAD 2> /dev/null) &&
@@ -51,7 +51,7 @@ if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
     ROK_COMMIT_HASH=${ROK_COMMIT_HASH:-$h}
     ROK_COMMIT_DATE=${ROK_COMMIT_DATE:-$d}
   else
-    echo "dist.sh: no commit for --version: run from a git checkout, or set ROK_COMMIT_HASH and" \
+    echo "dist-native.sh: no commit for --version: run from a git checkout, or set ROK_COMMIT_HASH and" \
       "ROK_COMMIT_DATE (\`git rev-parse --short=9 HEAD\` and \`git log -1 --format=%cs\`" \
       "in the checkout this was made from)" >&2
     exit 1
@@ -68,7 +68,7 @@ case $(uname -s) in
     cache=$(cygpath -u "${ROK_LLVM_CACHE:-$LOCALAPPDATA/rok}")
     # MSYS's /usr/bin/link (coreutils) would be rustc's link.exe.
     [ -n "${VCToolsInstallDir-}" ] || {
-      echo "dist.sh: run from a Developer prompt for the MSVC build tools" >&2
+      echo "dist-native.sh: run from a Developer prompt for the MSVC build tools" >&2
       exit 1
     }
     PATH=$(cygpath -u "${VCToolsInstallDir}bin/Host$VSCMD_ARG_HOST_ARCH/$VSCMD_ARG_TGT_ARCH"):$PATH
@@ -105,7 +105,7 @@ target=${CARGO_TARGET_DIR:-target}/release
 version=$("$target/rokc$exe" --version | awk '{ print $2 }')
 triple=$("$target/rokc$exe" --version --verbose | sed -n 's/^host: //p')
 if "$target/rokc$exe" --version --verbose | grep -q '^llvm: none'; then
-  echo "dist.sh: rokc was built without LLVM (see llvm/README.md)" >&2
+  echo "dist-native.sh: rokc was built without LLVM (see llvm/README.md)" >&2
   exit 1
 fi
 name=rok-$version-$triple
@@ -113,7 +113,7 @@ name=rok-$version-$triple
 # install.sh / install.ps1 download this version by default.
 grep -q "^version=\"\${ROK_VERSION:-$version}\"" install.sh &&
   grep -q "else { '$version' }" install.ps1 || {
-  echo "dist.sh: install.sh's or install.ps1's default version is not $version" >&2
+  echo "dist-native.sh: install.sh's or install.ps1's default version is not $version" >&2
   exit 1
 }
 
@@ -134,12 +134,12 @@ devname=""
 if [ -z "$static" ]; then
   devname=rok-mlir-dev-$version-$triple
   [ -n "$exe" ] || nm -g "$stage/bin/rokc" | grep -q '[^U] _*_ZN4llvm24DisableABIBreakingChecksE$' || {
-    echo "dist.sh: the stripped rokc does not export its LLVM / MLIR symbols" >&2
+    echo "dist-native.sh: the stripped rokc does not export its LLVM / MLIR symbols" >&2
     exit 1
   }
 fi
 [ -z "$exe" ] || [ -f "$dev/lib/rokc.lib" ] || {
-  echo "dist.sh: rokc.exe's link left no import library ($dev/lib/rokc.lib)" >&2
+  echo "dist-native.sh: rokc.exe's link left no import library ($dev/lib/rokc.lib)" >&2
   exit 1
 }
 runtime/rokr/localize.sh "$target/$rt" "$stage/lib/$rt"
@@ -190,8 +190,8 @@ if [ "$(uname -s)" = Linux ] && [ -z "$static" ]; then
     [ "${d##*/}" != "$triple" ] || rt_check "$stage/lib/$rt" "$d"
   done
   [ -z "$bad" ] || {
-    printf 'dist.sh: these need a glibc newer than 2.34:\n%b' "$bad" >&2
-    echo "dist.sh: build the Linux archives with ./dist-linux.sh (in a container with an old glibc)" >&2
+    printf 'dist-native.sh: these need a glibc newer than 2.34:\n%b' "$bad" >&2
+    echo "dist-native.sh: build the Linux archives with ./dist-linux-gnu.sh (in a container with an old glibc)" >&2
     exit 1
   }
 fi
@@ -200,8 +200,8 @@ cp install.sh install.ps1 README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE \
 
 # The toolchain runs from its new place, with no LLVM on PATH: its rokc
 # finds its library and builds with its own LLVM and lld.
-# Its programs need glibc 2.34: an older host (dist-linux.sh's) only
-# links them, and dist-linux.sh runs them on 2.34.
+# Its programs need glibc 2.34: an older host (dist-linux-gnu.sh's) only
+# links them, and dist-linux-gnu.sh runs them on 2.34.
 run=1
 case $(getconf GNU_LIBC_VERSION 2> /dev/null) in "glibc 2."[0-9] | "glibc 2."[12][0-9] | "glibc 2.3"[0-3]) run="" ;; esac
 printf 'fn main() -> i32 {\n    println("ok");\n    0\n}\n' > "$stage/check.rok"
@@ -237,7 +237,7 @@ fi
 
 sum=$(command -v sha256sum || echo "shasum -a 256")
 if [ "$ext" != zip ] && ! command -v xz > /dev/null 2>&1; then
-  echo "dist.sh: xz is needed for the .tar.xz archive (Debian / Ubuntu: apt install xz-utils; macOS: brew install xz)" >&2
+  echo "dist-native.sh: xz is needed for the .tar.xz archive (Debian / Ubuntu: apt install xz-utils; macOS: brew install xz)" >&2
   exit 1
 fi
 for n in "$name" $devname; do

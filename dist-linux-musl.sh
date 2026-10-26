@@ -1,16 +1,17 @@
 #!/bin/sh
-# Build the Linux release archives: dist.sh in a Debian 11 container
-# (dist-linux.Containerfile), so rok, rokc, rokls, libclang.so and
-# librokr.a need at most glibc 2.34, as the -gnu targets' programs do.
-# A newer host's glibc leaks its symbol versions into them.
+# Build the static musl release archive: dist-native.sh in Alpine
+# (dist-linux-musl.Containerfile), so rok, rokc, rokls and librokr.a link
+# against musl and run anywhere, Alpine and old glibc included. A static
+# rokc ships no libclang (`rokc bindgen` is unavailable) and no MLIR dev
+# bundle; dist-native.sh handles that when the host is musl.
 #
-#   ./dist-linux.sh [--out <dir>]
+#   ./dist-linux-musl.sh [--out <dir>]
 #
 # For the host's architecture (x86_64 or aarch64), with podman, else
-# docker. The checkout is mounted read-only; rustup, cargo, LLVM,
-# libclang and the target directory live in ROK_DIST_CACHE (default
-# ~/.cache/rok/dist-linux), the archives land in <dir> (default dist).
-# Then the installed toolchain builds and runs a program on Rocky Linux 9.
+# docker. The checkout is mounted read-only; rustup, cargo, LLVM and the
+# target directory live in ROK_DIST_CACHE (default ~/.cache/rok/dist-musl),
+# the archives land in <dir> (default dist). Then the installed toolchain
+# builds and runs a program in a bare Alpine.
 set -eu
 
 cd "$(dirname "$0")"
@@ -19,7 +20,7 @@ case "${1-}" in
   --out) out=$2 ;;
   "") ;;
   *)
-    echo "usage: ./dist-linux.sh [--out <dir>]" >&2
+    echo "usage: ./dist-linux-musl.sh [--out <dir>]" >&2
     exit 2
     ;;
 esac
@@ -31,24 +32,26 @@ if [ -z "${ROK_COMMIT_HASH-}" ] || [ -z "${ROK_COMMIT_DATE-}" ]; then
     ROK_COMMIT_HASH=${ROK_COMMIT_HASH:-$h}
     ROK_COMMIT_DATE=${ROK_COMMIT_DATE:-$d}
   else
-    echo "dist-linux.sh: no commit for --version: run from a git checkout, or set" \
+    echo "dist-linux-musl.sh: no commit for --version: run from a git checkout, or set" \
       "ROK_COMMIT_HASH and ROK_COMMIT_DATE (\`git rev-parse --short=9 HEAD\` and" \
       "\`git log -1 --format=%cs\` in the checkout this was made from)" >&2
     exit 1
   fi
 fi
+export ROK_COMMIT_HASH ROK_COMMIT_DATE
+
 engine=$(command -v podman || command -v docker) || {
-  echo "dist-linux.sh: needs podman or docker" >&2
+  echo "dist-linux-musl.sh: needs podman or docker" >&2
   exit 1
 }
-cache=${ROK_DIST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok/dist-linux}
+cache=${ROK_DIST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok/dist-musl}
 mkdir -p "$out" "$cache"
 out=$(cd "$out" && pwd)
 
 # The image is named after its definition.
-tag=rok-dist-linux:$(sha256sum dist-linux.Containerfile | cut -c1-12)
+tag=rok-dist-musl:$(sha256sum dist-linux-musl.Containerfile | cut -c1-12)
 $engine image inspect "$tag" > /dev/null 2>&1 ||
-  $engine build -t "$tag" - < dist-linux.Containerfile
+  $engine build -t "$tag" - < dist-linux-musl.Containerfile
 
 # Rootless podman maps the container's root to the caller; docker's is
 # root, so it runs as the caller.
@@ -68,15 +71,14 @@ $engine run --rm $user \
     PATH=$CARGO_HOME/bin:$PATH
     rustup toolchain install
     [ -n "$ROK_LLVM_JOBS" ] || unset ROK_LLVM_JOBS
-    ./dist.sh --out /out'
+    ./dist-native.sh --out /out'
 
-# dist.sh's check programs need glibc 2.34, newer than the image's: the
-# installed archive builds and runs them on Rocky Linux 9 (glibc 2.34),
-# with nothing else there.
-name=rok-$(cat "$out/rok-version")-$(uname -m)-unknown-linux-gnu
+# The installed static archive builds and runs a program in a bare
+# Alpine, with nothing else there.
+name=rok-$(cat "$out/rok-version")-$(uname -m)-unknown-linux-musl
 # shellcheck disable=SC2086
 $engine run --rm $user -v "$out:/out:ro" -e HOME=/tmp \
-  docker.io/rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f \
+  docker.io/library/alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd \
   sh -euc '
     cd /tmp
     tar -xzf "/out/$1.tar.gz"
@@ -86,4 +88,4 @@ $engine run --rm $user -v "$out:/out:ro" -e HOME=/tmp \
       ~/.rok/bin/rokc -q build check.rok $o -o check
       [ "$(./check)" = ok ]
     done
-    echo "$1: runs on $(cat /etc/rocky-release)"' sh "$name"
+    echo "$1: runs on Alpine $(cat /etc/alpine-release)"' sh "$name"

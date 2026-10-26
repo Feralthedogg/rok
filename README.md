@@ -120,15 +120,15 @@ rok jupyter install  # rok kernel for Jupyter / VS Code
 
 ```sh
 cargo build --release                 # target/release/{rok,rokc,rokls}, librokr.a
-./dist.sh                             # dist/rok-<version>-<triple>.tar.gz and .tar.xz (+ .sha256),
+./dist-native.sh                             # dist/rok-<version>-<triple>.tar.gz and .tar.xz (+ .sha256),
                                       # dist/rok-mlir-dev-<version>-<triple>.tar.gz (MLIR plugins)
 sh install.sh --archive dist/rok-*.tar.gz
 ```
 
 During development use `target/debug/rok` / `rokc` directly (they find the repository's `library/`). On
-Windows, `dist.sh` runs from Git Bash inside a Developer PowerShell for VS. The Linux release archives come
-from `./dist-linux.sh` (same output; podman or docker), which runs `dist.sh` in a Debian 11 container so the
-toolchain runs on glibc 2.34 and later (RHEL 9, Ubuntu 22.04, Debian 12); `dist.sh` refuses a Linux build that
+Windows, `dist-native.sh` runs from Git Bash inside a Developer PowerShell for VS. The Linux release archives come
+from `./dist-linux-gnu.sh` (same output; podman or docker), which runs `dist-native.sh` in a Debian 11 container so the
+toolchain runs on glibc 2.34 and later (RHEL 9, Ubuntu 22.04, Debian 12); `dist-native.sh` refuses a Linux build that
 needs a newer glibc.
 
 ### Checks

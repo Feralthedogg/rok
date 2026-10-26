@@ -147,7 +147,7 @@ only and links with the system's `cc`, reports `llvm: none` in
 `rokc version -v`, and the tests that need LLVM skip (fail under
 `ROK_REQUIRE_LLVM=1`). A `ROK_LLVM_PREFIX` that does
 not hold this LLVM with MLIR, lld and the dsymutil sources fails the
-build. `dist.sh` runs `build.sh` when no prefix is given.
+build. `dist-native.sh` runs `build.sh` when no prefix is given.
 
 rokc registers only the MLIR dialects it lowers to and those
 `__mlir_op` offers (`register_dialects` / `register_passes` in
@@ -185,7 +185,7 @@ On a 10-core Apple Silicon machine: 5.5 minutes, a build tree of ~2 GB at
 its peak, 36 MB installed (libclang.dylib 29 MB, headers 7.7 MB; 12 MB
 compressed). On an 8-core Windows host: 16 minutes, 30 MB.
 
-rokc looks for it in its toolchain's `lib/` (`dist.sh` copies it there,
+rokc looks for it in its toolchain's `lib/` (`dist-native.sh` copies it there,
 from `ROK_LIBCLANG_PREFIX` or this script's prefix), else, for a build in
 the repository, in this script's prefix. Without one, `rokc bindgen` says
 how to get it and the bindgen tests skip (fail under

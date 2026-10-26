@@ -365,7 +365,7 @@ jobs:
           targets/build.sh "$(rustc -vV | sed -n 's/^host: //p')"
       - run: ROK_REQUIRE_LLVM=1 ROK_REQUIRE_LIBCLANG=1 cargo test --test cli -- bindgen
 
-  # The release archive (dist.sh) and its install (install.ps1
+  # The release archive (dist-native.sh) and its install (install.ps1
   # -NoModifyPath into a scratch ROK_HOME), nightly on windows-x64: a
   # program, and a package's build / run / test, with nothing but the
   # installed toolchain on PATH.
@@ -385,8 +385,8 @@ jobs:
       - uses: ./.github/actions/libclang-prefix
       - name: toolchain (rust-toolchain.toml)
         run: rustup toolchain install && rustc -vV
-      - name: dist.sh
-        run: ./dist.sh --out "$RUNNER_TEMP/dist"
+      - name: dist-native.sh
+        run: ./dist-native.sh --out "$RUNNER_TEMP/dist"
       - name: install.ps1, then rok alone
         shell: pwsh
         run: |

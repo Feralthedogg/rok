@@ -2,7 +2,7 @@
 # Rewrite the archive <in> as <out>, one relocatable object in which only
 # `rok_*` stays global (ELF: also compiler_builtins' `__*`, weak), so
 # librokr.a links next to another Rust staticlib. <in> is built with fat
-# LTO (dist.sh, targets/build.sh).
+# LTO (dist-native.sh, targets/build.sh).
 #
 #   runtime/rokr/localize.sh <in.a> <out.a>   (or <in.lib> <out.lib>)
 #

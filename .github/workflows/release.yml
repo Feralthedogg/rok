@@ -1,7 +1,7 @@
 name: release
 
 # Build all six host archives on GitHub-hosted runners and cut the GitHub
-# release. macOS/Windows use dist.sh with the pinned LLVM/libclang prefixes,
+# release. macOS/Windows use dist-native.sh with the pinned LLVM/libclang prefixes,
 # which the prefix actions download from the rok-lang-artifacts S3 bucket
 # (built by prefixes.yml; Windows published by prefixes-windows.yml).
 # Linux gnu/musl use the container scripts, whose in-container LLVM is cached
@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # --- native hosts: macOS + Windows (dist.sh, host LLVM/libclang) ---
+      # --- native hosts: macOS + Windows (dist-native.sh, host LLVM/libclang) ---
       # The prefixes are downloaded from the rok-lang-artifacts S3 bucket
       # (published by prefixes.yml; Windows by prefixes-windows.yml).
       - uses: ./.github/actions/llvm-prefix
@@ -46,32 +46,32 @@ jobs:
       - name: rust toolchain
         if: matrix.kind == 'native'
         run: rustup toolchain install && rustc -vV
-      - name: dist.sh
+      - name: dist-native.sh
         if: matrix.kind == 'native'
         shell: bash
-        run: ./dist.sh --out "$PWD/dist"
+        run: ./dist-native.sh --out "$PWD/dist"
 
-      # --- linux gnu (dist-linux.sh in a container; cache its LLVM prefix) ---
+      # --- linux gnu (dist-linux-gnu.sh in a container; cache its LLVM prefix) ---
       - name: cache container prefix (gnu)
         if: matrix.kind == 'gnu'
         uses: actions/cache@v4
         with:
           path: ~/.cache/rok/dist-linux
-          key: dist-linux-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-linux.Containerfile') }}
-      - name: dist-linux.sh
+          key: dist-linux-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-linux-gnu.Containerfile') }}
+      - name: dist-linux-gnu.sh
         if: matrix.kind == 'gnu'
-        run: ./dist-linux.sh --out "$PWD/dist"
+        run: ./dist-linux-gnu.sh --out "$PWD/dist"
 
-      # --- linux musl (dist-musl.sh in a container) ---
+      # --- linux musl (dist-linux-musl.sh in a container) ---
       - name: cache container prefix (musl)
         if: matrix.kind == 'musl'
         uses: actions/cache@v4
         with:
           path: ~/.cache/rok/dist-musl
-          key: dist-musl-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-musl.Containerfile') }}
-      - name: dist-musl.sh
+          key: dist-musl-${{ runner.arch }}-${{ hashFiles('llvm/build.sh', 'llvm/rok.profdata.xz', 'llvm/patches/*.patch', 'dist-linux-musl.Containerfile') }}
+      - name: dist-linux-musl.sh
         if: matrix.kind == 'musl'
-        run: ./dist-musl.sh --out "$PWD/dist"
+        run: ./dist-linux-musl.sh --out "$PWD/dist"
 
       - uses: actions/upload-artifact@v4
         with:

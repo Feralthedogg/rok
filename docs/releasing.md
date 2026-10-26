@@ -29,14 +29,14 @@ covers only cutting the toolchain release.
 
 | Host | Machine | Command |
 |---|---|---|
-| `aarch64-apple-darwin` | an Apple-silicon Mac | `./dist.sh --out dist` |
-| `x86_64-unknown-linux-gnu` | x86_64 Linux | `./dist-linux.sh --out dist` |
-| `aarch64-unknown-linux-gnu` | arm64 Linux | `./dist-linux.sh --out dist` |
-| `x86_64-pc-windows-msvc` | Windows x86_64 | `./dist.sh --out dist` (Git Bash, MSVC environment) |
-| `x86_64-unknown-linux-musl` | x86_64 Linux | `./dist-musl.sh --out dist` (Alpine container; static, no libclang / dev bundle) |
-| `aarch64-unknown-linux-musl` | arm64 Linux | `./dist-musl.sh --out dist` |
+| `aarch64-apple-darwin` | an Apple-silicon Mac | `./dist-native.sh --out dist` |
+| `x86_64-unknown-linux-gnu` | x86_64 Linux | `./dist-linux-gnu.sh --out dist` |
+| `aarch64-unknown-linux-gnu` | arm64 Linux | `./dist-linux-gnu.sh --out dist` |
+| `x86_64-pc-windows-msvc` | Windows x86_64 | `./dist-native.sh --out dist` (Git Bash, MSVC environment) |
+| `x86_64-unknown-linux-musl` | x86_64 Linux | `./dist-linux-musl.sh --out dist` (Alpine container; static, no libclang / dev bundle) |
+| `aarch64-unknown-linux-musl` | arm64 Linux | `./dist-linux-musl.sh --out dist` |
 
-`dist-linux.sh` (glibc 2.34) and `dist-musl.sh` run in a container, so one
+`dist-linux-gnu.sh` (glibc 2.34) and `dist-linux-musl.sh` run in a container, so one
 x86_64 and one arm64 Linux box build four of the six. Intel Macs and
 Windows on arm64 get no archive; they build from source.
 
@@ -62,7 +62,7 @@ nothing without `--publish`.
 1. In `CHANGELOG.md`, change `## 0.1.0 (unreleased)` to `## 0.1.0
    (<date>)`; commit on `main`.
 2. Confirm the version matches across `rok`/`rokc` (`--version`),
-   `install.sh`, `install.ps1` and `rok-lang.org` `site.rokon`. `dist.sh`
+   `install.sh`, `install.ps1` and `rok-lang.org` `site.rokon`. `dist-native.sh`
    already fails if the install scripts disagree.
 3. Publish (this is the release itself):
 

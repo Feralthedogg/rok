@@ -1,7 +1,7 @@
-# The image dist-musl.sh runs dist.sh in: Alpine (musl), so rok, rokc,
+# The image dist-linux-musl.sh runs dist-native.sh in: Alpine (musl), so rok, rokc,
 # rokls and librokr.a are built against musl and the archive is fully
 # static. Packages come from the pinned base image's release; Rust is the
-# pinned toolchain, installed by dist-musl.sh through rustup-init.
+# pinned toolchain, installed by dist-linux-musl.sh through rustup-init.
 FROM docker.io/library/alpine:3.21@sha256:ee16d92f96db08d9d2d07da48555a27f3a69d8f0759021dbc601195ed0d2b5bd
 
 ARG RUSTUP=1.28.2
@@ -9,7 +9,7 @@ ARG RUSTUP_SHA256_X86_64=e6599a1c7be58a2d8eaca66a80e0dc006d87bbcf780a58b7343d6e1
 ARG RUSTUP_SHA256_AARCH64=a97c8f56d7462908695348dd8c71ea6740c138ce303715793a690503a94fc9a9
 
 # llvm/build.sh: cmake, samurai (ninja), g++, curl, xz, patch,
-# linux-headers. targets/build.sh: clang, lld, make, python3. dist.sh:
+# linux-headers. targets/build.sh: clang, lld, make, python3. dist-native.sh:
 # git, tar, and strip (binutils, in build-base).
 RUN apk add --no-cache \
 	build-base clang lld cmake samurai curl xz patch linux-headers \

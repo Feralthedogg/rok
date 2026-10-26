@@ -9,7 +9,7 @@ LLVMSupport. Anything else, such as another upstream dialect, the plugin carries
 
 ## The development bundle
 
-`dist.sh` ships `rok-mlir-dev-<version>-<triple>.{tar.gz,zip}` beside the toolchain (a build from source
+`dist-native.sh` ships `rok-mlir-dev-<version>-<triple>.{tar.gz,zip}` beside the toolchain (a build from source
 has the same tree in `target/<profile>/mlir-plugin-dev`):
 
 | Path | |

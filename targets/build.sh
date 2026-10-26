@@ -374,14 +374,14 @@ for t in ${*:-$TARGETS}; do
     *) rust=$t ;;
   esac
   rustup target add "$rust" > /dev/null
-  # One object (fat LTO), as dist.sh builds the host's runtime.
+  # One object (fat LTO), as dist-native.sh builds the host's runtime.
   CARGO_PROFILE_RELEASE_LTO=fat cargo build --release --locked -p rokr --target "$rust"
   rm -rf "$dir"
   mkdir -p "$dir"
   case $t in *-windows-*) rt=rokr.lib ;; *) rt=librokr.a ;; esac
   built=${CARGO_TARGET_DIR:-target}/$rust/release/$rt
   case $t in
-    # Localized, as the host's lib/librokr.a (dist.sh).
+    # Localized, as the host's lib/librokr.a (dist-native.sh).
     *-linux-* | *-apple-* | *-windows-*) runtime/rokr/localize.sh "$built" "$dir/$rt" ;;
     *) cp "$built" "$dir/" ;;
   esac

@@ -1,5 +1,5 @@
-# The image dist-linux.sh runs dist.sh in: Debian 11 (glibc 2.31), so
-# what it builds needs at most the glibc 2.34 dist.sh allows.
+# The image dist-linux-gnu.sh runs dist-native.sh in: Debian 11 (glibc 2.31), so
+# what it builds needs at most the glibc 2.34 dist-native.sh allows.
 #
 # Debian's packages come from one snapshot; bullseye-security carries
 # clang 22.1.8, the pinned LLVM's, which reads llvm/rok.profdata.xz.
