@@ -2229,9 +2229,15 @@ fn update_toolchain() {
     assert_eq!(list(), format!("9.9.1-{host} (default)\n"));
     assert_eq!(proxy(&["x"]), "rokc 9.9.1: x\n");
     // Idempotent: nothing left to remove.
-    let out = rok_cmd(&home, &root, &["toolchain", "clean"]).output().unwrap();
+    let out = rok_cmd(&home, &root, &["toolchain", "clean"])
+        .output()
+        .unwrap();
     ok(&out);
-    assert!(text(&out.stderr).contains("nothing to clean"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("nothing to clean"),
+        "{}",
+        text(&out.stderr)
+    );
     for gone in ["self", "upgrade"] {
         fails(
             &rok(&home, &root, &[gone]),

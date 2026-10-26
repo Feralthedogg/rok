@@ -552,11 +552,13 @@ fn update(home: &Path, version: Option<&str>, quiet: bool) -> Result<(), String>
 /// current default. Opt-in tidy-up; a version a project pins is removed
 /// too, so it is never run implicitly.
 fn clean(home: &Path, quiet: bool) -> Result<(), String> {
-    let def = default_pin(home)?.and_then(|p| find(home, &p)).ok_or_else(|| {
-        "no default toolchain to keep; set one with `rok toolchain default <version>`, \
+    let def = default_pin(home)?
+        .and_then(|p| find(home, &p))
+        .ok_or_else(|| {
+            "no default toolchain to keep; set one with `rok toolchain default <version>`, \
          or remove a toolchain by name (`rok toolchain remove <version>`)"
-            .to_owned()
-    })?;
+                .to_owned()
+        })?;
     let mut removed = 0;
     for (name, _) in installed(home) {
         let dir = root(home).join(&name);
