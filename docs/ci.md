@@ -11,10 +11,10 @@ same branch and event cancels the older one.
 | push to `main`, merge queue (`merge_group`) | linux-x64, linux-arm64, windows-x64 | `check`, `corpus` at `-O0` |
 | nightly (`schedule`, 03:17 UTC), manual run | every host | `check`, `corpus` at `-O0` and `-O2`, `cross-link`, `cross`, `wasm`, `bindgen`, `dist` |
 
-A manual run (`workflow_dispatch`) takes `hosts` (all, or some of `linux-x64 linux-arm64 macos-arm64 macos-x64
+A manual run (`workflow_dispatch`) takes `hosts` (all, or some of `linux-x64 linux-arm64 macos-arm64
 windows-x64 windows-arm64`), `jobs` (all, or some of `gate cross wasm bindgen dist`; `none`: prefixes only) and `filter`
 (`ROK_TEST_FILTER`: the integration cases to run; the differential suites always run). Hosts: `ubuntu-24.04` x86_64, `ubuntu-24.04-arm` aarch64, `macos-26`
-arm64, `macos-26-intel` x86_64, `windows-2022` x86_64, `windows-11-arm` aarch64 (cross only).
+arm64, `windows-2022` x86_64, `windows-11-arm` aarch64 (cross only). x86_64-apple-darwin is a cross target only — no native Intel-macOS host (GitHub's Intel runners are being retired).
 
 ## Jobs
 

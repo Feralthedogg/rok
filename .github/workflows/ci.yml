@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       hosts:
-        description: "Hosts: all, or some of linux-x64 linux-arm64 macos-arm64 macos-x64 windows-x64 windows-arm64"
+        description: "Hosts: all, or some of linux-x64 linux-arm64 macos-arm64 windows-x64 windows-arm64"
         default: all
       jobs:
         description: "Jobs after the prefixes: all, or some of gate cross wasm bindgen dist (none: prefixes only)"
@@ -104,7 +104,6 @@ jobs:
             {"name": "linux-x64", "os": "ubuntu-24.04", "gate": true},
             {"name": "linux-arm64", "os": "ubuntu-24.04-arm", "gate": true},
             {"name": "macos-arm64", "os": "macos-26", "gate": true},
-            {"name": "macos-x64", "os": "macos-26-intel", "gate": true},
             {"name": "windows-x64", "os": "windows-2022", "gate": true},
             {"name": "windows-arm64", "os": "windows-11-arm", "gate": false}
           ]'
