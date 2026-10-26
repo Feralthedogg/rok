@@ -1,19 +1,15 @@
 name: prefixes (windows)
 
-# Build the pinned Windows LLVM prefix in CI and publish it to the
-# rok-lang-artifacts S3 bucket at llvm/<version>/x86_64-pc-windows-msvc/llvm.tar.gz
-# (the path .github/actions/llvm-prefix downloads). A cold Windows LLVM build
-# is about 6 h on a 2-core runner, at the GitHub job limit; a larger hosted
-# runner's extra cores finish it well under the limit, so this no longer needs
-# a physical box or a pre-staged llvm-src.tar.gz. Run once per version (and
-# when the build scripts or PGO profile change). Upload auth is keyless
-# (OIDC -> rok-ci-artifacts).
+# Build the pinned Windows LLVM prefix in CI and publish it to S3 at
+# llvm/<version>/x86_64-pc-windows-msvc/llvm.tar.gz (for llvm-prefix). A cold
+# build is ~6 h on a 2-core runner (the job limit); a larger runner finishes
+# well under it, so no box or pre-staged llvm-src.tar.gz. Run once per version,
+# or when a build script or the PGO profile changes. Keyless OIDC
+# (rok-ci-artifacts).
 #
-# REQUIRES a larger Windows hosted runner, named by the repository variable
-# ROK_WINDOWS_X64_XL_RUNNER (set it to the org's larger-runner label, e.g. a
-# 16-core Windows runner labelled rok-windows-x64-16core). A future arm64
-# build would use ROK_WINDOWS_ARM64_XL_RUNNER. Without a larger runner the job
-# cannot be scheduled or times out at 6 h on the 2-core default.
+# Needs a larger Windows runner, labelled by vars.ROK_WINDOWS_X64_XL_RUNNER
+# (e.g. rok-windows-x64-16core); a future arm64 build would use
+# ROK_WINDOWS_ARM64_XL_RUNNER. Without one the job times out at 6 h.
 on:
   workflow_dispatch:
 
@@ -53,9 +49,8 @@ jobs:
             }
           } | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
-      # build.ps1 needs cmake, ninja, Python 3 and clang-cl on PATH. The
-      # hosted image has cmake, Python and LLVM (clang-cl under Program Files);
-      # ensure ninja and that LLVM's bin is on PATH.
+      # build.ps1 needs cmake, ninja, Python 3 and clang-cl on PATH. The image
+      # has all but ninja and LLVM's bin; add those.
       - name: build tools
         shell: pwsh
         run: |

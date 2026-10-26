@@ -1,14 +1,11 @@
 name: llvm-prefix
 description: >
-  The pinned LLVM + MLIR + lld prefix of llvm/build.sh (Windows:
-  llvm/build.ps1), named by ROK_LLVM_PREFIX. It is downloaded from the
-  public rok-lang-artifacts S3 bucket (llvm/<version>/<host>/llvm.tar.gz)
-  and verified by SHA-256,
-  with the actions cache as a fast layer on a GitHub-hosted runner; on a
-  self-hosted runner it stays in ROK_CI_HOME (which also holds the cargo
-  target directory, one per runner). The prefixes are built and published
-  by prefixes.yml (Windows by prefixes-windows.yml from the box),
-  not here. Windows: the MSVC environment is exported for every later step.
+  Restore the pinned LLVM/MLIR/lld prefix (llvm/build.sh, Windows build.ps1)
+  into ROK_LLVM_PREFIX. Downloaded from S3 (llvm/<version>/<host>/llvm.tar.gz),
+  SHA-256 verified, with the Actions cache as a fast layer on a hosted runner
+  or ROK_CI_HOME on a self-hosted one. Built and published by prefixes.yml
+  (Windows by prefixes-windows.yml), not here. Windows: exports the MSVC
+  environment for later steps.
 
 inputs:
   root:
@@ -31,9 +28,8 @@ outputs:
 runs:
   using: composite
   steps:
-    # cl / lib for rokc_llvm's shim, the whole developer environment for
-    # build.ps1. VCINSTALLDIR / VSINSTALLDIR stay unset: rustc then finds
-    # MSVC's link.exe itself, never Git's /usr/bin/link.
+    # MSVC dev environment for rokc_llvm's shim and build.ps1. VCINSTALLDIR /
+    # VSINSTALLDIR stay unset so rustc finds MSVC link.exe, not Git's.
     - name: MSVC environment
       if: runner.os == 'Windows'
       shell: pwsh
@@ -85,8 +81,8 @@ runs:
         echo "triple=$triple" >>"$GITHUB_OUTPUT"
         echo "ROK_LLVM_PREFIX=$p" >>"$GITHUB_ENV"
 
-    # Fast layer: the cache that the first job of a run populates from the
-    # asset below; a miss (new branch, evicted) falls through to a download.
+    # Fast layer: populated from the S3 asset below; a miss falls through
+    # to a download.
     - id: cache
       if: runner.environment == 'github-hosted'
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -94,10 +90,9 @@ runs:
         path: ${{ steps.where.outputs.prefix }}
         key: ${{ steps.where.outputs.key }}
 
-    # Source of truth: the versioned, SHA-256-verified prefix in the public
-    # rok-lang-artifacts S3 bucket (llvm/<v>/<host>/llvm.tar.gz, uploaded by
-    # prefixes.yml). A self-hosted runner downloads only when its
-    # ROK_CI_HOME has no complete prefix.
+    # Source of truth: the SHA-256-verified prefix on S3 (llvm/<v>/<host>/
+    # llvm.tar.gz, uploaded by prefixes.yml). A self-hosted runner downloads
+    # only when ROK_CI_HOME has no complete prefix.
     - name: Download prefix
       if: steps.cache.outputs.cache-hit != 'true' && steps.where.outputs.hit != 'true'
       shell: bash

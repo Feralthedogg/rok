@@ -1,9 +1,7 @@
 version: 2
 
-# Minor and patch bumps are grouped into one PR per ecosystem (low-risk, low
-# churn); a major bump comes as its own PR so a breaking update is reviewed on
-# its own. github-actions keeps the SHA-pinned actions current (the controlled
-# counterpart to pinning); cargo tracks the Rust workspace.
+# Group minor/patch bumps into one PR per ecosystem; a major bump gets its own
+# PR for review. github-actions keeps the SHA pins current, cargo the workspace.
 updates:
   - package-ecosystem: github-actions
     directory: /

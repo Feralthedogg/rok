@@ -1,21 +1,18 @@
 name: prefixes
 
-# Build the pinned LLVM (and libclang) prefix for each native host and
-# upload it, SHA-256 verified, to the public rok-lang-artifacts S3 bucket at
-# llvm/<version>/<host>/{llvm,libclang}.tar.gz, which the
-# .github/actions/{llvm,libclang}-prefix actions download. Run once per
-# version, or when the build scripts change. Upload auth is keyless (OIDC ->
-# rok-ci-artifacts). Windows's LLVM is published from the box by
-# prefixes-windows.yml (it exceeds the 6 h job limit here).
+# Build each native host's pinned LLVM (and libclang) prefix and upload it,
+# SHA-256 verified, to S3 at llvm/<version>/<host>/{llvm,libclang}.tar.gz for
+# the {llvm,libclang}-prefix actions. Run once per version, or when a build
+# script changes. Keyless OIDC (rok-ci-artifacts). Windows LLVM is published
+# by prefixes-windows.yml.
 on:
   workflow_dispatch:
     inputs:
       what:
         description: "llvm, libclang or both."
         default: both
-  # A pull request that changes a prefix build input does not rebuild here
-  # (that needs OIDC write and hours); only the notice job runs, to flag that
-  # the published S3 prefixes are now stale and must be refreshed by hand.
+  # A PR that changes a build input runs only the notice job (no rebuild),
+  # flagging that the published prefixes are stale.
   pull_request:
     paths:
       - llvm/build.sh
@@ -42,10 +39,9 @@ env:
   BUCKET: rok-lang-artifacts
 
 jobs:
-  # On a pull request (a prefix build input changed) this is the only job that
-  # runs: it does not rebuild, it fails loudly so the stale S3 prefixes are not
-  # forgotten. Refresh them with a manual run (Run workflow, what=both) before
-  # the next release. Not a required check, so it does not block the merge.
+  # On a PR (a build input changed) this is the only job: it does not rebuild,
+  # it warns so the stale prefixes get refreshed (manual run, what=both) before
+  # the next release. Not a required check.
   notice:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
@@ -135,9 +131,8 @@ jobs:
           aws s3 cp "out/$a"        "s3://$BUCKET/llvm/$v/$TRIPLE/libclang.tar.gz"
           aws s3 cp "out/$a.sha256" "s3://$BUCKET/llvm/$v/$TRIPLE/libclang.tar.gz.sha256"
 
-  # libclang on Windows builds within the limit (unlike the LLVM prefix), so
-  # it is produced here, not on the box. It downloads the Windows LLVM prefix
-  # (publish it first with prefixes-windows.yml).
+  # Windows libclang builds within the job limit (unlike LLVM), so it is built
+  # here. Needs the Windows LLVM prefix (publish it first).
   libclang-windows:
     name: build (windows-x64 libclang)
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.what == 'both' || inputs.what == 'libclang') }}
@@ -171,12 +166,10 @@ jobs:
           aws s3 cp "$tmp/out/$a"        "s3://$BUCKET/llvm/$V/$TRIPLE/libclang.tar.gz"
           aws s3 cp "$tmp/out/$a.sha256" "s3://$BUCKET/llvm/$V/$TRIPLE/libclang.tar.gz.sha256"
 
-  # The Linux container LLVM (and, for gnu, libclang): built inside the
-  # Debian 11 / Alpine release image by dist-llvm-prefix.sh and published to
-  # dist-llvm/<version>/<triple>/, which dist-linux-{gnu,musl}.sh download
-  # instead of building in-container. The image's glibc/libc is older than a
-  # CI host's, so these cannot be the host prefixes above. Run once per
-  # version (and whenever the build scripts or Containerfiles change).
+  # The Linux container LLVM (gnu also libclang): built in the Debian 11 /
+  # Alpine image by dist-llvm-prefix.sh and published to dist-llvm/<version>/
+  # <triple>/ for dist-linux-{gnu,musl}.sh. The image's glibc/libc is older
+  # than a CI host's, so these are not the host prefixes above.
   dist-llvm:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.what == 'both' || inputs.what == 'llvm') }}
     strategy:

@@ -8,8 +8,7 @@ name: ci
 #            targets, wasm, bindgen, dist; a manual run's inputs pick a
 #            subset
 on:
-  # Only main on push; a branch is tested through its pull request, so a PR
-  # branch does not run twice (once for the push, once for the PR).
+  # Push runs on main only; a branch is covered by its PR, not twice.
   push:
     branches: [main]
     paths-ignore: ["**/*.md"]
@@ -46,10 +45,8 @@ defaults:
     shell: bash
 
 jobs:
-  # Shell and PowerShell hygiene, run through the justfile recipes so CI and
-  # a local `just` check the same thing (fmt-check-sh, lint-sh, version-check,
-  # lint-ps). Independent of the build matrix and cheap, so it runs on every
-  # event. shellcheck and pwsh ship in the runner image.
+  # Shell/PowerShell hygiene via the justfile recipes, so CI and local `just`
+  # match. Cheap, runs on every event.
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -75,11 +72,9 @@ jobs:
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser -SkipPublisherCheck
           just lint-ps
 
-  # What runs where. hosts: the gate's hosts; prefixes: the hosts whose
-  # LLVM prefix a later job restores; runners: host -> runs-on labels
-  # (a repository variable puts linux-x64 / windows-x64 on a self-hosted
-  # runner, never for a pull request from a fork); cross: the cross
-  # targets with the host they run on.
+  # Decide what runs. Outputs: hosts (gate hosts), prefixes (hosts whose LLVM
+  # prefix a later job restores), runners (host -> runs-on; a repo variable can
+  # pick a self-hosted runner, never for a fork PR), cross (target + host).
   plan:
     # The nightly schedule runs only where the repository variable ROK_NIGHTLY is `on`.
     if: github.event_name != 'schedule' || vars.ROK_NIGHTLY == 'on'
@@ -145,13 +140,10 @@ jobs:
             [ "$jobs" = all ] && jobs="gate cross wasm bindgen dist"
             ;;
           esac
-          # Change-aware / draft-aware gate skip: run only lint (blank hosts
-          # and jobs so gate/cross/bindgen/dist/prefixes all come out empty)
-          # when the change cannot affect the build -- an inert change (docs,
-          # *.md or CI config only) or a draft PR. Never for nightly, the merge
-          # queue, or a new branch's first push, and fail safe toward running
-          # when the diff is unavailable. Safe because no check is a required
-          # status check and nightly/merge_group/dispatch always run the gate.
+          # Skip the gate (blank hosts/jobs, lint only) for changes that cannot
+          # affect the build (docs, *.md, CI config) and for draft PRs. Never
+          # skip nightly, the merge queue, or a new branch's first push, and run
+          # when the diff is unavailable.
           if [ "$tier" != nightly ] && [ "$EVENT" != merge_group ]; then
             changed=""
             if [ "$EVENT" = pull_request ]; then
@@ -214,10 +206,8 @@ jobs:
           } | tee -a "$GITHUB_OUTPUT"
           echo "tier: $tier"
 
-  # Restore the pinned LLVM prefix per host: the llvm-prefix action
-  # downloads it from the rok-lang-artifacts S3 bucket (built and published
-  # by prefixes.yml), with the Actions cache as a fast layer on a
-  # GitHub-hosted runner and ROK_CI_HOME on a self-hosted one.
+  # Restore each host's pinned LLVM prefix (llvm-prefix action: S3, with the
+  # Actions cache on a hosted runner or ROK_CI_HOME on a self-hosted one).
   llvm:
     needs: plan
     if: needs.plan.outputs.prefixes != '[]'
@@ -453,11 +443,9 @@ jobs:
           Must build --release
           Must test
 
-  # The single required status check for branch protection and the merge queue.
-  # It passes when the gate jobs (llvm restore, check, corpus) passed or were
-  # skipped -- an inert or draft change runs none of them -- and fails if any
-  # failed or was cancelled. Requiring this one job, not each matrix job, keeps
-  # a skipped job from leaving a required check stuck pending.
+  # The one required status check. Passes when llvm/check/corpus passed or were
+  # skipped, fails if any failed or was cancelled. Requiring this instead of
+  # each matrix job keeps a skipped job from blocking the merge.
   gate-passed:
     needs: [llvm, check, corpus]
     if: always()

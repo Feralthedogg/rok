@@ -1,12 +1,10 @@
 name: libclang-prefix
 description: >
-  The pinned libclang of llvm/build-libclang.sh (Windows:
-  llvm/build-libclang.ps1), named by ROK_LIBCLANG_PREFIX. Downloaded from
-  the public rok-lang-artifacts S3 bucket (llvm/<version>/<host>/libclang.tar.gz)
-  and verified by SHA-256, with the actions cache as a fast layer on a GitHub-hosted
-  runner; it stays in the default cache directory on a self-hosted runner.
-  Published by prefixes.yml (Windows by prefixes-windows.yml), apart
-  from the LLVM prefix. Run after llvm-prefix (Windows: its MSVC environment).
+  Restore the pinned libclang (llvm/build-libclang.sh, Windows .ps1) into
+  ROK_LIBCLANG_PREFIX. Downloaded from S3 (llvm/<version>/<host>/
+  libclang.tar.gz), SHA-256 verified, with the Actions cache as a fast layer
+  on a hosted runner or the default cache dir on a self-hosted one. Published
+  by prefixes.yml (Windows by prefixes-windows.yml). Run after llvm-prefix.
 
 inputs:
   arch:

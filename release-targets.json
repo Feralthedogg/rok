@@ -1,5 +1,5 @@
 {
-  "_comment": "Single source of truth for the release targets (the six host archives). Consumed by .github/workflows/release.yml (the plan job feeds the build matrix), scripts/release.sh (which archives to expect and verify), and scripts/check-targets.sh (asserts install.sh / install.ps1 supported-triple lists agree). The install scripts are standalone (curl | sh) and cannot read this at install time, so the check keeps them in sync instead. runs-on matches ci.yml's pinned runner images; kind picks the build script (native = dist-native.sh, gnu/musl = the container scripts); archive is the file set release.sh checks (unix = .tar.gz + .tar.xz + mlir-dev, win = .zip + mlir-dev, musl = .tar.gz + .tar.xz, static).",
+  "_comment": "The six release targets, the single source read by release.yml (build matrix), release.sh (archives to verify), and check-targets.sh (install-script lists). Fields: runs-on (ci.yml's runner images); kind (native=dist-native.sh, gnu/musl=container scripts); archive (file set: unix, win, musl).",
   "targets": [
     { "name": "macos",            "triple": "aarch64-apple-darwin",       "runs-on": "macos-26",         "kind": "native", "archive": "unix" },
     { "name": "windows",          "triple": "x86_64-pc-windows-msvc",     "runs-on": "windows-2022",     "kind": "native", "archive": "win"  },

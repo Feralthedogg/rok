@@ -1,15 +1,14 @@
 #!/bin/sh
-# Build the pinned LLVM (and, for gnu, libclang) prefix inside the Linux
-# release container and package it for the rok-lang-artifacts bucket, so
-# dist-linux-{gnu,musl}.sh download it instead of building it in-container.
-# A CI host's glibc/libc is newer than the image's, so the native prefix
-# (prefixes.yml) does not fit; this one is built in the same image.
-# Published by prefixes.yml at dist-llvm/<version>/<triple>/{llvm,libclang}.tar.gz.
+# Build the pinned LLVM (gnu also libclang) prefix inside the Linux release
+# container and package it, so dist-linux-{gnu,musl}.sh download it instead of
+# building in-container. The image's glibc/libc is older than a CI host's, so
+# the host prefix (prefixes.yml) does not fit. Published by prefixes.yml at
+# dist-llvm/<version>/<triple>/{llvm,libclang}.tar.gz.
 #
 #   scripts/dist-llvm-prefix.sh <gnu|musl> [--out <dir>]
 #
-# Writes <dir>/pkg/{llvm,libclang}.tar.gz and their .sha256 (default <dir>
-# dist-llvm). For the host's architecture, with podman, else docker.
+# Writes <dir>/pkg/{llvm,libclang}.tar.gz + .sha256 (default dist-llvm). Host
+# architecture, podman or docker.
 set -eu
 
 cd "$(dirname "$0")/.."

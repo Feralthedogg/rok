@@ -1,19 +1,14 @@
 #!/bin/sh
-# Check a collected set of 0.1.0 release archives and, only with
-# --publish, cut the GitHub release (spec 9.2.19, docs/releasing.md).
+# Check a collected set of release archives and, with --publish, cut the
+# GitHub release (spec 9.2.19, docs/releasing.md).
 #
 #   scripts/release.sh [--dir <dir>] [--publish]
 #
-# Build every host's archives first (docs/releasing.md) and gather them,
-# with their .sha256 sidecars and the rok-version file, into one <dir>
-# (default dist). Without --publish this only checks that the full set is
-# present and every checksum verifies, so a release never ships with a
-# missing archive (a dead download link). --publish then creates the tag
-# and uploads the assets with the gh CLI.
-#
-# --publish is the release itself: run it only once the release is meant
-# to go out. It does not deploy the sites or publish the stones; those
-# are separate steps in docs/releasing.md.
+# Gather every host's archives, their .sha256 sidecars and rok-version into
+# one <dir> (default dist). Without --publish it only checks the full set is
+# present and verifies, so a release never ships a missing archive. --publish
+# creates the tag and uploads the assets with gh; run it only when the release
+# is meant to go out. It does not deploy the sites or publish stones.
 set -eu
 
 dir=dist

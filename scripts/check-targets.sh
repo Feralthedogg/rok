@@ -1,9 +1,7 @@
 #!/bin/sh
-# Fail if the release target triples disagree across release-targets.json and
-# the install scripts. release.yml and release.sh read the manifest directly,
-# but install.sh / install.ps1 are standalone (curl | sh) and bake their
-# supported-triple list in, so this keeps those two in sync (justfile
-# `check-targets`, run in CI lint).
+# Fail if the install scripts' triple lists differ from release-targets.json.
+# release.yml and release.sh read the manifest; install.sh / install.ps1 bake
+# the list in, so check it here (justfile `check-targets`, CI lint).
 set -eu
 
 cd "$(dirname "$0")/.."

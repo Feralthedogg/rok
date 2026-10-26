@@ -45,10 +45,9 @@ cache=${ROK_DIST_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/rok/dist-linux}
 mkdir -p "$out" "$cache"
 out=$(cd "$out" && pwd)
 
-# The container's LLVM/libclang: dist-llvm-prefix.sh publishes a prefix built
-# in this same container to the rok-lang-artifacts bucket, and the build below
-# downloads it instead of building (the image's glibc is older than a CI
-# host's, so the native prefix does not fit). A miss falls back to building.
+# The container LLVM/libclang: dist-llvm-prefix.sh publishes a prefix from this
+# image to S3, and the build below downloads it (the host prefix does not fit,
+# older glibc). A miss falls back to building.
 base=${ROK_DIST_LLVM_BASE:-https://rok-lang-artifacts.s3.us-east-1.amazonaws.com}
 
 # The image is named after its definition.

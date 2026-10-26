@@ -1,9 +1,7 @@
 #!/bin/sh
-# Fail if the release version disagrees across the places it is hardcoded:
-# the workspace version (the source baked into `rokc --version`) and the
-# install scripts' ROK_VERSION defaults. dist-native.sh enforces this at
-# release-build time; this catches drift in ordinary CI (justfile
-# `version-check`).
+# Fail if the release version differs between Cargo.toml and the install
+# scripts' ROK_VERSION defaults. dist-native.sh checks this at build time;
+# this catches drift in CI (justfile `version-check`).
 set -eu
 
 cd "$(dirname "$0")/.."

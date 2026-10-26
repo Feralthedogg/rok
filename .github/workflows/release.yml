@@ -1,12 +1,9 @@
 name: release
 
-# Build all six host archives on GitHub-hosted runners and cut the GitHub
-# release. macOS/Windows use dist-native.sh with the pinned LLVM/libclang prefixes,
-# which the prefix actions download from the rok-lang-artifacts S3 bucket
-# (built by prefixes.yml; Windows published by prefixes-windows.yml).
-# Linux gnu/musl use the container scripts, whose LLVM is downloaded from the
-# same bucket (dist-llvm/, published by prefixes.yml). A tag push publishes;
-# a manual run only verifies.
+# Build the six host archives and cut the GitHub release. macOS/Windows run
+# dist-native.sh; Linux gnu/musl run the container scripts. LLVM/libclang
+# prefixes come from S3 (published by prefixes.yml, Windows by
+# prefixes-windows.yml). A tag push publishes; a manual run only verifies.
 on:
   push:
     tags: ["v*"]
@@ -43,9 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # --- native hosts: macOS + Windows (dist-native.sh, host LLVM/libclang) ---
-      # The prefixes are downloaded from the rok-lang-artifacts S3 bucket
-      # (published by prefixes.yml; Windows by prefixes-windows.yml).
+      # Native hosts (macOS, Windows): dist-native.sh with the host prefixes.
       - uses: ./.github/actions/llvm-prefix
         if: matrix.kind == 'native'
       - uses: ./.github/actions/libclang-prefix
@@ -58,9 +53,8 @@ jobs:
         shell: bash
         run: scripts/dist-native.sh --out "$PWD/dist"
 
-      # --- linux gnu/musl (dist-linux-{gnu,musl}.sh in a container) ---
-      # The container LLVM/libclang is downloaded from S3 (dist-llvm/,
-      # published by prefixes.yml); the scripts fall back to building it.
+      # Linux gnu/musl: the container scripts, LLVM from dist-llvm/ on S3
+      # (they fall back to building it).
       - name: dist-linux-gnu.sh
         if: matrix.kind == 'gnu'
         run: scripts/dist-linux-gnu.sh --out "$PWD/dist"
