@@ -106,7 +106,8 @@ command -v gh > /dev/null || {
 }
 notes="--generate-notes"
 [ -f "$dir/notes.md" ] && notes="--notes-file $dir/notes.md"
+# rok-* already matches rok-version; naming it again uploads it twice (422).
 # shellcheck disable=SC2086
-gh release create "$tag" "$dir"/rok-* "$dir/rok-version" \
+gh release create "$tag" "$dir"/rok-* \
   --target "$(git rev-parse HEAD)" --title "rok $version" $notes
 echo "release.sh: created $tag"
