@@ -451,12 +451,16 @@ fn order<T>(
         state[i] = 2;
         out.push(i);
     }
+    let mut index = HashMap::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        index.entry(manifest::key(name(item))).or_insert(i);
+    }
     let edges: Vec<Vec<usize>> = items
         .iter()
         .map(|x| {
             deps(x)
                 .iter()
-                .filter_map(|n| items.iter().position(|y| manifest::same(name(y), n)))
+                .filter_map(|n| index.get(&manifest::key(n)).copied())
                 .collect()
         })
         .collect();
@@ -1055,6 +1059,25 @@ mod tests {
             .map(|d| d.0)
             .collect();
         assert_eq!(names, ["a", "c", "b"]);
+    }
+
+    #[test]
+    fn ordering_keeps_normalized_first_matches_and_cuts_cycles() {
+        let all = vec![
+            (
+                "Root".to_owned(),
+                vec!["util_one".to_owned(), "missing".to_owned()],
+            ),
+            ("UTIL-ONE".to_owned(), vec!["root".to_owned()]),
+            ("util_one".to_owned(), Vec::new()),
+        ];
+        let names: Vec<_> = order(all, |p| &p.0, |p| p.1.clone())
+            .into_iter()
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(names, ["UTIL-ONE", "Root", "util_one"]);
+        let empty: Vec<(String, Vec<String>)> = Vec::new();
+        assert!(order(empty, |p| &p.0, |p| p.1.clone()).is_empty());
     }
 
     /// A node: name, dependencies (`?` optional), features.

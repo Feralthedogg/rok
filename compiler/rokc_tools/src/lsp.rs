@@ -22,6 +22,8 @@ struct Doc {
     text: String,
     /// Needs a compile (changed since the last one).
     dirty: bool,
+    /// Inputs of the last check, including one that reported errors.
+    inputs: Vec<PathBuf>,
     /// The last compile that type-checked: hover / definition /
     /// completion keep working while the buffer has errors.
     good: Option<Analysis>,
@@ -206,18 +208,22 @@ impl<W: Write> Server<W> {
                     }
                 };
                 if let Some(text) = text.as_str() {
+                    let path = uri_path(&uri);
                     let doc = self.docs.entry(uri).or_insert(Doc {
                         text: String::new(),
                         dirty: true,
+                        inputs: vec![path.clone()],
                         good: None,
                     });
                     text.clone_into(&mut doc.text);
                     doc.dirty = true;
+                    self.invalidate(&path);
                 }
                 return None;
             }
             "textDocument/didClose" => {
                 self.docs.remove(&uri);
+                self.invalidate(&uri_path(&uri));
                 self.publish(&uri, Vec::new());
                 return None;
             }
@@ -286,6 +292,15 @@ impl<W: Write> Server<W> {
         };
         self.reply(id, result);
         None
+    }
+
+    /// An edited or closed buffer changes every check that read it.
+    fn invalidate(&mut self, path: &Path) {
+        for doc in self.docs.values_mut() {
+            if doc.inputs.iter().any(|p| p == path) {
+                doc.dirty = true;
+            }
+        }
     }
 
     fn session(&self, anonymous: bool) -> Session {
@@ -390,6 +405,14 @@ impl<W: Write> Server<W> {
             .collect();
         let doc = self.docs.get_mut(uri).expect("checked above");
         doc.dirty = false;
+        if !a.source_map.files().is_empty() {
+            doc.inputs = a
+                .source_map
+                .files()
+                .iter()
+                .map(|(p, _)| PathBuf::from(p))
+                .collect();
+        }
         if a.hir.is_some() {
             doc.good = Some(a);
         }
@@ -778,21 +801,32 @@ fn definition(a: &Analysis, key: &str, ident: &str, off: usize) -> Option<Span> 
     })
 }
 
-/// Scope walk of the buffer's AST: the binding a one-segment path at
-/// `off` refers to.
-struct Locals {
-    off: usize,
+enum LocalQuery<'a> {
+    At(usize),
+    Name(&'a str),
+}
+
+/// Scope walk for one position or every reference to a name.
+struct Locals<'a> {
+    query: LocalQuery<'a>,
     scopes: Vec<Vec<(String, Span)>>,
     found: Option<Span>,
+    resolved: HashMap<usize, Span>,
     /// Every binding: name and declaring span.
     binds: Vec<(String, Span)>,
 }
 
-impl AstVisitor for Locals {
+impl AstVisitor for Locals<'_> {
     fn expr(&mut self, e: &Expr) {
         if let ExprKind::Path(p) = &e.kind {
             if let [seg] = p.segments.as_slice() {
-                if (e.span.start as usize..=e.span.end as usize).contains(&self.off) {
+                let wanted = match &self.query {
+                    LocalQuery::At(off) => {
+                        (e.span.start as usize..=e.span.end as usize).contains(off)
+                    }
+                    LocalQuery::Name(name) => seg.name == *name,
+                };
+                if wanted {
                     let hit = self
                         .scopes
                         .iter()
@@ -800,7 +834,12 @@ impl AstVisitor for Locals {
                         .flat_map(|s| s.iter().rev())
                         .find(|(n, _)| *n == seg.name);
                     if let Some((_, span)) = hit {
-                        self.found = Some(*span);
+                        match self.query {
+                            LocalQuery::At(_) => self.found = Some(*span),
+                            LocalQuery::Name(_) => {
+                                self.resolved.insert(p.span.start as usize, *span);
+                            }
+                        }
                     }
                 }
             }
@@ -820,7 +859,7 @@ impl AstVisitor for Locals {
     }
 }
 
-fn walk_items(v: &mut Locals, items: &[Item]) {
+fn walk_items(v: &mut Locals<'_>, items: &[Item]) {
     for item in items {
         match item {
             Item::Mod(m) => walk_items(v, m.items.as_deref().unwrap_or(&[])),
@@ -829,12 +868,12 @@ fn walk_items(v: &mut Locals, items: &[Item]) {
     }
 }
 
-/// The scope walk of `program` for a path at `off`.
-fn locals(program: &rokc_ast::Program, off: usize) -> Locals {
+fn locals<'a>(program: &rokc_ast::Program, query: LocalQuery<'a>) -> Locals<'a> {
     let mut v = Locals {
-        off,
+        query,
         scopes: vec![Vec::new()],
         found: None,
+        resolved: HashMap::new(),
         binds: Vec::new(),
     };
     walk_items(&mut v, &program.items);
@@ -844,7 +883,7 @@ fn locals(program: &rokc_ast::Program, off: usize) -> Locals {
 
 /// The declaring span of the local a one-segment path at `off` names.
 fn resolve_local(program: &rokc_ast::Program, off: usize) -> Option<Span> {
-    locals(program, off).found
+    locals(program, LocalQuery::At(off)).found
 }
 
 /// The first whole-word `name` at or after byte `from` of `text`.
@@ -998,15 +1037,17 @@ fn references(doc: &Doc, key: &str, off: usize) -> Option<Vec<(usize, usize)>> {
         .collect();
     let is_member = |s: usize| s > 0 && text.as_bytes()[s - 1] == b'.';
     let program = parse_doc(text, key);
-    let walk = locals(&program, usize::MAX);
-    // A binding's name, mapped to its declaring span.
-    let binding = |s: usize| {
-        walk.binds.iter().find_map(|(n, at)| {
-            (n == name && name_range(text, at.start as usize, name).is_some_and(|r| r.0 == s))
-                .then_some(*at)
-        })
-    };
-    let resolve = |s: usize| binding(s).or_else(|| resolve_local(&program, s));
+    let walk = locals(&program, LocalQuery::Name(name));
+    let mut resolved = walk.resolved;
+    // Declarations take precedence; the first binding wins overlapping spans.
+    for (n, at) in walk.binds.iter().rev() {
+        if n == name {
+            if let Some((start, _)) = name_range(text, at.start as usize, name) {
+                resolved.insert(start, *at);
+            }
+        }
+    }
+    let resolve = |s: usize| resolved.get(&s).copied();
     let mut out: Vec<(usize, usize)> = if is_member(start) {
         let a = doc.good.as_ref()?;
         let m = member_at(a, key, text, name, start)?;
@@ -1065,7 +1106,7 @@ fn defined_here(doc: &Doc, key: &str, off: usize) -> bool {
             .is_some_and(|(p, _)| p == key);
     }
     let program = parse_doc(text, key);
-    let walk = locals(&program, off);
+    let walk = locals(&program, LocalQuery::At(off));
     if walk.found.is_some()
         || walk.binds.iter().any(|(n, at)| {
             n == name && name_range(text, at.start as usize, name).is_some_and(|r| r.0 == start)
@@ -1546,6 +1587,35 @@ pub fn path_to_uri(path: &str, windows: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_references_keep_shadowing_and_initializer_scope() {
+        for name in ["value", "caf\u{e9}"] {
+            let text = format!(
+                "fn f({name}: i32) -> i32 {{\n    let a = ({name});\n    {{\n        let {name} = (({name})) + 1;\n        let b = {name};\n    }}\n    ({name})\n}}\n"
+            );
+            let words: Vec<_> = text
+                .match_indices(name)
+                .map(|(s, _)| (s, s + name.len()))
+                .collect();
+            let doc = Doc {
+                text,
+                dirty: false,
+                inputs: Vec::new(),
+                good: None,
+            };
+            let outer = vec![words[0], words[1], words[3], words[5]];
+            assert_eq!(
+                references(&doc, "test.rok", words[0].0),
+                Some(outer.clone())
+            );
+            assert_eq!(references(&doc, "test.rok", words[3].1), Some(outer));
+            assert_eq!(
+                references(&doc, "test.rok", words[4].0),
+                Some(vec![words[2], words[4]])
+            );
+        }
+    }
 
     #[test]
     fn positions_round_trip_utf16() {
