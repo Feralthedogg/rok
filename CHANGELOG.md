@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 (2026-10-27)
+
+- `print` and `println` accept any `Display` value, and default to printing a blank line.
+- The REPL prints a result through `Display`; a trailing `?` prints it through `Debug`.
+- Refreshing an LLVM prefix no longer rewrites the MLIR plugin's lib directory.
+
 ## 0.1.0 (2026-10-25)
 
 First release.
