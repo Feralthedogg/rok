@@ -3,6 +3,10 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
+mod sat;
+#[cfg(test)]
+mod tests;
+
 pub(super) fn lower_match(
     ctx: &mut LowerCtx<'_>,
     scrutinee: &Expr,
@@ -563,6 +567,7 @@ pub(super) fn check_match_arms(
 ) {
     let tys = [scrut_ty.clone()];
     let mut rows: Vec<Vec<Pat>> = Vec::new();
+    let mut sat = sat_checker(scrut_ty);
     // The catch-all a foreign `#[non_exhaustive]` type requires is never
     // unreachable.
     let foreign = foreign_non_exhaustive(ctx, scrut_ty);
@@ -573,7 +578,8 @@ pub(super) fn check_match_arms(
         let p = simplify(ctx, &a.pat);
         let exempt = synthetic.get(i).copied().unwrap_or(false)
             || (foreign.is_some() && hir_pattern_irrefutable(&a.pat));
-        if !exempt && !instance && !useful(ctx, &rows, std::slice::from_ref(&p), &tys) {
+        let reachable = exempt || instance || query_useful(ctx, &rows, &p, &tys, &mut sat);
+        if !reachable {
             ctx.emit_error(
                 rokc_diagnostic::ErrorKind::Type,
                 format!(
@@ -584,6 +590,11 @@ pub(super) fn check_match_arms(
             );
         }
         if a.guard.is_none() {
+            if sat.as_mut().is_some_and(|s| s.exclude(&p).is_none()) {
+                #[cfg(test)]
+                tests::record_fallback();
+                sat = None;
+            }
             rows.push(vec![p]);
         }
     }
@@ -600,10 +611,43 @@ pub(super) fn check_match_arms(
         );
         return;
     }
-    if useful(ctx, &rows, &[Pat::Wild], &tys) {
+    if query_useful(ctx, &rows, &Pat::Wild, &tys, &mut sat) {
         let w = witness(ctx, &rows, &tys).and_then(|mut w| w.pop());
         check_match_exhaustiveness(ctx, scrut_ty, arms, w);
     }
+}
+
+fn sat_checker(ty: &HirTy) -> Option<sat::Checker> {
+    #[cfg(test)]
+    if tests::matrix_only() {
+        return None;
+    }
+    let checker = sat::Checker::new(ty)?;
+    #[cfg(test)]
+    if tests::sat_only() {
+        return Some(checker);
+    }
+    (checker.bits() >= 8).then_some(checker)
+}
+
+fn query_useful(
+    ctx: &LowerCtx<'_>,
+    rows: &[Vec<Pat>],
+    p: &Pat,
+    tys: &[HirTy],
+    sat: &mut Option<sat::Checker>,
+) -> bool {
+    if let Some(result) = sat.as_mut().and_then(|s| s.useful(p)) {
+        #[cfg(test)]
+        tests::record_query();
+        return result;
+    }
+    #[cfg(test)]
+    if sat.is_some() {
+        tests::record_fallback();
+    }
+    *sat = None;
+    useful(ctx, rows, std::slice::from_ref(p), tys)
 }
 
 /// Spec 3.12.5: arms must cover the scrutinee. `bool` needs both literals,
